@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "mcp-protocol",
+    "mcp-server-filesystem-rs",
+    "mcp-server-search-rs",
+    "openclaw-capability-shim",
+    "rust-openclaw",
+    "rust-voice-pipeline",
+    "openclaw-sdk",
+    "openclaw-mod",
+    "openclaw-hwscan",
+    "openclaw-setup",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+authors = ["Sean"]
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+env_logger = "0.11"
+async-trait = "0.1"
+thiserror = "1"
+anyhow = "1"
+futures-util = "0.3"
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = true

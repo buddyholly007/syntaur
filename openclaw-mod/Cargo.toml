@@ -1,0 +1,15 @@
+[package]
+name = "openclaw-mod"
+version = "0.1.0"
+edition.workspace = true
+description = "Module manager CLI for OpenClaw"
+
+[[bin]]
+name = "ocmod"
+path = "src/main.rs"
+
+[dependencies]
+openclaw-sdk = { path = "../openclaw-sdk" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }

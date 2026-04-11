@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0284c7">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="manifest" href="/manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Syntaur — Chat</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>tailwind.config={darkMode:'class',theme:{extend:{colors:{oc:{500:'#0ea5e9',600:'#0284c7',700:'#0369a1'}}}}}</script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+  body { font-family: 'Inter', sans-serif; }
+  pre, code { font-family: 'JetBrains Mono', monospace; }
+  .chat-md pre { white-space: pre-wrap; word-break: break-word; }
+  @keyframes bounce { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-4px)} }
+  textarea { scrollbar-width: thin; }
+</style>
+</head>
+<body class="bg-gray-950 text-gray-100 h-screen flex flex-col">
+
+<!-- Top bar -->
+<div class="border-b border-gray-800 bg-gray-900/80 backdrop-blur flex-shrink-0">
+  <div class="max-w-4xl mx-auto px-3 sm:px-4 py-2 sm:py-2.5 flex items-center justify-between">
+    <div class="flex items-center gap-2 sm:gap-3 min-w-0">
+      <a href="/" class="flex items-center gap-2 hover:opacity-80 flex-shrink-0">
+        <img src="/icon.svg" class="w-5 h-5" alt="">
+        <span class="font-semibold hidden sm:inline">Syntaur</span>
+      </a>
+      <span class="text-gray-300 text-sm font-medium truncate" id="agent-name">Chat</span>
+    </div>
+    <div class="flex items-center gap-2 sm:gap-3 text-sm flex-shrink-0">
+      <button onclick="clearMessages()" class="text-gray-500 hover:text-gray-300 text-xs sm:text-sm">New</button>
+      <a href="/" class="text-gray-500 hover:text-gray-300 text-xs sm:text-sm">Home</a>
+    </div>
+  </div>
+</div>
+
+<!-- Messages area -->
+<div class="flex-1 overflow-y-auto" id="messages-scroll">
+  <div class="max-w-3xl mx-auto px-4 py-6 space-y-6" id="messages">
+
+    <!-- Welcome message -->
+    <div class="flex gap-4" id="welcome-msg">
+      <div class="w-8 h-8 rounded-lg bg-oc-600 flex items-center justify-center text-sm font-bold flex-shrink-0">&#9813;</div>
+      <div class="flex-1">
+        <p class="text-gray-300 leading-relaxed" id="greeting">Hey! I'm your AI assistant. How can I help you today?</p>
+        <div class="flex flex-wrap gap-2 mt-4">
+          <button onclick="send('What can you do?')" class="text-xs sm:text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-gray-600 rounded-xl px-3 sm:px-4 py-1.5 sm:py-2 transition-all">What can you do?</button>
+          <button onclick="send('Search the web for today\\'s top tech news')" class="text-xs sm:text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-gray-600 rounded-xl px-3 sm:px-4 py-1.5 sm:py-2 transition-all">Today's news</button>
+          <button onclick="send('Help me draft a professional email')" class="text-xs sm:text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-gray-600 rounded-xl px-3 sm:px-4 py-1.5 sm:py-2 transition-all">Draft an email</button>
+          <button onclick="send('Create an Excel budget spreadsheet')" class="text-xs sm:text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-gray-600 rounded-xl px-3 sm:px-4 py-1.5 sm:py-2 transition-all">Spreadsheet</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Drop overlay -->
+<div id="drop-overlay" class="fixed inset-0 z-50 bg-oc-600/10 backdrop-blur-sm hidden flex items-center justify-center pointer-events-none">
+  <div class="bg-gray-800 border-2 border-dashed border-oc-500 rounded-2xl p-12 text-center">
+    <p class="text-xl font-semibold text-oc-500">Drop file here</p>
+    <p class="text-sm text-gray-400 mt-2">The AI will read and analyze your file</p>
+  </div>
+</div>
+
+<!-- Input area -->
+<div class="border-t border-gray-800 bg-gray-900/80 backdrop-blur flex-shrink-0">
+  <div class="max-w-3xl mx-auto px-3 sm:px-4 py-3 sm:py-4">
+    <!-- Pending files -->
+    <div id="pending-files" class="hidden mb-2 flex flex-wrap gap-2"></div>
+    <div class="flex gap-2 sm:gap-3 items-end">
+      <label class="flex-shrink-0 cursor-pointer text-gray-500 hover:text-gray-300 p-2 rounded-lg hover:bg-gray-800 transition-colors" title="Attach file">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+        <input type="file" class="hidden" id="file-input" onchange="handleFileSelect(event)" multiple>
+      </label>
+      <div class="flex-1 relative">
+        <textarea id="input" rows="1" class="w-full bg-gray-800 border border-gray-700 hover:border-gray-600 focus:border-oc-500 focus:ring-1 focus:ring-oc-500 rounded-2xl px-4 sm:px-5 py-2.5 sm:py-3 pr-11 text-white placeholder-gray-400 outline-none resize-none text-sm leading-relaxed" placeholder="Message Syntaur... (drop files here)" onkeydown="handleKey(event)" oninput="autoGrow(this)" style="max-height:200px"></textarea>
+        <button onclick="sendFromInput()" class="absolute right-2 bottom-2 bg-oc-600 hover:bg-oc-700 disabled:opacity-40 text-white rounded-lg p-1.5 transition-colors" id="send-btn">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </button>
+      </div>
+    </div>
+    <p class="text-xs text-gray-600 text-center mt-2 hidden sm:block">Drop files to attach &middot; Your data stays on your machine</p>
+  </div>
+</div>
+
+<script>
+const token = sessionStorage.getItem('syntaur_token') || '';
+let sending = false;
+let pendingFiles = [];
+
+// Auth check
+if (!token) { location.href = '/'; }
+
+// Load agent info
+(async () => {
+  try {
+    const s = await (await fetch('/api/setup/status')).json();
+    if (s.agent_name) {
+      document.getElementById('agent-name').textContent = s.agent_name;
+      document.getElementById('greeting').textContent = `Hey! I'm ${s.agent_name}. How can I help you today?`;
+      document.title = `${s.agent_name} — Syntaur`;
+    }
+  } catch(e) {}
+})();
+
+function handleKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendFromInput();
+  }
+}
+
+function autoGrow(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 200) + 'px';
+}
+
+function sendFromInput() {
+  const el = document.getElementById('input');
+  const msg = el.value.trim();
+  if (!msg || sending) return;
+  el.value = '';
+  el.style.height = 'auto';
+  send(msg);
+}
+
+async function send(msg) {
+  if (sending) return;
+  sending = true;
+  const btn = document.getElementById('send-btn');
+  btn.disabled = true;
+
+  // Hide welcome suggestions after first message
+  const welcome = document.getElementById('welcome-msg');
+  if (welcome) {
+    const chips = welcome.querySelector('.flex.flex-wrap');
+    if (chips) chips.remove();
+  }
+
+  const container = document.getElementById('messages');
+  const scroll = document.getElementById('messages-scroll');
+
+  // User message
+  const userEl = document.createElement('div');
+  userEl.className = 'flex gap-4 justify-end';
+  userEl.innerHTML = `
+    <div class="max-w-[75%]">
+      <div class="bg-oc-900/50 border border-oc-800/40 rounded-2xl rounded-br-md px-5 py-3 text-sm text-gray-200 leading-relaxed">${esc(msg)}</div>
+    </div>`;
+  container.appendChild(userEl);
+
+  // AI thinking
+  const aiEl = document.createElement('div');
+  aiEl.className = 'flex gap-4';
+  aiEl.innerHTML = `
+    <div class="w-8 h-8 rounded-lg bg-oc-600 flex items-center justify-center text-sm font-bold flex-shrink-0">&#9813;</div>
+    <div class="flex-1 min-w-0" id="ai-response">
+      <div class="flex items-center gap-2 text-gray-500 text-sm py-2">
+        <span class="flex gap-1">
+          <span class="w-1.5 h-1.5 rounded-full bg-gray-500 animate-bounce" style="animation-delay:0ms"></span>
+          <span class="w-1.5 h-1.5 rounded-full bg-gray-500 animate-bounce" style="animation-delay:150ms"></span>
+          <span class="w-1.5 h-1.5 rounded-full bg-gray-500 animate-bounce" style="animation-delay:300ms"></span>
+        </span>
+      </div>
+    </div>`;
+  container.appendChild(aiEl);
+  scroll.scrollTop = scroll.scrollHeight;
+
+  const responseEl = aiEl.querySelector('#ai-response');
+  responseEl.removeAttribute('id');
+  const t0 = Date.now();
+
+  try {
+    // Start the turn — get a turn_id for streaming
+    const startResp = await fetch('/api/message/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: msg, agent: 'main', token })
+    });
+    const startData = await startResp.json();
+    const turnId = startData.turn_id;
+
+    if (!turnId) {
+      // Fallback to non-streaming
+      const resp = await fetch('/api/message', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: msg, agent: 'main', token })
+      });
+      const data = await resp.json();
+      const secs = ((Date.now() - t0) / 1000).toFixed(1);
+      responseEl.innerHTML = data.response
+        ? `<div class="text-gray-300 leading-relaxed text-sm chat-md">${md(data.response)}</div>
+           <div class="flex items-center gap-3 mt-2"><span class="text-xs text-gray-600">${secs}s</span>
+           <button onclick="copy(this)" class="text-xs text-gray-600 hover:text-gray-400" data-t="${escAttr(data.response)}">Copy</button></div>`
+        : `<p class="text-red-400 text-sm">${esc(data.error || 'No response')}</p>`;
+    } else {
+      // Stream events via SSE
+      const evtSource = new EventSource(`/api/message/${turnId}/stream?token=${token}`);
+      let toolsUsed = [];
+
+      evtSource.onmessage = (event) => {
+        const ev = JSON.parse(event.data);
+        switch (ev.event) {
+          case 'started':
+            responseEl.innerHTML = `<div class="flex items-center gap-2 text-gray-500 text-sm py-1">
+              <span class="flex gap-1"><span class="w-1.5 h-1.5 rounded-full bg-oc-500 animate-bounce"></span>
+              <span class="w-1.5 h-1.5 rounded-full bg-oc-500 animate-bounce" style="animation-delay:150ms"></span>
+              <span class="w-1.5 h-1.5 rounded-full bg-oc-500 animate-bounce" style="animation-delay:300ms"></span></span>
+              <span class="text-xs status-text">Thinking...</span></div>`;
+            break;
+          case 'llm_call_started':
+            const st = responseEl.querySelector('.status-text');
+            if (st) st.textContent = ev.round > 0 ? `Round ${ev.round + 1}...` : 'Thinking...';
+            break;
+          case 'tool_call_started':
+            toolsUsed.push(ev.tool_name);
+            responseEl.innerHTML = `<div class="space-y-1">${toolsUsed.map(t =>
+              `<div class="flex items-center gap-2 text-xs text-gray-500">
+                <span class="w-1 h-1 rounded-full bg-oc-500 animate-pulse"></span>
+                Using <span class="text-gray-400">${esc(t)}</span>...</div>`).join('')}</div>`;
+            break;
+          case 'tool_call_completed':
+            responseEl.querySelectorAll('.text-xs').forEach(el => {
+              if (el.textContent.includes(ev.tool_name)) {
+                const dot = el.querySelector('.animate-pulse');
+                if (dot) { dot.classList.remove('animate-pulse','bg-oc-500'); dot.classList.add(ev.success?'bg-green-500':'bg-red-500'); }
+              }
+            });
+            break;
+          case 'complete':
+            evtSource.close();
+            const secs = ((Date.now() - t0) / 1000).toFixed(1);
+            const rounds = ev.rounds > 1 ? ` &middot; ${ev.rounds} rounds` : '';
+            const tools = toolsUsed.length ? ` &middot; ${toolsUsed.join(', ')}` : '';
+            responseEl.innerHTML = `<div class="text-gray-300 leading-relaxed text-sm chat-md">${md(ev.response)}</div>
+              <div class="flex items-center gap-3 mt-2"><span class="text-xs text-gray-600">${secs}s${rounds}${tools}</span>
+              <button onclick="copy(this)" class="text-xs text-gray-600 hover:text-gray-400" data-t="${escAttr(ev.response)}">Copy</button></div>`;
+            scroll.scrollTop = scroll.scrollHeight;
+            sending = false; btn.disabled = false;
+            document.getElementById('input').focus();
+            return;
+          case 'error':
+            evtSource.close();
+            responseEl.innerHTML = `<p class="text-red-400 text-sm">${esc(ev.message)}</p>`;
+            sending = false; btn.disabled = false;
+            return;
+        }
+        scroll.scrollTop = scroll.scrollHeight;
+      };
+      evtSource.onerror = () => {
+        evtSource.close();
+        if (responseEl.querySelector('.animate-bounce')) responseEl.innerHTML = '<p class="text-red-400 text-sm">Connection lost</p>';
+        sending = false; btn.disabled = false;
+      };
+      return;
+    }
+  } catch(e) {
+    responseEl.innerHTML = `<p class="text-red-400 text-sm">Connection error: ${esc(e.message)}</p>`;
+  }
+
+  scroll.scrollTop = scroll.scrollHeight;
+  sending = false;
+  btn.disabled = false;
+  document.getElementById('input').focus();
+}
+
+function clearMessages() {
+  const container = document.getElementById('messages');
+  container.innerHTML = `
+    <div class="flex gap-4">
+      <div class="w-8 h-8 rounded-lg bg-oc-600 flex items-center justify-center text-sm font-bold flex-shrink-0">&#9813;</div>
+      <div class="flex-1">
+        <p class="text-gray-300 leading-relaxed">New conversation started. How can I help?</p>
+      </div>
+    </div>`;
+}
+
+function copy(btn) {
+  navigator.clipboard.writeText(btn.dataset.t).then(() => {
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = 'Copy', 1500);
+  });
+}
+
+function esc(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
+}
+function escAttr(s) {
+  return s.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function md(text) {
+  let h = esc(text);
+  // Code blocks
+  h = h.replace(/```(\w*)<br>([\s\S]*?)```/g, (_, lang, code) => {
+    const l = lang ? `<span class="absolute top-2 right-3 text-xs text-gray-500">${lang}</span>` : '';
+    return `<div class="relative my-3 group"><pre class="bg-gray-900 border border-gray-800 rounded-xl p-4 overflow-x-auto text-xs text-gray-300">${l}${code.replace(/<br>/g,'\n')}</pre><button onclick="navigator.clipboard.writeText(this.previousElementSibling.textContent)" class="absolute top-2 right-10 text-xs text-gray-600 hover:text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity">Copy</button></div>`;
+  });
+  // Inline code
+  h = h.replace(/`([^`]+)`/g, '<code class="bg-gray-800/80 px-1.5 py-0.5 rounded-md text-oc-400 text-xs">$1</code>');
+  // Bold
+  h = h.replace(/\*\*([^*]+)\*\*/g, '<strong class="text-white font-semibold">$1</strong>');
+  // Italic
+  h = h.replace(/\*([^*]+)\*/g, '<em class="text-gray-200">$1</em>');
+  // Links
+  h = h.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" class="text-oc-500 hover:text-oc-400 underline underline-offset-2">$1</a>');
+  // Bullets
+  h = h.replace(/(^|<br>)- (.+?)(?=<br>|$)/g, '$1<div class="flex gap-2 pl-1"><span class="text-gray-600 mt-0.5">&bull;</span><span>$2</span></div>');
+  // Numbered
+  h = h.replace(/(^|<br>)(\d+)\. (.+?)(?=<br>|$)/g, '$1<div class="flex gap-2 pl-1"><span class="text-gray-500 w-5 text-right flex-shrink-0">$2.</span><span>$3</span></div>');
+  // H3
+  h = h.replace(/(^|<br>)### (.+?)(?=<br>|$)/g, '$1<p class="font-semibold text-white mt-3 mb-1">$2</p>');
+  // H2
+  h = h.replace(/(^|<br>)## (.+?)(?=<br>|$)/g, '$1<p class="font-bold text-white text-base mt-3 mb-1">$2</p>');
+  return h;
+}
+
+// Drag and drop
+document.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  document.getElementById('drop-overlay').classList.remove('hidden');
+});
+document.addEventListener('dragleave', (e) => {
+  if (e.relatedTarget === null) document.getElementById('drop-overlay').classList.add('hidden');
+});
+document.addEventListener('drop', async (e) => {
+  e.preventDefault();
+  document.getElementById('drop-overlay').classList.add('hidden');
+  for (const file of e.dataTransfer.files) await addPendingFile(file);
+});
+
+function handleFileSelect(event) {
+  for (const file of event.target.files) addPendingFile(file);
+  event.target.value = '';
+}
+
+async function addPendingFile(file) {
+  const container = document.getElementById('pending-files');
+  container.classList.remove('hidden');
+  const sizeStr = file.size > 1048576 ? `${(file.size/1048576).toFixed(1)}MB` : `${(file.size/1024).toFixed(0)}KB`;
+
+  const pill = document.createElement('div');
+  pill.className = 'flex items-center gap-2 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-xs';
+  pill.innerHTML = '<span class="text-gray-400 animate-pulse">Uploading...</span>';
+  container.appendChild(pill);
+
+  const formData = new FormData();
+  formData.append('file', file);
+
+  try {
+    const resp = await fetch('/api/upload', { method: 'POST', body: formData });
+    const data = await resp.json();
+    if (data.success) {
+      const idx = pendingFiles.length;
+      pendingFiles.push({ filename: data.filename, path: data.path, preview: data.preview, size: sizeStr });
+      pill.innerHTML = `<span class="text-oc-500">&#128206;</span><span class="text-gray-300">${esc(data.filename)}</span><span class="text-gray-600">${sizeStr}</span><button onclick="this.parentElement.remove();pendingFiles[${idx}]=null" class="text-gray-600 hover:text-red-400">&times;</button>`;
+    } else {
+      pill.innerHTML = '<span class="text-red-400">Failed</span>';
+      setTimeout(() => pill.remove(), 2000);
+    }
+  } catch(e) {
+    pill.innerHTML = '<span class="text-red-400">Error</span>';
+    setTimeout(() => pill.remove(), 2000);
+  }
+}
+
+// Override send to include file context
+const _origSend = sendFromInput;
+sendFromInput = function() {
+  const el = document.getElementById('input');
+  let msg = el.value.trim();
+  const files = pendingFiles.filter(f => f !== null);
+  if (files.length > 0) {
+    const ctx = files.map(f => `\n\n--- File: ${f.filename} (${f.size}) ---\n${f.preview || '[binary]'}\n--- End ---`).join('');
+    if (!msg) msg = 'Please analyze the attached file' + (files.length > 1 ? 's' : '') + ':';
+    msg += ctx;
+    pendingFiles = [];
+    document.getElementById('pending-files').innerHTML = '';
+    document.getElementById('pending-files').classList.add('hidden');
+  }
+  if (!msg || sending) return;
+  el.value = '';
+  el.style.height = 'auto';
+  send(msg);
+};
+
+document.getElementById('input').focus();
+</script>
+</body>
+</html>

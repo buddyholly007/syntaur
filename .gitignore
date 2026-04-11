@@ -1,0 +1,7 @@
+target/
+*.log
+*.db
+*.bak
+.DS_Store
+release/
+/tmp/
