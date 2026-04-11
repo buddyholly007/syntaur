@@ -18,14 +18,13 @@ async-trait = { workspace = true }
 futures-util = { workspace = true }
 
 axum = { version = "0.8", features = ["macros", "multipart"] }
-reqwest = { version = "0.12", features = ["json", "multipart"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 regex = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 chrono = "0.4"
 uuid = { version = "1", features = ["v4"] }
 lru = "0.12"
-native-tls = "0.2"
-tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 base64 = "0.22"
 libc = "0.2"
 rand = "0.8"
@@ -40,3 +39,6 @@ fastembed = "4"
 
 ed25519-dalek = "2"
 hex = "0.4"
+rustls-pemfile = "2"
+rustls = { version = "0.23", features = ["ring"] }
+webpki-roots = "1"

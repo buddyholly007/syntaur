@@ -22,7 +22,7 @@ use std::net::TcpStream;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use log::{debug, warn};
-use native_tls::TlsConnector;
+
 use regex::Regex;
 use serde_json::json;
 
@@ -61,96 +61,9 @@ impl EmailConnector {
 
     /// Synchronous IMAP fetch (run inside spawn_blocking).
     fn fetch_messages(&self) -> Result<Vec<ExternalDoc>, String> {
-        let connector = TlsConnector::new()
-            .map_err(|e| format!("tls: {}", e))?;
-        let stream = TcpStream::connect((self.host.as_str(), self.port))
-            .map_err(|e| format!("connect {}: {}", self.host, e))?;
-        stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(30)))
-            .ok();
-        let mut tls = connector
-            .connect(&self.host, stream)
-            .map_err(|e| format!("tls handshake: {}", e))?;
-
-        let mut buf = [0u8; 4096];
-        // Read greeting
-        let _ = tls.read(&mut buf);
-
-        // LOGIN
-        let login_cmd = format!(
-            "a001 LOGIN \"{}\" \"{}\"\r\n",
-            self.username.replace('"', "\\\""),
-            self.password.replace('"', "\\\"")
-        );
-        tls.write_all(login_cmd.as_bytes())
-            .map_err(|e| format!("login write: {}", e))?;
-        let resp = read_until_tag(&mut tls, "a001")?;
-        if !resp.contains(" OK") {
-            return Err(format!("LOGIN failed: {}", resp));
-        }
-
-        // SELECT INBOX
-        tls.write_all(b"a002 SELECT INBOX\r\n")
-            .map_err(|e| format!("select write: {}", e))?;
-        let _ = read_until_tag(&mut tls, "a002")?;
-
-        // SEARCH SINCE date
-        let cutoff = Utc::now() - Duration::days(MAX_AGE_DAYS);
-        let since = cutoff.format("%d-%b-%Y").to_string();
-        let search_cmd = format!("a003 SEARCH SINCE {}\r\n", since);
-        tls.write_all(search_cmd.as_bytes())
-            .map_err(|e| format!("search write: {}", e))?;
-        let search_resp = read_until_tag(&mut tls, "a003")?;
-        let ids = parse_search_ids(&search_resp);
-        debug!(
-            "[email:{}] {} messages since {}",
-            self.account_id,
-            ids.len(),
-            since
-        );
-        let take = ids.iter().rev().take(MAX_MESSAGES).cloned().collect::<Vec<_>>();
-
-        let mut docs = Vec::new();
-        for id in take {
-            // FETCH RFC822
-            let fetch_cmd = format!("a{} FETCH {} BODY.PEEK[]\r\n", id + 100, id);
-            let tag = format!("a{}", id + 100);
-            tls.write_all(fetch_cmd.as_bytes())
-                .map_err(|e| format!("fetch write: {}", e))?;
-            let resp = match read_until_tag(&mut tls, &tag) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            // Extract message body between { and the closing tag
-            let raw = extract_fetch_body(&resp);
-            if raw.is_empty() {
-                continue;
-            }
-            let (subject, from, date, body) = parse_email(&raw);
-            if body.trim().is_empty() {
-                continue;
-            }
-            let updated_at = parse_email_date(&date);
-            docs.push(ExternalDoc {
-                source: "email".to_string(),
-                external_id: format!("{}/{}", self.account_id, id),
-                title: format!("{} ({})", subject, from),
-                body: format!(
-                    "From: {}\nSubject: {}\nDate: {}\nAccount: {}\n\n{}",
-                    from, subject, date, self.account_id, body
-                ),
-                updated_at,
-                metadata: json!({
-                    "account": self.account_id,
-                    "imap_uid": id,
-                }),
-            });
-        }
-
-        // LOGOUT
-        let _ = tls.write_all(b"a999 LOGOUT\r\n");
-        debug!("[email:{}] indexed {} messages", self.account_id, docs.len());
-        Ok(docs)
+        // Email indexing temporarily disabled during rustls migration.
+        // Will be re-enabled when IMAP client is ported to rustls.
+        Ok(Vec::new())
     }
 }
 
