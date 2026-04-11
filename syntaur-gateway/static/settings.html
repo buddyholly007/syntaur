@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0284c7">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="manifest" href="/manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Syntaur — Settings</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>tailwind.config={darkMode:'class',theme:{extend:{colors:{oc:{500:'#0ea5e9',600:'#0284c7',700:'#0369a1'}}}}}</script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+  body { font-family: 'Inter', sans-serif; }
+  .card { @apply bg-gray-800 rounded-xl border border-gray-700 p-5; }
+  .input { @apply w-full bg-gray-900 border border-gray-600 rounded-lg px-4 py-2.5 text-white placeholder-gray-400 focus:border-oc-500 focus:ring-1 focus:ring-oc-500 outline-none text-sm; }
+  .label { @apply block text-sm font-medium text-gray-300 mb-1.5; }
+  .btn-primary { @apply bg-oc-600 hover:bg-oc-700 text-white font-medium py-2 px-5 rounded-lg transition-colors text-sm; }
+  .btn-secondary { @apply bg-gray-700 hover:bg-gray-600 text-gray-200 font-medium py-2 px-5 rounded-lg transition-colors text-sm; }
+  .badge { @apply inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium; }
+  .badge-green { @apply bg-green-900/50 text-green-400; }
+  .badge-red { @apply bg-red-900/50 text-red-400; }
+  .tab { @apply px-4 py-2 text-sm font-medium rounded-lg cursor-pointer transition-colors; }
+  .tab.active { @apply bg-gray-800 text-white; }
+  .tab:not(.active) { @apply text-gray-400 hover:text-gray-300; }
+</style>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen">
+
+<!-- Top bar -->
+<div class="border-b border-gray-800 bg-gray-900/50 backdrop-blur sticky top-0 z-40">
+  <div class="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <a href="/" class="flex items-center gap-2 hover:opacity-80">
+        <img src="/icon.svg" class="w-5 h-5" alt="">
+        <span class="font-semibold text-lg">Syntaur</span>
+      </a>
+      <span class="text-gray-600">/</span>
+      <span class="text-gray-400">Settings</span>
+    </div>
+    <a href="/" class="text-sm text-gray-400 hover:text-gray-300">&#8592; Dashboard</a>
+  </div>
+</div>
+
+<div class="max-w-4xl mx-auto px-4 py-6">
+
+  <!-- Tabs -->
+  <div class="flex gap-1 mb-6 bg-gray-900 rounded-xl p-1 w-fit">
+    <button class="tab active" onclick="showTab('general')">General</button>
+    <button class="tab" onclick="showTab('llm')">LLM Backends</button>
+    <button class="tab" onclick="showTab('system')">System</button>
+  </div>
+
+  <!-- General tab -->
+  <div class="tab-content" id="tab-general">
+    <div class="space-y-4">
+
+      <div class="card">
+        <h3 class="font-medium mb-4">Assistant</h3>
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label class="label">Agent name</label>
+            <p class="text-gray-300" id="set-agent-name">--</p>
+          </div>
+          <div>
+            <label class="label">Version</label>
+            <p class="text-gray-300" id="set-version">--</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 class="font-medium mb-4">Connections</h3>
+        <div class="space-y-3">
+          <div class="flex items-center justify-between p-3 rounded-lg bg-gray-900">
+            <div>
+              <p class="text-sm font-medium">Telegram</p>
+              <p class="text-xs text-gray-500" id="set-telegram-status">Not configured</p>
+            </div>
+            <span class="badge" id="set-telegram-badge"></span>
+          </div>
+          <div class="flex items-center justify-between p-3 rounded-lg bg-gray-900">
+            <div>
+              <p class="text-sm font-medium">Home Assistant</p>
+              <p class="text-xs text-gray-500" id="set-ha-status">Not configured</p>
+            </div>
+            <span class="badge" id="set-ha-badge"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 class="font-medium mb-4">Data</h3>
+        <div class="grid grid-cols-2 gap-4 text-sm">
+          <div>
+            <label class="label">Config directory</label>
+            <p class="text-gray-400 font-mono text-xs" id="set-config-dir">~/.syntaur/</p>
+          </div>
+          <div>
+            <label class="label">Gateway port</label>
+            <p class="text-gray-400" id="set-port">18789</p>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- LLM tab -->
+  <div class="tab-content hidden" id="tab-llm">
+    <div class="space-y-4">
+
+      <div class="card">
+        <h3 class="font-medium mb-2">Active LLM Backends</h3>
+        <p class="text-sm text-gray-400 mb-4">These are the AI models Syntaur uses to process your requests. The primary is tried first; fallbacks activate automatically if the primary fails.</p>
+        <div class="space-y-3" id="llm-providers-list">
+          <p class="text-gray-500">Loading...</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 class="font-medium mb-2">Test a Connection</h3>
+        <p class="text-sm text-gray-400 mb-4">Verify an LLM endpoint is reachable and responding.</p>
+        <div class="space-y-3">
+          <div class="grid grid-cols-3 gap-3">
+            <div class="col-span-2">
+              <label class="label">Base URL</label>
+              <input class="input" id="test-url" placeholder="https://openrouter.ai/api/v1">
+            </div>
+            <div>
+              <label class="label">API Key (optional)</label>
+              <input type="password" class="input" id="test-key" placeholder="sk-...">
+            </div>
+          </div>
+          <div class="flex items-center gap-3">
+            <button class="btn-primary" onclick="testConnection()">Test</button>
+            <span id="test-result" class="text-sm"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="p-4 rounded-xl bg-gray-900 border border-gray-700">
+        <div class="flex items-start gap-2">
+          <span class="text-oc-500 mt-0.5">&#8505;</span>
+          <div class="text-sm">
+            <p class="text-gray-300">To change LLM backends, edit <code class="bg-gray-800 px-1.5 py-0.5 rounded text-xs">~/.syntaur/syntaur.json</code> and restart the gateway.</p>
+            <p class="text-gray-500 mt-1">Dashboard-based LLM management is coming in a future update.</p>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- System tab -->
+  <div class="tab-content hidden" id="tab-system">
+    <div class="space-y-4">
+
+      <div class="card">
+        <h3 class="font-medium mb-4">System Status</h3>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm" id="sys-stats">
+          <div>
+            <p class="text-gray-500">Uptime</p>
+            <p class="text-lg font-semibold" id="sys-uptime">--</p>
+          </div>
+          <div>
+            <p class="text-gray-500">Agents</p>
+            <p id="sys-agents" class="text-gray-300">--</p>
+          </div>
+          <div>
+            <p class="text-gray-500">Core Modules</p>
+            <p id="sys-core-mods" class="text-gray-300">--</p>
+          </div>
+          <div>
+            <p class="text-gray-500">Extension Modules</p>
+            <p id="sys-ext-mods" class="text-gray-300">--</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 class="font-medium mb-4">API Token</h3>
+        <p class="text-sm text-gray-400 mb-3">Use this token to access Syntaur from scripts, automations, or external tools.</p>
+        <div class="flex gap-2">
+          <input type="password" class="input font-mono" id="api-token-display" readonly>
+          <button class="btn-secondary" onclick="toggleTokenVisibility()">Show</button>
+          <button class="btn-secondary" onclick="copyToken()">Copy</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 class="font-medium mb-4">License</h3>
+        <div id="license-info" class="mb-4">
+          <p class="text-sm text-gray-400">Loading...</p>
+        </div>
+        <div>
+          <label class="label">License Key</label>
+          <textarea class="input font-mono text-xs" rows="3" id="license-key-input" placeholder='Paste your license key here (JSON format)...'></textarea>
+          <div class="flex items-center gap-3 mt-2">
+            <button class="btn-primary" onclick="activateLicense()">Activate</button>
+            <span id="license-result" class="text-sm"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 class="font-medium mb-4">Links</h3>
+        <div class="space-y-2 text-sm">
+          <a href="/setup" class="block p-3 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors">
+            <p class="font-medium text-gray-300">Re-run Setup Wizard</p>
+            <p class="text-xs text-gray-500">Change LLM backend, modules, or communication channels</p>
+          </a>
+          <a href="/modules" class="block p-3 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors">
+            <p class="font-medium text-gray-300">Module Management</p>
+            <p class="text-xs text-gray-500">Enable, disable, or configure modules</p>
+          </a>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+</div>
+
+<script>
+const token = sessionStorage.getItem('syntaur_token') || '';
+
+function showTab(name) {
+  document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
+  document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
+  document.getElementById(`tab-${name}`).classList.remove('hidden');
+  event.target.classList.add('active');
+}
+
+async function loadSettings() {
+  try {
+    const [health, status, mods] = await Promise.all([
+      fetch('/health').then(r => r.json()),
+      fetch('/api/setup/status').then(r => r.json()),
+      fetch('/api/setup/modules').then(r => r.json()),
+    ]);
+
+    // General
+    document.getElementById('set-agent-name').textContent = status.agent_name || 'main';
+    document.getElementById('set-version').textContent = `v${health.version || '?'}`;
+    document.getElementById('set-port').textContent = `${location.port || '18789'}`;
+
+    // Uptime
+    const u = health.uptime_secs || 0;
+    const h = Math.floor(u / 3600);
+    const m = Math.floor((u % 3600) / 60);
+    document.getElementById('sys-uptime').textContent = h > 0 ? `${h}h ${m}m` : `${m}m`;
+    document.getElementById('sys-agents').textContent = (health.agents || []).join(', ');
+
+    // Modules
+    const coreEnabled = mods.core_modules.filter(m => m.enabled).length;
+    const extEnabled = mods.extension_modules.filter(m => m.enabled).length;
+    document.getElementById('sys-core-mods').textContent = `${coreEnabled} / ${mods.core_modules.length}`;
+    document.getElementById('sys-ext-mods').textContent = `${extEnabled} / ${mods.extension_modules.length}`;
+
+    // LLM providers
+    document.getElementById('llm-providers-list').innerHTML = (health.llm_providers || []).map((p, i) => `
+      <div class="flex items-center justify-between p-3 rounded-lg bg-gray-900">
+        <div>
+          <p class="text-sm font-medium">${p}</p>
+          <p class="text-xs text-gray-500">${i === 0 ? 'Primary' : 'Fallback ' + i}</p>
+        </div>
+        <span class="badge badge-green">Active</span>
+      </div>
+    `).join('') || '<p class="text-gray-500 text-sm">No providers configured</p>';
+
+    // Token
+    if (token) {
+      document.getElementById('api-token-display').value = token;
+    }
+
+  } catch(e) {
+    console.error('Failed to load settings:', e);
+  }
+}
+
+async function testConnection() {
+  const url = document.getElementById('test-url').value;
+  const key = document.getElementById('test-key').value;
+  const result = document.getElementById('test-result');
+  result.className = 'text-sm text-gray-400';
+  result.textContent = 'Testing...';
+
+  try {
+    const resp = await fetch('/api/setup/test-llm', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ base_url: url, api_key: key || null })
+    });
+    const data = await resp.json();
+    if (data.success) {
+      result.className = 'text-sm text-green-400';
+      result.textContent = `Connected! ${data.models.length} models, ${data.latency_ms}ms`;
+    } else {
+      result.className = 'text-sm text-red-400';
+      result.textContent = data.error || 'Failed';
+    }
+  } catch(e) {
+    result.className = 'text-sm text-red-400';
+    result.textContent = 'Network error';
+  }
+}
+
+function toggleTokenVisibility() {
+  const input = document.getElementById('api-token-display');
+  input.type = input.type === 'password' ? 'text' : 'password';
+}
+
+function copyToken() {
+  const t = document.getElementById('api-token-display').value;
+  navigator.clipboard.writeText(t).then(() => {
+    const btn = event.target;
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = 'Copy', 1500);
+  });
+}
+
+async function loadLicense() {
+  try {
+    const lic = await (await fetch('/api/license/status')).json();
+    const info = document.getElementById('license-info');
+    if (lic.mode === 'licensed') {
+      info.innerHTML = `
+        <div class="flex items-center gap-2 mb-2">
+          <span class="badge bg-green-900/50 text-green-400">${lic.license_tier || 'Licensed'}</span>
+        </div>
+        <p class="text-sm text-gray-400">Licensed to: <span class="text-gray-300">${lic.license_holder}</span></p>
+        <p class="text-sm text-green-400 mt-1">Full access — all modules and features unlocked.</p>`;
+    } else if (lic.mode === 'demo') {
+      const days = Math.ceil((lic.demo_remaining_secs || 0) / 86400);
+      const hours = Math.floor((lic.demo_remaining_secs || 0) / 3600);
+      info.innerHTML = `
+        <div class="flex items-center gap-2 mb-2">
+          <span class="badge bg-yellow-900/50 text-yellow-400">Demo Mode</span>
+          <span class="text-sm text-yellow-400">${days} day${days !== 1 ? 's' : ''} remaining</span>
+        </div>
+        <p class="text-sm text-gray-400">Full access during demo period. Enter a license key below to keep using Syntaur after the trial.</p>
+        <div class="mt-2 w-full bg-gray-700 rounded-full h-1.5">
+          <div class="bg-yellow-500 h-1.5 rounded-full" style="width: ${Math.min(100, ((259200 - (lic.demo_remaining_secs || 0)) / 259200) * 100)}%"></div>
+        </div>`;
+    } else {
+      info.innerHTML = `
+        <div class="flex items-center gap-2 mb-2">
+          <span class="badge bg-red-900/50 text-red-400">Demo Expired</span>
+        </div>
+        <p class="text-sm text-gray-400">Your demo has ended. You can still use core features (${lic.daily_limit} conversations/day).</p>
+        <p class="text-sm text-gray-400 mt-1">Enter a license key below to unlock full access.</p>`;
+    }
+  } catch(e) {}
+}
+
+async function activateLicense() {
+  const key = document.getElementById('license-key-input').value.trim();
+  if (!key) return;
+  const result = document.getElementById('license-result');
+  result.className = 'text-sm text-gray-400';
+  result.textContent = 'Activating...';
+
+  try {
+    const resp = await fetch('/api/license/activate', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ key: key })
+    });
+    const data = await resp.json();
+    if (data.success) {
+      result.className = 'text-sm text-green-400';
+      result.textContent = data.message;
+      loadLicense();
+    } else {
+      result.className = 'text-sm text-red-400';
+      result.textContent = data.error || 'Activation failed';
+    }
+  } catch(e) {
+    result.className = 'text-sm text-red-400';
+    result.textContent = 'Network error';
+  }
+}
+
+loadSettings();
+loadLicense();
+</script>
+</body>
+</html>

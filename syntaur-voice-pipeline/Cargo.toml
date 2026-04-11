@@ -1,0 +1,22 @@
+[package]
+name = "rust-voice-pipeline"
+version = "0.1.0"
+edition = "2021"
+description = "Pure-Rust voice pipeline for Peter Parker assistant. Replaces HA's assist_pipeline."
+
+[dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "time", "signal", "sync", "process"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json", "multipart"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+regex = "1"
+byteorder = "1"
+chrono = "0.4"
+sherpa-onnx = { version = "1.12", features = ["static"] }
+
+[profile.release]
+opt-level = 2
+lto = true
+strip = true

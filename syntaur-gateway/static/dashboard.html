@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0284c7">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="manifest" href="/manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Syntaur</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>tailwind.config={darkMode:'class',theme:{extend:{colors:{oc:{50:'#f0f9ff',100:'#e0f2fe',500:'#0ea5e9',600:'#0284c7',700:'#0369a1',800:'#075985',900:'#0c4a6e'}}}}}</script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+  body { font-family: 'Inter', sans-serif; }
+  .card { @apply bg-gray-800 rounded-xl border border-gray-700 p-5; }
+  .card-hover { @apply hover:border-gray-600 transition-colors cursor-pointer; }
+  .badge { @apply inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium; }
+  .badge-green { @apply bg-green-900/50 text-green-400; }
+  .badge-yellow { @apply bg-yellow-900/50 text-yellow-400; }
+  .badge-red { @apply bg-red-900/50 text-red-400; }
+  .badge-blue { @apply bg-blue-900/50 text-blue-400; }
+  .badge-gray { @apply bg-gray-700 text-gray-400; }
+  .btn-primary { @apply bg-oc-600 hover:bg-oc-700 text-white font-medium py-2.5 px-6 rounded-lg transition-colors; }
+  .pulse { animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.6} }
+  #chat-container { display: none; }
+  #chat-container.open { display: flex; }
+  .chat-md pre { white-space: pre-wrap; word-break: break-word; }
+  .chat-md p + p { margin-top: 0.5rem; }
+  @keyframes bounce { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-4px)} }
+</style>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen">
+
+<!-- Login overlay -->
+<div id="login-overlay" class="fixed inset-0 z-50 bg-gray-950 flex items-center justify-center">
+  <div class="w-full max-w-sm px-4">
+    <div class="text-center mb-8">
+      <span class="text-4xl">&#9813;</span>
+      <h1 class="text-2xl font-bold mt-2">Syntaur</h1>
+      <p class="text-gray-400 text-sm mt-1">Sign in to your dashboard</p>
+    </div>
+    <div class="bg-gray-800 rounded-xl border border-gray-700 p-6">
+      <div class="space-y-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-300 mb-1.5">Password</label>
+          <input type="password" id="login-pass" class="w-full bg-gray-900 border border-gray-600 rounded-lg px-4 py-2.5 text-white placeholder-gray-400 focus:border-oc-500 focus:ring-1 focus:ring-oc-500 outline-none" placeholder="Dashboard password" onkeydown="if(event.key==='Enter')doLogin()">
+        </div>
+        <button onclick="doLogin()" class="w-full bg-oc-600 hover:bg-oc-700 text-white font-medium py-2.5 px-6 rounded-lg transition-colors" id="login-btn">Sign In</button>
+        <p id="login-error" class="text-sm text-red-400 hidden"></p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Top bar -->
+<div class="border-b border-gray-800 bg-gray-900/50 backdrop-blur sticky top-0 z-40">
+  <div class="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <img src="/icon.svg" class="w-5 h-5" alt="">
+      <span class="font-semibold text-lg">Syntaur</span>
+      <span class="badge badge-green" id="status-badge">
+        <span class="w-1.5 h-1.5 rounded-full bg-green-400 mr-1"></span>
+        Online
+      </span>
+    </div>
+    <div class="flex items-center gap-3">
+      <span id="license-badge" class="badge badge-gray text-xs hidden"></span>
+      <a href="/chat" class="btn-primary text-sm inline-block">Chat</a>
+      <a href="/settings" class="text-sm text-gray-400 hover:text-gray-300">Settings</a>
+    </div>
+  </div>
+</div>
+
+<div class="max-w-6xl mx-auto px-4 py-6">
+
+  <!-- Welcome -->
+  <div class="mb-6">
+    <h1 class="text-2xl font-bold" id="welcome-text">Welcome back</h1>
+    <p class="text-gray-400 mt-1" id="welcome-sub">Your AI assistant is running.</p>
+  </div>
+
+  <!-- Status cards row -->
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4 mb-6">
+    <div class="card">
+      <p class="text-xs text-gray-500 uppercase tracking-wider">Uptime</p>
+      <p class="text-2xl font-semibold mt-1" id="stat-uptime">--</p>
+    </div>
+    <div class="card">
+      <p class="text-xs text-gray-500 uppercase tracking-wider">LLM Backend</p>
+      <p class="text-sm font-medium mt-1 text-gray-300" id="stat-llm">Loading...</p>
+      <p class="text-xs text-gray-500 mt-0.5" id="stat-llm-status"></p>
+    </div>
+    <div class="card">
+      <p class="text-xs text-gray-500 uppercase tracking-wider">Modules</p>
+      <p class="text-2xl font-semibold mt-1" id="stat-modules">--</p>
+      <p class="text-xs text-gray-500 mt-0.5" id="stat-tools">-- tools</p>
+    </div>
+    <div class="card">
+      <p class="text-xs text-gray-500 uppercase tracking-wider">Agents</p>
+      <p class="text-sm font-medium mt-1 text-gray-300" id="stat-agents">--</p>
+    </div>
+  </div>
+
+  <!-- Main content grid -->
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+
+    <!-- Quick Actions -->
+    <div class="card md:col-span-1">
+      <h3 class="font-medium text-sm text-gray-400 mb-3">Quick Actions</h3>
+      <div class="space-y-2">
+        <a href="/chat" class="block w-full text-left p-3 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors">
+          <p class="font-medium text-sm">Chat with your AI</p>
+          <p class="text-xs text-gray-500">Ask questions, run tasks, control your home</p>
+        </a>
+        <a href="/settings" class="block w-full text-left p-3 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors">
+          <p class="font-medium text-sm">Settings</p>
+          <p class="text-xs text-gray-500">LLM backends, modules, account</p>
+        </a>
+        <a href="/modules" class="block w-full text-left p-3 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors">
+          <p class="font-medium text-sm">Manage Modules</p>
+          <p class="text-xs text-gray-500">Enable, disable, configure</p>
+        </a>
+        <a href="/history" class="block w-full text-left p-3 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors">
+          <p class="font-medium text-sm">Conversation History</p>
+          <p class="text-xs text-gray-500">Browse and search past chats</p>
+        </a>
+        <button onclick="showPhoneAccess()" class="w-full text-left p-3 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors">
+          <p class="font-medium text-sm">Open on Phone</p>
+          <p class="text-xs text-gray-500">QR code + save as app</p>
+        </button>
+      </div>
+    </div>
+
+    <!-- Modules -->
+    <div class="card md:col-span-2">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-medium text-sm text-gray-400">Active Modules</h3>
+        <span class="text-xs text-gray-500" id="module-count"></span>
+      </div>
+      <div class="grid grid-cols-2 sm:grid-cols-3 gap-2" id="module-grid">
+        <!-- Populated by JS -->
+      </div>
+    </div>
+
+  </div>
+
+  <!-- System Info -->
+  <div class="card mt-4">
+    <div class="flex items-center justify-between mb-3">
+      <h3 class="font-medium text-sm text-gray-400">System</h3>
+      <span class="text-xs text-gray-500" id="sys-version"></span>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm" id="sys-info">
+    </div>
+  </div>
+
+</div>
+
+<!-- Phone access modal -->
+<div id="phone-modal" class="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm hidden flex items-center justify-center p-4">
+  <div class="bg-gray-800 rounded-2xl border border-gray-700 max-w-sm w-full p-6">
+    <div class="flex items-center justify-between mb-4">
+      <h3 class="font-semibold text-lg">Open on Your Phone</h3>
+      <button onclick="document.getElementById('phone-modal').classList.add('hidden')" class="text-gray-400 hover:text-white text-xl">&times;</button>
+    </div>
+    <div class="text-center">
+      <p class="text-sm text-gray-400 mb-4">Scan this QR code with your phone's camera:</p>
+      <div class="bg-white p-4 rounded-xl inline-block">
+        <img id="phone-qr" src="" alt="QR Code" class="w-48 h-48">
+      </div>
+      <p class="text-xs text-gray-500 font-mono mt-3 select-all" id="phone-url"></p>
+    </div>
+    <div class="mt-4 p-3 rounded-lg bg-gray-900 text-xs space-y-2">
+      <p class="text-gray-300 font-medium">Save as an app on your phone:</p>
+      <p class="text-gray-500"><strong class="text-gray-400">iPhone:</strong> Open in Safari &rarr; tap <span class="inline-block border border-gray-600 rounded px-1">Share &#8599;</span> &rarr; "Add to Home Screen"</p>
+      <p class="text-gray-500"><strong class="text-gray-400">Android:</strong> Open in Chrome &rarr; tap <span class="inline-block border border-gray-600 rounded px-1">&#8942;</span> menu &rarr; "Add to Home screen"</p>
+      <p class="text-gray-500 mt-1">This creates a full-screen app icon with the Syntaur logo — no browser bar, looks like a native app.</p>
+    </div>
+    <p class="text-xs text-gray-600 mt-3 text-center">Your phone must be on the same network, or use Tailscale for remote access.</p>
+  </div>
+</div>
+
+<!-- Chat panel (slide-in from right) -->
+<div id="chat-container" class="fixed inset-0 z-50 flex">
+  <div class="flex-1 bg-black/50 backdrop-blur-sm" onclick="toggleChat()"></div>
+  <div class="w-full max-w-xl bg-gray-900 border-l border-gray-700 flex flex-col">
+    <!-- Chat header -->
+    <div class="flex items-center justify-between p-4 border-b border-gray-700">
+      <div class="flex items-center gap-3">
+        <div class="w-8 h-8 rounded-full bg-oc-600 flex items-center justify-center text-sm font-bold">&#9813;</div>
+        <div>
+          <p class="font-semibold" id="chat-agent-name">Chat</p>
+          <p class="text-xs text-gray-500">Enter to send &middot; Shift+Enter for newline</p>
+        </div>
+      </div>
+      <div class="flex items-center gap-2">
+        <button onclick="clearChat()" class="text-xs text-gray-500 hover:text-gray-300 px-2 py-1">Clear</button>
+        <button onclick="toggleChat()" class="text-gray-400 hover:text-white text-xl leading-none">&times;</button>
+      </div>
+    </div>
+    <!-- Messages -->
+    <div class="flex-1 overflow-y-auto p-4 space-y-4" id="chat-messages">
+      <div class="flex gap-3">
+        <div class="w-7 h-7 rounded-full bg-oc-600 flex items-center justify-center text-xs font-bold flex-shrink-0 mt-0.5">&#9813;</div>
+        <div class="flex-1 text-sm text-gray-300" id="chat-greeting">
+          <p>Hey! How can I help you?</p>
+          <div class="flex flex-wrap gap-2 mt-3">
+            <button onclick="quickChat('What can you do?')" class="text-xs bg-gray-800 hover:bg-gray-700 border border-gray-600 rounded-full px-3 py-1 transition-colors">What can you do?</button>
+            <button onclick="quickChat('Search the web for today\\'s top news')" class="text-xs bg-gray-800 hover:bg-gray-700 border border-gray-600 rounded-full px-3 py-1 transition-colors">Today's news</button>
+            <button onclick="quickChat('Create a simple budget spreadsheet')" class="text-xs bg-gray-800 hover:bg-gray-700 border border-gray-600 rounded-full px-3 py-1 transition-colors">Create a spreadsheet</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <!-- Input -->
+    <div class="p-4 border-t border-gray-700">
+      <div class="flex gap-2 items-end">
+        <textarea id="chat-input" rows="1" class="flex-1 bg-gray-800 border border-gray-600 rounded-xl px-4 py-2.5 text-white placeholder-gray-400 focus:border-oc-500 focus:ring-1 focus:ring-oc-500 outline-none resize-none text-sm" placeholder="Ask anything..." onkeydown="chatKeydown(event)" oninput="autoResize(this)" style="max-height:120px"></textarea>
+        <button onclick="sendMessage()" class="bg-oc-600 hover:bg-oc-700 text-white rounded-xl p-2.5 transition-colors flex-shrink-0" id="send-btn">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13"/><path d="M22 2L15 22L11 13L2 9L22 2Z"/></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+let chatOpen = false;
+let authToken = sessionStorage.getItem('syntaur_token') || '';
+
+// Login
+async function doLogin() {
+  const pass = document.getElementById('login-pass').value;
+  const errEl = document.getElementById('login-error');
+  errEl.classList.add('hidden');
+  document.getElementById('login-btn').textContent = 'Signing in...';
+
+  try {
+    const resp = await fetch('/api/auth/login', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ password: pass })
+    });
+    const data = await resp.json();
+    if (data.success && data.token) {
+      authToken = data.token;
+      sessionStorage.setItem('syntaur_token', authToken);
+      document.getElementById('login-overlay').classList.add('hidden');
+      loadDashboard();
+    } else {
+      errEl.textContent = data.error || 'Invalid password';
+      errEl.classList.remove('hidden');
+    }
+  } catch(e) {
+    errEl.textContent = 'Connection error';
+    errEl.classList.remove('hidden');
+  }
+  document.getElementById('login-btn').textContent = 'Sign In';
+}
+
+// Check if already authenticated
+async function checkAuth() {
+  if (authToken) {
+    // Verify token still works
+    try {
+      const resp = await fetch('/api/setup/status');
+      if (resp.ok) {
+        document.getElementById('login-overlay').classList.add('hidden');
+        return;
+      }
+    } catch(e) {}
+  }
+  // Show login
+  document.getElementById('login-overlay').classList.remove('hidden');
+  document.getElementById('login-pass').focus();
+}
+
+// Toggle chat panel
+function toggleChat() {
+  chatOpen = !chatOpen;
+  document.getElementById('chat-container').classList.toggle('open', chatOpen);
+  if (chatOpen) document.getElementById('chat-input').focus();
+}
+
+function chatKeydown(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+}
+
+function autoResize(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+}
+
+function quickChat(msg) {
+  document.getElementById('chat-input').value = msg;
+  sendMessage();
+}
+
+function clearChat() {
+  const messages = document.getElementById('chat-messages');
+  messages.innerHTML = `
+    <div class="flex gap-3">
+      <div class="w-7 h-7 rounded-full bg-oc-600 flex items-center justify-center text-xs font-bold flex-shrink-0 mt-0.5">&#9813;</div>
+      <div class="flex-1 text-sm text-gray-300">
+        <p>Chat cleared. How can I help?</p>
+      </div>
+    </div>`;
+}
+
+let isSending = false;
+
+async function sendMessage() {
+  if (isSending) return;
+  const input = document.getElementById('chat-input');
+  const msg = input.value.trim();
+  if (!msg) return;
+  input.value = '';
+  input.style.height = 'auto';
+  isSending = true;
+
+  const messages = document.getElementById('chat-messages');
+  const sendBtn = document.getElementById('send-btn');
+  sendBtn.disabled = true;
+  sendBtn.classList.add('opacity-50');
+
+  // User message
+  const userDiv = document.createElement('div');
+  userDiv.className = 'flex gap-3 justify-end';
+  userDiv.innerHTML = `
+    <div class="max-w-[80%] bg-oc-900/40 border border-oc-800/50 rounded-xl rounded-br-sm px-4 py-2.5 text-sm">
+      <p class="text-gray-200">${escapeHtml(msg)}</p>
+    </div>`;
+  messages.appendChild(userDiv);
+
+  // Thinking indicator
+  const aiDiv = document.createElement('div');
+  aiDiv.className = 'flex gap-3';
+  aiDiv.innerHTML = `
+    <div class="w-7 h-7 rounded-full bg-oc-600 flex items-center justify-center text-xs font-bold flex-shrink-0 mt-0.5">&#9813;</div>
+    <div class="flex-1 text-sm">
+      <div class="flex items-center gap-2 text-gray-400">
+        <div class="flex gap-1">
+          <span class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style="animation-delay:0ms"></span>
+          <span class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style="animation-delay:150ms"></span>
+          <span class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style="animation-delay:300ms"></span>
+        </div>
+        <span class="text-xs">Thinking...</span>
+      </div>
+    </div>`;
+  messages.appendChild(aiDiv);
+  messages.scrollTop = messages.scrollHeight;
+
+  // Send to API
+  const startTime = Date.now();
+  try {
+    const resp = await fetch('/api/message', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: msg, agent: 'main', token: authToken })
+    });
+    const data = await resp.json();
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    const rounds = data.rounds || 0;
+
+    if (data.response) {
+      const rendered = renderMarkdown(data.response);
+      const meta = rounds > 1 ? `<span class="text-xs text-gray-600 mt-2 block">${elapsed}s &middot; ${rounds} rounds</span>` : `<span class="text-xs text-gray-600 mt-2 block">${elapsed}s</span>`;
+      aiDiv.querySelector('.flex-1').innerHTML = `
+        <div class="text-gray-300 leading-relaxed chat-md">${rendered}</div>
+        ${meta}
+        <button onclick="copyText(this)" class="text-xs text-gray-600 hover:text-gray-400 mt-1" data-text="${escapeAttr(data.response)}">Copy</button>`;
+    } else if (data.error) {
+      aiDiv.querySelector('.flex-1').innerHTML = `<p class="text-red-400 text-sm">${escapeHtml(data.error)}</p>`;
+    }
+  } catch(e) {
+    aiDiv.querySelector('.flex-1').innerHTML = `<p class="text-red-400 text-sm">Connection error: ${e.message}</p>`;
+  }
+
+  messages.scrollTop = messages.scrollHeight;
+  sendBtn.disabled = false;
+  sendBtn.classList.remove('opacity-50');
+  isSending = false;
+  input.focus();
+}
+
+function copyText(btn) {
+  navigator.clipboard.writeText(btn.dataset.text).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = orig, 1500);
+  });
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
+}
+
+function escapeAttr(s) {
+  return s.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// Simple markdown renderer
+function renderMarkdown(text) {
+  let html = escapeHtml(text);
+
+  // Code blocks (```lang\n...\n```)
+  html = html.replace(/```(\w*)<br>([\s\S]*?)```/g, (_, lang, code) => {
+    const langLabel = lang ? `<span class="text-xs text-gray-500 absolute top-2 right-2">${lang}</span>` : '';
+    return `<div class="relative my-2"><pre class="bg-gray-950 border border-gray-700 rounded-lg p-3 overflow-x-auto text-xs font-mono text-gray-300">${langLabel}${code.replace(/<br>/g, '\n')}</pre></div>`;
+  });
+
+  // Inline code (`...`)
+  html = html.replace(/`([^`]+)`/g, '<code class="bg-gray-800 px-1.5 py-0.5 rounded text-oc-500 text-xs font-mono">$1</code>');
+
+  // Bold (**...**)
+  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong class="text-white font-semibold">$1</strong>');
+
+  // Italic (*...*)
+  html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+
+  // Links [text](url)
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" class="text-oc-500 hover:text-oc-400 underline">$1</a>');
+
+  // Bullet lists (- item)
+  html = html.replace(/(^|<br>)- (.+?)(?=<br>|$)/g, '$1<span class="flex gap-2"><span class="text-gray-500">&bull;</span><span>$2</span></span>');
+
+  // Numbered lists (1. item)
+  html = html.replace(/(^|<br>)(\d+)\. (.+?)(?=<br>|$)/g, '$1<span class="flex gap-2"><span class="text-gray-500">$2.</span><span>$3</span></span>');
+
+  // Headers (### ...)
+  html = html.replace(/(^|<br>)### (.+?)(?=<br>|$)/g, '$1<p class="font-semibold text-white mt-2">$2</p>');
+  html = html.replace(/(^|<br>)## (.+?)(?=<br>|$)/g, '$1<p class="font-bold text-white text-base mt-2">$2</p>');
+
+  return html;
+}
+
+// Load dashboard data
+async function loadDashboard() {
+  try {
+    // Health
+    const health = await (await fetch('/health')).json();
+    const uptime = health.uptime_secs || 0;
+    const h = Math.floor(uptime / 3600);
+    const m = Math.floor((uptime % 3600) / 60);
+    document.getElementById('stat-uptime').textContent = h > 0 ? `${h}h ${m}m` : `${m}m`;
+    document.getElementById('stat-agents').textContent = (health.agents || []).join(', ');
+    document.getElementById('sys-version').textContent = `v${health.version || '?'}`;
+
+    if (health.agents && health.agents.length > 0) {
+      document.getElementById('chat-agent-name').textContent = health.agents[0];
+    }
+
+    // Setup status
+    const setup = await (await fetch('/api/setup/status')).json();
+    if (setup.agent_name) {
+      document.getElementById('welcome-text').textContent = `Welcome back`;
+      document.getElementById('welcome-sub').textContent = `${setup.agent_name} is online and ready.`;
+      document.getElementById('chat-greeting').textContent = `Hey! I'm ${setup.agent_name}. How can I help you?`;
+      document.getElementById('chat-agent-name').textContent = setup.agent_name;
+    }
+
+    // Modules
+    const mods = await (await fetch('/api/setup/modules')).json();
+    const allMods = [...mods.core_modules, ...mods.extension_modules];
+    const enabled = allMods.filter(m => m.enabled);
+    const totalTools = enabled.reduce((s, m) => s + m.tool_count, 0);
+
+    document.getElementById('stat-modules').textContent = enabled.length;
+    document.getElementById('stat-tools').textContent = `${totalTools} tools`;
+    document.getElementById('module-count').textContent = `${enabled.length} of ${allMods.length}`;
+
+    const grid = document.getElementById('module-grid');
+    grid.innerHTML = enabled.map(m => `
+      <div class="p-2.5 rounded-lg bg-gray-900 text-xs">
+        <p class="font-medium text-gray-300 truncate">${m.name}</p>
+        <p class="text-gray-500 mt-0.5">${m.tool_count} tools</p>
+      </div>
+    `).join('');
+
+    // LLM status
+    document.getElementById('stat-llm').textContent = setup.has_llm_configured ? 'Connected' : 'Not configured';
+    document.getElementById('stat-llm-status').textContent = setup.has_llm_configured ? 'Primary + fallbacks' : '';
+
+    // License status
+    try {
+      const lic = await (await fetch('/api/license/status')).json();
+      const badge = document.getElementById('license-badge');
+      badge.classList.remove('hidden');
+      if (lic.mode === 'licensed') {
+        badge.className = 'badge badge-green text-xs';
+        badge.textContent = lic.license_tier || 'Licensed';
+      } else if (lic.mode === 'demo') {
+        const days = Math.ceil((lic.demo_remaining_secs || 0) / 86400);
+        badge.className = 'badge bg-yellow-900/50 text-yellow-400 text-xs';
+        badge.textContent = `Demo: ${days}d left`;
+      } else {
+        badge.className = 'badge badge-red text-xs cursor-pointer';
+        badge.textContent = 'Demo Expired';
+        badge.onclick = () => location.href = '/settings';
+      }
+    } catch(e) {}
+
+  } catch(e) {
+    document.getElementById('status-badge').className = 'badge badge-red';
+    document.getElementById('status-badge').innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-red-400 mr-1"></span>Error';
+  }
+}
+
+// Phone access QR
+function showPhoneAccess() {
+  const url = location.origin;
+  document.getElementById('phone-qr').src =
+    `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(url)}&bgcolor=ffffff&color=0c4a6e`;
+  document.getElementById('phone-url').textContent = url;
+  document.getElementById('phone-modal').classList.remove('hidden');
+}
+
+// Init — check if setup is needed first
+(async () => {
+  try {
+    const s = await (await fetch('/api/setup/status')).json();
+    if (!s.setup_complete) {
+      location.href = '/setup';
+      return;
+    }
+  } catch(e) {}
+  checkAuth();
+  loadDashboard();
+  setInterval(loadDashboard, 30000);
+})();
+</script>
+
+</body>
+</html>

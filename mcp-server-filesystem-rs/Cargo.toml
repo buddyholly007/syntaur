@@ -1,0 +1,27 @@
+[package]
+name = "mcp-server-filesystem-rs"
+version = "0.1.0"
+edition.workspace = true
+description = "Pure-Rust replacement for @modelcontextprotocol/server-filesystem"
+
+[[bin]]
+name = "mcp-server-filesystem-rs"
+path = "src/main.rs"
+
+[dependencies]
+mcp-protocol = { path = "../mcp-protocol" }
+
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+globset = "0.4"
+mime_guess = "2"
+similar = "2"
+rand = "0.8"
+base64 = "0.22"

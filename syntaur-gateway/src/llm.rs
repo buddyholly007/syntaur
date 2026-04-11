@@ -1,0 +1,629 @@
+use crate::circuit_breaker::CircuitBreaker;
+use crate::config::{Config, ModelSelection, ProviderConfig};
+use log::{debug, error, info, warn};
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
+
+// ── LLM Messages ────────────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+impl ChatMessage {
+    pub fn system(content: &str) -> Self {
+        Self { role: "system".to_string(), content: content.to_string(), tool_calls: None, tool_call_id: None }
+    }
+    pub fn user(content: &str) -> Self {
+        Self { role: "user".to_string(), content: content.to_string(), tool_calls: None, tool_call_id: None }
+    }
+    pub fn assistant(content: &str) -> Self {
+        Self { role: "assistant".to_string(), content: content.to_string(), tool_calls: None, tool_call_id: None }
+    }
+    pub fn assistant_with_tools(content: &str, tool_calls: Vec<serde_json::Value>) -> Self {
+        Self { role: "assistant".to_string(), content: content.to_string(), tool_calls: Some(tool_calls), tool_call_id: None }
+    }
+    pub fn tool_result(tool_call_id: &str, content: &str) -> Self {
+        Self { role: "tool".to_string(), content: content.to_string(), tool_calls: None, tool_call_id: Some(tool_call_id.to_string()) }
+    }
+}
+
+/// Result of an LLM call — either text or tool calls
+#[derive(Debug)]
+pub enum LlmResult {
+    Text(String),
+    ToolCalls { content: String, tool_calls: Vec<serde_json::Value> },
+}
+
+#[derive(Deserialize, Debug)]
+struct LlmResponse {
+    choices: Option<Vec<LlmChoice>>,
+}
+
+#[derive(Deserialize, Debug)]
+struct LlmChoice {
+    message: Option<LlmMessage>,
+}
+
+#[derive(Deserialize, Debug)]
+struct LlmMessage {
+    content: Option<String>,
+    reasoning_content: Option<String>,
+    reasoning: Option<String>,
+    tool_calls: Option<Vec<serde_json::Value>>,
+}
+
+// ── Provider Chain ──────────────────────────────────────────────────────────
+
+/// Pick a sensible default HTTP timeout for a provider based on its name.
+///
+/// - `claude-shim` / `claude-cli`: 600s — these spawn local `claude -p` which
+///   can take 60-300s for tool-using turns (Claude Code does its own tool
+///   execution internally before returning final text). 120s was too short
+///   and caused fall-throughs to fallback providers mid-conversation.
+/// - `lmstudio` / `local`: 60s — fast local inference servers, anything
+///   slower than this means they're stuck.
+/// - everything else: 120s — remote OpenAI-compatible providers (OpenRouter
+///   Nemotron, etc.).
+fn provider_default_timeout(prov_name: &str) -> Duration {
+    if prov_name.contains("claude-shim") || prov_name.contains("claude-cli") {
+        Duration::from_secs(600)
+    } else if prov_name.contains("lmstudio") || prov_name.contains("local") {
+        Duration::from_secs(60)
+    } else {
+        Duration::from_secs(120)
+    }
+}
+
+pub struct LlmProvider {
+    pub name: String,
+    pub base_url: String,
+    pub api_key: String,
+    pub model_id: String,
+    pub max_tokens: u64,
+    pub circuit: Mutex<CircuitBreaker>,
+}
+
+pub struct LlmChain {
+    providers: Vec<LlmProvider>,
+    client: Client,
+}
+
+impl LlmChain {
+    /// Build a chain that prefers the agent's `fast` model for cheap/quick
+    /// phases (research planning, report synthesis). Falls back to the
+    /// primary model if no fast model is configured.
+    pub fn from_config_fast(config: &Config, agent_id: &str, client: Client) -> Self {
+        let model_sel = config.agent_model(agent_id);
+        if let Some(fast) = model_sel.fast.as_deref() {
+            // Build a chain with fast as primary, original primary as fallback,
+            // then the original fallbacks. Keeps resilience while preferring fast.
+            let mut alt = ModelSelection::default();
+            alt.primary = fast.to_string();
+            alt.fallbacks = std::iter::once(model_sel.primary.clone())
+                .chain(model_sel.fallbacks.iter().cloned())
+                .collect();
+            return Self::from_model_selection(config, &alt, agent_id, client);
+        }
+        Self::from_config(config, agent_id, client)
+    }
+
+    /// Build from config's model selection (primary + fallbacks)
+    pub fn from_config(config: &Config, agent_id: &str, client: Client) -> Self {
+        let model_sel = config.agent_model(agent_id);
+        Self::from_model_selection(config, model_sel, agent_id, client)
+    }
+
+    /// Build a chain from any ModelSelection (used by from_config and from_config_fast).
+    fn from_model_selection(
+        config: &Config,
+        model_sel: &ModelSelection,
+        agent_id: &str,
+        client: Client,
+    ) -> Self {
+        let mut providers = Vec::new();
+
+        // Primary
+        if let Some((prov_name, model_id)) = config.resolve_model(&model_sel.primary) {
+            if let Some(prov_config) = config.models.providers.get(&prov_name) {
+                let timeout = provider_default_timeout(&prov_name);
+
+                providers.push(LlmProvider {
+                    name: prov_name.clone(),
+                    base_url: prov_config.base_url.clone(),
+                    api_key: prov_config.api_key.clone(),
+                    model_id,
+                    max_tokens: prov_config.models.first().map(|m| m.max_tokens).unwrap_or(4096),
+                    circuit: Mutex::new(CircuitBreaker::new(&prov_name, timeout)),
+                });
+            }
+        }
+
+        // Fallbacks
+        for fallback in &model_sel.fallbacks {
+            if let Some((prov_name, model_id)) = config.resolve_model(fallback) {
+                if let Some(prov_config) = config.models.providers.get(&prov_name) {
+                    let timeout = provider_default_timeout(&prov_name);
+                    providers.push(LlmProvider {
+                        name: prov_name.clone(),
+                        base_url: prov_config.base_url.clone(),
+                        api_key: prov_config.api_key.clone(),
+                        model_id,
+                        max_tokens: prov_config.models.first().map(|m| m.max_tokens).unwrap_or(4096),
+                        circuit: Mutex::new(CircuitBreaker::new(&prov_name, timeout)),
+                    });
+                }
+            }
+        }
+
+        if providers.is_empty() {
+            warn!("No LLM providers configured for agent {}", agent_id);
+        } else {
+            info!("LLM chain for {}: {}", agent_id,
+                providers.iter().map(|p| format!("{}:{}", p.name, p.model_id)).collect::<Vec<_>>().join(" → "));
+        }
+
+        Self { providers, client }
+    }
+
+    /// Generate an embedding for the given text via the configured embedding
+    /// model. Uses the FIRST provider in the chain whose `models` list contains
+    /// an entry tagged as an embedding model (heuristic: id contains "embed").
+    /// Returns the raw f32 vector. Falls back to an error if no embedding
+    /// provider is wired.
+    pub async fn embed_text(&self, text: &str) -> Result<Vec<f32>, String> {
+        // Try each provider in order; first success wins
+        for prov in &self.providers {
+            // Heuristic: skip providers whose model_id doesn't look like an embedder
+            if !prov.model_id.contains("embed") && !prov.model_id.contains("Embed") {
+                continue;
+            }
+            let url = format!("{}/embeddings", prov.base_url.trim_end_matches('/'));
+            let body = serde_json::json!({
+                "model": prov.model_id,
+                "input": text,
+            });
+            let req = self
+                .client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", prov.api_key))
+                .header("Content-Type", "application/json")
+                .timeout(std::time::Duration::from_secs(60))
+                .json(&body);
+            let resp = match req.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    log::warn!("[llm:{}] embed: {}", prov.name, e);
+                    continue;
+                }
+            };
+            if !resp.status().is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                log::warn!("[llm:{}] embed HTTP error: {}", prov.name, body);
+                continue;
+            }
+            #[derive(serde::Deserialize)]
+            struct EmbedItem { embedding: Vec<f32> }
+            #[derive(serde::Deserialize)]
+            struct EmbedResp { data: Vec<EmbedItem> }
+            let parsed: EmbedResp = match resp.json().await {
+                Ok(p) => p,
+                Err(e) => {
+                    log::warn!("[llm:{}] embed parse: {}", prov.name, e);
+                    continue;
+                }
+            };
+            if let Some(item) = parsed.data.into_iter().next() {
+                return Ok(item.embedding);
+            }
+        }
+        Err("no embedding provider succeeded".to_string())
+    }
+
+    /// True if any provider in the chain looks like an embedding model.
+    pub fn has_embedder(&self) -> bool {
+        self.providers
+            .iter()
+            .any(|p| p.model_id.contains("embed") || p.model_id.contains("Embed"))
+    }
+
+    /// Call LLM — returns text only
+    pub async fn call(&self, messages: &[ChatMessage]) -> Result<String, String> {
+        match self.call_raw(messages, None).await? {
+            LlmResult::Text(t) => Ok(t),
+            LlmResult::ToolCalls { content, .. } => Ok(if content.is_empty() { "(tool call requested)".to_string() } else { content }),
+        }
+    }
+
+    /// Call LLM with tools — returns structured result
+    pub async fn call_raw(&self, messages: &[ChatMessage], tools: Option<&Vec<serde_json::Value>>) -> Result<LlmResult, String> {
+        for (i, provider) in self.providers.iter().enumerate() {
+            // Check circuit breaker
+            {
+                let mut circuit = provider.circuit.lock().await;
+                if !circuit.can_execute() {
+                    debug!("[llm:{}] Circuit OPEN, skipping", provider.name);
+                    continue;
+                }
+            }
+
+            let timeout = {
+                let circuit = provider.circuit.lock().await;
+                circuit.timeout()
+            };
+
+            let start = Instant::now();
+            info!("[llm:{}] Calling model={} timeout={}s", provider.name, provider.model_id, timeout.as_secs());
+            match call_provider(&self.client, provider, messages, timeout, tools).await {
+                Ok(result) => {
+                    let latency = start.elapsed().as_millis() as u64;
+                    let desc = match &result {
+                        LlmResult::Text(t) => format!("text {} chars", t.len()),
+                        LlmResult::ToolCalls { tool_calls, .. } => format!("{} tool calls", tool_calls.len()),
+                    };
+                    info!("[llm:{}] Success in {}ms ({})", provider.name, latency, desc);
+                    {
+                        let mut circuit = provider.circuit.lock().await;
+                        circuit.record_success(latency);
+                    }
+                    return Ok(result);
+                }
+                Err(e) => {
+                    let latency = start.elapsed().as_millis() as u64;
+                    let was_timeout = e.contains("timeout") || e.contains("timed out");
+                    {
+                        let mut circuit = provider.circuit.lock().await;
+                        circuit.record_failure(was_timeout);
+                    }
+
+                    if i < self.providers.len() - 1 {
+                        warn!("[llm:{}] Failed after {}ms ({}), trying next provider", provider.name, latency, e);
+                    } else {
+                        error!("[llm] All {} providers failed after {}ms. Last error: {}", self.providers.len(), latency, e);
+                    }
+                }
+            }
+        }
+
+        Err("All LLM providers failed".to_string())
+    }
+
+    /// Same as `call_raw` but with an explicit `max_tokens` cap that
+    /// overrides the provider's configured ceiling. Intended for the voice
+    /// pipeline where responses must be 1 short sentence so TTS playback
+    /// is brief and the echo window stays small. Any other caller should
+    /// keep using `call_raw`.
+    pub async fn call_raw_capped(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&Vec<serde_json::Value>>,
+        max_tokens_override: u32,
+    ) -> Result<LlmResult, String> {
+        for (i, provider) in self.providers.iter().enumerate() {
+            {
+                let mut circuit = provider.circuit.lock().await;
+                if !circuit.can_execute() {
+                    debug!("[llm:{}] Circuit OPEN, skipping", provider.name);
+                    continue;
+                }
+            }
+            let timeout = {
+                let circuit = provider.circuit.lock().await;
+                circuit.timeout()
+            };
+            let start = Instant::now();
+            info!(
+                "[llm:{}] Calling model={} timeout={}s max_tokens={} (capped)",
+                provider.name, provider.model_id, timeout.as_secs(), max_tokens_override
+            );
+            match call_provider_capped(
+                &self.client,
+                provider,
+                messages,
+                timeout,
+                tools,
+                max_tokens_override,
+            )
+            .await
+            {
+                Ok(result) => {
+                    let latency = start.elapsed().as_millis() as u64;
+                    let desc = match &result {
+                        LlmResult::Text(t) => format!("text {} chars", t.len()),
+                        LlmResult::ToolCalls { tool_calls, .. } => {
+                            format!("{} tool calls", tool_calls.len())
+                        }
+                    };
+                    info!("[llm:{}] Success in {}ms ({})", provider.name, latency, desc);
+                    {
+                        let mut circuit = provider.circuit.lock().await;
+                        circuit.record_success(latency);
+                    }
+                    return Ok(result);
+                }
+                Err(e) => {
+                    let latency = start.elapsed().as_millis() as u64;
+                    let was_timeout = e.contains("timeout") || e.contains("timed out");
+                    {
+                        let mut circuit = provider.circuit.lock().await;
+                        circuit.record_failure(was_timeout);
+                    }
+                    if i < self.providers.len() - 1 {
+                        warn!(
+                            "[llm:{}] Failed after {}ms ({}), trying next provider",
+                            provider.name, latency, e
+                        );
+                    } else {
+                        error!(
+                            "[llm] All {} providers failed after {}ms. Last error: {}",
+                            self.providers.len(),
+                            latency,
+                            e
+                        );
+                    }
+                }
+            }
+        }
+        Err("All LLM providers failed".to_string())
+    }
+}
+
+async fn call_provider(
+    client: &Client,
+    provider: &LlmProvider,
+    messages: &[ChatMessage],
+    timeout: Duration,
+    tools: Option<&Vec<serde_json::Value>>,
+) -> Result<LlmResult, String> {
+    let url = format!("{}/chat/completions", provider.base_url.trim_end_matches('/'));
+
+    let mut payload = serde_json::json!({
+        "model": provider.model_id,
+        "messages": messages,
+        "max_tokens": provider.max_tokens.min(8192).max(2000),
+        "temperature": 0.7,
+    });
+
+    // Add tool definitions if provided
+    if let Some(tools) = tools {
+        payload["tools"] = serde_json::json!(tools);
+    }
+
+    debug!("[llm:{}] POST {} (model={}, messages={}, max_tokens={})",
+        provider.name, url, provider.model_id, messages.len(), provider.max_tokens.min(8192).max(2000));
+
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", provider.api_key))
+        .header("Content-Type", "application/json")
+        .json(&payload)
+        .timeout(timeout)
+        .send()
+        .await
+        .map_err(|e| {
+            let msg = if e.is_timeout() {
+                format!("timed out after {}s", timeout.as_secs())
+            } else if e.is_connect() {
+                format!("connection failed: {}", e)
+            } else {
+                format!("request error: {}", e)
+            };
+            error!("[llm:{}] HTTP error: {}", provider.name, msg);
+            msg
+        })?;
+
+    let status = resp.status();
+    debug!("[llm:{}] HTTP {}", provider.name, status);
+
+    // Handle rate limit and server errors
+    if status.as_u16() == 429 {
+        return Err("rate limited (429)".to_string());
+    }
+    if status.as_u16() == 402 {
+        return Err("billing error (402)".to_string());
+    }
+    if status.is_server_error() {
+        return Err(format!("server error ({})", status));
+    }
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("HTTP {} — {}", status, body.chars().take(200).collect::<String>()));
+    }
+
+    let raw_body = resp.text().await
+        .map_err(|e| format!("response read error: {}", e))?;
+
+    debug!("[llm:{}] Raw response: {}...", provider.name, &raw_body[..raw_body.len().min(500)]);
+
+    let body: LlmResponse = serde_json::from_str(&raw_body)
+        .map_err(|e| {
+            error!("[llm:{}] Response parse error: {} — raw: {}...", provider.name, e, &raw_body[..raw_body.len().min(200)]);
+            format!("response parse error: {}", e)
+        })?;
+
+    let message = body.choices
+        .and_then(|c| c.into_iter().next())
+        .and_then(|c| c.message);
+
+    let content = match &message {
+        Some(m) => {
+            let c = m.content.clone()
+                .or_else(|| m.reasoning_content.clone())
+                .or_else(|| m.reasoning.clone())
+                .unwrap_or_default();
+            if c.is_empty() {
+                warn!("[llm:{}] All content fields empty. content={:?}, reasoning_content={:?}, reasoning={:?}",
+                    provider.name, m.content.is_some(), m.reasoning_content.is_some(), m.reasoning.is_some());
+            }
+            c
+        }
+        None => {
+            error!("[llm:{}] No message in response", provider.name);
+            String::new()
+        }
+    };
+
+    // Check for tool calls in the response
+    let raw_tool_calls: Option<Vec<serde_json::Value>> = {
+        let raw_val: serde_json::Value = serde_json::from_str(&raw_body).unwrap_or_default();
+        raw_val.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("tool_calls"))
+            .and_then(|tc| tc.as_array())
+            .cloned()
+    };
+
+    if let Some(ref tc) = raw_tool_calls {
+        if !tc.is_empty() {
+            info!("[llm:{}] {} tool call(s) returned", provider.name, tc.len());
+            return Ok(LlmResult::ToolCalls {
+                content: content.clone(),
+                tool_calls: tc.clone(),
+            });
+        }
+    }
+
+    if content.is_empty() {
+        return Err(format!("empty response from LLM (raw: {}...)", &raw_body[..raw_body.len().min(100)]));
+    }
+
+    // Strip <think> blocks
+    let think_re = regex::Regex::new(r"(?s)<think>.*?</think>").unwrap();
+    let cleaned = think_re.replace_all(&content, "").trim().to_string();
+
+    Ok(LlmResult::Text(if cleaned.is_empty() { content } else { cleaned }))
+}
+
+/// Same body as `call_provider` but overrides `max_tokens` at the request
+/// level rather than inheriting the provider's configured ceiling. Voice
+/// responses must stay under ~1 sentence so TTS audio is brief.
+async fn call_provider_capped(
+    client: &Client,
+    provider: &LlmProvider,
+    messages: &[ChatMessage],
+    timeout: Duration,
+    tools: Option<&Vec<serde_json::Value>>,
+    max_tokens: u32,
+) -> Result<LlmResult, String> {
+    let url = format!("{}/chat/completions", provider.base_url.trim_end_matches('/'));
+
+    let mut payload = serde_json::json!({
+        "model": provider.model_id,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": 0.3,
+    });
+    if let Some(tools) = tools {
+        payload["tools"] = serde_json::json!(tools);
+    }
+
+    debug!(
+        "[llm:{}] POST {} (capped, max_tokens={}, messages={})",
+        provider.name, url, max_tokens, messages.len()
+    );
+
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", provider.api_key))
+        .header("Content-Type", "application/json")
+        .json(&payload)
+        .timeout(timeout)
+        .send()
+        .await
+        .map_err(|e| {
+            let msg = if e.is_timeout() {
+                format!("timed out after {}s", timeout.as_secs())
+            } else if e.is_connect() {
+                format!("connection failed: {}", e)
+            } else {
+                format!("request error: {}", e)
+            };
+            error!("[llm:{}] HTTP error: {}", provider.name, msg);
+            msg
+        })?;
+
+    let status = resp.status();
+    if status.as_u16() == 429 {
+        return Err("rate limited (429)".to_string());
+    }
+    if status.as_u16() == 402 {
+        return Err("billing error (402)".to_string());
+    }
+    if status.is_server_error() {
+        return Err(format!("server error ({})", status));
+    }
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "HTTP {} — {}",
+            status,
+            body.chars().take(200).collect::<String>()
+        ));
+    }
+
+    let raw_body = resp
+        .text()
+        .await
+        .map_err(|e| format!("response read error: {}", e))?;
+
+    let body: LlmResponse = serde_json::from_str(&raw_body)
+        .map_err(|e| format!("response parse error: {}", e))?;
+
+    let message = body
+        .choices
+        .and_then(|c| c.into_iter().next())
+        .and_then(|c| c.message);
+
+    let content = match &message {
+        Some(m) => m
+            .content
+            .clone()
+            .or_else(|| m.reasoning_content.clone())
+            .or_else(|| m.reasoning.clone())
+            .unwrap_or_default(),
+        None => String::new(),
+    };
+
+    // Parse tool calls if present
+    let raw_tool_calls: Option<Vec<serde_json::Value>> = {
+        let raw_val: serde_json::Value = serde_json::from_str(&raw_body).unwrap_or_default();
+        raw_val
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("tool_calls"))
+            .and_then(|tc| tc.as_array())
+            .cloned()
+    };
+    if let Some(ref tc) = raw_tool_calls {
+        if !tc.is_empty() {
+            return Ok(LlmResult::ToolCalls {
+                content: content.clone(),
+                tool_calls: tc.clone(),
+            });
+        }
+    }
+
+    if content.is_empty() {
+        return Err("empty response from LLM".to_string());
+    }
+
+    let think_re = regex::Regex::new(r"(?s)<think>.*?</think>").unwrap();
+    let cleaned = think_re.replace_all(&content, "").trim().to_string();
+
+    Ok(LlmResult::Text(if cleaned.is_empty() {
+        content
+    } else {
+        cleaned
+    }))
+}

@@ -1,0 +1,90 @@
+name: Build Syntaur
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact: syntaur-linux-x86_64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            artifact: syntaur-linux-aarch64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: syntaur-macos-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: syntaur-macos-aarch64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: syntaur-windows-x86_64.exe
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl tools (Linux)
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get install -y musl-tools
+
+      - name: Install cross-compilation tools (Linux ARM)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo '[target.aarch64-unknown-linux-musl]' >> .cargo/config.toml
+          echo 'linker = "aarch64-linux-gnu-gcc"' >> .cargo/config.toml
+
+      - name: Build gateway
+        run: cargo build --release --target ${{ matrix.target }} -p rust-syntaur
+
+      - name: Build module manager
+        run: cargo build --release --target ${{ matrix.target }} -p syntaur-mod
+
+      - name: Rename artifacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            cp target/${{ matrix.target }}/release/rust-syntaur.exe dist/${{ matrix.artifact }}
+            cp target/${{ matrix.target }}/release/ocmod.exe dist/ocmod-windows-x86_64.exe
+          else
+            cp target/${{ matrix.target }}/release/rust-syntaur dist/${{ matrix.artifact }}
+            cp target/${{ matrix.target }}/release/ocmod dist/ocmod-${matrix.artifact#syntaur-}
+            chmod +x dist/*
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true

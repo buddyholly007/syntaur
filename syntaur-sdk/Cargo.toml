@@ -1,0 +1,16 @@
+[package]
+name = "syntaur-sdk"
+version = "0.1.0"
+edition.workspace = true
+description = "SDK for building Syntaur modules — tools, services, and extensions"
+license = "MIT"
+
+[dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+semver = { version = "1", features = ["serde"] }
+toml = "0.8"
+anyhow = { workspace = true }
