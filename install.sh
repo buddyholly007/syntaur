@@ -36,7 +36,7 @@ echo ""
 mkdir -p "$INSTALL_DIR"
 
 # Download binary
-DOWNLOAD_URL="https://get.syntaur.dev/releases/v${VERSION}/syntaur-${PLATFORM}-${ARCH}"
+DOWNLOAD_URL="https://github.com/buddyholly007/syntaur/releases/download/v${VERSION}/syntaur-${PLATFORM}-${ARCH}"
 echo "  Downloading $BRAND..."
 
 if command -v curl >/dev/null 2>&1; then
