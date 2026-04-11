@@ -83,13 +83,16 @@ fn email_read_sync(folder: &str, count: usize, imap_host: &str, email: &str, pas
     use std::net::TcpStream;
 
     // Use native_tls for IMAP SSL
-    let connector = native_tls::TlsConnector::new()
-        .map_err(|e| format!("TLS error: {}", e))?;
-    let stream = TcpStream::connect((imap_host, 993))
-        .map_err(|e| format!("Connect error: {}", e))?;
+    let connector = {
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        std::sync::Arc::new(rustls::ClientConfig::builder().with_root_certificates(root_store).with_no_client_auth())
+    };
+    let server_name = rustls::pki_types::ServerName::try_from(imap_host.to_string()).map_err(|e| format!("DNS: {}", e))?;
+    let conn = rustls::ClientConnection::new(connector, server_name).map_err(|e| format!("TLS: {}", e))?;
+    let stream = TcpStream::connect((imap_host, 993)).map_err(|e| format!("Connect: {}", e))?;
     stream.set_read_timeout(Some(Duration::from_secs(15))).ok();
-    let mut tls = connector.connect(imap_host, stream)
-        .map_err(|e| format!("TLS handshake error: {}", e))?;
+    let mut tls = rustls::StreamOwned::new(conn, stream);
 
     let mut buf = vec![0u8; 65536];
 
@@ -208,16 +211,22 @@ fn email_send_sync(to: &str, subject: &str, body: &str, smtp_host: &str, smtp_po
     use std::io::{Read, Write};
     use std::net::TcpStream;
 
-    let connector = native_tls::TlsConnector::new()
-        .map_err(|e| format!("TLS error: {}", e))?;
+    let connector = {
+        let mut rs = rustls::RootCertStore::empty();
+        rs.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        std::sync::Arc::new(rustls::ClientConfig::builder().with_root_certificates(rs).with_no_client_auth())
+    };
 
     // Port 465 = implicit TLS, port 587 = STARTTLS
     let mut tls = if smtp_port == 465 {
         let stream = TcpStream::connect((smtp_host, 465))
             .map_err(|e| format!("Connect error: {}", e))?;
         stream.set_read_timeout(Some(Duration::from_secs(15))).ok();
-        connector.connect(smtp_host, stream)
-            .map_err(|e| format!("TLS error: {}", e))?
+        {
+        let sn = rustls::pki_types::ServerName::try_from(smtp_host.to_string()).map_err(|e| format!("DNS: {}", e))?;
+        let conn = rustls::ClientConnection::new(connector, sn).map_err(|e| format!("TLS: {}", e))?;
+        rustls::StreamOwned::new(conn, stream)
+    }
     } else {
         // STARTTLS for port 587
         let mut stream = TcpStream::connect((smtp_host, 587))
@@ -229,8 +238,11 @@ fn email_send_sync(to: &str, subject: &str, body: &str, smtp_host: &str, smtp_po
         stream.read(&mut buf).ok();
         stream.write_all(b"STARTTLS\r\n").ok();
         stream.read(&mut buf).ok();
-        connector.connect(smtp_host, stream)
-            .map_err(|e| format!("STARTTLS error: {}", e))?
+        {
+        let sn = rustls::pki_types::ServerName::try_from(smtp_host.to_string()).map_err(|e| format!("DNS: {}", e))?;
+        let conn = rustls::ClientConnection::new(connector, sn).map_err(|e| format!("TLS: {}", e))?;
+        rustls::StreamOwned::new(conn, stream)
+    }
     };
 
     let mut buf = vec![0u8; 4096];
