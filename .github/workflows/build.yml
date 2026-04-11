@@ -8,15 +8,13 @@ on:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
+            target: x86_64-unknown-linux-gnu
             artifact: syntaur-linux-x86_64
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-musl
-            artifact: syntaur-linux-aarch64
-          - os: macos-latest
+          - os: macos-13
             target: x86_64-apple-darwin
             artifact: syntaur-macos-x86_64
           - os: macos-latest
@@ -36,19 +34,14 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install musl tools (Linux)
-        if: contains(matrix.target, 'musl')
-        run: sudo apt-get install -y musl-tools
-
-      - name: Install cross-compilation tools (Linux ARM)
-        if: matrix.target == 'aarch64-unknown-linux-musl'
-        run: |
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          echo '[target.aarch64-unknown-linux-musl]' >> .cargo/config.toml
-          echo 'linker = "aarch64-linux-gnu-gcc"' >> .cargo/config.toml
+      - name: Install system deps (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
       - name: Build gateway
         run: cargo build --release --target ${{ matrix.target }} -p rust-openclaw
+        env:
+          OPENSSL_STATIC: "1"
 
       - name: Build module manager
         run: cargo build --release --target ${{ matrix.target }} -p openclaw-mod
@@ -62,7 +55,9 @@ jobs:
             cp target/${{ matrix.target }}/release/ocmod.exe dist/ocmod-windows-x86_64.exe
           else
             cp target/${{ matrix.target }}/release/rust-openclaw dist/${{ matrix.artifact }}
-            cp target/${{ matrix.target }}/release/ocmod dist/ocmod-${matrix.artifact#syntaur-}
+            SUFFIX="${{ matrix.artifact }}"
+            SUFFIX="${SUFFIX#syntaur-}"
+            cp target/${{ matrix.target }}/release/ocmod dist/ocmod-${SUFFIX}
             chmod +x dist/*
           fi
 
@@ -76,15 +71,21 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
 
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: find artifacts -type f | sort
 
       - name: Create release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: artifacts/**/*
           generate_release_notes: true
