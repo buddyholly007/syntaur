@@ -284,20 +284,55 @@ async function loadTodos() {
 function renderTodos() {
   const list = document.getElementById('todo-list');
   const count = document.getElementById('todo-count');
-  const open = todos.filter(t => !t.done).length;
-  count.textContent = `${open} open`;
+  const open = todos.filter(t => !t.done);
+  const done = todos.filter(t => t.done);
+  count.textContent = `${open.length} open`;
+
   if (todos.length === 0) {
     list.innerHTML = '<p class="text-xs text-gray-600 py-2">No tasks yet</p>';
     return;
   }
-  list.innerHTML = todos.map(t => `
+
+  let html = open.map(t => `
     <div class="flex items-center gap-2 group">
-      <input type="checkbox" ${t.done ? 'checked' : ''} onchange="toggleTodo(${t.id})" class="rounded border-gray-600 bg-gray-900 text-oc-500 focus:ring-oc-500 cursor-pointer">
-      <span class="flex-1 text-sm ${t.done ? 'text-gray-600 line-through' : 'text-gray-300'}">${escapeHtml(t.text)}</span>
+      <input type="checkbox" onchange="toggleTodo(${t.id})" class="rounded border-gray-600 bg-gray-900 text-oc-500 focus:ring-oc-500 cursor-pointer">
+      <span class="flex-1 text-sm text-gray-300">${escapeHtml(t.text)}</span>
       ${t.due_date ? '<span class="text-xs text-gray-600">' + t.due_date + '</span>' : ''}
       <button onclick="deleteTodo(${t.id})" class="text-gray-700 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity text-xs">&times;</button>
     </div>
   `).join('');
+
+  if (done.length > 0) {
+    html += `
+    <details class="mt-2">
+      <summary class="text-xs text-gray-600 cursor-pointer hover:text-gray-400 select-none py-1">${done.length} completed</summary>
+      <div class="space-y-1.5 mt-1.5">
+        ${done.map(t => `
+          <div class="flex items-center gap-2 group">
+            <input type="checkbox" checked onchange="toggleTodo(${t.id})" class="rounded border-gray-600 bg-gray-900 text-oc-500 focus:ring-oc-500 cursor-pointer">
+            <span class="flex-1 text-sm text-gray-600 line-through">${escapeHtml(t.text)}</span>
+            <button onclick="deleteTodo(${t.id})" class="text-gray-700 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity text-xs">&times;</button>
+          </div>
+        `).join('')}
+        <button onclick="deleteCompleted()" class="w-full mt-2 text-xs text-gray-600 hover:text-red-400 py-1.5 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors">Clear completed items</button>
+      </div>
+    </details>`;
+  }
+
+  list.innerHTML = html;
+}
+
+async function deleteCompleted() {
+  const done = todos.filter(t => t.done);
+  for (const t of done) {
+    try {
+      await authFetch(`/api/todos/${t.id}`, {
+        method: 'DELETE', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ token: authToken })
+      });
+    } catch(e) {}
+  }
+  await loadTodos();
 }
 
 async function addTodo() {
