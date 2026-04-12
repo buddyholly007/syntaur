@@ -9,11 +9,11 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Syntaur Setup</title>
-<script src="https://cdn.tailwindcss.com"></script>
+<script src="/tailwind.js"></script>
 <script>tailwind.config={darkMode:'class',theme:{extend:{colors:{oc:{50:'#f0f9ff',100:'#e0f2fe',500:'#0ea5e9',600:'#0284c7',700:'#0369a1',800:'#075985',900:'#0c4a6e'}}}}}</script>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-  body { font-family: 'Inter', sans-serif; }
+  @import url('/fonts.css');
+  body { font-family: 'Inter', sans-serif; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; }
   .step { display: none; }
   .step.active { display: block; }
   .fade-in { animation: fadeIn 0.3s ease-in; }
@@ -42,8 +42,8 @@
     <p class="text-gray-400">Your personal AI platform</p>
     <!-- Centaur emblem placeholder -->
     <div class="text-4xl mt-2 opacity-60">&#9813;</div>
-    <!-- Progress bar -->
-    <div class="mt-6 flex items-center gap-1" id="progress">
+    <!-- Progress bar (hidden until server mode chosen) -->
+    <div class="mt-6 flex items-center gap-1 hidden" id="progress">
       <div class="h-1 rounded-full flex-1 bg-oc-600 transition-all" id="prog-1"></div>
       <div class="h-1 rounded-full flex-1 bg-gray-700 transition-all" id="prog-2"></div>
       <div class="h-1 rounded-full flex-1 bg-gray-700 transition-all" id="prog-3"></div>
@@ -53,8 +53,85 @@
     </div>
   </div>
 
+  <!-- Step 0: Server vs Connect -->
+  <div class="step active fade-in" id="step-0">
+    <div class="card text-center py-8">
+      <h2 class="text-2xl font-semibold mb-2">Welcome to Syntaur</h2>
+      <p class="text-gray-400 mb-8">Your personal AI platform</p>
+
+      <div class="space-y-4 max-w-md mx-auto text-left">
+        <button onclick="chooseServer()" class="w-full p-5 rounded-xl bg-gray-900 hover:bg-gray-800 border border-gray-700 hover:border-oc-600 transition-all text-left group">
+          <div class="flex items-start gap-4">
+            <div class="text-2xl mt-1">&#9881;</div>
+            <div>
+              <p class="font-semibold text-white group-hover:text-oc-400 transition-colors">Set up Syntaur on this computer</p>
+              <p class="text-sm text-gray-400 mt-1">This computer will run your AI. You can access it from your phone, laptop, or any other device on your network.</p>
+              <p class="text-xs text-yellow-400/70 mt-2">&#9888; This computer needs to stay on for Syntaur to work.</p>
+            </div>
+          </div>
+        </button>
+
+        <button onclick="chooseConnect()" class="w-full p-5 rounded-xl bg-gray-900 hover:bg-gray-800 border border-gray-700 hover:border-oc-600 transition-all text-left group">
+          <div class="flex items-start gap-4">
+            <div class="text-2xl mt-1">&#128279;</div>
+            <div>
+              <p class="font-semibold text-white group-hover:text-oc-400 transition-colors">Connect to my Syntaur server</p>
+              <p class="text-sm text-gray-400 mt-1">Syntaur is already running on another computer. Connect this device to it.</p>
+            </div>
+          </div>
+        </button>
+      </div>
+
+      <p class="text-xs text-gray-600 mt-6">For the best experience, run Syntaur on a computer that stays on — a NAS, mini PC, or desktop.</p>
+    </div>
+  </div>
+
+  <!-- Step Connect: Enter server URL -->
+  <div class="step fade-in" id="step-connect">
+    <div class="card">
+      <h2 class="text-xl font-semibold mb-2">Connect to your Syntaur server</h2>
+      <p class="text-gray-400 mb-6">Enter the address of the computer running Syntaur. You can find this on the server's dashboard or in its startup log.</p>
+
+      <div class="space-y-4">
+        <div>
+          <label class="label">Server address</label>
+          <input type="text" id="connect-url" class="input" placeholder="e.g. 192.168.1.50:18789 or my-server.tail1234.ts.net:18789">
+          <p class="text-xs text-gray-500 mt-1">Local IP, Tailscale hostname, or domain name. Port is usually 18789.</p>
+        </div>
+
+        <div id="connect-status" class="hidden p-3 rounded-lg text-sm"></div>
+
+        <div class="flex justify-between">
+          <button class="btn-secondary" onclick="goStep(0)">Back</button>
+          <button class="btn-primary" onclick="testConnect()" id="btn-connect">Connect</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Step Connect Done -->
+  <div class="step fade-in" id="step-connect-done">
+    <div class="card text-center py-12">
+      <div class="text-5xl mb-4">&#10003;</div>
+      <h2 class="text-2xl font-semibold mb-2">Connected!</h2>
+      <p class="text-gray-400 mb-4">This device is linked to your Syntaur server at <strong class="text-white" id="connect-done-url"></strong></p>
+      <p class="text-gray-400 mb-8">Your conversations, settings, and AI follow you across every device.</p>
+
+      <div class="flex gap-4 justify-center">
+        <a id="connect-done-link" href="/" class="btn-primary inline-block">Open Dashboard</a>
+      </div>
+
+      <div class="mt-8 p-4 rounded-lg bg-gray-900 text-left max-w-md mx-auto">
+        <p class="text-sm font-medium text-gray-300 mb-2">How to open Syntaur later</p>
+        <p class="text-xs text-gray-500">A <strong class="text-gray-400">Syntaur</strong> shortcut was added to your app launcher. You can also bookmark this page or go to:</p>
+        <p class="text-xs text-sky-400 mt-1 font-mono" id="connect-done-bookmark"></p>
+        <p class="text-xs text-gray-500 mt-2">Your conversations sync automatically — pick up where you left off on any device.</p>
+      </div>
+    </div>
+  </div>
+
   <!-- Step 1: Welcome + Hardware Scan -->
-  <div class="step active fade-in" id="step-1">
+  <div class="step fade-in" id="step-1">
     <div class="card">
       <h2 class="text-xl font-semibold mb-4">Welcome to Syntaur</h2>
       <p class="text-gray-400 mb-6">Let's set up your personal AI assistant. This will only take a few minutes.</p>
@@ -838,22 +915,51 @@
     </div>
   </div>
 
-  <!-- Step 7: Done -->
+  <!-- Step 7: Remote Access -->
   <div class="step fade-in" id="step-7">
-    <div class="card text-center py-12">
-      <div class="text-5xl mb-4">&#10003;</div>
-      <h2 class="text-2xl font-semibold mb-2">Syntaur is ready!</h2>
-      <p class="text-gray-400 mb-8">Your AI assistant <strong id="done-name" class="text-white"></strong> is running.</p>
-      <div class="flex gap-4 justify-center">
+    <div class="card">
+      <div class="text-center mb-6">
+        <div class="text-4xl mb-2">&#10003;</div>
+        <h2 class="text-xl font-semibold">Syntaur is running!</h2>
+        <p class="text-gray-400 mt-1">Your AI assistant <strong id="done-name" class="text-white"></strong> is ready on this computer.</p>
+      </div>
+
+      <div class="p-4 rounded-lg bg-gray-900 mb-6">
+        <h3 class="font-medium text-gray-300 mb-3">Access from your phone and other computers</h3>
+        <p class="text-sm text-gray-400 mb-4">Syntaur runs on this computer. To use it from your phone, laptop, or tablet, those devices just need to connect to this computer over your network.</p>
+
+        <div class="space-y-3">
+          <div class="p-3 rounded-lg bg-gray-800">
+            <p class="text-sm font-medium text-gray-300 mb-1">Same Wi-Fi / local network</p>
+            <p class="text-xs text-gray-500 mb-2">If your other devices are on the same network, use this address:</p>
+            <p class="text-sm text-sky-400 font-mono" id="done-local-url">Detecting...</p>
+            <p class="text-xs text-gray-500 mt-1">Open this URL on your phone's browser and tap "Add to Home Screen" for an app-like experience.</p>
+          </div>
+
+          <div class="p-3 rounded-lg bg-gray-800" id="done-tailscale-section">
+            <p class="text-sm font-medium text-gray-300 mb-1">From anywhere (outside your home)</p>
+            <p class="text-xs text-gray-500 mb-2">To access Syntaur from anywhere — at work, on the go, or on a different network — we recommend <strong class="text-gray-300">Tailscale</strong>. It creates a secure private connection between your devices with zero configuration.</p>
+            <div id="done-tailscale-status"></div>
+            <div id="done-tailscale-install" class="mt-2">
+              <a href="https://tailscale.com/download" target="_blank" class="text-sm text-sky-400 hover:underline">Install Tailscale (free for personal use) &rarr;</a>
+              <p class="text-xs text-gray-500 mt-1">Install on this computer AND on the devices you want to connect from. Then come back and refresh this page.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <p class="text-sm text-gray-500 mt-6" id="done-telegram"></p>
+
+      <div class="flex justify-between mt-6">
+        <button class="btn-secondary" onclick="goStep(6)">Back</button>
         <a href="/" class="btn-primary inline-block">Open Dashboard</a>
       </div>
-      <p class="text-sm text-gray-500 mt-6" id="done-telegram"></p>
-      <div class="mt-8 p-4 rounded-lg bg-gray-900 text-left max-w-md mx-auto">
+
+      <div class="mt-6 p-4 rounded-lg bg-gray-900 text-left">
         <p class="text-sm font-medium text-gray-300 mb-2">How to open Syntaur later</p>
-        <p class="text-xs text-gray-500">A <strong class="text-gray-400">Syntaur</strong> shortcut was added to your app launcher during installation. You can also bookmark this page or go to:</p>
+        <p class="text-xs text-gray-500">Use the <strong class="text-gray-400">Syntaur</strong> shortcut in your app launcher, or go to:</p>
         <p class="text-xs text-sky-400 mt-1 font-mono">http://localhost:18789</p>
-        <p class="text-xs text-gray-500 mt-2">Syntaur runs in the background automatically — your shortcut opens this dashboard any time.</p>
-        <p class="text-xs text-gray-500 mt-1">You can manage the shortcut later in <a href="/settings" class="text-sky-400 hover:underline">Settings</a>.</p>
+        <p class="text-xs text-gray-500 mt-2">Your conversations follow you across every device — pick up where you left off anywhere.</p>
       </div>
     </div>
   </div>
@@ -862,26 +968,134 @@
 
 <script>
 // State
-let currentStep = 1;
+let currentStep = 0;
+let installMode = 'server'; // 'server' or 'connect'
 let hwScan = null;
 let llmChoice = 'cloud';
 let voiceEnabled = false;
 let telegramEnabled = false;
 let modules = [];
 
+// Step 0: Mode selection
+function chooseServer() {
+  installMode = 'server';
+  document.getElementById('progress').classList.remove('hidden');
+  goStep(1);
+  runScan();
+}
+
+function chooseConnect() {
+  installMode = 'connect';
+  document.getElementById('progress').classList.add('hidden');
+  goStep('connect');
+}
+
+// Connect mode: test server URL
+async function testConnect() {
+  const raw = document.getElementById('connect-url').value.trim();
+  if (!raw) return;
+
+  const btn = document.getElementById('btn-connect');
+  const status = document.getElementById('connect-status');
+  btn.disabled = true;
+  btn.textContent = 'Connecting...';
+  status.classList.remove('hidden');
+  status.className = 'p-3 rounded-lg text-sm bg-gray-900 text-gray-400';
+  status.textContent = 'Testing connection...';
+
+  // Normalize URL
+  let url = raw;
+  if (!url.startsWith('http')) url = 'http://' + url;
+  if (!url.includes(':')) url += ':18789';
+
+  try {
+    const resp = await fetch(url + '/api/setup/status', { mode: 'cors', signal: AbortSignal.timeout(10000) });
+    const data = await resp.json();
+
+    if (data.agent_name || data.setup_complete) {
+      status.className = 'p-3 rounded-lg text-sm bg-green-900/30 text-green-300';
+      status.innerHTML = `Connected to Syntaur server` +
+        (data.agent_name ? ` (agent: <strong>${data.agent_name}</strong>)` : '') +
+        `. Version ${data.version || 'unknown'}.`;
+
+      // Show success screen
+      document.getElementById('connect-done-url').textContent = url.replace('http://', '');
+      document.getElementById('connect-done-bookmark').textContent = url;
+      document.getElementById('connect-done-link').href = url;
+
+      // Install shortcut pointing to remote URL
+      try {
+        await fetch('/api/settings/install-shortcut', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ target: 'menu' })
+        });
+      } catch(e) {}
+
+      setTimeout(() => goStep('connect-done'), 1000);
+    } else {
+      status.className = 'p-3 rounded-lg text-sm bg-yellow-900/30 text-yellow-300';
+      status.textContent = 'Server found but setup is not complete. Complete setup on the server first.';
+    }
+  } catch(e) {
+    status.className = 'p-3 rounded-lg text-sm bg-red-900/30 text-red-300';
+    status.innerHTML = `Can't reach <strong>${url}</strong>. Make sure:<br>` +
+      '&bull; The server computer is turned on<br>' +
+      '&bull; Syntaur is running on it<br>' +
+      '&bull; Both devices are on the same network (or connected via Tailscale)<br>' +
+      '&bull; The address and port are correct';
+  }
+
+  btn.disabled = false;
+  btn.textContent = 'Connect';
+}
+
 // Step navigation
 function goStep(n) {
-  document.getElementById(`step-${currentStep}`).classList.remove('active');
-  document.getElementById(`step-${n}`).classList.add('active');
+  const current = document.getElementById(`step-${currentStep}`);
+  if (current) current.classList.remove('active');
+  const next = document.getElementById(`step-${n}`);
+  if (next) next.classList.add('active');
   currentStep = n;
-  // Update progress
-  for (let i = 1; i <= 6; i++) {
-    document.getElementById(`prog-${i}`).className =
-      `h-1 rounded-full flex-1 transition-all ${i <= n ? 'bg-oc-600' : 'bg-gray-700'}`;
+  // Update progress (server mode only, steps 1-6)
+  if (typeof n === 'number' && n >= 1) {
+    for (let i = 1; i <= 6; i++) {
+      const el = document.getElementById(`prog-${i}`);
+      if (el) el.className = `h-1 rounded-full flex-1 transition-all ${i <= n ? 'bg-oc-600' : 'bg-gray-700'}`;
+    }
   }
   if (n === 4) checkTailscale();
   if (n === 5) loadModules();
   if (n === 6) buildSummary();
+  if (n === 7) detectLocalUrl();
+}
+
+// Detect local network URL for remote access step
+async function detectLocalUrl() {
+  try {
+    const resp = await fetch('/api/setup/scan');
+    const data = await resp.json();
+    const ip = data.local_ip || location.hostname;
+    const port = location.port || '18789';
+    const url = `http://${ip}:${port}`;
+    document.getElementById('done-local-url').textContent = url;
+
+    // Check Tailscale
+    try {
+      const tsResp = await fetch('/api/setup/check-tailscale');
+      const ts = await tsResp.json();
+      if (ts.installed && ts.hostname) {
+        const tsUrl = `http://${ts.hostname}:${port}`;
+        document.getElementById('done-tailscale-status').innerHTML =
+          `<p class="text-sm text-green-400 mb-1">&#10003; Tailscale is connected</p>` +
+          `<p class="text-sm text-sky-400 font-mono">${tsUrl}</p>` +
+          `<p class="text-xs text-gray-500 mt-1">Use this address from any device on your Tailscale network — at home, at work, anywhere.</p>`;
+        document.getElementById('done-tailscale-install').classList.add('hidden');
+      }
+    } catch(e) {}
+  } catch(e) {
+    document.getElementById('done-local-url').textContent = 'http://' + location.host;
+  }
 }
 
 // Step 1: Hardware scan
@@ -1776,8 +1990,7 @@ function buildFallbacks() {
   return [fb];
 }
 
-// Init
-runScan();
+// Init — step 0 shows first, runScan starts when user chooses "server" mode
 selectLlm('cloud');
 </script>
 

@@ -9,11 +9,11 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Syntaur — Settings</title>
-<script src="https://cdn.tailwindcss.com"></script>
+<script src="/tailwind.js"></script>
 <script>tailwind.config={darkMode:'class',theme:{extend:{colors:{oc:{500:'#0ea5e9',600:'#0284c7',700:'#0369a1'}}}}}</script>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-  body { font-family: 'Inter', sans-serif; }
+  @import url('/fonts.css');
+  body { font-family: 'Inter', sans-serif; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; }
   .card { @apply bg-gray-800 rounded-xl border border-gray-700 p-5; }
   .input { @apply w-full bg-gray-900 border border-gray-600 rounded-lg px-4 py-2.5 text-white placeholder-gray-400 focus:border-oc-500 focus:ring-1 focus:ring-oc-500 outline-none text-sm; }
   .label { @apply block text-sm font-medium text-gray-300 mb-1.5; }

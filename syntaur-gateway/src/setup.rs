@@ -354,6 +354,9 @@ pub async fn first_run_redirect(
         || path == "/health"
         || path == "/icon.svg"
         || path == "/manifest.json"
+        || path == "/tailwind.js"
+        || path == "/fonts.css"
+        || path.starts_with("/fonts/")
         || path.starts_with("/static/")
     {
         return next.run(req).await;
@@ -872,6 +875,51 @@ pub async fn handle_manifest() -> (axum::http::HeaderMap, &'static str) {
 }
 
 
+/// GET /tailwind.js — bundled Tailwind CSS (no CDN dependency)
+pub async fn handle_tailwind() -> (axum::http::HeaderMap, &'static str) {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("content-type", "application/javascript".parse().unwrap());
+    headers.insert("cache-control", "public, max-age=604800".parse().unwrap());
+    (headers, include_str!("../static/tailwind.js"))
+}
+
+/// GET /fonts.css — bundled font definitions (no CDN dependency)
+pub async fn handle_fonts_css() -> (axum::http::HeaderMap, &'static str) {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("content-type", "text/css".parse().unwrap());
+    headers.insert("cache-control", "public, max-age=604800".parse().unwrap());
+    (headers, include_str!("../static/fonts.css"))
+}
+
+/// GET /fonts/{filename} — bundled font files
+pub async fn handle_font_file(
+    axum::extract::Path(filename): axum::extract::Path<String>,
+) -> Result<(axum::http::HeaderMap, &'static [u8]), StatusCode> {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("content-type", "font/ttf".parse().unwrap());
+    headers.insert("cache-control", "public, max-age=2592000".parse().unwrap());
+
+    // Match embedded font files by name
+    let data: &[u8] = match filename.as_str() {
+        "UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuDyYMZg.ttf" =>
+            include_bytes!("../static/fonts/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuDyYMZg.ttf"),
+        "UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuFuYMZg.ttf" =>
+            include_bytes!("../static/fonts/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuFuYMZg.ttf"),
+        "UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuGKYMZg.ttf" =>
+            include_bytes!("../static/fonts/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuGKYMZg.ttf"),
+        "UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuI6fMZg.ttf" =>
+            include_bytes!("../static/fonts/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuI6fMZg.ttf"),
+        "UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfMZg.ttf" =>
+            include_bytes!("../static/fonts/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfMZg.ttf"),
+        "tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8-qxjPQ.ttf" =>
+            include_bytes!("../static/fonts/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8-qxjPQ.ttf"),
+        "tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8yKxjPQ.ttf" =>
+            include_bytes!("../static/fonts/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8yKxjPQ.ttf"),
+        _ => return Err(StatusCode::NOT_FOUND),
+    };
+    Ok((headers, data))
+}
+
 /// GET /api/setup/scan — run a hardware scan and return results.
 /// Returns GPU, CPU, RAM, disk info for the setup wizard.
 pub async fn handle_hardware_scan(
@@ -915,6 +963,7 @@ pub async fn handle_hardware_scan(
         network_llms,
         network_gpus,
         gpu_scan_blocked,
+        local_ip: detect_local_ip(),
     }))
 }
 
@@ -930,6 +979,17 @@ pub struct HardwareScanResponse {
     pub network_llms: Vec<NetworkLlmInfo>,
     pub network_gpus: Vec<NetworkGpuInfo>,
     pub gpu_scan_blocked: bool,
+    pub local_ip: Option<String>,
+}
+
+fn detect_local_ip() -> Option<String> {
+    // Connect to a public address (doesn't actually send data) to find our local IP
+    std::net::UdpSocket::bind("0.0.0.0:0").ok()
+        .and_then(|s| {
+            s.connect("8.8.8.8:80").ok()?;
+            s.local_addr().ok()
+        })
+        .map(|addr| addr.ip().to_string())
 }
 
 #[derive(Serialize)]
@@ -1684,34 +1744,92 @@ pub async fn handle_install_shortcut(
 
     #[cfg(target_os = "linux")]
     {
-        // Ensure icon is installed
-        let icon_dir = format!("{}/.local/share/icons/hicolor/scalable/apps", home);
-        let _ = std::fs::create_dir_all(&icon_dir);
-        let _ = std::fs::write(format!("{}/syntaur.svg", icon_dir), SHORTCUT_ICON_SVG);
+        // Install icons — SVG for GTK desktops, PNG for KDE/XFCE
+        let icon_base = format!("{}/.local/share/icons/hicolor", home);
+        let svg_dir = format!("{}/scalable/apps", icon_base);
+        let _ = std::fs::create_dir_all(&svg_dir);
+        let _ = std::fs::write(format!("{}/syntaur.svg", svg_dir), SHORTCUT_ICON_SVG);
 
-        // Update icon cache
-        let _ = std::process::Command::new("gtk-update-icon-cache")
-            .args(["-f", "-t", &format!("{}/.local/share/icons/hicolor", home)])
+        // Generate PNG icons via Python (works everywhere, no extra deps)
+        let _ = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(format!(r#"
+import struct, zlib, os
+def create_png(size, path):
+    raw = b''
+    for y in range(size):
+        raw += b'\x00'
+        for x in range(size):
+            t = y / size
+            r = int(14 + t * (3 - 14))
+            g = int(165 + t * (105 - 165))
+            b = int(233 + t * (161 - 233))
+            cx, cy = abs(x - size//2), abs(y - size//2)
+            corner = size//2 - size//8
+            if cx > corner and cy > corner:
+                if ((cx - corner)**2 + (cy - corner)**2)**0.5 > size//8:
+                    raw += bytes([0, 0, 0, 0]); continue
+            raw += bytes([r, g, b, 255])
+    def chunk(ct, d):
+        c = ct + d
+        return struct.pack('>I', len(d)) + c + struct.pack('>I', zlib.crc32(c) & 0xffffffff)
+    hdr = struct.pack('>IIBBBBB', size, size, 8, 6, 0, 0, 0)
+    png = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', hdr) + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b'')
+    with open(path, 'wb') as f: f.write(png)
+for s in [48, 64, 128, 256]:
+    d = os.path.expanduser('~/.local/share/icons/hicolor/{{}}x{{}}/apps'.format(s, s))
+    os.makedirs(d, exist_ok=True)
+    create_png(s, d + '/syntaur.png')
+"#))
             .output();
+
+        // Update icon caches (GTK and KDE)
+        let _ = std::process::Command::new("gtk-update-icon-cache")
+            .args(["-f", "-t", &icon_base])
+            .output();
+        let _ = std::process::Command::new("kbuildsycoca5").output();
+
+        // Detect viewer binary location
+        let exec_line = std::env::current_exe().ok()
+            .and_then(|p| p.parent().map(|d| d.join("syntaur-viewer")))
+            .filter(|p| p.exists())
+            .map(|p| p.to_string_lossy().to_string())
+            .or_else(|| {
+                let candidates = [
+                    format!("{}/.local/bin/syntaur-viewer", home),
+                    "/tmp/syntaur-viewer".to_string(),
+                ];
+                candidates.into_iter().find(|p| std::path::Path::new(p).exists())
+            })
+            .unwrap_or_else(|| format!("xdg-open {}", dashboard_url));
+
+        let desktop_content = format!(
+            "[Desktop Entry]\nName=Syntaur\nComment=Your personal AI platform\nExec={}\nIcon=syntaur\nType=Application\nCategories=Utility;Development;\nStartupNotify=false\n",
+            exec_line
+        );
 
         if req.target == "desktop" {
             let desktop_dir = std::env::var("XDG_DESKTOP_DIR")
                 .unwrap_or_else(|_| format!("{}/Desktop", home));
             let _ = std::fs::create_dir_all(&desktop_dir);
             let path = format!("{}/syntaur.desktop", desktop_dir);
-            let content = format!(
-                "[Desktop Entry]\nName=Syntaur\nComment=Your personal AI platform\nExec=xdg-open {}\nIcon=syntaur\nType=Application\nCategories=Utility;Development;\nStartupNotify=false\n",
-                dashboard_url
-            );
-            return match std::fs::write(&path, &content) {
+
+            return match std::fs::write(&path, &desktop_content) {
                 Ok(_) => {
-                    // Mark as trusted (GNOME requires this for desktop files)
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+
+                    // GNOME trust
                     let _ = std::process::Command::new("gio")
                         .args(["set", &path, "metadata::trusted", "true"])
                         .output();
-                    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from(
-                        std::os::unix::fs::PermissionsExt::from_mode(0o755)
-                    ));
+
+                    // KDE Plasma trust — kioclient5 marks the file as trusted
+                    let _ = std::process::Command::new("kioclient5")
+                        .args(["exec", &path])
+                        .env("QT_QPA_PLATFORM", "offscreen")
+                        .output();
+
                     axum::Json(InstallShortcutResponse {
                         success: true,
                         message: "Desktop shortcut created — look for 'Syntaur' on your desktop.".into(),
@@ -1726,11 +1844,8 @@ pub async fn handle_install_shortcut(
             let app_dir = format!("{}/.local/share/applications", home);
             let _ = std::fs::create_dir_all(&app_dir);
             let path = format!("{}/syntaur.desktop", app_dir);
-            let content = format!(
-                "[Desktop Entry]\nName=Syntaur\nComment=Your personal AI platform\nExec=xdg-open {}\nIcon=syntaur\nType=Application\nCategories=Utility;Development;\nStartupNotify=false\n",
-                dashboard_url
-            );
-            return match std::fs::write(&path, content) {
+
+            return match std::fs::write(&path, &desktop_content) {
                 Ok(_) => axum::Json(InstallShortcutResponse {
                     success: true,
                     message: "App launcher shortcut installed — find 'Syntaur' in your application menu.".into(),

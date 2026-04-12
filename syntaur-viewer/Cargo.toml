@@ -8,6 +8,14 @@ description = "Lightweight dashboard viewer for Syntaur — native OS webview, n
 name = "syntaur-viewer"
 path = "src/main.rs"
 
-[dependencies]
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk4 = "0.9"
+webkit6 = "0.4"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+tao = "0.30"
+wry = "0.47"
+
+[target.'cfg(target_os = "macos")'.dependencies]
 tao = "0.30"
 wry = "0.47"

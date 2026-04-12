@@ -1,96 +1,131 @@
-//! Syntaur Dashboard Viewer — lightweight native webview window.
+//! Syntaur Dashboard Viewer — native webview, no browser needed.
 //!
-//! Opens the Syntaur dashboard in a minimal OS-native window using the
-//! platform's built-in web engine (WebKit on Linux, WKWebView on macOS,
-//! WebView2/Edge on Windows). No full browser needed.
-//!
-//! Uses ~20-30 MB RAM with zero GPU usage — ideal when the GPU and RAM
-//! are needed for LLM inference.
-
-use tao::{
-    dpi::LogicalSize,
-    event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
-    window::{Icon, WindowBuilder},
-};
-use wry::WebViewBuilder;
+//! Linux: GTK4 + WebKitGTK 6.0 — native Wayland & X11, fractional scaling.
+//! macOS: WKWebView via wry+tao.
+//! Windows: WebView2 via wry+tao.
 
 const DEFAULT_URL: &str = "http://localhost:18789";
 const WINDOW_TITLE: &str = "Syntaur";
-const DEFAULT_WIDTH: f64 = 1200.0;
-const DEFAULT_HEIGHT: f64 = 800.0;
 
 fn main() {
-    // Allow overriding the URL via CLI arg or env var
+    // URL priority: CLI arg > env var > saved server config > default localhost
     let url = std::env::args()
         .nth(1)
         .or_else(|| std::env::var("SYNTAUR_URL").ok())
+        .or_else(|| read_saved_url())
         .unwrap_or_else(|| DEFAULT_URL.to_string());
 
-    // Disable GPU compositing on Linux (WebKit)
-    #[cfg(target_os = "linux")]
-    {
-        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+    if let Err(e) = run_viewer(&url) {
+        eprintln!("[syntaur-viewer] Failed: {}", e);
+        std::process::exit(1);
     }
+}
+
+/// Read saved server URL from ~/.syntaur/server.json (connect mode)
+fn read_saved_url() -> Option<String> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()?;
+    let data = std::fs::read_to_string(format!("{}/.syntaur/server.json", home)).ok()?;
+    // Parse {"url": "http://..."}
+    let start = data.find("\"url\"")?.checked_add(5)?;
+    let rest = &data[start..];
+    let q1 = rest.find('"')? + 1;
+    let q2 = rest[q1..].find('"')? + q1;
+    Some(rest[q1..q2].to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn run_viewer(url: &str) -> Result<(), String> {
+    use gtk4::prelude::*;
+    use gtk4::{Application, ApplicationWindow};
+    use webkit6::prelude::*;
+    use webkit6::WebView;
+
+    let app = Application::builder()
+        .application_id("dev.syntaur.viewer")
+        .build();
+
+    let url_owned = url.to_string();
+
+    app.connect_activate(move |app| {
+        let window = ApplicationWindow::builder()
+            .application(app)
+            .title(WINDOW_TITLE)
+            .default_width(1200)
+            .default_height(800)
+            .build();
+
+        let webview = WebView::new();
+        webview.set_vexpand(true);
+        webview.set_hexpand(true);
+        webview.load_uri(&url_owned);
+
+        window.set_child(Some(&webview));
+        window.present();
+    });
+
+    app.run_with_args::<&str>(&[]);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn run_viewer(url: &str) -> Result<(), String> {
+    use tao::{
+        dpi::LogicalSize,
+        event::{Event, WindowEvent},
+        event_loop::{ControlFlow, EventLoop},
+        window::WindowBuilder,
+    };
+    use wry::WebViewBuilder;
 
     let event_loop = EventLoop::new();
-
     let window = WindowBuilder::new()
         .with_title(WINDOW_TITLE)
-        .with_inner_size(LogicalSize::new(DEFAULT_WIDTH, DEFAULT_HEIGHT))
-        .with_window_icon(load_icon())
+        .with_inner_size(LogicalSize::new(1200.0, 800.0))
         .build(&event_loop)
-        .expect("Failed to create window");
+        .map_err(|e| format!("window: {}", e))?;
 
-    let builder = WebViewBuilder::new()
-        .with_url(&url)
-        .with_devtools(cfg!(debug_assertions));
-
-    // Disable GPU on Windows (WebView2/Chromium flags)
-    #[cfg(target_os = "windows")]
-    let builder = builder
-        .with_additional_browser_args("--disable-gpu --disable-software-rasterizer");
-
-    let _webview = builder
+    let _webview = WebViewBuilder::new()
+        .with_url(url)
         .build(&window)
-        .expect("Failed to create webview");
+        .map_err(|e| format!("webview: {}", e))?;
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
-
-        if let Event::WindowEvent {
-            event: WindowEvent::CloseRequested,
-            ..
-        } = event
-        {
+        if let Event::WindowEvent { event: WindowEvent::CloseRequested, .. } = event {
             *control_flow = ControlFlow::Exit;
         }
     });
 }
 
-/// Try to load a window icon from the embedded PNG data.
-/// Returns None on failure (window just won't have an icon — not fatal).
-fn load_icon() -> Option<Icon> {
-    // Embedded 32x32 RGBA icon (Syntaur centaur silhouette on dark bg).
-    // Generated from the SVG at build time would be ideal, but for now
-    // we use a simple solid-color placeholder that works everywhere.
-    let size = 32u32;
-    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
-    for y in 0..size {
-        for x in 0..size {
-            // Simple rounded rectangle with gradient-ish fill
-            let in_rect = x >= 2 && x < 30 && y >= 2 && y < 30;
-            if in_rect {
-                // Sky blue gradient (#0ea5e9 -> #0369a1)
-                let t = y as f32 / size as f32;
-                let r = (14.0 + t * (3.0 - 14.0)) as u8;
-                let g = (165.0 + t * (105.0 - 165.0)) as u8;
-                let b = (233.0 + t * (161.0 - 233.0)) as u8;
-                rgba.extend_from_slice(&[r, g, b, 255]);
-            } else {
-                rgba.extend_from_slice(&[0, 0, 0, 0]);
-            }
+#[cfg(target_os = "windows")]
+fn run_viewer(url: &str) -> Result<(), String> {
+    use tao::{
+        dpi::LogicalSize,
+        event::{Event, WindowEvent},
+        event_loop::{ControlFlow, EventLoop},
+        window::WindowBuilder,
+    };
+    use wry::WebViewBuilder;
+
+    let event_loop = EventLoop::new();
+    let window = WindowBuilder::new()
+        .with_title(WINDOW_TITLE)
+        .with_inner_size(LogicalSize::new(1200.0, 800.0))
+        .build(&event_loop)
+        .map_err(|e| format!("window: {}", e))?;
+
+    let _webview = WebViewBuilder::new()
+        .with_url(url)
+        .with_additional_browser_args("--disable-gpu --disable-software-rasterizer")
+        .build(&window)
+        .map_err(|e| format!("webview: {}", e))?;
+
+    event_loop.run(move |event, _, control_flow| {
+        *control_flow = ControlFlow::Wait;
+        if let Event::WindowEvent { event: WindowEvent::CloseRequested, .. } = event {
+            *control_flow = ControlFlow::Exit;
         }
-    }
-    Icon::from_rgba(rgba, size, size).ok()
+    });
 }

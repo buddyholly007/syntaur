@@ -1,5 +1,8 @@
 # Syntaur installer for Windows — https://syntaur.dev
-# Usage: irm https://get.syntaur.dev/install.ps1 | iex
+# Usage:
+#   irm https://get.syntaur.dev/install.ps1 | iex               # interactive
+#   irm https://get.syntaur.dev/install.ps1 | iex -Args --server # server mode
+#   irm https://get.syntaur.dev/install.ps1 | iex -Args --connect # viewer only
 #Requires -Version 5.1
 $ErrorActionPreference = "Stop"
 
@@ -13,6 +16,26 @@ Write-Host ""
 Write-Host "  $([char]0x265E) $Brand v$Version"
 Write-Host "  Your personal AI platform"
 Write-Host ""
+
+# Parse mode
+$Mode = ""
+if ($args -contains "--server") { $Mode = "server" }
+if ($args -contains "--connect") { $Mode = "connect" }
+
+if (-not $Mode) {
+    Write-Host "  How would you like to use Syntaur?"
+    Write-Host ""
+    Write-Host "  1) Run the server on this computer"
+    Write-Host "     Your AI runs here. Access from phone, laptop, any device."
+    Write-Host "     (This computer needs to stay on.)"
+    Write-Host ""
+    Write-Host "  2) Connect to my Syntaur server"
+    Write-Host "     Syntaur is already running elsewhere. Just install the viewer."
+    Write-Host ""
+    $Choice = Read-Host "  Choose [1/2]"
+    $Mode = if ($Choice -eq "2") { "connect" } else { "server" }
+    Write-Host ""
+}
 
 # Detect architecture
 $Arch = if ([Environment]::Is64BitOperatingSystem) { "x86_64" } else {
@@ -28,21 +51,23 @@ if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 }
 
-# Download binary
-$DownloadUrl = "https://github.com/buddyholly007/syntaur/releases/download/v$Version/syntaur-windows-$Arch.exe"
 $BinaryPath = Join-Path $InstallDir $Binary
 
-Write-Host "  Downloading $Brand..."
-try {
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    Invoke-WebRequest -Uri $DownloadUrl -OutFile $BinaryPath -UseBasicParsing
-} catch {
-    Write-Host ""
-    Write-Host "  Note: Download server not yet available." -ForegroundColor Yellow
-    Write-Host "  For now, copy the binary manually to $BinaryPath"
-    Write-Host "  Then run: $Binary"
-    Write-Host ""
-    exit 0
+# Download gateway binary (server mode only)
+if ($Mode -eq "server") {
+    $DownloadUrl = "https://github.com/buddyholly007/syntaur/releases/download/v$Version/syntaur-windows-$Arch.exe"
+    Write-Host "  Downloading $Brand server..."
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $DownloadUrl -OutFile $BinaryPath -UseBasicParsing
+    } catch {
+        Write-Host ""
+        Write-Host "  Note: Download server not yet available." -ForegroundColor Yellow
+        Write-Host "  For now, copy the binary manually to $BinaryPath"
+        Write-Host "  Then run: $Binary"
+        Write-Host ""
+        exit 0
+    }
 }
 
 # Download viewer (lightweight dashboard window — no full browser needed)
@@ -102,7 +127,8 @@ $Shortcut.Save()
 
 Write-Host "  Desktop shortcut installed"
 
-# --- Auto-start via Startup folder ---
+# --- Auto-start via Startup folder (server mode only) ---
+if ($Mode -eq "server") {
 $StartupDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup"
 $StartupShortcut = Join-Path $StartupDir "Syntaur Service.lnk"
 
@@ -114,16 +140,28 @@ $Shortcut.Description = "Syntaur AI Platform - background service"
 $Shortcut.Save()
 
 Write-Host "  Auto-start configured (runs at login)"
+} # end server-only auto-start
 
 # Clean up COM object
 [System.Runtime.Interopservices.Marshal]::ReleaseComObject($WshShell) | Out-Null
 
 Write-Host ""
-Write-Host "  $([char]0x2713) $Brand installed to $BinaryPath" -ForegroundColor Green
-Write-Host ""
-Write-Host "  To start now:"
-Write-Host "    Start-Process '$BinaryPath'"
-Write-Host ""
-Write-Host "  Then open Syntaur from the Start Menu or Desktop shortcut, or go to:"
-Write-Host "    $DashboardUrl"
+if ($Mode -eq "server") {
+    Write-Host "  $([char]0x2713) $Brand server installed" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  To start now:"
+    Write-Host "    Start-Process '$BinaryPath'"
+    Write-Host ""
+    Write-Host "  Open Syntaur from the Start Menu or Desktop shortcut, or go to:"
+    Write-Host "    $DashboardUrl"
+    Write-Host ""
+    Write-Host "  To access from your phone or other computers:"
+    Write-Host "    1. Install Tailscale on this computer and your other devices"
+    Write-Host "    2. Open the Tailscale URL shown in the Syntaur dashboard"
+} else {
+    Write-Host "  $([char]0x2713) $Brand viewer installed" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  Open Syntaur from the Start Menu to connect to your server."
+    Write-Host "  The setup wizard will ask for your server address."
+}
 Write-Host ""

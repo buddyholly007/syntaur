@@ -1,17 +1,49 @@
 #!/bin/sh
 # Syntaur installer — https://syntaur.dev
-# Usage: curl -sSL https://get.syntaur.dev | sh
+# Usage:
+#   curl -sSL https://get.syntaur.dev | sh              # interactive
+#   curl -sSL https://get.syntaur.dev | sh -s -- --server   # server mode
+#   curl -sSL https://get.syntaur.dev | sh -s -- --connect  # viewer only
 set -e
 
 BRAND="Syntaur"
 VERSION="0.1.0"
 BINARY="syntaur"
 INSTALL_DIR="$HOME/.local/bin"
+MODE=""
+
+# Parse flags
+for arg in "$@"; do
+  case "$arg" in
+    --server)  MODE="server" ;;
+    --connect) MODE="connect" ;;
+  esac
+done
 
 echo ""
 echo "  ♞ $BRAND v$VERSION"
 echo "  Your personal AI platform"
 echo ""
+
+# If no mode specified, ask
+if [ -z "$MODE" ]; then
+  echo "  How would you like to use Syntaur?"
+  echo ""
+  echo "  1) Run the server on this computer"
+  echo "     Your AI runs here. Access from phone, laptop, any device."
+  echo "     (This computer needs to stay on.)"
+  echo ""
+  echo "  2) Connect to my Syntaur server"
+  echo "     Syntaur is already running elsewhere. Just install the viewer."
+  echo ""
+  printf "  Choose [1/2]: "
+  read -r CHOICE
+  case "$CHOICE" in
+    2) MODE="connect" ;;
+    *) MODE="server" ;;
+  esac
+  echo ""
+fi
 
 # Detect OS and architecture
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -35,30 +67,32 @@ echo ""
 # Create install directory
 mkdir -p "$INSTALL_DIR"
 
-# Download binary
-DOWNLOAD_URL="https://github.com/buddyholly007/syntaur/releases/download/v${VERSION}/syntaur-${PLATFORM}-${ARCH}"
-echo "  Downloading $BRAND..."
+# Download gateway binary (server mode only)
+if [ "$MODE" = "server" ]; then
+  DOWNLOAD_URL="https://github.com/buddyholly007/syntaur/releases/download/v${VERSION}/syntaur-${PLATFORM}-${ARCH}"
+  echo "  Downloading $BRAND server..."
 
-if command -v curl >/dev/null 2>&1; then
-  curl -fsSL "$DOWNLOAD_URL" -o "$INSTALL_DIR/$BINARY" 2>/dev/null || {
-    echo ""
-    echo "  Note: Download server not yet available."
-    echo "  For now, copy the binary manually to $INSTALL_DIR/$BINARY"
-    echo "  Then run: $BINARY"
-    echo ""
-    exit 0
-  }
-elif command -v wget >/dev/null 2>&1; then
-  wget -q "$DOWNLOAD_URL" -O "$INSTALL_DIR/$BINARY" 2>/dev/null || {
-    echo "  Note: Download server not yet available."
-    exit 0
-  }
-else
-  echo "Error: curl or wget required"
-  exit 1
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$DOWNLOAD_URL" -o "$INSTALL_DIR/$BINARY" 2>/dev/null || {
+      echo ""
+      echo "  Note: Download server not yet available."
+      echo "  For now, copy the binary manually to $INSTALL_DIR/$BINARY"
+      echo "  Then run: $BINARY"
+      echo ""
+      exit 0
+    }
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q "$DOWNLOAD_URL" -O "$INSTALL_DIR/$BINARY" 2>/dev/null || {
+      echo "  Note: Download server not yet available."
+      exit 0
+    }
+  else
+    echo "Error: curl or wget required"
+    exit 1
+  fi
+
+  chmod +x "$INSTALL_DIR/$BINARY"
 fi
-
-chmod +x "$INSTALL_DIR/$BINARY"
 
 # Download viewer (lightweight dashboard window — no full browser needed)
 VIEWER_BINARY="syntaur-viewer"
@@ -88,8 +122,8 @@ case ":$PATH:" in
     ;;
 esac
 
-# Install systemd service (Linux only)
-if [ "$PLATFORM" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
+# Install systemd service (server mode, Linux only)
+if [ "$MODE" = "server" ] && [ "$PLATFORM" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
   UNIT_DIR="$HOME/.config/systemd/user"
   mkdir -p "$UNIT_DIR"
 
@@ -112,8 +146,8 @@ UNIT
   echo "  Systemd service installed (syntaur.service)"
 fi
 
-# macOS launchd plist
-if [ "$PLATFORM" = "macos" ]; then
+# macOS launchd plist (server mode only)
+if [ "$MODE" = "server" ] && [ "$PLATFORM" = "macos" ]; then
   PLIST_DIR="$HOME/Library/LaunchAgents"
   mkdir -p "$PLIST_DIR"
 
@@ -138,7 +172,7 @@ fi
 DASHBOARD_URL="http://localhost:18789"
 
 if [ "$PLATFORM" = "linux" ]; then
-  # Install icon
+  # Install SVG icon
   ICON_DIR="$HOME/.local/share/icons/hicolor/scalable/apps"
   mkdir -p "$ICON_DIR"
   cat > "$ICON_DIR/syntaur.svg" << 'ICON'
@@ -158,16 +192,48 @@ if [ "$PLATFORM" = "linux" ]; then
 </svg>
 ICON
 
-  # Install .desktop file (shows in app launcher / start menu)
-  APP_DIR="$HOME/.local/share/applications"
-  mkdir -p "$APP_DIR"
-  # Use syntaur-viewer if available, fall back to xdg-open
+  # Generate PNG icons for KDE/XFCE (SVG alone is not enough)
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c "
+import struct, zlib, os
+def create_png(size, path):
+    raw = b''
+    for y in range(size):
+        raw += b'\x00'
+        for x in range(size):
+            t = y / size
+            r = int(14 + t * (3 - 14))
+            g = int(165 + t * (105 - 165))
+            b = int(233 + t * (161 - 233))
+            cx, cy = abs(x - size//2), abs(y - size//2)
+            corner = size//2 - size//8
+            if cx > corner and cy > corner:
+                if ((cx - corner)**2 + (cy - corner)**2)**0.5 > size//8:
+                    raw += bytes([0, 0, 0, 0]); continue
+            raw += bytes([r, g, b, 255])
+    def chunk(ct, d):
+        c = ct + d
+        return struct.pack('>I', len(d)) + c + struct.pack('>I', zlib.crc32(c) & 0xffffffff)
+    hdr = struct.pack('>IIBBBBB', size, size, 8, 6, 0, 0, 0)
+    png = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', hdr) + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b'')
+    with open(path, 'wb') as f: f.write(png)
+for s in [48, 64, 128, 256]:
+    d = os.path.expanduser('~/.local/share/icons/hicolor/%dx%d/apps' % (s, s))
+    os.makedirs(d, exist_ok=True)
+    create_png(s, d + '/syntaur.png')
+" 2>/dev/null && echo "  PNG icons generated"
+  fi
+
+  # Determine exec command: prefer syntaur-viewer, fall back to xdg-open
   if [ -x "$INSTALL_DIR/syntaur-viewer" ]; then
     SHORTCUT_EXEC="$INSTALL_DIR/syntaur-viewer"
   else
     SHORTCUT_EXEC="xdg-open $DASHBOARD_URL"
   fi
 
+  # Install .desktop file in app launcher
+  APP_DIR="$HOME/.local/share/applications"
+  mkdir -p "$APP_DIR"
   cat > "$APP_DIR/syntaur.desktop" << DESKTOP
 [Desktop Entry]
 Name=Syntaur
@@ -179,17 +245,26 @@ Categories=Utility;Development;
 StartupNotify=false
 DESKTOP
 
-  # Validate the desktop file if desktop-file-validate is available
-  if command -v desktop-file-validate >/dev/null 2>&1; then
-    desktop-file-validate "$APP_DIR/syntaur.desktop" 2>/dev/null || true
+  # Install .desktop file on desktop
+  DESKTOP_DIR="${XDG_DESKTOP_DIR:-$HOME/Desktop}"
+  if [ -d "$DESKTOP_DIR" ]; then
+    cp "$APP_DIR/syntaur.desktop" "$DESKTOP_DIR/syntaur.desktop"
+    chmod +x "$DESKTOP_DIR/syntaur.desktop"
+
+    # GNOME trust
+    gio set "$DESKTOP_DIR/syntaur.desktop" metadata::trusted true 2>/dev/null
+
+    # KDE Plasma trust
+    if command -v kwriteconfig5 >/dev/null 2>&1; then
+      kwriteconfig5 --file "$DESKTOP_DIR/syntaur.desktop" --group "Desktop Entry" --key "X-KDE-RunOnDisconnect" "false" 2>/dev/null
+    fi
   fi
 
-  # Update icon cache if possible
-  if command -v gtk-update-icon-cache >/dev/null 2>&1; then
-    gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
-  fi
+  # Update icon caches
+  gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
+  kbuildsycoca5 2>/dev/null || true
 
-  echo "  Application shortcut installed (find 'Syntaur' in your app launcher)"
+  echo "  Application shortcut installed (find 'Syntaur' in your app launcher and on your desktop)"
 fi
 
 if [ "$PLATFORM" = "macos" ]; then
@@ -248,17 +323,27 @@ ICON
 fi
 
 echo ""
-echo "  ✓ $BRAND installed to $INSTALL_DIR/$BINARY"
-echo ""
-echo "  To start:"
-if [ "$PLATFORM" = "linux" ]; then
-  echo "    systemctl --user start syntaur"
+if [ "$MODE" = "server" ]; then
+  echo "  ✓ $BRAND server installed"
   echo ""
-  echo "  Then open Syntaur from your app launcher, or go to:"
+  echo "  To start:"
+  if [ "$PLATFORM" = "linux" ]; then
+    echo "    systemctl --user start syntaur"
+  else
+    echo "    $BINARY"
+  fi
+  echo ""
+  echo "  Open Syntaur from your app launcher or go to:"
+  echo "    $DASHBOARD_URL"
+  echo ""
+  echo "  To access from your phone or other computers:"
+  echo "    1. Install Tailscale on this computer and your other devices"
+  echo "    2. Open the Tailscale URL shown in the Syntaur dashboard"
+  echo "    3. Or use the local network address shown after setup"
 else
-  echo "    $BINARY"
+  echo "  ✓ $BRAND viewer installed"
   echo ""
-  echo "  Then open Syntaur from ~/Applications or Spotlight, or go to:"
+  echo "  Open Syntaur from your app launcher to connect to your server."
+  echo "  The setup wizard will ask for your server address."
 fi
-echo "    $DASHBOARD_URL"
 echo ""
