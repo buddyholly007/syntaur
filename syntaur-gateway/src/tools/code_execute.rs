@@ -229,12 +229,26 @@ impl Tool for CodeExecuteTool {
         // would inherit an exhausted limit and bwrap.fork() would EAGAIN.
         // PID isolation is handled by bwrap's PID namespace; runaway forks
         // are bounded by the wall-clock timeout + RLIMIT_AS memory cap.
+        #[cfg(unix)]
         unsafe {
             use std::os::unix::process::CommandExt;
             bwrap.pre_exec(|| {
-                set_rlimit(libc::RLIMIT_AS, MEM_LIMIT_BYTES as u64)?;
-                set_rlimit(libc::RLIMIT_FSIZE, FSIZE_LIMIT_BYTES as u64)?;
-                set_rlimit(libc::RLIMIT_CORE, 0)?;
+                // Macro avoids type mismatch: Linux uses __rlimit_resource_t (u32),
+                // macOS uses c_int (i32) — macro passes constants directly.
+                macro_rules! set_rlimit {
+                    ($res:expr, $val:expr) => {{
+                        let lim = libc::rlimit {
+                            rlim_cur: $val as libc::rlim_t,
+                            rlim_max: $val as libc::rlim_t,
+                        };
+                        if libc::setrlimit($res, &lim) != 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                    }};
+                }
+                set_rlimit!(libc::RLIMIT_AS, MEM_LIMIT_BYTES as u64);
+                set_rlimit!(libc::RLIMIT_FSIZE, FSIZE_LIMIT_BYTES as u64);
+                set_rlimit!(libc::RLIMIT_CORE, 0u64);
                 Ok(())
             });
         }
@@ -302,13 +316,9 @@ impl Tool for CodeExecuteTool {
                 None
             }
             Err(_) => {
-                // Timed out — kill the child
-                if let Some(id) = child.id() {
-                    unsafe {
-                        libc::kill(id as i32, libc::SIGKILL);
-                    }
-                }
-                let _ = child.wait().await;
+                // Timed out — kill the child (cross-platform: SIGKILL on Unix,
+                // TerminateProcess on Windows)
+                let _ = child.kill().await;
                 None
             }
         };
@@ -423,20 +433,7 @@ impl Drop for ScopedDir {
     }
 }
 
-/// Set a single rlimit. Used inside the pre_exec hook so it applies to the
-/// child process before exec(2).
-fn set_rlimit(resource: u32, value: u64) -> std::io::Result<()> {
-    let lim = libc::rlimit {
-        rlim_cur: value as libc::rlim_t,
-        rlim_max: value as libc::rlim_t,
-    };
-    let rc = unsafe { libc::setrlimit(resource as libc::__rlimit_resource_t, &lim) };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
+
 
 /// Quick filename → MIME guess. Used for artifact metadata only.
 fn guess_mime(filename: &str) -> String {

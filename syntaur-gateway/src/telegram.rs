@@ -1,6 +1,4 @@
 use crate::config::TelegramAccount;
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
 use crate::llm::{ChatMessage, LlmChain};
 use log::{debug, error, info, warn};
 use reqwest::Client;
@@ -129,11 +127,14 @@ fn log_message(account_id: &str, agent_id: &str, user_id: i64, user_text: &str, 
         "assistant": response,
     });
 
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(&log_path)
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    if let Ok(mut file) = opts.open(&log_path)
     {
         use std::io::Write;
         let _ = writeln!(file, "{}", entry);
