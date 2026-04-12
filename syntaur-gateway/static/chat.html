@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#0284c7">
-<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" type="image/x-icon"><link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32"><link rel="apple-touch-icon" href="/icon-192.png">
 <link rel="manifest" href="/manifest.json">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -27,7 +27,7 @@
   <div class="max-w-4xl mx-auto px-3 sm:px-4 py-2 sm:py-2.5 flex items-center justify-between">
     <div class="flex items-center gap-2 sm:gap-3 min-w-0">
       <a href="/" class="flex items-center gap-2 hover:opacity-80 flex-shrink-0">
-        <img src="/icon.svg" class="w-5 h-5" alt="">
+        <img src="/app-icon.jpg" class="h-8 w-8 rounded-lg" alt="">
         <span class="font-semibold hidden sm:inline">Syntaur</span>
       </a>
       <div class="relative" id="agent-switcher">
@@ -53,7 +53,7 @@
 
     <!-- Welcome message -->
     <div class="flex gap-4" id="welcome-msg">
-      <div class="w-8 h-8 rounded-lg bg-oc-600 flex items-center justify-center text-sm font-bold flex-shrink-0">&#9813;</div>
+      <img src="/agent-avatar/main" class="w-8 h-8 rounded-lg flex-shrink-0" alt="">
       <div class="flex-1">
         <p class="text-gray-300 leading-relaxed" id="greeting">Hey! I'm your AI assistant. How can I help you today?</p>
         <div class="flex flex-wrap gap-2 mt-4">
@@ -236,7 +236,7 @@ async function loadConversationMessages(convId) {
       } else if (msg.role === 'assistant' && msg.content) {
         const el = document.createElement('div');
         el.className = 'flex gap-4';
-        el.innerHTML = `<div class="w-8 h-8 rounded-lg bg-oc-600 flex items-center justify-center text-sm font-bold flex-shrink-0">&#9813;</div>
+        el.innerHTML = `<img src="/agent-avatar/main" class="w-8 h-8 rounded-lg flex-shrink-0" alt="">
           <div class="flex-1 min-w-0">
             <div class="text-gray-300 leading-relaxed text-sm chat-md">${md(msg.content)}</div>
           </div>`;
@@ -249,7 +249,7 @@ async function loadConversationMessages(convId) {
       const thinkEl = document.createElement('div');
       thinkEl.className = 'flex gap-4';
       thinkEl.id = 'pending-response';
-      thinkEl.innerHTML = `<div class="w-8 h-8 rounded-lg bg-oc-600 flex items-center justify-center text-sm font-bold flex-shrink-0">&#9813;</div>
+      thinkEl.innerHTML = `<img src="/agent-avatar/main" class="w-8 h-8 rounded-lg flex-shrink-0" alt="">
         <div class="flex-1 min-w-0">
           <div class="flex items-center gap-2 text-gray-500 text-sm py-2">
             <span class="flex gap-1">
@@ -288,7 +288,7 @@ async function pollForResponse(convId, lastCount) {
           if (msg.role === 'assistant' && msg.content) {
             const el = document.createElement('div');
             el.className = 'flex gap-4';
-            el.innerHTML = `<div class="w-8 h-8 rounded-lg bg-oc-600 flex items-center justify-center text-sm font-bold flex-shrink-0">&#9813;</div>
+            el.innerHTML = `<img src="/agent-avatar/main" class="w-8 h-8 rounded-lg flex-shrink-0" alt="">
               <div class="flex-1 min-w-0">
                 <div class="text-gray-300 leading-relaxed text-sm chat-md">${md(msg.content)}</div>
               </div>`;
@@ -310,7 +310,7 @@ function clearMessagesUI() {
   const container = document.getElementById('messages');
   container.innerHTML = `
     <div class="flex gap-4" id="welcome-msg">
-      <div class="w-8 h-8 rounded-lg bg-oc-600 flex items-center justify-center text-sm font-bold flex-shrink-0">&#9813;</div>
+      <img src="/agent-avatar/main" class="w-8 h-8 rounded-lg flex-shrink-0" alt="">
       <div class="flex-1">
         <p class="text-gray-300 leading-relaxed" id="greeting">Hey! I'm ${esc(currentAgent)}. How can I help you today?</p>
         <div class="flex flex-wrap gap-2 mt-4">
@@ -385,7 +385,7 @@ async function send(msg) {
   const aiEl = document.createElement('div');
   aiEl.className = 'flex gap-4';
   aiEl.innerHTML = `
-    <div class="w-8 h-8 rounded-lg bg-oc-600 flex items-center justify-center text-sm font-bold flex-shrink-0">&#9813;</div>
+    <img src="/agent-avatar/main" class="w-8 h-8 rounded-lg flex-shrink-0" alt="">
     <div class="flex-1 min-w-0" id="ai-response">
       <div class="flex items-center gap-2 text-gray-500 text-sm py-2">
         <span class="flex gap-1">

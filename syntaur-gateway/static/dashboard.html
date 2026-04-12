@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#0284c7">
-<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" type="image/x-icon"><link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32"><link rel="apple-touch-icon" href="/icon-192.png">
 <link rel="manifest" href="/manifest.json">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -38,7 +38,7 @@
 <div id="login-overlay" class="fixed inset-0 z-50 bg-gray-950 flex items-center justify-center">
   <div class="w-full max-w-sm px-4">
     <div class="text-center mb-8">
-      <span class="text-4xl">&#9813;</span>
+      <img src="/app-icon.jpg" class="w-16 h-16 rounded-2xl mx-auto" alt="Syntaur">
       <h1 class="text-2xl font-bold mt-2">Syntaur</h1>
       <p class="text-gray-400 text-sm mt-1">Sign in to your dashboard</p>
     </div>
@@ -59,7 +59,7 @@
 <div class="border-b border-gray-800 bg-gray-900/50 backdrop-blur sticky top-0 z-40">
   <div class="px-4 py-2.5 flex items-center justify-between">
     <div class="flex items-center gap-3">
-      <img src="/icon.svg" class="w-5 h-5" alt="">
+      <img src="/app-icon.jpg" class="h-8 w-8 rounded-lg" alt="">
       <span class="font-semibold">Syntaur</span>
       <span class="badge badge-green text-xs" id="status-badge">
         <span class="w-1.5 h-1.5 rounded-full bg-green-400 mr-1"></span>Online
@@ -82,7 +82,7 @@
     <!-- Chat header -->
     <div class="flex items-center justify-between px-4 py-2.5 border-b border-gray-800">
       <div class="flex items-center gap-2">
-        <div class="w-7 h-7 rounded-lg bg-oc-600 flex items-center justify-center text-xs font-bold">&#9813;</div>
+        <img src="/agent-avatar/main" class="w-7 h-7 rounded-lg" alt="">
         <div class="relative" id="dash-agent-switcher">
           <button onclick="toggleDashAgentMenu()" class="flex items-center gap-1 font-medium text-sm text-gray-300 hover:text-white transition-colors">
             <span id="chat-agent-name">Chat</span>
@@ -103,7 +103,7 @@
     <!-- Chat Messages -->
     <div class="flex-1 overflow-y-auto p-4 space-y-4" id="chat-messages">
       <div class="flex gap-3">
-        <div class="w-7 h-7 rounded-full bg-oc-600 flex items-center justify-center text-xs font-bold flex-shrink-0 mt-0.5">&#9813;</div>
+        <img src="/agent-avatar/main" class="w-7 h-7 rounded-full flex-shrink-0 mt-0.5" alt="">
         <div class="flex-1 text-sm text-gray-300" id="chat-greeting">
           <p id="welcome-sub">Hey! How can I help you?</p>
           <div class="flex flex-wrap gap-2 mt-3">
@@ -315,7 +315,7 @@ async function loadTelegramMessages() {
             <p class="text-sm text-gray-300">${escapeHtml(text)}</p>
             <p class="text-xs text-gray-600 mt-0.5 text-right">${time} ${date}</p>
           </div>
-          ${!isUser ? '<div class="w-6 h-6 rounded-full bg-oc-600 flex items-center justify-center text-xs flex-shrink-0">&#9813;</div>' : ''}
+          ${!isUser ? '<div class="w-6 h-6 rounded-full bg-oc-600 flex items-center justify-center text-xs flex-shrink-0"></div>' : ''}
         </div>`;
     }).join('');
     container.scrollTop = container.scrollHeight;
@@ -600,7 +600,7 @@ function clearChat() {
   const messages = document.getElementById('chat-messages');
   messages.innerHTML = `
     <div class="flex gap-3">
-      <div class="w-7 h-7 rounded-full bg-oc-600 flex items-center justify-center text-xs font-bold flex-shrink-0 mt-0.5">&#9813;</div>
+      <img src="/agent-avatar/main" class="w-7 h-7 rounded-full flex-shrink-0 mt-0.5" alt="">
       <div class="flex-1 text-sm text-gray-300">
         <p>Chat cleared. How can I help?</p>
       </div>
@@ -636,7 +636,7 @@ async function sendMessage() {
   const aiDiv = document.createElement('div');
   aiDiv.className = 'flex gap-3';
   aiDiv.innerHTML = `
-    <div class="w-7 h-7 rounded-full bg-oc-600 flex items-center justify-center text-xs font-bold flex-shrink-0 mt-0.5">&#9813;</div>
+    <img src="/agent-avatar/main" class="w-7 h-7 rounded-full flex-shrink-0 mt-0.5" alt="">
     <div class="flex-1 text-sm">
       <div class="flex items-center gap-2 text-gray-400">
         <div class="flex gap-1">

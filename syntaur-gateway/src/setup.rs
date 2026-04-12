@@ -358,6 +358,15 @@ pub async fn first_run_redirect(
         || path.starts_with("/api/auth/")
         || path == "/health"
         || path == "/icon.svg"
+        || path == "/favicon.ico"
+        || path == "/favicon-32.png"
+        || path == "/app-icon.jpg"
+        || path == "/logo.jpg"
+        || path == "/avatar.png"
+        || path == "/icon-192.png"
+        || path == "/icon-512.png"
+        || path == "/logo-mark.jpg"
+        || path.starts_with("/agent-avatar/")
         || path == "/manifest.json"
         || path == "/tailwind.js"
         || path == "/fonts.css"
@@ -879,6 +888,125 @@ pub async fn handle_manifest() -> (axum::http::HeaderMap, &'static str) {
     (headers, include_str!("../static/manifest.json"))
 }
 
+
+/// GET /favicon.ico
+pub async fn handle_favicon() -> (axum::http::HeaderMap, &'static [u8]) {
+    let mut h = axum::http::HeaderMap::new();
+    h.insert("content-type", "image/x-icon".parse().unwrap());
+    h.insert("cache-control", "public, max-age=604800".parse().unwrap());
+    (h, include_bytes!("../static/favicon.ico"))
+}
+
+/// GET /favicon-32.png
+pub async fn handle_favicon_png() -> (axum::http::HeaderMap, &'static [u8]) {
+    let mut h = axum::http::HeaderMap::new();
+    h.insert("content-type", "image/png".parse().unwrap());
+    h.insert("cache-control", "public, max-age=604800".parse().unwrap());
+    (h, include_bytes!("../static/favicon-32.png"))
+}
+
+/// GET /app-icon.jpg
+pub async fn handle_app_icon() -> (axum::http::HeaderMap, &'static [u8]) {
+    let mut h = axum::http::HeaderMap::new();
+    h.insert("content-type", "image/jpeg".parse().unwrap());
+    h.insert("cache-control", "public, max-age=604800".parse().unwrap());
+    (h, include_bytes!("../static/app-icon.jpg"))
+}
+
+/// GET /logo.jpg
+pub async fn handle_logo() -> (axum::http::HeaderMap, &'static [u8]) {
+    let mut h = axum::http::HeaderMap::new();
+    h.insert("content-type", "image/jpeg".parse().unwrap());
+    h.insert("cache-control", "public, max-age=604800".parse().unwrap());
+    (h, include_bytes!("../static/logo.jpg"))
+}
+
+/// GET /avatar.png
+pub async fn handle_avatar() -> (axum::http::HeaderMap, &'static [u8]) {
+    let mut h = axum::http::HeaderMap::new();
+    h.insert("content-type", "image/png".parse().unwrap());
+    h.insert("cache-control", "public, max-age=604800".parse().unwrap());
+    (h, include_bytes!("../static/avatar.png"))
+}
+
+/// GET /icon-192.png
+pub async fn handle_icon_192() -> (axum::http::HeaderMap, &'static [u8]) {
+    let mut h = axum::http::HeaderMap::new();
+    h.insert("content-type", "image/png".parse().unwrap());
+    h.insert("cache-control", "public, max-age=604800".parse().unwrap());
+    (h, include_bytes!("../static/icon-192.png"))
+}
+
+/// GET /icon-512.png
+pub async fn handle_icon_512() -> (axum::http::HeaderMap, &'static [u8]) {
+    let mut h = axum::http::HeaderMap::new();
+    h.insert("content-type", "image/png".parse().unwrap());
+    h.insert("cache-control", "public, max-age=604800".parse().unwrap());
+    (h, include_bytes!("../static/icon-512.png"))
+}
+
+/// GET /logo-mark.jpg
+pub async fn handle_logo_mark() -> (axum::http::HeaderMap, &'static [u8]) {
+    let mut h = axum::http::HeaderMap::new();
+    h.insert("content-type", "image/jpeg".parse().unwrap());
+    h.insert("cache-control", "public, max-age=604800".parse().unwrap());
+    (h, include_bytes!("../static/logo-mark.jpg"))
+}
+
+/// GET /agent-avatar/{agent_id} — serve custom agent avatar or default
+pub async fn handle_agent_avatar(
+    axum::extract::Path(agent_id): axum::extract::Path<String>,
+) -> (axum::http::HeaderMap, Vec<u8>) {
+    let mut h = axum::http::HeaderMap::new();
+    h.insert("cache-control", "public, max-age=300".parse().unwrap());
+
+    // Check for custom avatar on disk
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
+    let custom_path = format!("{}/.syntaur/avatars/{}.jpg", home, agent_id);
+    if let Ok(data) = std::fs::read(&custom_path) {
+        h.insert("content-type", "image/jpeg".parse().unwrap());
+        return (h, data);
+    }
+    let custom_png = format!("{}/.syntaur/avatars/{}.png", home, agent_id);
+    if let Ok(data) = std::fs::read(&custom_png) {
+        h.insert("content-type", "image/png".parse().unwrap());
+        return (h, data);
+    }
+
+    // Default: serve the app icon
+    h.insert("content-type", "image/png".parse().unwrap());
+    (h, include_bytes!("../static/avatar.png").to_vec())
+}
+
+/// POST /api/agent-avatar/{agent_id} — upload custom agent avatar
+pub async fn handle_agent_avatar_upload(
+    axum::extract::Path(agent_id): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<axum::Json<serde_json::Value>, (StatusCode, String)> {
+    if body.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "No image data".to_string()));
+    }
+    if body.len() > 5 * 1024 * 1024 {
+        return Err((StatusCode::BAD_REQUEST, "Image too large (max 5MB)".to_string()));
+    }
+
+    let content_type = headers.get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("image/jpeg");
+    let ext = if content_type.contains("png") { "png" } else { "jpg" };
+
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
+    let dir = format!("{}/.syntaur/avatars", home);
+    let _ = std::fs::create_dir_all(&dir);
+    let path = format!("{}/{}.{}", dir, agent_id, ext);
+
+    std::fs::write(&path, &body).map_err(|e|
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Could not save avatar: {}", e))
+    )?;
+
+    Ok(axum::Json(serde_json::json!({ "success": true, "path": path })))
+}
 
 /// GET /tailwind.js — bundled Tailwind CSS (no CDN dependency)
 pub async fn handle_tailwind() -> (axum::http::HeaderMap, &'static str) {

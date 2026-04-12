@@ -1,5 +1,5 @@
 {
-  "name": "Syntaur",
+  "name": "Syntaur Systems",
   "short_name": "Syntaur",
   "description": "Your personal AI platform",
   "start_url": "/",
@@ -8,9 +8,14 @@
   "theme_color": "#0284c7",
   "icons": [
     {
-      "src": "/icon.svg",
-      "sizes": "any",
-      "type": "image/svg+xml"
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
     }
   ]
 }

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#0284c7">
-<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" type="image/x-icon"><link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32"><link rel="apple-touch-icon" href="/icon-192.png">
 <link rel="manifest" href="/manifest.json">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -34,7 +34,7 @@
   <div class="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
     <div class="flex items-center gap-3">
       <a href="/" class="flex items-center gap-2 hover:opacity-80">
-        <img src="/icon.svg" class="w-5 h-5" alt="">
+        <img src="/app-icon.jpg" class="h-8 w-8 rounded-lg" alt="">
         <span class="font-semibold text-lg">Syntaur</span>
       </a>
       <span class="text-gray-600">/</span>
@@ -68,6 +68,12 @@
             <label class="label">Version</label>
             <p class="text-gray-300" id="set-version">--</p>
           </div>
+        </div>
+
+        <h3 class="font-medium mb-3 mt-6">Agent Avatars</h3>
+        <p class="text-xs text-gray-500 mb-3">Upload a custom image for each agent. It will appear in chat and on the dashboard.</p>
+        <div class="space-y-3" id="avatar-list">
+          <!-- Populated by JS -->
         </div>
       </div>
 
@@ -255,15 +261,37 @@ function showTab(name) {
 
 async function loadSettings() {
   try {
+    const headers = { 'Authorization': 'Bearer ' + token };
     const [health, status, mods] = await Promise.all([
-      fetch('/health').then(r => r.json()),
-      fetch('/api/setup/status').then(r => r.json()),
-      fetch('/api/setup/modules').then(r => r.json()),
+      fetch('/health', { headers }).then(r => r.json()),
+      fetch('/api/setup/status', { headers }).then(r => r.json()),
+      fetch('/api/setup/modules', { headers }).then(r => r.json()),
     ]);
 
     // General
     document.getElementById('set-agent-name').textContent = status.agent_name || 'main';
     document.getElementById('set-version').textContent = `v${health.version || '?'}`;
+
+    // Agent avatars
+    const agents = (health.agents || []).map(a => typeof a === 'object' ? a : { id: a, name: a });
+    const avatarList = document.getElementById('avatar-list');
+    if (avatarList) {
+      avatarList.innerHTML = agents.map(a => {
+        const id = a.id || a;
+        const name = a.name || id;
+        return `<div class="flex items-center gap-3 p-2 rounded-lg bg-gray-900">
+          <img src="/agent-avatar/${id}?t=${Date.now()}" class="w-10 h-10 rounded-lg" alt="" id="avatar-img-${id}">
+          <div class="flex-1">
+            <p class="text-sm font-medium text-gray-300">${name}</p>
+            <p class="text-xs text-gray-600">${id}</p>
+          </div>
+          <label class="text-xs text-oc-500 hover:text-oc-400 cursor-pointer px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 transition-colors">
+            Change
+            <input type="file" class="hidden" accept="image/*" onchange="uploadAvatar('${id}', this)">
+          </label>
+        </div>`;
+      }).join('');
+    }
     document.getElementById('set-port').textContent = `${location.port || '18789'}`;
 
     // Uptime
@@ -399,6 +427,24 @@ async function activateLicense() {
     result.className = 'text-sm text-red-400';
     result.textContent = 'Network error';
   }
+}
+
+async function uploadAvatar(agentId, input) {
+  const file = input.files[0];
+  if (!file) return;
+  try {
+    const resp = await fetch(`/api/agent-avatar/${agentId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': file.type, 'Authorization': 'Bearer ' + token },
+      body: file
+    });
+    const data = await resp.json();
+    if (data.success) {
+      const img = document.getElementById(`avatar-img-${agentId}`);
+      if (img) img.src = `/agent-avatar/${agentId}?t=${Date.now()}`;
+    }
+  } catch(e) { console.log('upload error:', e); }
+  input.value = '';
 }
 
 loadSettings();
