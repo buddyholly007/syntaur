@@ -672,15 +672,24 @@ impl Config {
 
     /// Resolve a model string like "lmstudio/Qwen3.5-27B" to (provider_name, model_id)
     pub fn resolve_model(&self, model_str: &str) -> Option<(String, String)> {
+        // Try "provider/model" format first (e.g., "primary/gpt-4o")
         let parts: Vec<&str> = model_str.splitn(2, '/').collect();
-        if parts.len() != 2 {
-            return None;
+        if parts.len() == 2 {
+            if self.models.providers.contains_key(parts[0]) {
+                return Some((parts[0].to_string(), parts[1].to_string()));
+            }
         }
-        if self.models.providers.contains_key(parts[0]) {
-            Some((parts[0].to_string(), parts[1].to_string()))
-        } else {
-            None
+        // Bare provider name (e.g., "primary") — use the provider's configured model
+        if let Some(prov) = self.models.providers.get(model_str) {
+            // Model ID can be in the models list or in the flattened extra fields
+            let model_id = prov.models.first().map(|m| m.id.clone())
+                .or_else(|| prov.extra.get("model").and_then(|v| v.as_str()).map(String::from))
+                .unwrap_or_default();
+            if !model_id.is_empty() {
+                return Some((model_str.to_string(), model_id));
+            }
         }
+        None
     }
 
     /// Get Telegram accounts with their bot tokens

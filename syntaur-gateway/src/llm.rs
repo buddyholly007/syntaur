@@ -364,6 +364,7 @@ impl LlmChain {
     pub async fn call_raw(&self, messages: &[ChatMessage], tools: Option<&Vec<serde_json::Value>>) -> Result<LlmResult, String> {
         let order = self.ranked_order().await;
         let total = order.len();
+        let mut last_error: Option<String> = None;
 
         for (attempt, &idx) in order.iter().enumerate() {
             let provider = &self.providers[idx];
@@ -418,12 +419,13 @@ impl LlmChain {
                         warn!("[llm:{}] Failed after {}ms ({}), trying next provider", provider.name, latency, e);
                     } else {
                         error!("[llm] All {} providers failed after {}ms. Last error: {}", self.providers.len(), latency, e);
+                        last_error = Some(e);
                     }
                 }
             }
         }
 
-        Err("All LLM providers failed".to_string())
+        Err(last_error.unwrap_or_else(|| "All LLM providers failed".to_string()))
     }
 
     /// Same as `call_raw` but with an explicit `max_tokens` cap that
@@ -439,6 +441,7 @@ impl LlmChain {
     ) -> Result<LlmResult, String> {
         let order = self.ranked_order().await;
         let total = order.len();
+        let mut last_error: Option<String> = None;
 
         for (attempt, &idx) in order.iter().enumerate() {
             let provider = &self.providers[idx];
@@ -510,11 +513,12 @@ impl LlmChain {
                             latency,
                             e
                         );
+                        last_error = Some(e);
                     }
                 }
             }
         }
-        Err("All LLM providers failed".to_string())
+        Err(last_error.unwrap_or_else(|| "All LLM providers failed".to_string()))
     }
 }
 

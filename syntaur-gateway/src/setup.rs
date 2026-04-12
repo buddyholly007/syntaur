@@ -620,7 +620,7 @@ pub async fn handle_setup_apply(
         },
         "agents": {
             "defaults": {
-                "model": "primary",
+                "model": { "primary": "primary", "fallbacks": [] },
                 "tools": { "profile": "full" }
             },
             "list": [{
@@ -790,14 +790,15 @@ fn build_provider(input: &LlmProviderInput) -> serde_json::Value {
         _ => input.base_url.as_deref().unwrap_or("http://127.0.0.1:11434/v1"),
     };
     let api = if input.provider == "anthropic" { "anthropic" } else { "openai-completions" };
+    let model_id = input.model.as_deref().unwrap_or("default");
     let mut obj = serde_json::json!({
         "api": api,
-        "base_url": base_url,
-        "model": input.model.as_deref().unwrap_or("default"),
+        "baseUrl": base_url,
+        "models": [{"id": model_id, "name": model_id}],
     });
     if let Some(ref key) = input.api_key {
         if !key.is_empty() {
-            obj["api_key"] = serde_json::json!(key);
+            obj["apiKey"] = serde_json::json!(key);
         }
     }
     obj
