@@ -145,14 +145,24 @@ where
             .and_then(|s| s.strip_prefix("Bearer ").or_else(|| s.strip_prefix("bearer ")))
             .map(|s| s.to_string());
 
-        let raw_token: Option<String> = if let Some(t) = bearer {
-            Some(t)
+        let (raw_token, via_query_string) = if let Some(t) = bearer {
+            (Some(t), false)
         } else {
             // Fall back to query param for curl-style callers.
-            Query::<TokenQuery>::try_from_uri(&parts.uri)
+            let qs = Query::<TokenQuery>::try_from_uri(&parts.uri)
                 .ok()
-                .and_then(|Query(q)| q.token)
+                .and_then(|Query(q)| q.token);
+            let is_qs = qs.is_some();
+            (qs, is_qs)
         };
+
+        if via_query_string {
+            log::warn!(
+                "[auth] DEPRECATED: token passed via ?token= query string. \
+                 Use Authorization: Bearer <token> header instead. \
+                 Query string tokens may leak into browser history, server logs, and referrer headers."
+            );
+        }
 
         let Some(raw) = raw_token else {
             return Err((
@@ -180,7 +190,15 @@ where
         // 2. Legacy admin fallback — only when users table is empty.
         if legacy_admin_enabled(&ctx.users).await {
             if let Some(legacy) = ctx.legacy_token.as_deref() {
-                if raw == legacy {
+                // Constant-time comparison to prevent timing side-channels.
+                let a = raw.as_bytes();
+                let b = legacy.as_bytes();
+                let len_match = a.len() == b.len();
+                let mut diff: u8 = 0;
+                for (x, y) in a.iter().zip(b.iter()) {
+                    diff |= x ^ y;
+                }
+                if len_match && diff == 0 {
                     return Ok(Principal::LegacyAdmin);
                 }
             }

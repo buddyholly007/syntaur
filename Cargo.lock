@@ -3504,6 +3504,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "shell-words"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77"
+
+[[package]]
 name = "sherpa-onnx"
 version = "1.12.36"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3822,10 +3828,13 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
+ "shell-words",
  "snow",
+ "subtle",
  "syntaur-sdk",
  "tokio",
  "tokio-tungstenite",
+ "tower-http",
  "uuid",
  "webpki-roots 1.0.6",
 ]

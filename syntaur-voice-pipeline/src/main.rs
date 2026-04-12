@@ -60,8 +60,8 @@ impl Config {
                 "--mode" => { i += 1; mode = args.get(i).cloned().unwrap_or(mode); }
                 "--port" => { i += 1; port = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(port); }
                 "--model-dir" => { i += 1; model_dir = args.get(i).cloned().unwrap_or(model_dir); }
-                "--syntaur-url" | "--syntaur-url" => { i += 1; syntaur_url = args.get(i).cloned().unwrap_or(syntaur_url); }
-                "--syntaur-secret" | "--syntaur-secret" => { i += 1; syntaur_secret = args.get(i).cloned().unwrap_or_default(); }
+                "--syntaur-url" => { i += 1; syntaur_url = args.get(i).cloned().unwrap_or(syntaur_url); }
+                "--syntaur-secret" => { i += 1; syntaur_secret = args.get(i).cloned().unwrap_or_default(); }
                 "--tts-url" => { i += 1; tts_url = args.get(i).cloned().unwrap_or(tts_url); }
                 _ => {}
             }

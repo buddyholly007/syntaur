@@ -19,6 +19,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 
+pub async fn require_setup_auth(state: &AppState, token: &str) -> Result<(), StatusCode> {
+    if is_first_run(state) { return Ok(()); }
+    if !state.config.security.require_setup_auth_after_first_run { return Ok(()); }
+    let principal = crate::resolve_principal(state, token).await?;
+    crate::require_admin(&principal)?;
+    Ok(())
+}
+
+fn extract_token_from_headers(headers: &axum::http::HeaderMap) -> String {
+    headers.get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer ").or_else(|| s.strip_prefix("bearer ")))
+        .unwrap_or("").to_string()
+}
+
 // ── Types ───────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -70,6 +85,7 @@ pub struct SetupStatusResponse {
     pub has_llm_configured: bool,
     pub agent_name: Option<String>,
     pub version: String,
+    pub security_warnings: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -103,20 +119,25 @@ pub async fn handle_setup_status(
     let agent_name = state.config.agents.list.first()
         .map(|a| a.id.clone());
 
+    let security_warnings = state.config.security.warnings();
+
     Json(SetupStatusResponse {
         setup_complete: has_admin && has_llm,
         has_admin_user: has_admin,
         has_llm_configured: has_llm,
         agent_name,
         version: env!("CARGO_PKG_VERSION").to_string(),
+        security_warnings,
     })
 }
 
 /// POST /api/setup/test-llm — test an LLM connection.
 pub async fn handle_test_llm(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<TestLlmRequest>,
-) -> Json<TestLlmResponse> {
+) -> Result<Json<TestLlmResponse>, StatusCode> {
+    require_setup_auth(&state, &extract_token_from_headers(&headers)).await?;
     let client = &state.client;
     let start = std::time::Instant::now();
 
@@ -145,23 +166,23 @@ pub async fn handle_test_llm(
                     .unwrap_or_default();
 
                 info!("[setup] LLM test OK: {} ({} models, {}ms)", req.base_url, models.len(), latency);
-                Json(TestLlmResponse { success: true, models, latency_ms: latency, error: None })
+                Ok(Json(TestLlmResponse { success: true, models, latency_ms: latency, error: None }))
             } else {
                 let status = resp.status().as_u16();
                 let body = resp.text().await.unwrap_or_default();
                 warn!("[setup] LLM test failed: {} -> {} {}", req.base_url, status, body);
-                Json(TestLlmResponse {
+                Ok(Json(TestLlmResponse {
                     success: false, models: Vec::new(), latency_ms: latency,
                     error: Some(format!("HTTP {}: {}", status, body.chars().take(200).collect::<String>())),
-                })
+                }))
             }
         }
         Err(e) => {
             warn!("[setup] LLM test error: {} -> {}", req.base_url, e);
-            Json(TestLlmResponse {
+            Ok(Json(TestLlmResponse {
                 success: false, models: Vec::new(), latency_ms: 0,
                 error: Some(format!("Connection failed: {}", e)),
-            })
+            }))
         }
     }
 }
@@ -169,8 +190,10 @@ pub async fn handle_test_llm(
 /// POST /api/setup/test-telegram — test a Telegram bot token.
 pub async fn handle_test_telegram(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<TestTelegramRequest>,
-) -> Json<TestTelegramResponse> {
+) -> Result<Json<TestTelegramResponse>, StatusCode> {
+    require_setup_auth(&state, &extract_token_from_headers(&headers)).await?;
     let client = &state.client;
     let url = format!("https://api.telegram.org/bot{}/getMe", req.bot_token);
 
@@ -182,22 +205,22 @@ pub async fn handle_test_telegram(
                 let bot_name = result.get("first_name").and_then(|v| v.as_str()).map(String::from);
                 let bot_username = result.get("username").and_then(|v| v.as_str()).map(String::from);
                 info!("[setup] Telegram test OK: @{}", bot_username.as_deref().unwrap_or("?"));
-                Json(TestTelegramResponse {
+                Ok(Json(TestTelegramResponse {
                     success: true, bot_name, bot_username, error: None,
-                })
+                }))
             } else {
                 let desc = body.get("description").and_then(|v| v.as_str()).unwrap_or("Unknown error");
-                Json(TestTelegramResponse {
+                Ok(Json(TestTelegramResponse {
                     success: false, bot_name: None, bot_username: None,
                     error: Some(desc.to_string()),
-                })
+                }))
             }
         }
         Err(e) => {
-            Json(TestTelegramResponse {
+            Ok(Json(TestTelegramResponse {
                 success: false, bot_name: None, bot_username: None,
                 error: Some(format!("Connection failed: {}", e)),
-            })
+            }))
         }
     }
 }
@@ -205,8 +228,10 @@ pub async fn handle_test_telegram(
 /// POST /api/setup/test-ha — test a Home Assistant connection.
 pub async fn handle_test_ha(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<TestHaRequest>,
-) -> Json<TestHaResponse> {
+) -> Result<Json<TestHaResponse>, StatusCode> {
+    require_setup_auth(&state, &extract_token_from_headers(&headers)).await?;
     let client = &state.client;
     let url = format!("{}/api/", req.base_url.trim_end_matches('/'));
 
@@ -235,21 +260,21 @@ pub async fn handle_test_ha(
                 };
 
                 info!("[setup] HA test OK: v{}", version.as_deref().unwrap_or("?"));
-                Json(TestHaResponse {
+                Ok(Json(TestHaResponse {
                     success: true, version, device_count, error: None,
-                })
+                }))
             } else {
-                Json(TestHaResponse {
+                Ok(Json(TestHaResponse {
                     success: false, version: None, device_count: None,
                     error: Some(format!("HTTP {}", resp.status())),
-                })
+                }))
             }
         }
         Err(e) => {
-            Json(TestHaResponse {
+            Ok(Json(TestHaResponse {
                 success: false, version: None, device_count: None,
                 error: Some(format!("Connection failed: {}", e)),
-            })
+            }))
         }
     }
 }
@@ -257,7 +282,9 @@ pub async fn handle_test_ha(
 /// GET /api/setup/modules — list available modules.
 pub async fn handle_setup_modules(
     State(state): State<Arc<AppState>>,
-) -> Json<ModuleListResponse> {
+    headers: axum::http::HeaderMap,
+) -> Result<Json<ModuleListResponse>, StatusCode> {
+    require_setup_auth(&state, &extract_token_from_headers(&headers)).await?;
     let mut core_modules = Vec::new();
     for m in crate::modules::CORE_MODULES {
         let enabled = state.config.modules.entries.get(m.id)
@@ -295,7 +322,7 @@ pub async fn handle_setup_modules(
         }
     }
 
-    Json(ModuleListResponse { core_modules, extension_modules })
+    Ok(Json(ModuleListResponse { core_modules, extension_modules }))
 }
 
 
@@ -320,10 +347,14 @@ pub async fn first_run_redirect(
 ) -> axum::response::Response {
     let path = req.uri().path();
 
-    // Always allow setup-related paths
+    // Always allow setup-related paths, auth, static assets, and health check
     if path == "/setup"
         || path.starts_with("/api/setup/")
+        || path.starts_with("/api/auth/")
         || path == "/health"
+        || path == "/icon.svg"
+        || path == "/manifest.json"
+        || path.starts_with("/static/")
     {
         return next.run(req).await;
     }
@@ -358,15 +389,15 @@ pub async fn handle_login(
         }));
     }
 
-    // Try 2: check gateway password
+    // Try 2: check gateway password (constant-time comparison)
     let gw_auth = &state.config.gateway.auth;
     let password_match = gw_auth.extra.get("password")
         .and_then(|v| v.as_str())
-        .map(|p| p == req.password)
+        .map(|p| constant_time_eq(p.as_bytes(), req.password.as_bytes()))
         .unwrap_or(false);
 
-    // Try 3: check gateway token directly
-    let token_match = req.password == gw_auth.token;
+    // Try 3: check gateway token directly (constant-time comparison)
+    let token_match = constant_time_eq(gw_auth.token.as_bytes(), req.password.as_bytes());
 
     if password_match || token_match {
         // Mint a session token for the first user (or create one)
@@ -413,8 +444,10 @@ pub struct LoginResponse {
 /// Updates syntaur.json on disk. Requires gateway restart to take effect.
 pub async fn handle_module_toggle(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<ModuleToggleRequest>,
-) -> Json<ModuleToggleResponse> {
+) -> Result<Json<ModuleToggleResponse>, StatusCode> {
+    require_setup_auth(&state, &extract_token_from_headers(&headers)).await?;
     let home = std::env::var("HOME").unwrap_or_else(|_| "/home/sean".to_string());
     let config_path = crate::resolve_data_dir().join("syntaur.json");
 
@@ -422,22 +455,22 @@ pub async fn handle_module_toggle(
     let config_text = match std::fs::read_to_string(&config_path) {
         Ok(t) => t,
         Err(e) => {
-            return Json(ModuleToggleResponse {
+            return Ok(Json(ModuleToggleResponse {
                 success: false,
                 message: format!("Cannot read config: {}", e),
                 restart_required: false,
-            });
+            }));
         }
     };
 
     let mut config: serde_json::Value = match serde_json::from_str(&config_text) {
         Ok(v) => v,
         Err(e) => {
-            return Json(ModuleToggleResponse {
+            return Ok(Json(ModuleToggleResponse {
                 success: false,
                 message: format!("Cannot parse config: {}", e),
                 restart_required: false,
-            });
+            }));
         }
     };
 
@@ -457,20 +490,25 @@ pub async fn handle_module_toggle(
     // Write back
     match std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap_or_default()) {
         Ok(_) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600));
+            }
             let action = if req.enabled { "enabled" } else { "disabled" };
             log::info!("[setup] Module '{}' {} via dashboard", req.module_id, action);
-            Json(ModuleToggleResponse {
+            Ok(Json(ModuleToggleResponse {
                 success: true,
                 message: format!("Module '{}' {}. Restart gateway to apply.", req.module_id, action),
                 restart_required: true,
-            })
+            }))
         }
         Err(e) => {
-            Json(ModuleToggleResponse {
+            Ok(Json(ModuleToggleResponse {
                 success: false,
                 message: format!("Cannot write config: {}", e),
                 restart_required: false,
-            })
+            }))
         }
     }
 }
@@ -511,20 +549,22 @@ pub async fn handle_license_status(
 /// POST /api/license/activate — apply a license key.
 pub async fn handle_license_activate(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<LicenseActivateRequest>,
-) -> Json<LicenseActivateResponse> {
+) -> Result<Json<LicenseActivateResponse>, StatusCode> {
+    require_setup_auth(&state, &extract_token_from_headers(&headers)).await?;
     let data_dir = crate::resolve_data_dir();
     match crate::license::apply_license_key(&data_dir, &req.key) {
-        Ok(email) => Json(LicenseActivateResponse {
+        Ok(email) => Ok(Json(LicenseActivateResponse {
             success: true,
             message: format!("License activated for {}", email),
             error: None,
-        }),
-        Err(e) => Json(LicenseActivateResponse {
+        })),
+        Err(e) => Ok(Json(LicenseActivateResponse {
             success: false,
             message: String::new(),
             error: Some(e),
-        }),
+        })),
     }
 }
 
@@ -545,8 +585,10 @@ pub struct LicenseActivateResponse {
 /// Writes config file + agent workspace from installer choices.
 pub async fn handle_setup_apply(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<SetupApplyRequest>,
-) -> Json<SetupApplyResponse> {
+) -> Result<Json<SetupApplyResponse>, StatusCode> {
+    require_setup_auth(&state, &extract_token_from_headers(&headers)).await?;
     let data_dir = crate::resolve_data_dir();
 
     // Build config JSON
@@ -638,10 +680,15 @@ pub async fn handle_setup_apply(
         log::info!("[setup] Backed up existing config to {:?}", backup);
     }
     if let Err(e) = std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap_or_default()) {
-        return Json(SetupApplyResponse {
+        return Ok(Json(SetupApplyResponse {
             success: false,
             message: format!("Failed to write config: {}", e),
-        });
+        }));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600));
     }
 
     // Create agent workspace
@@ -700,10 +747,10 @@ pub async fn handle_setup_apply(
 
     log::info!("[setup] Configuration applied: agent={}, workspace={}", agent_id, workspace.display());
 
-    Json(SetupApplyResponse {
+    Ok(Json(SetupApplyResponse {
         success: true,
         message: format!("Setup complete! {} is ready. Restart the gateway to apply.", req.agent_name),
-    })
+    }))
 }
 
 #[derive(Deserialize)]
@@ -765,13 +812,23 @@ fn slug(name: &str) -> String {
         .to_string()
 }
 
+/// Constant-time byte comparison to prevent timing side-channels.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 fn generate_token() -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    std::time::SystemTime::now().hash(&mut hasher);
-    std::process::id().hash(&mut hasher);
-    format!("{:016x}{:016x}{:016x}", hasher.finish(), hasher.finish().wrapping_mul(31), hasher.finish().wrapping_mul(97))
+    use rand::RngCore;
+    let mut buf = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut buf);
+    hex::encode(buf)
 }
 
 fn remove_conditional(input: &str, flag: &str) -> String {
@@ -817,8 +874,10 @@ pub async fn handle_manifest() -> (axum::http::HeaderMap, &'static str) {
 /// GET /api/setup/scan — run a hardware scan and return results.
 /// Returns GPU, CPU, RAM, disk info for the setup wizard.
 pub async fn handle_hardware_scan(
-    State(_state): State<Arc<AppState>>,
-) -> Json<HardwareScanResponse> {
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<HardwareScanResponse>, StatusCode> {
+    require_setup_auth(&state, &extract_token_from_headers(&headers)).await?;
     let cpu_model = read_cpu_model();
     let (ram_total, ram_avail) = read_ram();
     let gpu = detect_gpu();
@@ -844,7 +903,7 @@ pub async fn handle_hardware_scan(
         tier
     };
 
-    Json(HardwareScanResponse {
+    Ok(Json(HardwareScanResponse {
         cpu: cpu_model,
         ram_total_gb: format!("{:.1}", ram_total as f64 / 1024.0),
         ram_available_gb: format!("{:.1}", ram_avail as f64 / 1024.0),
@@ -855,7 +914,7 @@ pub async fn handle_hardware_scan(
         network_llms,
         network_gpus,
         gpu_scan_blocked,
-    })
+    }))
 }
 
 #[derive(Serialize)]
@@ -1164,8 +1223,10 @@ async fn scan_network_gpus() -> (Vec<NetworkGpuInfo>, bool) {
 /// POST /api/setup/fix-firewall — attempt to add firewall rules for GPU scanning.
 /// Tries to enable SSH outbound on the local subnet.
 pub async fn handle_fix_firewall(
-    State(_state): State<Arc<AppState>>,
-) -> Json<FirewallFixResponse> {
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<FirewallFixResponse>, StatusCode> {
+    require_setup_auth(&state, &extract_token_from_headers(&headers)).await?;
     // Try to add iptables/ufw rule for SSH scanning
     // This requires elevated permissions — try sudo
 
@@ -1181,10 +1242,10 @@ pub async fn handle_fix_firewall(
                 .args(["-n", "ufw", "reload"])
                 .output();
             log::info!("[setup] Firewall rule added via ufw: allow out 22/tcp");
-            return Json(FirewallFixResponse {
+            return Ok(Json(FirewallFixResponse {
                 success: true,
                 message: "Firewall updated — SSH outbound allowed for GPU scanning.".to_string(),
-            });
+            }));
         }
     }
 
@@ -1196,10 +1257,10 @@ pub async fn handle_fix_firewall(
     if let Ok(output) = ipt_result {
         if output.status.success() {
             log::info!("[setup] Firewall rule added via iptables: allow outbound SSH");
-            return Json(FirewallFixResponse {
+            return Ok(Json(FirewallFixResponse {
                 success: true,
                 message: "Firewall updated via iptables — SSH outbound allowed.".to_string(),
-            });
+            }));
         }
     }
 
@@ -1214,18 +1275,18 @@ pub async fn handle_fix_firewall(
                 .args(["-n", "firewall-cmd", "--reload"])
                 .output();
             log::info!("[setup] Firewall rule added via firewalld");
-            return Json(FirewallFixResponse {
+            return Ok(Json(FirewallFixResponse {
                 success: true,
                 message: "Firewall updated via firewalld.".to_string(),
-            });
+            }));
         }
     }
 
     // None worked — likely need password for sudo
-    Json(FirewallFixResponse {
+    Ok(Json(FirewallFixResponse {
         success: false,
         message: "Could not modify firewall automatically (sudo access required). Try running: sudo ufw allow out 22/tcp && sudo ufw reload".to_string(),
-    })
+    }))
 }
 
 #[derive(Serialize)]
@@ -1238,7 +1299,9 @@ pub struct FirewallFixResponse {
 /// GET /api/setup/check-tailscale — check if Tailscale is installed and connected.
 pub async fn handle_check_tailscale(
     State(state): State<Arc<AppState>>,
-) -> Json<TailscaleStatus> {
+    headers: axum::http::HeaderMap,
+) -> Result<Json<TailscaleStatus>, StatusCode> {
+    require_setup_auth(&state, &extract_token_from_headers(&headers)).await?;
     // Check if tailscale binary exists
     let installed = std::process::Command::new("which")
         .arg("tailscale")
@@ -1247,13 +1310,13 @@ pub async fn handle_check_tailscale(
         .unwrap_or(false);
 
     if !installed {
-        return Json(TailscaleStatus {
+        return Ok(Json(TailscaleStatus {
             installed: false,
             connected: false,
             ip: None,
             hostname: None,
             url: None,
-        });
+        }));
     }
 
     // Check tailscale status
@@ -1293,13 +1356,13 @@ pub async fn handle_check_tailscale(
         None
     };
 
-    Json(TailscaleStatus {
+    Ok(Json(TailscaleStatus {
         installed,
         connected,
         ip,
         hostname,
         url,
-    })
+    }))
 }
 
 #[derive(Serialize)]
@@ -1323,39 +1386,46 @@ pub async fn handle_landing_page() -> axum::response::Html<&'static str> {
 
 
 /// GET /api/setup/ssh-pubkey — return this machine's SSH public key for the GPU guide.
-pub async fn handle_ssh_pubkey() -> Json<serde_json::Value> {
+pub async fn handle_ssh_pubkey(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    require_setup_auth(&state, &extract_token_from_headers(&headers)).await?;
     let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
     
     // Try common key locations
     for key_file in &["id_ed25519.pub", "id_rsa.pub", "id_ecdsa.pub"] {
         let path = format!("{}/.ssh/{}", home, key_file);
         if let Ok(key) = std::fs::read_to_string(&path) {
-            return Json(serde_json::json!({ "key": key.trim() }));
+            return Ok(Json(serde_json::json!({ "key": key.trim() })));
         }
     }
-    
+
     // No key found — try to generate one
     let key_path = format!("{}/.ssh/id_ed25519", home);
     let _ = std::fs::create_dir_all(format!("{}/.ssh", home));
-    
+
     if let Ok(output) = std::process::Command::new("ssh-keygen")
         .args(["-t", "ed25519", "-f", &key_path, "-N", "", "-q"])
         .output()
     {
         if output.status.success() {
             if let Ok(key) = std::fs::read_to_string(format!("{}.pub", key_path)) {
-                return Json(serde_json::json!({ "key": key.trim() }));
+                return Ok(Json(serde_json::json!({ "key": key.trim() })));
             }
         }
     }
-    
-    Json(serde_json::json!({ "error": "Could not find or generate an SSH key. You may need to run: ssh-keygen -t ed25519" }))
+
+    Ok(Json(serde_json::json!({ "error": "Could not find or generate an SSH key. You may need to run: ssh-keygen -t ed25519" })))
 }
 
 /// POST /api/setup/test-gpu — test SSH connection to a remote host and scan for GPUs.
 pub async fn handle_test_gpu(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<TestGpuRequest>,
-) -> Json<TestGpuResponse> {
+) -> Result<Json<TestGpuResponse>, StatusCode> {
+    require_setup_auth(&state, &extract_token_from_headers(&headers)).await?;
     let output = tokio::process::Command::new("ssh")
         .args([
             "-o", "ConnectTimeout=5",
@@ -1383,11 +1453,11 @@ pub async fn handle_test_gpu(
                 }
             }).collect();
 
-            Json(TestGpuResponse {
+            Ok(Json(TestGpuResponse {
                 connected: true,
                 gpus,
                 error: None,
-            })
+            }))
         }
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
@@ -1404,18 +1474,18 @@ pub async fn handle_test_gpu(
             } else {
                 format!("Connection issue: {}", stderr.chars().take(200).collect::<String>())
             };
-            Json(TestGpuResponse {
+            Ok(Json(TestGpuResponse {
                 connected,
                 gpus: Vec::new(),
                 error: Some(error),
-            })
+            }))
         }
         Err(e) => {
-            Json(TestGpuResponse {
+            Ok(Json(TestGpuResponse {
                 connected: false,
                 gpus: Vec::new(),
                 error: Some(format!("Could not run SSH: {}", e)),
-            })
+            }))
         }
     }
 }
@@ -1443,8 +1513,11 @@ pub struct GpuResult {
 /// POST /api/upload — upload a file for use in chat.
 /// Saves to a temp dir and returns the file path + preview of content.
 pub async fn handle_file_upload(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     mut multipart: axum::extract::Multipart,
-) -> Json<FileUploadResponse> {
+) -> Result<Json<FileUploadResponse>, StatusCode> {
+    require_setup_auth(&state, &extract_token_from_headers(&headers)).await?;
     let upload_dir = crate::resolve_data_dir().join("uploads");
     let _ = std::fs::create_dir_all(&upload_dir);
 
@@ -1455,7 +1528,7 @@ pub async fn handle_file_upload(
         let data = match field.bytes().await {
             Ok(d) => d,
             Err(e) => {
-                return Json(FileUploadResponse {
+                return Ok(Json(FileUploadResponse {
                     success: false,
                     filename: filename.clone(),
                     path: None,
@@ -1463,18 +1536,32 @@ pub async fn handle_file_upload(
                     size_bytes: 0,
                     content_type: content_type.clone(),
                     error: Some(format!("Read error: {}", e)),
-                });
+                }));
             }
         };
 
         let size = data.len();
+
+        // Enforce upload size limit
+        let max_bytes = state.config.security.max_upload_size_mb * 1024 * 1024;
+        if size as u64 > max_bytes {
+            return Ok(Json(FileUploadResponse {
+                success: false,
+                filename,
+                path: None,
+                preview: None,
+                size_bytes: size,
+                content_type,
+                error: Some(format!("File exceeds {}MB upload limit", state.config.security.max_upload_size_mb)),
+            }));
+        }
 
         // Generate unique filename
         let ext = std::path::Path::new(&filename)
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("txt");
-        let unique_name = format!("{}-{}.{}", 
+        let unique_name = format!("{}-{}.{}",
             chrono::Utc::now().format("%Y%m%d-%H%M%S"),
             &uuid::Uuid::new_v4().to_string()[..8],
             ext
@@ -1482,7 +1569,7 @@ pub async fn handle_file_upload(
         let file_path = upload_dir.join(&unique_name);
 
         if let Err(e) = std::fs::write(&file_path, &data) {
-            return Json(FileUploadResponse {
+            return Ok(Json(FileUploadResponse {
                 success: false,
                 filename,
                 path: None,
@@ -1490,7 +1577,7 @@ pub async fn handle_file_upload(
                 size_bytes: size,
                 content_type,
                 error: Some(format!("Write error: {}", e)),
-            });
+            }));
         }
 
         // Generate preview
@@ -1498,7 +1585,7 @@ pub async fn handle_file_upload(
 
         log::info!("[upload] {} ({} bytes, {}) -> {}", filename, size, content_type, file_path.display());
 
-        return Json(FileUploadResponse {
+        return Ok(Json(FileUploadResponse {
             success: true,
             filename,
             path: Some(file_path.to_string_lossy().to_string()),
@@ -1506,10 +1593,10 @@ pub async fn handle_file_upload(
             size_bytes: size,
             content_type,
             error: None,
-        });
+        }));
     }
 
-    Json(FileUploadResponse {
+    Ok(Json(FileUploadResponse {
         success: false,
         filename: String::new(),
         path: None,
@@ -1517,7 +1604,7 @@ pub async fn handle_file_upload(
         size_bytes: 0,
         content_type: String::new(),
         error: Some("No file in request".to_string()),
-    })
+    }))
 }
 
 fn generate_preview(data: &[u8], content_type: &str, filename: &str) -> String {

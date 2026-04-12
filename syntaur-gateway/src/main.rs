@@ -29,24 +29,14 @@ mod license;
 /// Brand name constant — used in user-facing messages.
 pub const BRAND: &str = "Syntaur";
 
-/// Resolve the data directory. Checks ~/.syntaur/ first (new brand),
-/// falls back to ~/.syntaur/ (legacy), creates ~/.syntaur/ if neither exists.
+/// Resolve the data directory (~/.syntaur/). Creates it if it doesn't exist.
 pub fn resolve_data_dir() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
-    let new_dir = std::path::PathBuf::from(&home).join(".syntaur");
-    let legacy_dir = std::path::PathBuf::from(&home).join(".syntaur");
-
-    if new_dir.exists() {
-        new_dir
-    } else if legacy_dir.exists() {
-        // Legacy install — use existing data, log migration hint
-        log::info!("[{}] Using legacy data dir at ~/.syntaur/ (rename to ~/.syntaur/ when ready)", BRAND);
-        legacy_dir
-    } else {
-        // Fresh install — use new brand
-        let _ = std::fs::create_dir_all(&new_dir);
-        new_dir
+    let dir = std::path::PathBuf::from(&home).join(".syntaur");
+    if !dir.exists() {
+        let _ = std::fs::create_dir_all(&dir);
     }
+    dir
 }
 
 use axum::{extract::State, response::Json, routing::{get, post}, Router};
@@ -148,8 +138,8 @@ async fn run_bootstrap_admin(args: &[String]) {
         }
     };
 
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/sean".to_string());
-    let db_path = PathBuf::from(format!("{}/index.db", std::path::Path::new(&std::env::var("HOME").unwrap_or_else(|_| "/home/sean".to_string())).join(if std::path::Path::new(&std::env::var("HOME").unwrap_or_else(|_| "/home/sean".to_string())).join(".syntaur").exists() { ".syntaur" } else { ".syntaur" }).to_string_lossy()));
+    let data_dir_str = resolve_data_dir().to_string_lossy().to_string();
+    let db_path = PathBuf::from(format!("{}/index.db", data_dir_str));
 
     // Ensure the schema is migrated before touching any user tables —
     // opening the Indexer runs the migration idempotently.
@@ -230,8 +220,7 @@ async fn run_mint_token(args: &[String]) {
         }
     };
 
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/sean".to_string());
-    let db_path = PathBuf::from(format!("{}/index.db", std::path::Path::new(&std::env::var("HOME").unwrap_or_else(|_| "/home/sean".to_string())).join(if std::path::Path::new(&std::env::var("HOME").unwrap_or_else(|_| "/home/sean".to_string())).join(".syntaur").exists() { ".syntaur" } else { ".syntaur" }).to_string_lossy()));
+    let db_path = PathBuf::from(format!("{}/index.db", resolve_data_dir().to_string_lossy()));
 
     // Migrate first so the users table exists.
     if let Err(e) = index::Indexer::open(db_path.clone()) {
@@ -317,8 +306,18 @@ pub async fn resolve_principal(
         });
     }
     if auth::legacy_admin_enabled(&state.users).await {
-        if raw == state.config.gateway.auth.token {
-            return Ok(auth::Principal::LegacyAdmin);
+        // Constant-time comparison to prevent timing side-channels on the
+        // legacy global token.
+        let expected = state.config.gateway.auth.token.as_bytes();
+        let given = raw.as_bytes();
+        if expected.len() == given.len() {
+            let mut diff: u8 = 0;
+            for (a, b) in expected.iter().zip(given.iter()) {
+                diff |= a ^ b;
+            }
+            if diff == 0 {
+                return Ok(auth::Principal::LegacyAdmin);
+            }
         }
     }
     Err(StatusCode::UNAUTHORIZED)
@@ -363,10 +362,18 @@ pub struct GatewayStats {
 /// Syntaur doesn't handle internally). Used by rust-social-manager bsky-approve.
 async fn handle_external_callbacks(
     State(state): State<Arc<AppState>>,
-) -> Json<Vec<serde_json::Value>> {
+    headers: axum::http::HeaderMap,
+) -> Result<Json<Vec<serde_json::Value>>, axum::http::StatusCode> {
+    let raw = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
+    let principal = resolve_principal(&state, raw).await?;
+    require_admin(&principal)?;
     let mut buf = state.external_callbacks.lock().await;
     let drained: Vec<serde_json::Value> = buf.drain(..).collect();
-    Json(drained)
+    Ok(Json(drained))
 }
 
 async fn handle_health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
@@ -1139,7 +1146,7 @@ async fn handle_messages(
 // the first user is bootstrapped the admin surface is effectively locked
 // down. A follow-up polish pass can add an `is_admin` column on `users`.
 
-fn require_admin(principal: &auth::Principal) -> Result<(), axum::http::StatusCode> {
+pub fn require_admin(principal: &auth::Principal) -> Result<(), axum::http::StatusCode> {
     if principal.is_admin() {
         Ok(())
     } else {
@@ -1411,7 +1418,8 @@ async fn handle_run_skill(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RunSkillRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let _principal = resolve_principal(&state, &req.token).await?;
+    let principal = resolve_principal(&state, &req.token).await?;
+    require_admin(&principal)?;
     match state.skills.run(&req.name, &req.args).await {
         Ok(out) => Ok(Json(serde_json::json!({"ok": true, "output": out}))),
         Err(e) => Ok(Json(serde_json::json!({"ok": false, "error": e}))),
@@ -1464,9 +1472,17 @@ async fn handle_propose_plan(
         // Look up the plan we just created so we can render the steps in
         // the approval keyboard message.
         if let Ok(Some((plan, steps))) = state.plans.get(plan_id).await {
-            let bot_token = "REDACTED_TELEGRAM_BOT_TOKEN";
-            let chat_id = REDACTED_CHAT_ID_i64;
-            if let Err(e) = plans::send_approval(
+            let bot_token = &state.config.channels.telegram.bot_token;
+            let chat_id = state.config.channels.telegram.extra.get("chatId")
+                .and_then(|v| v.as_i64())
+                .or_else(|| state.config.channels.telegram.accounts.values()
+                    .next()
+                    .and_then(|a| a.extra.get("chatId"))
+                    .and_then(|v| v.as_i64()))
+                .unwrap_or(0);
+            if bot_token.is_empty() || chat_id == 0 {
+                warn!("[plans] No Telegram bot_token/chatId configured — skipping approval send");
+            } else if let Err(e) = plans::send_approval(
                 &state.client,
                 bot_token,
                 chat_id,
@@ -1501,7 +1517,17 @@ async fn handle_approve_plan(
     axum::extract::Path(plan_id): axum::extract::Path<i64>,
     Json(req): Json<ApprovePlanRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let _principal = resolve_principal(&state, &req.token).await?;
+    let principal = resolve_principal(&state, &req.token).await?;
+    // Verify ownership: only the plan creator or an admin can approve.
+    match state.plans.get(plan_id).await {
+        Ok(Some((plan, _))) => {
+            if plan.user_id != principal.user_id() && !principal.is_admin() {
+                return Err(axum::http::StatusCode::FORBIDDEN);
+            }
+        }
+        Ok(None) => return Ok(Json(serde_json::json!({"error": "not found"}))),
+        Err(e) => return Ok(Json(serde_json::json!({"error": e}))),
+    }
     if let Err(e) = state.plans.mark_approved(plan_id).await {
         return Ok(Json(serde_json::json!({"error": e})));
     }
@@ -1528,7 +1554,17 @@ async fn handle_deny_plan(
     axum::extract::Path(plan_id): axum::extract::Path<i64>,
     Json(req): Json<DenyPlanRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let _principal = resolve_principal(&state, &req.token).await?;
+    let principal = resolve_principal(&state, &req.token).await?;
+    // Verify ownership: only the plan creator or an admin can deny.
+    match state.plans.get(plan_id).await {
+        Ok(Some((plan, _))) => {
+            if plan.user_id != principal.user_id() && !principal.is_admin() {
+                return Err(axum::http::StatusCode::FORBIDDEN);
+            }
+        }
+        Ok(None) => return Ok(Json(serde_json::json!({"error": "not found"}))),
+        Err(e) => return Ok(Json(serde_json::json!({"error": e}))),
+    }
     if let Err(e) = state.plans.mark_denied(plan_id).await {
         return Ok(Json(serde_json::json!({"error": e})));
     }
@@ -1542,9 +1578,15 @@ async fn handle_get_plan(
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
-    let _principal = resolve_principal(&state, token).await?;
+    let principal = resolve_principal(&state, token).await?;
     match state.plans.get(plan_id).await {
-        Ok(Some((plan, steps))) => Ok(Json(serde_json::json!({"plan": plan, "steps": steps}))),
+        Ok(Some((plan, steps))) => {
+            // Verify ownership: only the plan creator or an admin can view.
+            if plan.user_id != principal.user_id() && !principal.is_admin() {
+                return Err(axum::http::StatusCode::FORBIDDEN);
+            }
+            Ok(Json(serde_json::json!({"plan": plan, "steps": steps})))
+        }
         Ok(None) => Ok(Json(serde_json::json!({"error": "not found"}))),
         Err(e) => Ok(Json(serde_json::json!({"error": e}))),
     }
@@ -1623,7 +1665,8 @@ async fn handle_admin_list_slash(
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
-    let _principal = resolve_principal(&state, token).await?;
+    let principal = resolve_principal(&state, token).await?;
+    require_admin(&principal)?;
     let agent_filter = params.get("agent").map(|s| s.as_str());
     match state.slash.list(agent_filter).await {
         Ok(rows) => Ok(Json(serde_json::json!({"slash_commands": rows}))),
@@ -1731,6 +1774,11 @@ async fn handle_dispatch_slash(
 pub(crate) fn spawn_plan_executor(state: Arc<AppState>, plan_id: i64) {
     tokio::spawn(async move {
         let store = Arc::clone(&state.plans);
+        // Fetch the plan to get its user_id for scoped execution.
+        let plan_user_id = match store.get(plan_id).await {
+            Ok(Some((plan, _))) => plan.user_id,
+            _ => 0,
+        };
         let dispatcher = move |kind: plans::StepKind, target: String, args: serde_json::Value| {
             let state = Arc::clone(&state);
             async move {
@@ -1739,8 +1787,9 @@ pub(crate) fn spawn_plan_executor(state: Arc<AppState>, plan_id: i64) {
                     plans::StepKind::Skill => state.skills.run(&target, &args).await,
                     plans::StepKind::Tool => {
                         // Build a minimal one-shot ToolRegistry on a workspace
-                        // we know exists. Plans run with admin-equivalent
-                        // identity (user_id = 0) for now.
+                        // we know exists. Plans run scoped to the plan creator's
+                        // user_id so tool hooks and audit entries are attributed
+                        // correctly.
                         let workspace = crate::resolve_data_dir().join("workspace-main");
                         let mut tr = crate::tools::ToolRegistry::with_extensions(
                             workspace,
@@ -1753,7 +1802,7 @@ pub(crate) fn spawn_plan_executor(state: Arc<AppState>, plan_id: i64) {
                             Arc::clone(&state.tool_rate_limiter),
                             Arc::clone(&state.tool_circuit_breakers),
                         );
-                        tr.set_user_id(0);
+                        tr.set_user_id(plan_user_id);
                         tr.set_tool_hooks(Arc::clone(&state.tool_hooks));
                         {
                             let run_skill: Arc<dyn crate::tools::extension::Tool> =
@@ -2247,12 +2296,18 @@ async fn main() {
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .unwrap_or_default();
+    let hooks_tg_token = config.channels.telegram.bot_token.clone();
+    let hooks_tg_chat_id = config.channels.telegram.extra.get("chatId")
+        .and_then(|v| v.as_i64())
+        .or_else(|| config.channels.telegram.accounts.values()
+            .next()
+            .and_then(|a| a.extra.get("chatId"))
+            .and_then(|v| v.as_i64()))
+        .unwrap_or(0);
     let tool_hooks_store = match tool_hooks::HookStore::open(
         hooks_db_path,
-        // Use the Claude bot for hook telegram_notify actions (matches the
-        // backup script + bot monitor convention).
-        "REDACTED_TELEGRAM_BOT_TOKEN".to_string(),
-        REDACTED_CHAT_ID,
+        hooks_tg_token,
+        hooks_tg_chat_id,
         hooks_http,
     )
     .await
@@ -2976,7 +3031,18 @@ async fn main() {
         .route("/api/license/status", get(setup::handle_license_status))
         .route("/api/license/activate", post(setup::handle_license_activate))
         .route("/api/setup/apply", post(setup::handle_setup_apply))
-        .with_state(Arc::clone(&state));
+        .with_state(Arc::clone(&state))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            setup::first_run_redirect,
+        ))
+        .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)); // 16 MB
+
+    // Security warnings before server start
+    if config.gateway.bind != "loopback" {
+        warn!("Gateway is bound to 0.0.0.0 — accessible from the network without TLS. \
+               Consider setting gateway.bind = \"loopback\" or deploying a TLS reverse proxy.");
+    }
 
     info!("HTTP server on {}", bind_addr);
 

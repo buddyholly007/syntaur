@@ -240,7 +240,7 @@ impl Tool for ExecTool {
     async fn execute(&self, args: Value, ctx: &ToolContext<'_>) -> Result<RichToolResult, String> {
         let command = arg_str(&args, "command");
         let timeout = arg_u64_or(&args, "timeout", 30);
-        shell::exec_sandboxed(ctx.workspace, command, timeout, ctx.allowed_scripts)
+        shell::exec_sandboxed(ctx.workspace, command, timeout, ctx.allowed_scripts, "argv")
             .await
             .map(RichToolResult::text)
     }

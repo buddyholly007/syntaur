@@ -240,10 +240,17 @@ fn fallback_response(text: &str) -> OpenAiChatResponse {
     }
 }
 
-/// Validate the bearer token if a shared secret is configured. Returns Ok
-/// if no secret is set OR the header matches.
-fn check_auth(headers: &HeaderMap, expected: Option<&str>) -> Result<(), StatusCode> {
+/// Validate the bearer token if a shared secret is configured.
+///
+/// * If no secret is set AND `require_auth` is true  -> UNAUTHORIZED
+/// * If no secret is set AND `require_auth` is false -> Ok (LAN-only open mode)
+/// * If a secret is set, use constant-time XOR comparison.
+fn check_auth(headers: &HeaderMap, expected: Option<&str>, require_auth: bool) -> Result<(), StatusCode> {
     let Some(secret) = expected else {
+        if require_auth {
+            warn!("[voice_chat] auth required but no shared secret configured");
+            return Err(StatusCode::UNAUTHORIZED);
+        }
         return Ok(());
     };
     let header = headers
@@ -251,7 +258,16 @@ fn check_auth(headers: &HeaderMap, expected: Option<&str>) -> Result<(), StatusC
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let presented = header.strip_prefix("Bearer ").unwrap_or(header);
-    if presented == secret {
+
+    // Constant-time comparison: XOR every byte, accumulate into a single flag.
+    let a = presented.as_bytes();
+    let b = secret.as_bytes();
+    let len_match = a.len() == b.len();
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    if len_match && diff == 0 {
         Ok(())
     } else {
         warn!("[voice_chat] auth failed: missing or wrong bearer token");
@@ -265,7 +281,7 @@ pub async fn handle_chat_completions(
     headers: HeaderMap,
     Json(req): Json<OpenAiChatRequest>,
 ) -> Result<Json<OpenAiChatResponse>, StatusCode> {
-    check_auth(headers.get_all("authorization").iter().fold(&headers, |h, _| h), state.ha_voice_secret.as_deref())?;
+    check_auth(&headers, state.ha_voice_secret.as_deref(), state.config.security.require_voice_auth)?;
 
     info!(
         "[voice_chat] request: {} messages, model={:?}",
@@ -594,23 +610,29 @@ mod tests {
     }
 
     #[test]
-    fn test_check_auth_no_secret_passes() {
+    fn test_check_auth_no_secret_not_required_passes() {
         let h = HeaderMap::new();
-        assert!(check_auth(&h, None).is_ok());
+        assert!(check_auth(&h, None, false).is_ok());
+    }
+
+    #[test]
+    fn test_check_auth_no_secret_required_fails() {
+        let h = HeaderMap::new();
+        assert!(check_auth(&h, None, true).is_err());
     }
 
     #[test]
     fn test_check_auth_correct_secret_passes() {
         let mut h = HeaderMap::new();
         h.insert("authorization", "Bearer s3cret".parse().unwrap());
-        assert!(check_auth(&h, Some("s3cret")).is_ok());
+        assert!(check_auth(&h, Some("s3cret"), true).is_ok());
     }
 
     #[test]
     fn test_check_auth_wrong_secret_fails() {
         let mut h = HeaderMap::new();
         h.insert("authorization", "Bearer wrong".parse().unwrap());
-        assert!(check_auth(&h, Some("right")).is_err());
+        assert!(check_auth(&h, Some("right"), true).is_err());
     }
 
     #[test]

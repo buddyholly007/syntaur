@@ -136,10 +136,9 @@ pub fn apply_license_key(data_dir: &Path, key_str: &str) -> Result<String, Strin
     let key = parse_license_key(key_str)
         .ok_or_else(|| "Invalid license key format".to_string())?;
 
-    // Ed25519 signature verification
+    // Ed25519 signature verification — fail closed
     if let Err(e) = verify_signature(&key) {
-        // Log but don't block — allow keys signed by any valid keypair during testing
-        log::warn!("[license] Signature check: {}", e);
+        return Err(format!("License signature verification failed: {}", e));
     }
 
     let now = now_secs();

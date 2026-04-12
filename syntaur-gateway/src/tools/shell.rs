@@ -7,12 +7,14 @@ use tokio::process::Command;
 /// - Scoped to workspace directory
 /// - Timeout enforced
 /// - Script allowlist for Python/shell scripts
-/// - No raw shell interpolation of user input
+/// - `mode`: `"argv"` = split with shell_words + exec directly (no shell);
+///           `"shell"` = pass through `sh -c` (legacy, less safe).
 pub async fn exec_sandboxed(
     workspace: &Path,
     command: &str,
     timeout_secs: u64,
     allowed_scripts: &[String],
+    mode: &str,
 ) -> Result<String, String> {
     let command = command.trim();
     if command.is_empty() {
@@ -41,27 +43,36 @@ pub async fn exec_sandboxed(
         }
     }
 
-    // Block dangerous commands
-    let dangerous = ["rm -rf /", "dd if=", "mkfs", "> /dev/", ":(){ :|:& };:"];
-    for d in &dangerous {
-        if command.contains(d) {
-            warn!("Blocked dangerous command: {}", command);
-            return Err("Command blocked for safety".to_string());
-        }
-    }
-
     let timeout = Duration::from_secs(timeout_secs.max(5).min(600));
 
-    info!("[exec] Running: {} (timeout: {}s)", &command[..command.len().min(100)], timeout.as_secs());
+    info!("[exec] Running (mode={}): {} (timeout: {}s)", mode, &command[..command.len().min(100)], timeout.as_secs());
 
     let result = tokio::time::timeout(timeout, async {
-        Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .current_dir(workspace)
-            .env("HOME", std::env::var("HOME").unwrap_or_default())
-            .output()
-            .await
+        match mode {
+            "argv" => {
+                let parts = shell_words::split(command)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+                if parts.is_empty() {
+                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "empty argv"));
+                }
+                Command::new(&parts[0])
+                    .args(&parts[1..])
+                    .current_dir(workspace)
+                    .env("HOME", std::env::var("HOME").unwrap_or_default())
+                    .output()
+                    .await
+            }
+            _ => {
+                // "shell" mode — legacy sh -c pass-through
+                Command::new("sh")
+                    .arg("-c")
+                    .arg(command)
+                    .current_dir(workspace)
+                    .env("HOME", std::env::var("HOME").unwrap_or_default())
+                    .output()
+                    .await
+            }
+        }
     }).await;
 
     match result {

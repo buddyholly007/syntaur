@@ -37,6 +37,10 @@ serde_yaml = "0.9"
 # Uses CPU; 384-dim embeddings; ~50ms per query on a desktop Intel.
 fastembed = "4"
 
+shell-words = "1"
+subtle = "2"
+tower-http = { version = "0.6", features = ["limit", "cors"] }
+
 ed25519-dalek = "2"
 hex = "0.4"
 rustls-pemfile = "2"

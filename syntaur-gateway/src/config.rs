@@ -32,6 +32,8 @@ pub struct Config {
     /// Runtime module enable/disable configuration.
     #[serde(default)]
     pub modules: crate::modules::ModulesConfig,
+    #[serde(default)]
+    pub security: SecurityConfig,
     #[serde(flatten)]
     pub extra: HashMap<String, serde_json::Value>,
 }
@@ -384,6 +386,69 @@ pub struct GatewayAuth {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
+// --- Security ---
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
+#[serde(default)]
+pub struct SecurityConfig {
+    #[serde(rename = "requireVoiceAuth")]
+    pub require_voice_auth: bool,
+    #[serde(rename = "requireSetupAuthAfterFirstRun")]
+    pub require_setup_auth_after_first_run: bool,
+    #[serde(rename = "allowQueryStringTokens")]
+    pub allow_query_string_tokens: bool,
+    #[serde(rename = "rateLimitLoginPerMinute")]
+    pub rate_limit_login_per_minute: u32,
+    #[serde(rename = "maxUploadSizeMb")]
+    pub max_upload_size_mb: u64,
+    #[serde(rename = "shellExecutionMode")]
+    pub shell_execution_mode: String,
+    #[serde(rename = "tokenExpiryHours")]
+    pub token_expiry_hours: Option<u64>,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            require_voice_auth: true,
+            require_setup_auth_after_first_run: true,
+            allow_query_string_tokens: false,
+            rate_limit_login_per_minute: 5,
+            max_upload_size_mb: 50,
+            shell_execution_mode: "argv".to_string(),
+            token_expiry_hours: None,
+        }
+    }
+}
+
+impl SecurityConfig {
+    pub fn warnings(&self) -> Vec<String> {
+        let mut w = Vec::new();
+        if !self.require_voice_auth {
+            w.push("Voice endpoint is open without authentication. Anyone on your network can trigger smart-home actions and tools via this endpoint.".to_string());
+        }
+        if !self.require_setup_auth_after_first_run {
+            w.push("Setup endpoints are accessible without admin login. Anyone on your network can modify your configuration, upload files, and change firewall rules.".to_string());
+        }
+        if self.allow_query_string_tokens {
+            w.push("Tokens in URLs may leak into browser history, server logs, and HTTP referrer headers.".to_string());
+        }
+        if self.rate_limit_login_per_minute == 0 {
+            w.push("Login rate limiting is disabled. Brute-force attacks against your password are not throttled.".to_string());
+        }
+        if self.max_upload_size_mb > 500 {
+            w.push("Large upload limit increases denial-of-service risk.".to_string());
+        }
+        if self.shell_execution_mode == "shell" {
+            w.push("Shell mode passes commands through sh -c which allows command chaining and injection. Use only if required for specific scripts.".to_string());
+        }
+        if self.token_expiry_hours.is_none() || self.token_expiry_hours == Some(0) {
+            w.push("API tokens never expire. Compromised tokens remain valid until manually revoked.".to_string());
+        }
+        w
+    }
+}
+
 // --- Plugins ---
 
 #[derive(Deserialize, Serialize, Clone, Debug, Default)]
@@ -526,6 +591,18 @@ pub fn load_config(path: &Path) -> ConfigLoadResult {
     }
     if config.models.providers.is_empty() {
         warnings.push("No LLM providers defined in config".to_string());
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            let mode = meta.permissions().mode() & 0o777;
+            if mode & 0o077 != 0 {
+                warnings.push(format!("Config file has permissive mode {:o} — should be 600. Run: chmod 600 {}", mode, path.display()));
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+            }
+        }
     }
 
     ConfigLoadResult { config, warnings }

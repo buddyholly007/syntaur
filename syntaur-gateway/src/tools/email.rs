@@ -17,7 +17,7 @@ fn get_accounts() -> Vec<(&'static str, EmailAccount)> {
             smtp_host: "smtp.gmail.com",
             smtp_port: 465,
             email: "CrimsonLanternMusic@gmail.com",
-            password: std::env::var("GMAIL_APP_PASSWORD").unwrap_or_else(|_| "REDACTED_GMAIL_APP_PASSWORD".to_string()),
+            password: std::env::var("GMAIL_APP_PASSWORD").unwrap_or_default(),
             display_name: "Crimson Lantern",
         }),
         ("felix", EmailAccount {
@@ -25,13 +25,13 @@ fn get_accounts() -> Vec<(&'static str, EmailAccount)> {
             smtp_host: "smtp-mail.outlook.com",
             smtp_port: 587,
             email: "felixcherry1985@outlook.com",
-            password: std::env::var("OUTLOOK_PASSWORD").unwrap_or_else(|_| "REDACTED_OUTLOOK_PASSWORD".to_string()),
+            password: std::env::var("OUTLOOK_PASSWORD").unwrap_or_default(),
             display_name: "Felix Cherry",
         }),
     ]
 }
 
-fn get_account(name: &str) -> EmailAccount {
+fn get_account(name: &str) -> Result<EmailAccount, String> {
     let key = name.to_lowercase();
     let accounts = get_accounts();
     for (id, acc) in &accounts {
@@ -41,7 +41,7 @@ fn get_account(name: &str) -> EmailAccount {
             || (key.is_empty() && *id == "crimson-lantern")
             || (key == "default" && *id == "crimson-lantern")
         {
-            return EmailAccount {
+            let account = EmailAccount {
                 imap_host: acc.imap_host,
                 smtp_host: acc.smtp_host,
                 smtp_port: acc.smtp_port,
@@ -49,9 +49,19 @@ fn get_account(name: &str) -> EmailAccount {
                 password: acc.password.clone(),
                 display_name: acc.display_name,
             };
+            if account.password.is_empty() {
+                return Err(format!("Password not configured for account '{}' ({})", id, acc.email));
+            }
+            return Ok(account);
         }
     }
-    get_accounts().remove(0).1 // default
+    // Default to first account
+    let mut all = get_accounts();
+    let (id, acc) = all.remove(0);
+    if acc.password.is_empty() {
+        return Err(format!("Password not configured for default account '{}' ({})", id, acc.email));
+    }
+    Ok(acc)
 }
 
 /// Read recent emails from inbox
@@ -63,7 +73,7 @@ pub async fn email_read(folder: &str, count: usize) -> Result<String, String> {
 pub async fn email_read_account(folder: &str, count: usize, account: &str) -> Result<String, String> {
     let folder = if folder.is_empty() { "INBOX".to_string() } else { folder.to_string() };
     let count = count.max(1).min(20);
-    let acc = get_account(account);
+    let acc = get_account(account)?;
 
     info!("[email] Reading {} emails from {} ({})", count, folder, acc.email);
 
@@ -108,8 +118,14 @@ fn email_read_sync(folder: &str, count: usize, imap_host: &str, email: &str, pas
         return Err(format!("Login failed: {}", resp));
     }
 
-    // Select folder
-    let cmd = format!("a2 SELECT {}\r\n", folder);
+    // Validate folder name — reject IMAP injection characters
+    if folder.contains('"') || folder.contains('\\') || folder.contains('\r') || folder.contains('\n') || folder.contains('{') {
+        tls.write_all(b"a9 LOGOUT\r\n").ok();
+        return Err(format!("Invalid IMAP folder name: {}", folder));
+    }
+
+    // Select folder (quote to handle spaces in folder names)
+    let cmd = format!("a2 SELECT \"{}\"\r\n", folder);
     tls.write_all(cmd.as_bytes()).map_err(|e| format!("Write error: {}", e))?;
     let n = tls.read(&mut buf).map_err(|e| format!("Read error: {}", e))?;
     let resp = String::from_utf8_lossy(&buf[..n]);
@@ -188,7 +204,7 @@ pub async fn email_send_account(to: &str, subject: &str, body: &str, account: &s
         return Err("to, subject, and body are required".to_string());
     }
 
-    let acc = get_account(account);
+    let acc = get_account(account)?;
     info!("[email] Sending from {} to {} subject: {}", acc.email, to, subject);
 
     let to = to.to_string();
