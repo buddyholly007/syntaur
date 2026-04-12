@@ -330,6 +330,19 @@ const MIGRATIONS: &[&str] = &[
         created_at         INTEGER NOT NULL
     );
     "#,
+    // v10: bug reports.
+    r#"
+    CREATE TABLE IF NOT EXISTS bug_reports (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id     INTEGER,
+        user_name   TEXT,
+        description TEXT NOT NULL,
+        system_info TEXT,
+        page_url    TEXT,
+        status      TEXT NOT NULL DEFAULT 'open',
+        created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

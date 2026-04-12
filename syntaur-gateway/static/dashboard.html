@@ -248,7 +248,7 @@ async function doLogin() {
       authToken = data.token;
       sessionStorage.setItem('syntaur_token', authToken);
       document.getElementById('login-overlay').classList.add('hidden');
-      loadDashboard();
+      if (window._authResolve) { window._authResolve(); window._authResolve = null; }
     } else {
       errEl.textContent = data.error || 'Invalid password';
       errEl.classList.remove('hidden');
@@ -260,21 +260,27 @@ async function doLogin() {
   document.getElementById('login-btn').textContent = 'Sign In';
 }
 
-// Check if already authenticated
+// Check if already authenticated — blocks until login succeeds
 async function checkAuth() {
   if (authToken) {
-    // Verify token still works
+    // Verify token against an auth-protected endpoint
     try {
-      const resp = await fetch('/api/setup/status');
+      const resp = await fetch('/api/setup/modules', {
+        headers: { 'Authorization': 'Bearer ' + authToken }
+      });
       if (resp.ok) {
         document.getElementById('login-overlay').classList.add('hidden');
         return;
       }
     } catch(e) {}
+    // Token expired or invalid — clear it
+    authToken = '';
+    sessionStorage.removeItem('syntaur_token');
   }
-  // Show login
+  // Show login and wait for successful authentication
   document.getElementById('login-overlay').classList.remove('hidden');
   document.getElementById('login-pass').focus();
+  return new Promise(resolve => { window._authResolve = resolve; });
 }
 
 // Toggle chat panel
@@ -439,11 +445,18 @@ function renderMarkdown(text) {
   return html;
 }
 
+// Authenticated fetch helper
+function authFetch(url, opts = {}) {
+  opts.headers = opts.headers || {};
+  if (authToken) opts.headers['Authorization'] = 'Bearer ' + authToken;
+  return fetch(url, opts);
+}
+
 // Load dashboard data
 async function loadDashboard() {
   try {
     // Health
-    const health = await (await fetch('/health')).json();
+    const health = await (await authFetch('/health')).json();
     const uptime = health.uptime_secs || 0;
     const h = Math.floor(uptime / 3600);
     const m = Math.floor((uptime % 3600) / 60);
@@ -456,7 +469,7 @@ async function loadDashboard() {
     }
 
     // Setup status
-    const setup = await (await fetch('/api/setup/status')).json();
+    const setup = await (await authFetch('/api/setup/status')).json();
     if (setup.agent_name) {
       document.getElementById('welcome-text').textContent = `Welcome back`;
       document.getElementById('welcome-sub').textContent = `${setup.agent_name} is online and ready.`;
@@ -465,7 +478,7 @@ async function loadDashboard() {
     }
 
     // Modules
-    const mods = await (await fetch('/api/setup/modules')).json();
+    const mods = await (await authFetch('/api/setup/modules')).json();
     const allMods = [...mods.core_modules, ...mods.extension_modules];
     const enabled = allMods.filter(m => m.enabled);
     const totalTools = enabled.reduce((s, m) => s + m.tool_count, 0);
@@ -488,7 +501,7 @@ async function loadDashboard() {
 
     // License status
     try {
-      const lic = await (await fetch('/api/license/status')).json();
+      const lic = await (await authFetch('/api/license/status')).json();
       const badge = document.getElementById('license-badge');
       badge.classList.remove('hidden');
       if (lic.mode === 'licensed') {
@@ -523,17 +536,69 @@ function showPhoneAccess() {
 // Init — check if setup is needed first
 (async () => {
   try {
-    const s = await (await fetch('/api/setup/status')).json();
+    const s = await (await authFetch('/api/setup/status')).json();
     if (!s.setup_complete) {
       location.href = '/setup';
       return;
     }
   } catch(e) {}
-  checkAuth();
+  await checkAuth();
   loadDashboard();
   setInterval(loadDashboard, 30000);
 })();
 </script>
 
+<script>
+// Bug Report UI — injected on all authenticated pages (schema v10)
+(function() {
+  const BUG_TOKEN = sessionStorage.getItem('syntaur_token') || '';
+  if (!BUG_TOKEN) return;
+  const topBar = document.querySelector('.border-b.border-gray-800 .flex.items-center.justify-between');
+  if (!topBar) return;
+  const rightNav = topBar.lastElementChild;
+  if (!rightNav) return;
+  const bugBtn = document.createElement('button');
+  bugBtn.title = 'Report a Bug';
+  bugBtn.className = 'text-gray-500 hover:text-gray-300 transition-colors p-1 rounded';
+  bugBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2l1.88 1.88M14.12 3.88L16 2M9 7.13v-1a3.003 3.003 0 116 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 014-4h4a4 4 0 014 4v3c0 3.3-2.7 6-6 6z"/><path d="M12 20v-9M6.53 9C4.6 8.8 3 7.1 3 5M6 13H2M6 17l-4 1M17.47 9c1.93-.2 3.53-1.9 3.53-4M18 13h4M18 17l4 1"/></svg>';
+  bugBtn.onclick = function() { openBugModal(); };
+  if (rightNav.tagName === 'DIV') { rightNav.prepend(bugBtn); }
+  else { const w = document.createElement('div'); w.className='flex items-center gap-3'; topBar.replaceChild(w, rightNav); w.appendChild(bugBtn); w.appendChild(rightNav); }
+  const overlay = document.createElement('div');
+  overlay.id = 'bug-report-overlay';
+  overlay.className = 'fixed inset-0 z-50 bg-black/60 backdrop-blur-sm hidden flex items-center justify-center';
+  overlay.innerHTML = '<div class="bg-gray-800 border border-gray-700 rounded-2xl w-full max-w-lg mx-4 shadow-2xl"><div class="px-6 py-4 border-b border-gray-700 flex items-center justify-between"><h3 class="text-lg font-semibold text-white">Report a Bug</h3><button onclick="document.getElementById(\'bug-report-overlay\').classList.add(\'hidden\')" class="text-gray-400 hover:text-gray-200 text-xl leading-none">&times;</button></div><div class="px-6 py-5 space-y-4"><div><label class="block text-sm font-medium text-gray-300 mb-1.5">What went wrong?</label><textarea id="bug-desc" rows="4" class="w-full bg-gray-900 border border-gray-600 rounded-lg px-4 py-2.5 text-white placeholder-gray-500 focus:border-sky-500 focus:ring-1 focus:ring-sky-500 outline-none resize-none text-sm" placeholder="Describe the bug..."></textarea></div><details class="text-sm"><summary class="text-gray-400 cursor-pointer hover:text-gray-300 select-none">System Info (auto-collected)</summary><pre id="bug-sysinfo" class="mt-2 bg-gray-900 border border-gray-700 rounded-lg p-3 text-xs text-gray-400 overflow-x-auto max-h-40 overflow-y-auto"></pre></details><div id="bug-feedback" class="hidden text-sm"></div></div><div class="px-6 py-4 border-t border-gray-700 flex justify-end gap-3"><button onclick="document.getElementById(\'bug-report-overlay\').classList.add(\'hidden\')" class="text-sm text-gray-400 hover:text-gray-300 px-4 py-2">Cancel</button><button id="bug-submit-btn" onclick="submitBugReport()" class="text-sm bg-sky-600 hover:bg-sky-700 text-white font-medium px-5 py-2 rounded-lg transition-colors">Submit</button></div></div>';
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.classList.add('hidden'); });
+  window.openBugModal = async function() {
+    const ov = document.getElementById('bug-report-overlay');
+    const desc = document.getElementById('bug-desc');
+    const si = document.getElementById('bug-sysinfo');
+    const fb = document.getElementById('bug-feedback');
+    desc.value = ''; fb.classList.add('hidden');
+    document.getElementById('bug-submit-btn').disabled = false;
+    document.getElementById('bug-submit-btn').textContent = 'Submit';
+    const info = { userAgent: navigator.userAgent, screen: screen.width+'x'+screen.height, window: innerWidth+'x'+innerHeight, page: location.href, time: new Date().toISOString() };
+    try { const r = await fetch('/health'); if (r.ok) info.gateway = await r.json(); } catch(e) { info.gateway = 'unavailable'; }
+    si.textContent = JSON.stringify(info, null, 2);
+    ov.classList.remove('hidden'); desc.focus();
+  };
+  window.submitBugReport = async function() {
+    const desc = document.getElementById('bug-desc').value.trim();
+    const fb = document.getElementById('bug-feedback');
+    const btn = document.getElementById('bug-submit-btn');
+    if (!desc) { fb.className='text-sm text-red-400'; fb.textContent='Please describe the bug.'; fb.classList.remove('hidden'); return; }
+    btn.disabled = true; btn.textContent = 'Submitting...'; fb.classList.add('hidden');
+    const si = { userAgent: navigator.userAgent, screen: screen.width+'x'+screen.height, window: innerWidth+'x'+innerHeight, page: location.href, time: new Date().toISOString() };
+    try { const r = await fetch('/health'); if (r.ok) si.gateway = await r.json(); } catch(e) {}
+    try {
+      const res = await fetch('/api/bug-reports', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ token: BUG_TOKEN, description: desc, system_info: si, page_url: location.href }) });
+      const data = await res.json();
+      if (data.id) { fb.className='text-sm text-green-400'; fb.textContent='Bug report #'+data.id+' submitted. Thank you!'; fb.classList.remove('hidden'); btn.textContent='Submitted'; setTimeout(function(){ document.getElementById('bug-report-overlay').classList.add('hidden'); }, 2000); }
+      else { fb.className='text-sm text-red-400'; fb.textContent=data.error||'Submission failed.'; fb.classList.remove('hidden'); btn.disabled=false; btn.textContent='Submit'; }
+    } catch(e) { fb.className='text-sm text-red-400'; fb.textContent='Network error: '+e.message; fb.classList.remove('hidden'); btn.disabled=false; btn.textContent='Submit'; }
+  };
+})();
+</script>
 </body>
 </html>

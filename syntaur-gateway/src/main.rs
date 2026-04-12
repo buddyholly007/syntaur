@@ -73,6 +73,8 @@ pub struct AppState {
     /// failure cluster opens the whole group. v5 Item 1 Stage 4.
     pub tool_circuit_breakers:
         Arc<tokio::sync::Mutex<HashMap<String, crate::circuit_breaker::CircuitBreaker>>>,
+    /// Path to index.db for direct queries (bug reports, etc).
+    pub db_path: PathBuf,
     /// Per-user auth store (users, tokens, Telegram links). v5 Item 3.
     pub users: Arc<auth::UserStore>,
     /// In-memory state cache for in-flight OAuth2 authorization_code
@@ -388,7 +390,9 @@ async fn handle_health(State(state): State<Arc<AppState>>) -> Json<serde_json::V
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_secs": uptime,
-        "agents": state.config.agents.list.iter().map(|a| &a.id).collect::<Vec<_>>(),
+        "agents": state.config.agents.list.iter().map(|a| {
+            a.extra.get("name").and_then(|v| v.as_str()).unwrap_or(&a.id)
+        }).collect::<Vec<_>>(),
         "providers": providers,
     }))
 }
@@ -407,6 +411,110 @@ struct ApiMessageRequest {
     /// Optional: append this turn to an existing conversation
     conversation_id: Option<String>,
 }
+
+// ── Bug Reports ─────────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct BugReportRequest {
+    token: String,
+    description: String,
+    system_info: Option<serde_json::Value>,
+    page_url: Option<String>,
+}
+
+async fn handle_bug_report_submit(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BugReportRequest>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let principal = resolve_principal(&state, &req.token).await?;
+
+    if req.description.trim().is_empty() {
+        return Ok(Json(serde_json::json!({"error": "description is required"})));
+    }
+
+    let user_id = principal.user_id();
+    let user_name = match &principal {
+        auth::Principal::User { name, .. } => name.clone(),
+        auth::Principal::LegacyAdmin => "admin".to_string(),
+    };
+    let description = req.description.clone();
+    let system_info = req.system_info.as_ref().map(|v| v.to_string());
+    let page_url = req.page_url.clone();
+    let db_path = state.db_path.clone();
+
+    let report_id: i64 = tokio::task::spawn_blocking(move || -> Result<i64, String> {
+        let conn = rusqlite::Connection::open(&db_path)
+            .map_err(|e| format!("open db: {}", e))?;
+        conn.execute(
+            "INSERT INTO bug_reports (user_id, user_name, description, system_info, page_url) VALUES (?, ?, ?, ?, ?)",
+            rusqlite::params![user_id, &user_name, &description, &system_info, &page_url],
+        ).map_err(|e| format!("insert: {}", e))?;
+        Ok(conn.last_insert_rowid())
+    })
+    .await
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|e| {
+        error!("[bug-report] {}", e);
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let user_display = match &principal {
+        auth::Principal::User { name, .. } => name.clone(),
+        auth::Principal::LegacyAdmin => "admin".to_string(),
+    };
+    info!("[bug-report] #{} from {}", report_id, user_display);
+
+    Ok(Json(serde_json::json!({
+        "id": report_id,
+        "status": "submitted",
+    })))
+}
+
+async fn handle_bug_report_list(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let _principal = resolve_principal(&state, token).await?;
+
+    let db_path = state.db_path.clone();
+    let status_filter = params.get("status").cloned().unwrap_or_else(|| "all".to_string());
+
+    let reports: Vec<serde_json::Value> = tokio::task::spawn_blocking(move || -> Result<Vec<serde_json::Value>, String> {
+        let conn = rusqlite::Connection::open(&db_path).map_err(|e| format!("open: {}", e))?;
+        let sql = if status_filter == "all" {
+            "SELECT id, user_name, description, status, created_at FROM bug_reports ORDER BY id DESC"
+        } else {
+            "SELECT id, user_name, description, status, created_at FROM bug_reports WHERE status = ?1 ORDER BY id DESC"
+        };
+        let mut stmt = conn.prepare(sql).map_err(|e| format!("prepare: {}", e))?;
+        let params: Vec<&dyn rusqlite::types::ToSql> = if status_filter == "all" {
+            vec![]
+        } else {
+            vec![&status_filter as &dyn rusqlite::types::ToSql]
+        };
+        let rows = stmt.query_map(params.as_slice(), |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, i64>(0)?,
+                "user_name": row.get::<_, Option<String>>(1)?,
+                "description": row.get::<_, String>(2)?,
+                "status": row.get::<_, String>(3)?,
+                "created_at": row.get::<_, Option<String>>(4)?,
+            }))
+        }).map_err(|e| format!("query: {}", e))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    })
+    .await
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|e| {
+        error!("[bug-report] list: {}", e);
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Json(serde_json::json!({ "reports": reports })))
+}
+
+// ── Chat ────────────────────────────────────────────────────────────────────
 
 async fn handle_api_message(
     State(state): State<Arc<AppState>>,
@@ -2877,6 +2985,7 @@ async fn main() {
             crate::rate_limit::RateLimiter::new(),
         )),
         tool_circuit_breakers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        db_path: PathBuf::from(format!("{}/index.db", data_dir_str)),
         users: Arc::clone(&users),
         oauth_state: Arc::clone(&oauth_state),
         oauth_tokens: Arc::clone(&oauth_tokens),
@@ -3035,6 +3144,8 @@ async fn main() {
         .route("/api/license/activate", post(setup::handle_license_activate))
         .route("/api/setup/apply", post(setup::handle_setup_apply))
         .route("/api/settings/install-shortcut", post(setup::handle_install_shortcut))
+        .route("/api/bug-reports", post(handle_bug_report_submit))
+        .route("/api/bug-reports", get(handle_bug_report_list))
         .with_state(Arc::clone(&state))
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),

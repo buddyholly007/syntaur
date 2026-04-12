@@ -117,7 +117,12 @@ pub async fn handle_setup_status(
     let has_llm = !state.config.models.providers.is_empty();
 
     let agent_name = state.config.agents.list.first()
-        .map(|a| a.id.clone());
+        .map(|a| {
+            a.extra.get("name")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| a.id.clone())
+        });
 
     let security_warnings = state.config.security.warnings();
 
