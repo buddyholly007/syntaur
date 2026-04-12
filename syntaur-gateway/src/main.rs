@@ -3302,12 +3302,20 @@ async fn main() {
     // Graceful shutdown on SIGTERM/SIGINT
     let shutdown = async move {
         let ctrl_c = tokio::signal::ctrl_c();
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to register SIGTERM");
 
-        tokio::select! {
-            _ = ctrl_c => info!("SIGINT received"),
-            _ = sigterm.recv() => info!("SIGTERM received"),
+        #[cfg(unix)]
+        {
+            let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to register SIGTERM");
+            tokio::select! {
+                _ = ctrl_c => info!("SIGINT received"),
+                _ = sigterm.recv() => info!("SIGTERM received"),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            ctrl_c.await.expect("failed to listen for Ctrl+C");
+            info!("SIGINT received");
         }
 
         info!("Shutting down — stopping all tasks");
