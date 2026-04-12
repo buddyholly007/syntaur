@@ -39,25 +39,25 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
       - name: Build gateway
-        run: cargo build --release --target ${{ matrix.target }} -p rust-openclaw
+        run: cargo build --release --target ${{ matrix.target }} -p syntaur-gateway
         env:
           OPENSSL_STATIC: "1"
 
       - name: Build module manager
-        run: cargo build --release --target ${{ matrix.target }} -p openclaw-mod
+        run: cargo build --release --target ${{ matrix.target }} -p syntaur-mod
 
       - name: Rename artifacts
         shell: bash
         run: |
           mkdir -p dist
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            cp target/${{ matrix.target }}/release/rust-openclaw.exe dist/${{ matrix.artifact }}
-            cp target/${{ matrix.target }}/release/ocmod.exe dist/ocmod-windows-x86_64.exe
+            cp target/${{ matrix.target }}/release/syntaur-gateway.exe dist/${{ matrix.artifact }}
+            cp target/${{ matrix.target }}/release/syntaur-mod.exe dist/syntaur-mod-windows-x86_64.exe
           else
-            cp target/${{ matrix.target }}/release/rust-openclaw dist/${{ matrix.artifact }}
+            cp target/${{ matrix.target }}/release/syntaur-gateway dist/${{ matrix.artifact }}
             SUFFIX="${{ matrix.artifact }}"
             SUFFIX="${SUFFIX#syntaur-}"
-            cp target/${{ matrix.target }}/release/ocmod dist/ocmod-${SUFFIX}
+            cp target/${{ matrix.target }}/release/syntaur-mod dist/syntaur-mod-${SUFFIX}
             chmod +x dist/*
           fi
 
