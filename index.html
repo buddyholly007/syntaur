@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Syntaur — Your Personal AI Platform</title>
-<meta name="description" content="A single binary that gives you a private AI assistant with 88 tools, voice control, smart home, and more. Runs on your hardware. Free to start.">
+<meta name="description" content="A single Rust binary: multi-agent AI chat, voice assistant, smart home control, and 88+ tools. Runs on your hardware. No cloud required.">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <script src="https://cdn.tailwindcss.com"></script>
 <script>tailwind.config={theme:{extend:{colors:{oc:{500:'#0ea5e9',600:'#0284c7',700:'#0369a1',800:'#075985'}}}}}</script>
@@ -12,6 +12,8 @@
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
   body { font-family: 'Inter', sans-serif; }
   .glow { box-shadow: 0 0 60px rgba(14,165,233,0.15); }
+  .fade-in { animation: fadeIn 0.6s ease-out; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
 </style>
 </head>
 <body class="bg-gray-950 text-gray-100">
@@ -22,10 +24,12 @@
     <div class="flex items-center gap-2">
       <img src="icon.svg" class="w-6 h-6" alt="">
       <span class="font-bold text-lg">Syntaur</span>
+      <span class="text-xs text-gray-600 ml-1">v0.2</span>
     </div>
     <div class="flex items-center gap-6 text-sm">
       <a href="#features" class="text-gray-400 hover:text-white">Features</a>
-      <a href="#modules" class="text-gray-400 hover:text-white">Modules</a>
+      <a href="#voice" class="text-gray-400 hover:text-white">Voice</a>
+      <a href="#smarthome" class="text-gray-400 hover:text-white">Smart Home</a>
       <a href="#pricing" class="text-gray-400 hover:text-white">Pricing</a>
       <a href="https://github.com/buddyholly007/syntaur" class="text-gray-400 hover:text-white">GitHub</a>
       <a href="#download" class="bg-oc-600 hover:bg-oc-700 text-white px-4 py-2 rounded-lg font-medium transition-colors">Download</a>
@@ -34,52 +38,76 @@
 </nav>
 
 <!-- Hero -->
-<section class="max-w-5xl mx-auto px-4 pt-24 pb-16 text-center">
+<section class="max-w-5xl mx-auto px-4 pt-24 pb-16 text-center fade-in">
   <div class="inline-flex items-center gap-2 bg-gray-800/50 border border-gray-700 rounded-full px-4 py-1.5 text-sm text-gray-400 mb-6">
-    <span class="w-2 h-2 rounded-full bg-green-400"></span>
-    Free &amp; open source — runs on your hardware
+    <span class="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span>
+    Open source &middot; runs on your hardware &middot; 6.6 MB binary
   </div>
   <h1 class="text-5xl sm:text-6xl font-extrabold leading-tight mb-6">
-    Your personal<br><span class="text-oc-500">AI platform</span>
+    AI that lives<br><span class="text-oc-500">in your house</span>
   </h1>
   <p class="text-xl text-gray-400 max-w-2xl mx-auto mb-10">
-    One binary. 88 tools. Voice assistant, smart home control, browser automation, and more — all private, all local. No Docker, no Python, no complexity.
+    Multi-agent chat, voice assistant, and smart home control in a single binary.
+    Talk to it, type to it, or just say the wake word. It remembers you, controls your devices, and delegates to specialist agents when it needs to.
   </p>
   <div class="flex flex-col sm:flex-row gap-3 justify-center" id="download">
     <a href="https://github.com/buddyholly007/syntaur/releases/latest" class="bg-oc-600 hover:bg-oc-700 text-white px-8 py-3.5 rounded-xl font-semibold text-lg transition-colors inline-flex items-center justify-center gap-2">
       Download Syntaur
-      <span class="text-sm opacity-70">35 MB</span>
+      <span class="text-sm opacity-70">6.6 MB</span>
     </a>
     <div class="bg-gray-800 border border-gray-700 rounded-xl px-6 py-3.5 font-mono text-sm text-gray-300 select-all">
       curl -sSL https://buddyholly007.github.io/syntaur/install.sh | sh
     </div>
   </div>
-  <p class="text-xs text-gray-600 mt-4">Linux, macOS, Windows · Free tier included · No account required</p>
+  <p class="text-xs text-gray-600 mt-4">Linux, macOS, Windows &middot; Free tier included &middot; No account required</p>
 </section>
 
-<!-- What you get -->
+<!-- Chat Demo -->
+<section class="max-w-3xl mx-auto px-4 py-8">
+  <div class="bg-gray-900 border border-gray-800 rounded-2xl p-6 glow">
+    <div class="flex items-center gap-2 mb-4 text-sm text-gray-500">
+      <span class="w-3 h-3 rounded-full bg-red-500/60"></span>
+      <span class="w-3 h-3 rounded-full bg-yellow-500/60"></span>
+      <span class="w-3 h-3 rounded-full bg-green-500/60"></span>
+      <span class="ml-2">Syntaur Chat</span>
+    </div>
+    <div class="space-y-4 text-sm">
+      <div class="flex justify-end"><div class="bg-blue-900/40 rounded-xl px-4 py-2 max-w-xs">Hey, what do you know about me?</div></div>
+      <div class="flex"><div class="bg-gray-800 rounded-xl px-4 py-2 max-w-md">Hey Sean! Based on your profile: you're a Rust developer in Sacramento. It's 5:17 PM on your Friday evening. What are you working on?</div></div>
+      <div class="flex justify-end"><div class="bg-blue-900/40 rounded-xl px-4 py-2 max-w-xs">Turn on the office lights and write me a prime checker in Rust</div></div>
+      <div class="text-xs text-gray-600 text-center py-1">
+        <span class="text-green-400">&#9679;</span> Smart Home: office lights on &middot;
+        <span class="text-oc-500">&#9679;</span> Coder agent: generating code...
+      </div>
+      <div class="flex"><div class="bg-gray-800 rounded-xl px-4 py-2 max-w-md">Office lights are on. Here's your prime checker:<br><code class="text-oc-500 text-xs">fn is_prime(n: u64) -> bool { ... }</code></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- Features Grid -->
 <section class="max-w-5xl mx-auto px-4 py-16" id="features">
-  <h2 class="text-3xl font-bold text-center mb-12">Everything in one binary</h2>
+  <h2 class="text-3xl font-bold text-center mb-4">More than a chatbot</h2>
+  <p class="text-gray-400 text-center mb-12 max-w-xl mx-auto">Syntaur is a platform. It orchestrates multiple specialist agents, routes to the best available AI backend, and remembers everything about you.</p>
   <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
     <div class="bg-gray-800/50 border border-gray-700/50 rounded-2xl p-6 glow">
+      <div class="text-3xl mb-3">&#129302;</div>
+      <h3 class="font-semibold text-lg mb-2">Multi-Agent Orchestrator</h3>
+      <p class="text-gray-400 text-sm">Primary assistant delegates to specialist sub-agents &mdash; search, coder, researcher &mdash; each with focused system prompts. You see one coherent response.</p>
+    </div>
+    <div class="bg-gray-800/50 border border-gray-700/50 rounded-2xl p-6">
+      <div class="text-3xl mb-3">&#9889;</div>
+      <h3 class="font-semibold text-lg mb-2">Load-Aware Routing</h3>
+      <p class="text-gray-400 text-sm">Tracks latency, in-flight requests, and health across all backends. Automatically spreads load between local GPU and cloud. Circuit breaker on failures.</p>
+    </div>
+    <div class="bg-gray-800/50 border border-gray-700/50 rounded-2xl p-6">
       <div class="text-3xl mb-3">&#128172;</div>
-      <h3 class="font-semibold text-lg mb-2">AI Chat</h3>
-      <p class="text-gray-400 text-sm">Full-featured chat with markdown, code blocks, tool visualization. Connect any LLM — local, network, or cloud.</p>
+      <h3 class="font-semibold text-lg mb-2">Streaming Chat</h3>
+      <p class="text-gray-400 text-sm">Token-by-token SSE streaming with real-time status: "Thinking...", "Searching...", "Coding...". Conversations auto-titled, searchable, persistent.</p>
     </div>
     <div class="bg-gray-800/50 border border-gray-700/50 rounded-2xl p-6">
-      <div class="text-3xl mb-3">&#127908;</div>
-      <h3 class="font-semibold text-lg mb-2">Voice Assistant</h3>
-      <p class="text-gray-400 text-sm">Talk to your AI with wake word, speech-to-text, and natural text-to-speech. Works hands-free with a room speaker.</p>
-    </div>
-    <div class="bg-gray-800/50 border border-gray-700/50 rounded-2xl p-6">
-      <div class="text-3xl mb-3">&#127968;</div>
-      <h3 class="font-semibold text-lg mb-2">Smart Home</h3>
-      <p class="text-gray-400 text-sm">Control lights, thermostats, locks through conversation. Integrates with Home Assistant for 1000+ device types.</p>
-    </div>
-    <div class="bg-gray-800/50 border border-gray-700/50 rounded-2xl p-6">
-      <div class="text-3xl mb-3">&#128736;</div>
-      <h3 class="font-semibold text-lg mb-2">88 Built-in Tools</h3>
-      <p class="text-gray-400 text-sm">Web search, email, file management, browser automation, office documents, CAPTCHA solving, social media, and more.</p>
+      <div class="text-3xl mb-3">&#128100;</div>
+      <h3 class="font-semibold text-lg mb-2">Remembers You</h3>
+      <p class="text-gray-400 text-sm">Persistent user profile &mdash; name, timezone, location, preferences. Injected into every conversation. Your assistant knows who you are across sessions.</p>
     </div>
     <div class="bg-gray-800/50 border border-gray-700/50 rounded-2xl p-6">
       <div class="text-3xl mb-3">&#128274;</div>
@@ -88,108 +116,122 @@
     </div>
     <div class="bg-gray-800/50 border border-gray-700/50 rounded-2xl p-6">
       <div class="text-3xl mb-3">&#128640;</div>
-      <h3 class="font-semibold text-lg mb-2">Zero Dependencies</h3>
-      <p class="text-gray-400 text-sm">One 35 MB binary. No Docker, no Python, no Node.js, no YAML configs. Download, run, done.</p>
+      <h3 class="font-semibold text-lg mb-2">6.6 MB Binary</h3>
+      <p class="text-gray-400 text-sm">Pure Rust. No Docker, no Python, no Node.js, no YAML. Download, set two env vars, run. Everything included.</p>
     </div>
   </div>
 </section>
 
-<!-- How it works -->
+<!-- Voice Section -->
+<section class="max-w-5xl mx-auto px-4 py-16" id="voice">
+  <h2 class="text-3xl font-bold text-center mb-4">Voice that just works</h2>
+  <p class="text-gray-400 text-center mb-12 max-w-xl mx-auto">Open <code class="text-oc-500">/voice</code> in any browser. Click the mic or say the wake word. No hardware required.</p>
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+    <div class="bg-gray-800/30 border border-gray-700/50 rounded-2xl p-6 text-center">
+      <div class="text-4xl mb-4">&#127911;</div>
+      <h3 class="font-semibold mb-2">Browser Voice UI</h3>
+      <p class="text-gray-400 text-sm">Push-to-talk or always-listen wake word mode. Works in Chrome, Firefox, Safari. Zero setup.</p>
+    </div>
+    <div class="bg-gray-800/30 border border-gray-700/50 rounded-2xl p-6 text-center">
+      <div class="text-4xl mb-4">&#128483;</div>
+      <h3 class="font-semibold mb-2">Neural TTS Built-in</h3>
+      <p class="text-gray-400 text-sm">8 neural voices via Edge TTS &mdash; free, zero config. Or bring your own: Piper, Orpheus, Fish Audio, OpenAI.</p>
+    </div>
+    <div class="bg-gray-800/30 border border-gray-700/50 rounded-2xl p-6 text-center">
+      <div class="text-4xl mb-4">&#127897;</div>
+      <h3 class="font-semibold mb-2">Custom Wake Word</h3>
+      <p class="text-gray-400 text-sm">Train your own wake phrase with openWakeWord (50 samples) or microWakeWord for ESP32 smart speakers. Guide included.</p>
+    </div>
+  </div>
+  <div class="mt-8 text-center">
+    <p class="text-sm text-gray-500">Voice tier: Browser STT (free) &rarr; Parakeet local STT (150ms) &rarr; OpenAI Whisper (cloud)</p>
+    <p class="text-sm text-gray-500">TTS tier: Edge TTS (free, neural) &rarr; Your trained voice &rarr; OpenAI TTS</p>
+  </div>
+</section>
+
+<!-- Smart Home Section -->
+<section class="max-w-5xl mx-auto px-4 py-16" id="smarthome">
+  <h2 class="text-3xl font-bold text-center mb-4">Your house, your rules</h2>
+  <p class="text-gray-400 text-center mb-12 max-w-xl mx-auto">Direct device control over your local network. No Home Assistant required. Auto-discovers devices via mDNS.</p>
+  <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+    <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl p-4 text-center">
+      <p class="font-medium text-sm">Shelly</p>
+      <p class="text-xs text-gray-500 mt-1">WiFi &middot; Gen1 + Gen2/3</p>
+      <p class="text-xs text-green-400 mt-1">Auto-discovered</p>
+    </div>
+    <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl p-4 text-center">
+      <p class="font-medium text-sm">WLED</p>
+      <p class="text-xs text-gray-500 mt-1">WiFi &middot; LED strips</p>
+      <p class="text-xs text-green-400 mt-1">Auto-discovered</p>
+    </div>
+    <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl p-4 text-center">
+      <p class="font-medium text-sm">Tasmota</p>
+      <p class="text-xs text-gray-500 mt-1">WiFi &middot; 3000+ devices</p>
+      <p class="text-xs text-green-400 mt-1">Auto-discovered</p>
+    </div>
+    <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl p-4 text-center">
+      <p class="font-medium text-sm">ESPHome</p>
+      <p class="text-xs text-gray-500 mt-1">WiFi &middot; DIY sensors</p>
+      <p class="text-xs text-green-400 mt-1">Auto-discovered</p>
+    </div>
+    <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl p-4 text-center">
+      <p class="font-medium text-sm">Philips Hue</p>
+      <p class="text-xs text-gray-500 mt-1">Bridge &middot; Zigbee</p>
+      <p class="text-xs text-green-400 mt-1">Auto-discovered</p>
+    </div>
+    <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl p-4 text-center">
+      <p class="font-medium text-sm">Matter / Thread</p>
+      <p class="text-xs text-gray-500 mt-1">New standard</p>
+      <p class="text-xs text-blue-400 mt-1">With border router</p>
+    </div>
+    <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl p-4 text-center">
+      <p class="font-medium text-sm">Zigbee</p>
+      <p class="text-xs text-gray-500 mt-1">5,200+ devices</p>
+      <p class="text-xs text-blue-400 mt-1">Via Zigbee2MQTT</p>
+    </div>
+    <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl p-4 text-center">
+      <p class="font-medium text-sm">Z-Wave</p>
+      <p class="text-xs text-gray-500 mt-1">4,000+ devices</p>
+      <p class="text-xs text-blue-400 mt-1">Via Z-Wave JS</p>
+    </div>
+  </div>
+  <div class="mt-8 bg-gray-800/30 border border-gray-700/50 rounded-xl p-4 max-w-lg mx-auto">
+    <p class="text-xs text-gray-500 text-center mb-2">Includes embedded mDNS reflector for VLAN setups</p>
+    <p class="text-xs text-yellow-500/80 text-center">If your router has a built-in mDNS relay (UniFi, Mikrotik), disable it to avoid conflicts.</p>
+  </div>
+</section>
+
+<!-- Architecture -->
 <section class="max-w-5xl mx-auto px-4 py-16">
-  <h2 class="text-3xl font-bold text-center mb-12">Up and running in 5 minutes</h2>
-  <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
-    <div class="text-center">
-      <div class="w-10 h-10 rounded-full bg-oc-600 text-white font-bold flex items-center justify-center mx-auto mb-3">1</div>
-      <h3 class="font-medium mb-1">Download</h3>
-      <p class="text-sm text-gray-500">One binary for your platform. 35 MB.</p>
-    </div>
-    <div class="text-center">
-      <div class="w-10 h-10 rounded-full bg-oc-600 text-white font-bold flex items-center justify-center mx-auto mb-3">2</div>
-      <h3 class="font-medium mb-1">Run</h3>
-      <p class="text-sm text-gray-500">Browser opens automatically to the setup wizard.</p>
-    </div>
-    <div class="text-center">
-      <div class="w-10 h-10 rounded-full bg-oc-600 text-white font-bold flex items-center justify-center mx-auto mb-3">3</div>
-      <h3 class="font-medium mb-1">Configure</h3>
-      <p class="text-sm text-gray-500">Pick your LLM, name your AI, enable modules.</p>
-    </div>
-    <div class="text-center">
-      <div class="w-10 h-10 rounded-full bg-oc-600 text-white font-bold flex items-center justify-center mx-auto mb-3">4</div>
-      <h3 class="font-medium mb-1">Chat</h3>
-      <p class="text-sm text-gray-500">Talk to your AI from browser, phone, or voice.</p>
-    </div>
-  </div>
-</section>
-
-<!-- LLM Options -->
-<section class="max-w-5xl mx-auto px-4 py-16">
-  <h2 class="text-3xl font-bold text-center mb-4">Bring your own brain</h2>
-  <p class="text-gray-400 text-center mb-12 max-w-xl mx-auto">Use any LLM — local or cloud. Syntaur auto-detects your hardware and recommends the best setup with automatic fallbacks.</p>
-  <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
-    <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl p-4 text-center">
-      <p class="font-medium">Local GPU</p>
-      <p class="text-xs text-gray-500 mt-1">Ollama + your NVIDIA/AMD/Apple GPU</p>
-      <p class="text-xs text-green-400 mt-2">Free &middot; Private</p>
-    </div>
-    <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl p-4 text-center">
-      <p class="font-medium">Network LLM</p>
-      <p class="text-xs text-gray-500 mt-1">Auto-discovers Ollama on your LAN</p>
-      <p class="text-xs text-blue-400 mt-2">Free &middot; LAN-only</p>
-    </div>
-    <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl p-4 text-center">
-      <p class="font-medium">OpenRouter</p>
-      <p class="text-xs text-gray-500 mt-1">Free tier with tool-capable models</p>
-      <p class="text-xs text-yellow-400 mt-2">Free tier available</p>
-    </div>
-    <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl p-4 text-center">
-      <p class="font-medium">OpenAI / Anthropic</p>
-      <p class="text-xs text-gray-500 mt-1">GPT-4o, Claude Sonnet</p>
-      <p class="text-xs text-gray-400 mt-2">Pay-per-use</p>
-    </div>
-  </div>
-</section>
-
-<!-- Modules -->
-<section class="max-w-5xl mx-auto px-4 py-16" id="modules">
-  <h2 class="text-3xl font-bold text-center mb-4">Modular by design</h2>
-  <p class="text-gray-400 text-center mb-12 max-w-xl mx-auto">Enable only what you need. Extend with community modules.</p>
-  <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-    <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl p-3 text-center text-sm">
-      <span class="text-green-400 text-xs block mb-1">Free</span>Files &amp; Memory
-    </div>
-    <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl p-3 text-center text-sm">
-      <span class="text-green-400 text-xs block mb-1">Free</span>Shell &amp; Code
-    </div>
-    <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl p-3 text-center text-sm">
-      <span class="text-green-400 text-xs block mb-1">Free</span>Web Search
-    </div>
-    <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl p-3 text-center text-sm">
-      <span class="text-green-400 text-xs block mb-1">Free</span>Telegram
-    </div>
-    <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl p-3 text-center text-sm">
-      <span class="text-oc-500 text-xs block mb-1">Pro</span>Voice Assistant
-    </div>
-    <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl p-3 text-center text-sm">
-      <span class="text-oc-500 text-xs block mb-1">Pro</span>Smart Home
-    </div>
-    <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl p-3 text-center text-sm">
-      <span class="text-oc-500 text-xs block mb-1">Pro</span>Email &amp; SMS
-    </div>
-    <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl p-3 text-center text-sm">
-      <span class="text-oc-500 text-xs block mb-1">Pro</span>Office Docs
-    </div>
-    <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl p-3 text-center text-sm">
-      <span class="text-oc-500 text-xs block mb-1">Pro</span>Browser Automation
-    </div>
-    <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl p-3 text-center text-sm">
-      <span class="text-oc-500 text-xs block mb-1">Pro</span>Social Media
-    </div>
-    <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl p-3 text-center text-sm">
-      <span class="text-oc-500 text-xs block mb-1">Pro</span>Finance
-    </div>
-    <div class="bg-gray-800/30 border border-gray-700/50 rounded-xl p-3 text-center text-sm">
-      <span class="text-oc-500 text-xs block mb-1">Pro</span>Security Cameras
-    </div>
+  <h2 class="text-3xl font-bold text-center mb-4">Under the hood</h2>
+  <p class="text-gray-400 text-center mb-12 max-w-xl mx-auto">Built in Rust for speed, safety, and a tiny footprint.</p>
+  <div class="bg-gray-900 border border-gray-800 rounded-2xl p-8 font-mono text-sm text-gray-400 max-w-2xl mx-auto overflow-x-auto">
+<pre>
+User: "turn on the kitchen lights"
+  |
+  v
+<span class="text-white">Orchestrator</span> -- profile + time injected into system prompt
+  |
+  v
+<span class="text-white">Planner</span> -- heuristic classification (50+ signals) or LLM fallback
+  |
+  v
+<span class="text-oc-500">Assistant Agent</span> -- delegates to sub-agents if needed
+  |      \
+  |     <span class="text-green-400">Coder</span> / <span class="text-yellow-400">Search</span> / <span class="text-purple-400">Researcher</span>
+  |
+  v
+<span class="text-white">Backend Router</span> -- latency EMA + in-flight + circuit breaker
+  |           \
+<span class="text-blue-400">Local GPU</span>    <span class="text-orange-400">Cloud API</span>
+  |
+  v
+<span class="text-white">Device Registry</span> -- room lookup, protocol dispatch
+  |        |         |        |
+<span class="text-green-400">HTTP</span>   <span class="text-blue-400">Matter</span>   <span class="text-yellow-400">MQTT</span>   <span class="text-gray-500">BLE</span>
+Shelly  Thread  Zigbee  (future)
+WLED            Z-Wave
+</pre>
   </div>
 </section>
 
@@ -202,12 +244,12 @@
       <p class="text-4xl font-extrabold mb-1">$0</p>
       <p class="text-gray-500 text-sm mb-6">Forever</p>
       <ul class="space-y-2 text-sm text-gray-300">
-        <li class="flex items-center gap-2"><span class="text-green-400">&#10003;</span> AI chat with any LLM</li>
-        <li class="flex items-center gap-2"><span class="text-green-400">&#10003;</span> Web search &amp; file management</li>
-        <li class="flex items-center gap-2"><span class="text-green-400">&#10003;</span> Shell &amp; code execution</li>
+        <li class="flex items-center gap-2"><span class="text-green-400">&#10003;</span> Multi-agent AI chat with streaming</li>
+        <li class="flex items-center gap-2"><span class="text-green-400">&#10003;</span> Any LLM backend (local or cloud)</li>
+        <li class="flex items-center gap-2"><span class="text-green-400">&#10003;</span> Conversation persistence and search</li>
+        <li class="flex items-center gap-2"><span class="text-green-400">&#10003;</span> User profile and preferences</li>
         <li class="flex items-center gap-2"><span class="text-green-400">&#10003;</span> Telegram integration</li>
-        <li class="flex items-center gap-2"><span class="text-green-400">&#10003;</span> Unlimited conversations</li>
-        <li class="flex items-center gap-2"><span class="text-green-400">&#10003;</span> Community modules</li>
+        <li class="flex items-center gap-2"><span class="text-green-400">&#10003;</span> Web search and file management</li>
       </ul>
       <a href="https://github.com/buddyholly007/syntaur/releases/latest" class="block mt-6 text-center bg-gray-700 hover:bg-gray-600 text-white px-6 py-2.5 rounded-lg font-medium transition-colors">Download Free</a>
     </div>
@@ -215,17 +257,17 @@
       <span class="absolute -top-3 left-1/2 -translate-x-1/2 bg-oc-600 text-white text-xs font-bold px-3 py-1 rounded-full">Most Popular</span>
       <h3 class="font-bold text-xl mb-2">Pro</h3>
       <p class="text-4xl font-extrabold mb-1">$49</p>
-      <p class="text-gray-500 text-sm mb-6">One-time purchase</p>
+      <p class="text-gray-500 text-sm mb-6">One-time purchase, perpetual</p>
       <ul class="space-y-2 text-sm text-gray-300">
         <li class="flex items-center gap-2"><span class="text-oc-500">&#10003;</span> Everything in Free</li>
-        <li class="flex items-center gap-2"><span class="text-oc-500">&#10003;</span> Voice assistant (wake word, TTS, STT)</li>
-        <li class="flex items-center gap-2"><span class="text-oc-500">&#10003;</span> Smart home control</li>
+        <li class="flex items-center gap-2"><span class="text-oc-500">&#10003;</span> Voice assistant (wake word, 8 neural voices)</li>
+        <li class="flex items-center gap-2"><span class="text-oc-500">&#10003;</span> Smart home (WiFi, Zigbee, Z-Wave, Matter)</li>
+        <li class="flex items-center gap-2"><span class="text-oc-500">&#10003;</span> Device auto-discovery and mDNS reflector</li>
         <li class="flex items-center gap-2"><span class="text-oc-500">&#10003;</span> Email, SMS, browser automation</li>
-        <li class="flex items-center gap-2"><span class="text-oc-500">&#10003;</span> Office documents, social media</li>
-        <li class="flex items-center gap-2"><span class="text-oc-500">&#10003;</span> Finance &amp; security cameras</li>
-        <li class="flex items-center gap-2"><span class="text-oc-500">&#10003;</span> Perpetual license — pay once, use forever</li>
+        <li class="flex items-center gap-2"><span class="text-oc-500">&#10003;</span> Office docs, social media, finance</li>
+        <li class="flex items-center gap-2"><span class="text-oc-500">&#10003;</span> Custom voice training guide</li>
       </ul>
-      <a href="https://buddyholly007.github.io/syntaur/#pricing" class="block mt-6 text-center bg-oc-600 hover:bg-oc-700 text-white px-6 py-2.5 rounded-lg font-semibold transition-colors">Buy Pro — $49</a>
+      <a href="/checkout" class="block mt-6 text-center bg-oc-600 hover:bg-oc-700 text-white px-6 py-2.5 rounded-lg font-semibold transition-colors">Buy Pro &mdash; $49</a>
     </div>
   </div>
 </section>
@@ -233,7 +275,7 @@
 <!-- CTA -->
 <section class="max-w-5xl mx-auto px-4 py-20 text-center">
   <h2 class="text-3xl font-bold mb-4">Your AI. Your hardware. Your rules.</h2>
-  <p class="text-gray-400 mb-8">Download Syntaur and start chatting in 5 minutes.</p>
+  <p class="text-gray-400 mb-8 max-w-lg mx-auto">Download Syntaur and talk to it in 5 minutes. No account, no Docker, no cloud dependency.</p>
   <a href="https://github.com/buddyholly007/syntaur/releases/latest" class="bg-oc-600 hover:bg-oc-700 text-white px-8 py-3.5 rounded-xl font-semibold text-lg transition-colors inline-block">Download Syntaur</a>
 </section>
 
@@ -242,12 +284,13 @@
   <div class="max-w-5xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-4 text-sm text-gray-600">
     <div class="flex items-center gap-2">
       <img src="icon.svg" class="w-4 h-4 opacity-50" alt="">
-      <span>Syntaur</span>
+      <span>Syntaur v0.2</span>
     </div>
     <div class="flex items-center gap-6">
       <a href="https://github.com/buddyholly007/syntaur" class="hover:text-gray-400">GitHub</a>
       <a href="https://github.com/buddyholly007/syntaur/issues" class="hover:text-gray-400">Support</a>
-      <a href="/setup" class="hover:text-gray-400">Documentation</a>
+      <a href="https://github.com/buddyholly007/syntaur/blob/main/syntaur-license-server/VOICE_TRAINING.md" class="hover:text-gray-400">Voice Training</a>
+      <a href="https://github.com/buddyholly007/syntaur/blob/main/syntaur-license-server/WAKE_WORD_TRAINING.md" class="hover:text-gray-400">Wake Word</a>
     </div>
   </div>
 </footer>
