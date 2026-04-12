@@ -391,8 +391,11 @@ async fn handle_health(State(state): State<Arc<AppState>>) -> Json<serde_json::V
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_secs": uptime,
         "agents": state.config.agents.list.iter().map(|a| {
-            a.extra.get("name").and_then(|v| v.as_str()).unwrap_or(&a.id)
-        }).collect::<Vec<_>>(),
+            serde_json::json!({
+                "id": a.id,
+                "name": a.extra.get("name").and_then(|v| v.as_str()).unwrap_or(&a.id)
+            })
+        }).collect::<Vec<serde_json::Value>>(),
         "providers": providers,
     }))
 }

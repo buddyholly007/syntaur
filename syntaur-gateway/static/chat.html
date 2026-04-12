@@ -30,10 +30,18 @@
         <img src="/icon.svg" class="w-5 h-5" alt="">
         <span class="font-semibold hidden sm:inline">Syntaur</span>
       </a>
-      <span class="text-gray-300 text-sm font-medium truncate" id="agent-name">Chat</span>
+      <div class="relative" id="agent-switcher">
+        <button onclick="toggleAgentMenu()" class="flex items-center gap-1 text-gray-300 text-sm font-medium hover:text-white transition-colors">
+          <span id="agent-name">Chat</span>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="text-gray-500"><path d="M6 9l6 6 6-6"/></svg>
+        </button>
+        <div id="agent-menu" class="hidden absolute left-0 top-full mt-1 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1 min-w-[160px] z-50">
+          <!-- Populated by JS -->
+        </div>
+      </div>
     </div>
     <div class="flex items-center gap-2 sm:gap-3 text-sm flex-shrink-0">
-      <button onclick="clearMessages()" class="text-gray-500 hover:text-gray-300 text-xs sm:text-sm">New</button>
+      <button onclick="newConversation()" class="text-gray-500 hover:text-gray-300 text-xs sm:text-sm">New Chat</button>
       <a href="/" class="text-gray-500 hover:text-gray-300 text-xs sm:text-sm">Home</a>
     </div>
   </div>
@@ -78,12 +86,10 @@
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
         <input type="file" class="hidden" id="file-input" onchange="handleFileSelect(event)" multiple>
       </label>
-      <div class="flex-1 relative">
-        <textarea id="input" rows="1" class="w-full bg-gray-800 border border-gray-700 hover:border-gray-600 focus:border-oc-500 focus:ring-1 focus:ring-oc-500 rounded-2xl px-4 sm:px-5 py-2.5 sm:py-3 pr-11 text-white placeholder-gray-400 outline-none resize-none text-sm leading-relaxed" placeholder="Message Syntaur... (drop files here)" onkeydown="handleKey(event)" oninput="autoGrow(this)" style="max-height:200px"></textarea>
-        <button onclick="sendFromInput()" class="absolute right-2 bottom-2 bg-oc-600 hover:bg-oc-700 disabled:opacity-40 text-white rounded-lg p-1.5 transition-colors" id="send-btn">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-        </button>
-      </div>
+      <textarea id="input" rows="1" class="flex-1 bg-gray-800 border border-gray-700 hover:border-gray-600 focus:border-oc-500 focus:ring-1 focus:ring-oc-500 rounded-2xl px-4 sm:px-5 py-2.5 sm:py-3 text-white placeholder-gray-400 outline-none resize-none text-sm leading-relaxed" placeholder="Message Syntaur... (drop files here)" onkeydown="handleKey(event)" oninput="autoGrow(this)" style="max-height:200px"></textarea>
+      <button onclick="sendFromInput()" class="flex-shrink-0 bg-oc-600 hover:bg-oc-700 disabled:opacity-40 text-white rounded-xl p-2.5 transition-colors" id="send-btn">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+      </button>
     </div>
     <p class="text-xs text-gray-600 text-center mt-2 hidden sm:block">Drop files to attach &middot; Your data stays on your machine</p>
   </div>
@@ -94,21 +100,240 @@ const token = sessionStorage.getItem('syntaur_token') || '';
 if (!token) { window.location.href = '/'; }
 let sending = false;
 let pendingFiles = [];
+let currentAgent = 'main';
+let agents = [];
+let conversationId = null;
 
-// Auth check
-if (!token) { location.href = '/'; }
-
-// Load agent info
+// Load agents and initialize
 (async () => {
   try {
-    const s = await (await fetch('/api/setup/status')).json();
-    if (s.agent_name) {
-      document.getElementById('agent-name').textContent = s.agent_name;
-      document.getElementById('greeting').textContent = `Hey! I'm ${s.agent_name}. How can I help you today?`;
-      document.title = `${s.agent_name} — Syntaur`;
+    const health = await (await fetch('/health', { headers: { 'Authorization': 'Bearer ' + token } })).json();
+    const rawAgents = health.agents || [];
+
+    // Health now returns {id, name} objects
+    window._agentIdMap = {};
+    agents = rawAgents.map(a => {
+      if (typeof a === 'object') {
+        window._agentIdMap[a.name] = a.id;
+        return a.name;
+      }
+      return a; // fallback for old format
+    });
+
+    if (agents.length > 0) {
+      currentAgent = agents[0];
+      updateAgentDisplay();
+      buildAgentMenu();
     }
-  } catch(e) {}
+
+    // Resume last conversation for this agent, or start fresh
+    await loadLastConversation();
+
+    // When page becomes visible again (user navigated back), reload messages
+    document.addEventListener('visibilitychange', async () => {
+      if (document.visibilityState === 'visible' && conversationId && !sending) {
+        await reloadCurrentConversation();
+      }
+    });
+  } catch(e) {
+    console.error('init:', e);
+  }
 })();
+
+function updateAgentDisplay() {
+  document.getElementById('agent-name').textContent = currentAgent;
+  document.getElementById('greeting').textContent = `Hey! I'm ${currentAgent}. How can I help you today?`;
+  document.title = `${currentAgent} — Syntaur`;
+}
+
+function buildAgentMenu() {
+  const menu = document.getElementById('agent-menu');
+  menu.innerHTML = agents.map(a => `
+    <button onclick="switchAgent('${a}')" class="w-full text-left px-4 py-2 text-sm hover:bg-gray-700 transition-colors ${a === currentAgent ? 'text-oc-500 font-medium' : 'text-gray-300'}">
+      ${esc(a)}
+    </button>
+  `).join('');
+}
+
+function toggleAgentMenu() {
+  const menu = document.getElementById('agent-menu');
+  menu.classList.toggle('hidden');
+  // Close on click outside
+  if (!menu.classList.contains('hidden')) {
+    setTimeout(() => {
+      document.addEventListener('click', function close(e) {
+        if (!menu.contains(e.target) && !e.target.closest('#agent-switcher')) {
+          menu.classList.add('hidden');
+        }
+        document.removeEventListener('click', close);
+      });
+    }, 10);
+  }
+}
+
+async function switchAgent(name) {
+  document.getElementById('agent-menu').classList.add('hidden');
+  if (name === currentAgent) return;
+  currentAgent = name;
+  updateAgentDisplay();
+  buildAgentMenu();
+  conversationId = null;
+  clearMessagesUI();
+  await loadLastConversation();
+}
+
+async function loadLastConversation() {
+  try {
+    const agentId = getAgentId(currentAgent);
+    // Try agent ID first, then display name (for conversations created before ID fix)
+    let convs = [];
+    for (const name of [agentId, currentAgent]) {
+      const resp = await fetch(`/api/conversations?token=${token}&agent=${encodeURIComponent(name)}&limit=1`);
+      const data = await resp.json();
+      convs = data.conversations || [];
+      if (convs.length > 0) break;
+    }
+    if (convs.length > 0) {
+      conversationId = convs[0].id;
+      await loadConversationMessages(conversationId);
+    }
+  } catch(e) {
+    console.log('No conversation history:', e.message);
+  }
+}
+
+// Map display name back to agent ID for API calls
+function getAgentId(displayName) {
+  // The health endpoint returns display names, but the API needs IDs.
+  // Common mapping: "Felix" -> "main", others are their own IDs.
+  // We store this from the setup status.
+  return window._agentIdMap?.[displayName] || displayName.toLowerCase().replace(/\s+/g, '-');
+}
+
+async function loadConversationMessages(convId) {
+  try {
+    const resp = await fetch(`/api/conversations/${convId}?token=${token}`);
+    const data = await resp.json();
+    const messages = data.messages || [];
+    if (messages.length === 0) return;
+
+    // Hide welcome suggestions
+    const welcome = document.getElementById('welcome-msg');
+    if (welcome) {
+      const chips = welcome.querySelector('.flex.flex-wrap');
+      if (chips) chips.remove();
+    }
+
+    const container = document.getElementById('messages');
+
+    for (const msg of messages) {
+      if (msg.role === 'user') {
+        const el = document.createElement('div');
+        el.className = 'flex gap-4 justify-end';
+        el.innerHTML = `<div class="max-w-[75%]">
+          <div class="bg-oc-900/50 border border-oc-800/40 rounded-2xl rounded-br-md px-5 py-3 text-sm text-gray-200 leading-relaxed">${esc(msg.content)}</div></div>`;
+        container.appendChild(el);
+      } else if (msg.role === 'assistant' && msg.content) {
+        const el = document.createElement('div');
+        el.className = 'flex gap-4';
+        el.innerHTML = `<div class="w-8 h-8 rounded-lg bg-oc-600 flex items-center justify-center text-sm font-bold flex-shrink-0">&#9813;</div>
+          <div class="flex-1 min-w-0">
+            <div class="text-gray-300 leading-relaxed text-sm chat-md">${md(msg.content)}</div>
+          </div>`;
+        container.appendChild(el);
+      }
+    }
+
+    // If last message is from user, the AI is still working — show indicator and poll
+    if (messages.length > 0 && messages[messages.length - 1].role === 'user') {
+      const thinkEl = document.createElement('div');
+      thinkEl.className = 'flex gap-4';
+      thinkEl.id = 'pending-response';
+      thinkEl.innerHTML = `<div class="w-8 h-8 rounded-lg bg-oc-600 flex items-center justify-center text-sm font-bold flex-shrink-0">&#9813;</div>
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center gap-2 text-gray-500 text-sm py-2">
+            <span class="flex gap-1">
+              <span class="w-1.5 h-1.5 rounded-full bg-oc-500 animate-bounce" style="animation-delay:0ms"></span>
+              <span class="w-1.5 h-1.5 rounded-full bg-oc-500 animate-bounce" style="animation-delay:150ms"></span>
+              <span class="w-1.5 h-1.5 rounded-full bg-oc-500 animate-bounce" style="animation-delay:300ms"></span>
+            </span>
+            <span class="text-xs">Working on it...</span>
+          </div>
+        </div>`;
+      container.appendChild(thinkEl);
+      pollForResponse(convId, messages.length);
+    }
+
+    const scroll = document.getElementById('messages-scroll');
+    scroll.scrollTop = scroll.scrollHeight;
+  } catch(e) {
+    console.log('Failed to load messages:', e.message);
+  }
+}
+
+// Poll conversation for new messages (AI still responding)
+async function pollForResponse(convId, lastCount) {
+  const poll = async () => {
+    try {
+      const resp = await fetch(`/api/conversations/${convId}?token=${token}`);
+      const data = await resp.json();
+      const messages = data.messages || [];
+      if (messages.length > lastCount) {
+        // New message arrived — remove thinking indicator and show response
+        const pending = document.getElementById('pending-response');
+        if (pending) pending.remove();
+        const container = document.getElementById('messages');
+        for (let i = lastCount; i < messages.length; i++) {
+          const msg = messages[i];
+          if (msg.role === 'assistant' && msg.content) {
+            const el = document.createElement('div');
+            el.className = 'flex gap-4';
+            el.innerHTML = `<div class="w-8 h-8 rounded-lg bg-oc-600 flex items-center justify-center text-sm font-bold flex-shrink-0">&#9813;</div>
+              <div class="flex-1 min-w-0">
+                <div class="text-gray-300 leading-relaxed text-sm chat-md">${md(msg.content)}</div>
+              </div>`;
+            container.appendChild(el);
+          }
+        }
+        const scroll = document.getElementById('messages-scroll');
+        scroll.scrollTop = scroll.scrollHeight;
+        return; // Stop polling
+      }
+    } catch(e) {}
+    // Keep polling every 2 seconds
+    setTimeout(poll, 2000);
+  };
+  setTimeout(poll, 2000);
+}
+
+function clearMessagesUI() {
+  const container = document.getElementById('messages');
+  container.innerHTML = `
+    <div class="flex gap-4" id="welcome-msg">
+      <div class="w-8 h-8 rounded-lg bg-oc-600 flex items-center justify-center text-sm font-bold flex-shrink-0">&#9813;</div>
+      <div class="flex-1">
+        <p class="text-gray-300 leading-relaxed" id="greeting">Hey! I'm ${esc(currentAgent)}. How can I help you today?</p>
+        <div class="flex flex-wrap gap-2 mt-4">
+          <button onclick="send('What can you do?')" class="text-xs sm:text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-gray-600 rounded-xl px-3 sm:px-4 py-1.5 sm:py-2 transition-all">What can you do?</button>
+          <button onclick="send('Search the web for today\\'s top tech news')" class="text-xs sm:text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-gray-600 rounded-xl px-3 sm:px-4 py-1.5 sm:py-2 transition-all">Today's news</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+async function newConversation() {
+  conversationId = null;
+  clearMessagesUI();
+  document.getElementById('input').focus();
+}
+
+async function reloadCurrentConversation() {
+  if (!conversationId) return;
+  // Clear and reload all messages for the current conversation
+  const container = document.getElementById('messages');
+  container.innerHTML = '';
+  await loadConversationMessages(conversationId);
+}
 
 function handleKey(e) {
   if (e.key === 'Enter' && !e.shiftKey) {
@@ -179,10 +404,23 @@ async function send(msg) {
 
   try {
     // Start the turn — get a turn_id for streaming
+    // Create conversation if we don't have one
+    if (!conversationId) {
+      try {
+        const cr = await fetch('/api/conversations', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token, agent: getAgentId(currentAgent) })
+        });
+        const cd = await cr.json();
+        if (cd.id) conversationId = cd.id;
+      } catch(e) {}
+    }
+
     const startResp = await fetch('/api/message/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: msg, agent: 'main', token })
+      body: JSON.stringify({ message: msg, agent: getAgentId(currentAgent), token, conversation_id: conversationId })
     });
     const startData = await startResp.json();
     const turnId = startData.turn_id;
@@ -192,7 +430,7 @@ async function send(msg) {
       const resp = await fetch('/api/message', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: msg, agent: 'main', token })
+        body: JSON.stringify({ message: msg, agent: getAgentId(currentAgent), token, conversation_id: conversationId })
       });
       const data = await resp.json();
       const secs = ((Date.now() - t0) / 1000).toFixed(1);
@@ -273,14 +511,7 @@ async function send(msg) {
 }
 
 function clearMessages() {
-  const container = document.getElementById('messages');
-  container.innerHTML = `
-    <div class="flex gap-4">
-      <div class="w-8 h-8 rounded-lg bg-oc-600 flex items-center justify-center text-sm font-bold flex-shrink-0">&#9813;</div>
-      <div class="flex-1">
-        <p class="text-gray-300 leading-relaxed">New conversation started. How can I help?</p>
-      </div>
-    </div>`;
+  newConversation();
 }
 
 function copy(btn) {
