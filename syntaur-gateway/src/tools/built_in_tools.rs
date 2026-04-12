@@ -1767,3 +1767,151 @@ impl Tool for AddCalendarEventTool {
         Ok(RichToolResult::text(format!("Added calendar event #{}: {} on {}", id, title, start)))
     }
 }
+
+// ── Tax Module Tools ────────────────────────────────────────────────────────
+
+pub struct LogExpenseTool;
+
+#[async_trait]
+impl Tool for LogExpenseTool {
+    fn name(&self) -> &str { "log_expense" }
+    fn description(&self) -> &str { "Log an expense to the user's tax tracker. Specify vendor, amount, category, and date." }
+    fn parameters(&self) -> Value {
+        json!({ "type": "object", "properties": {
+            "vendor": { "type": "string", "description": "Vendor or store name" },
+            "amount": { "type": "string", "description": "Amount in dollars (e.g. '45.99')" },
+            "category": { "type": "string", "description": "Expense category (e.g. 'Hardware & Supplies', 'Meals & Entertainment', 'Medical')" },
+            "date": { "type": "string", "description": "Date (YYYY-MM-DD)" },
+            "description": { "type": "string", "description": "Brief description" },
+            "entity": { "type": "string", "description": "'business' or 'personal'" }
+        }, "required": ["vendor", "amount", "date"] })
+    }
+    fn capabilities(&self) -> ToolCapabilities { ToolCapabilities { read_only: false, ..Default::default() } }
+    async fn execute(&self, args: Value, ctx: &ToolContext<'_>) -> Result<RichToolResult, String> {
+        let vendor = arg_str(&args, "vendor");
+        let amount = arg_str(&args, "amount");
+        let date = arg_str(&args, "date");
+        if vendor.is_empty() || amount.is_empty() || date.is_empty() {
+            return Err("vendor, amount, and date are required".into());
+        }
+        let amount_cents = crate::tax::parse_cents(amount).ok_or("Invalid amount format")?;
+        let db = ctx.db_path.ok_or("database not available")?.to_path_buf();
+        let uid = ctx.user_id;
+        let now = chrono::Utc::now().timestamp();
+        let vendor_owned = vendor.to_string();
+        let date_owned = date.to_string();
+        let desc = args.get("description").and_then(|v| v.as_str()).map(String::from);
+        let entity = args.get("entity").and_then(|v| v.as_str()).unwrap_or("personal").to_string();
+        let cat = args.get("category").and_then(|v| v.as_str()).map(String::from);
+
+        let id = tokio::task::spawn_blocking(move || -> Result<i64, String> {
+            let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+            let category_id: Option<i64> = cat.as_deref().and_then(|c|
+                conn.query_row("SELECT id FROM expense_categories WHERE name = ?", rusqlite::params![c], |r| r.get(0)).ok()
+            );
+            conn.execute(
+                "INSERT INTO expenses (user_id, amount_cents, vendor, category_id, expense_date, description, entity, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                rusqlite::params![uid, amount_cents, &vendor_owned, category_id, &date_owned, &desc, &entity, now],
+            ).map_err(|e| e.to_string())?;
+            Ok(conn.last_insert_rowid())
+        }).await.map_err(|e| e.to_string())?.map_err(|e| e)?;
+
+        Ok(RichToolResult::text(format!("Logged expense #{}: {} {} at {} on {}", id, crate::tax::cents_to_display(amount_cents), vendor, vendor, date)))
+    }
+}
+
+pub struct ExpenseSummaryTool;
+
+#[async_trait]
+impl Tool for ExpenseSummaryTool {
+    fn name(&self) -> &str { "expense_summary" }
+    fn description(&self) -> &str { "Get a summary of the user's expenses — totals by category for a given period." }
+    fn parameters(&self) -> Value {
+        json!({ "type": "object", "properties": {
+            "start": { "type": "string", "description": "Start date (YYYY-MM-DD), defaults to Jan 1 of current year" },
+            "end": { "type": "string", "description": "End date (YYYY-MM-DD), defaults to Dec 31 of current year" },
+            "entity": { "type": "string", "description": "Filter by 'business' or 'personal'" }
+        }})
+    }
+    async fn execute(&self, args: Value, ctx: &ToolContext<'_>) -> Result<RichToolResult, String> {
+        let db = ctx.db_path.ok_or("database not available")?.to_path_buf();
+        let uid = ctx.user_id;
+        let year = chrono::Utc::now().format("%Y").to_string();
+        let start = args.get("start").and_then(|v| v.as_str()).unwrap_or(&format!("{}-01-01", year)).to_string();
+        let end = args.get("end").and_then(|v| v.as_str()).unwrap_or(&format!("{}-12-31", year)).to_string();
+        let entity_filter = args.get("entity").and_then(|v| v.as_str()).map(String::from);
+
+        let summary = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+            let mut lines = vec![format!("Expense Summary ({} to {})", start, end)];
+
+            // By category
+            let mut sql = "SELECT c.name, c.entity, SUM(e.amount_cents), COUNT(*) \
+                           FROM expenses e JOIN expense_categories c ON e.category_id = c.id \
+                           WHERE e.user_id = ? AND e.expense_date >= ? AND e.expense_date <= ?".to_string();
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+                Box::new(uid), Box::new(start.clone()), Box::new(end.clone()),
+            ];
+            if let Some(ref ent) = entity_filter {
+                sql.push_str(" AND e.entity = ?");
+                params.push(Box::new(ent.clone()));
+            }
+            sql.push_str(" GROUP BY c.id ORDER BY SUM(e.amount_cents) DESC");
+
+            let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+            let refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|b| b.as_ref()).collect();
+            let rows = stmt.query_map(refs.as_slice(), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?))
+            }).map_err(|e| e.to_string())?;
+
+            let mut total: i64 = 0;
+            lines.push(String::new());
+            for r in rows {
+                if let Ok((cat, ent, cents, count)) = r {
+                    total += cents;
+                    lines.push(format!("  {} ({}): {} ({} items)", cat, ent, crate::tax::cents_to_display(cents), count));
+                }
+            }
+            lines.push(String::new());
+            lines.push(format!("Total: {}", crate::tax::cents_to_display(total)));
+
+            Ok(lines.join("\n"))
+        }).await.map_err(|e| e.to_string())?.map_err(|e| e)?;
+
+        Ok(RichToolResult::text(summary))
+    }
+}
+
+pub struct ScanReceiptTool;
+
+#[async_trait]
+impl Tool for ScanReceiptTool {
+    fn name(&self) -> &str { "scan_receipt" }
+    fn description(&self) -> &str { "Scan a receipt image that the user has uploaded. Extracts vendor, amount, date, and category using AI vision. The receipt must already be uploaded via the dashboard." }
+    fn parameters(&self) -> Value {
+        json!({ "type": "object", "properties": {
+            "receipt_id": { "type": "integer", "description": "The receipt ID to scan (from a pending upload)" }
+        }, "required": ["receipt_id"] })
+    }
+    fn capabilities(&self) -> ToolCapabilities { ToolCapabilities { read_only: false, ..Default::default() } }
+    async fn execute(&self, args: Value, ctx: &ToolContext<'_>) -> Result<RichToolResult, String> {
+        let id = args.get("receipt_id").and_then(|v| v.as_i64()).ok_or("receipt_id required")?;
+        let db = ctx.db_path.ok_or("database not available")?.to_path_buf();
+
+        // Check receipt exists and is pending
+        let status: String = {
+            let db2 = db.clone();
+            tokio::task::spawn_blocking(move || -> Result<String, String> {
+                let conn = rusqlite::Connection::open(&db2).map_err(|e| e.to_string())?;
+                conn.query_row("SELECT status FROM receipts WHERE id = ?", rusqlite::params![id], |r| r.get(0))
+                    .map_err(|e| format!("Receipt not found: {}", e))
+            }).await.map_err(|e| e.to_string())?.map_err(|e| e)?
+        };
+
+        if status == "scanned" {
+            return Ok(RichToolResult::text(format!("Receipt #{} has already been scanned.", id)));
+        }
+
+        Ok(RichToolResult::text(format!("Receipt #{} is queued for scanning. The vision AI will process it shortly and create an expense entry automatically.", id)))
+    }
+}

@@ -54,7 +54,7 @@ pub struct CategorySummary {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-fn cents_to_display(cents: i64) -> String {
+pub fn cents_to_display(cents: i64) -> String {
     let negative = cents < 0;
     let abs = cents.unsigned_abs();
     let dollars = abs / 100;
@@ -66,7 +66,7 @@ fn cents_to_display(cents: i64) -> String {
     }
 }
 
-fn parse_cents(s: &str) -> Option<i64> {
+pub fn parse_cents(s: &str) -> Option<i64> {
     let cleaned = s.replace(['$', ',', ' '], "");
     let parts: Vec<&str> = cleaned.split('.').collect();
     match parts.len() {

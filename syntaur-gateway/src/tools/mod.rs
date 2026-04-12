@@ -302,6 +302,9 @@ impl ToolRegistry {
         reg!(built_in_tools::CompleteTodoTool);
         reg!(built_in_tools::ListTodosTool);
         reg!(built_in_tools::AddCalendarEventTool);
+        reg!(built_in_tools::LogExpenseTool);
+        reg!(built_in_tools::ExpenseSummaryTool);
+        reg!(built_in_tools::ScanReceiptTool);
         reg!(built_in_tools::BrowserScreenshotTool);
         reg!(built_in_tools::BrowserExecuteJsTool);
         reg!(built_in_tools::BrowserClickAtTool);
