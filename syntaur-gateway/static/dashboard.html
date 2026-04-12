@@ -161,6 +161,17 @@
       </div>
     </div>
 
+    <!-- Tax Summary -->
+    <div class="card" id="tax-widget">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-medium text-sm text-gray-400">Expenses (YTD)</h3>
+        <a href="/tax" class="text-xs text-oc-500 hover:text-oc-400">View All</a>
+      </div>
+      <div id="tax-summary-content">
+        <p class="text-xs text-gray-600">Loading...</p>
+      </div>
+    </div>
+
     <!-- Quick Actions -->
     <div class="card">
       <h3 class="font-medium text-sm text-gray-400 mb-3">Quick Actions</h3>
@@ -521,6 +532,48 @@ function getDashAgentId(name) {
   return dashAgentIdMap[name] || name.toLowerCase().replace(/\s+/g, '-');
 }
 
+// ── Tax Summary Widget ──
+async function loadTaxSummary() {
+  try {
+    const resp = await authFetch(`/api/tax/summary?token=${authToken}`);
+    const data = await resp.json();
+    const el = document.getElementById('tax-summary-content');
+    if (!data.total_cents && data.total_cents !== 0) {
+      el.innerHTML = '<p class="text-xs text-gray-600">No expenses tracked yet</p>';
+      return;
+    }
+    const cats = (data.categories || []).slice(0, 4);
+    el.innerHTML = `
+      <div class="space-y-2">
+        <div class="flex justify-between text-sm">
+          <span class="text-gray-400">Total</span>
+          <span class="text-white font-medium">${data.total_display}</span>
+        </div>
+        <div class="flex justify-between text-sm">
+          <span class="text-gray-400">Business</span>
+          <span class="text-gray-300">${data.business_display}</span>
+        </div>
+        <div class="flex justify-between text-sm">
+          <span class="text-gray-400">Deductible</span>
+          <span class="text-green-400">${data.deductible_display}</span>
+        </div>
+        ${data.receipt_count > 0 ? `<div class="flex justify-between text-sm"><span class="text-gray-400">Receipts</span><span class="text-gray-300">${data.receipt_count}</span></div>` : ''}
+      </div>
+      ${cats.length > 0 ? `
+        <div class="mt-3 pt-3 border-t border-gray-700 space-y-1">
+          ${cats.map(c => `
+            <div class="flex justify-between text-xs">
+              <span class="text-gray-500">${c.category}</span>
+              <span class="text-gray-400">${c.total_display}</span>
+            </div>
+          `).join('')}
+        </div>
+      ` : ''}`;
+  } catch(e) {
+    document.getElementById('tax-summary-content').innerHTML = '<p class="text-xs text-gray-600">Tax module not configured</p>';
+  }
+}
+
 // Init widgets — rendered empty first, populated after auth
 renderTodos();
 renderCalendar();
@@ -852,6 +905,7 @@ function showPhoneAccess() {
   loadDashboard();
   loadTodos();
   loadCalendarEvents();
+  loadTaxSummary();
   setInterval(loadDashboard, 30000);
   setInterval(loadTodos, 60000);
 })();

@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" href="/favicon.ico" type="image/x-icon"><link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32"><link rel="apple-touch-icon" href="/icon-192.png">
+<link rel="manifest" href="/manifest.json">
+<title>Syntaur — Tax & Expenses</title>
+<script src="/tailwind.js"></script>
+<script>tailwind.config={darkMode:'class',theme:{extend:{colors:{oc:{500:'#0ea5e9',600:'#0284c7',700:'#0369a1'}}}}}</script>
+<style>
+  @import url('/fonts.css');
+  body { font-family: 'Inter', sans-serif; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; }
+  .card { @apply bg-gray-800 rounded-xl border border-gray-700 p-5; }
+  .btn-primary { @apply bg-oc-600 hover:bg-oc-700 text-white font-medium py-2 px-4 rounded-lg transition-colors text-sm; }
+  .input { @apply w-full bg-gray-900 border border-gray-600 rounded-lg px-3 py-2 text-white placeholder-gray-500 focus:border-oc-500 focus:ring-1 focus:ring-oc-500 outline-none text-sm; }
+  .label { @apply block text-xs font-medium text-gray-400 mb-1; }
+</style>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen">
+
+<!-- Top bar -->
+<div class="border-b border-gray-800 bg-gray-900/50 backdrop-blur sticky top-0 z-40">
+  <div class="max-w-6xl mx-auto px-4 py-2.5 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <a href="/" class="flex items-center gap-2 hover:opacity-80">
+        <img src="/app-icon.jpg" class="h-8 w-8 rounded-lg" alt="">
+        <span class="font-semibold">Syntaur</span>
+      </a>
+      <span class="text-gray-500">/</span>
+      <span class="text-gray-300 font-medium">Tax & Expenses</span>
+    </div>
+    <div class="flex items-center gap-3 text-sm">
+      <button onclick="showTab('overview')" class="tab text-white" id="tab-btn-overview">Overview</button>
+      <button onclick="showTab('expenses')" class="tab text-gray-400" id="tab-btn-expenses">Expenses</button>
+      <button onclick="showTab('receipts')" class="tab text-gray-400" id="tab-btn-receipts">Receipts</button>
+      <a href="/" class="text-gray-500 hover:text-gray-300">Home</a>
+    </div>
+  </div>
+</div>
+
+<div class="max-w-6xl mx-auto px-4 py-6">
+
+  <!-- Overview tab -->
+  <div id="tab-overview">
+    <!-- Summary cards -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+      <div class="card">
+        <p class="text-xs text-gray-500 uppercase">Total Expenses</p>
+        <p class="text-2xl font-semibold mt-1" id="sum-total">--</p>
+      </div>
+      <div class="card">
+        <p class="text-xs text-gray-500 uppercase">Business</p>
+        <p class="text-2xl font-semibold mt-1 text-oc-500" id="sum-business">--</p>
+      </div>
+      <div class="card">
+        <p class="text-xs text-gray-500 uppercase">Tax Deductible</p>
+        <p class="text-2xl font-semibold mt-1 text-green-400" id="sum-deductible">--</p>
+      </div>
+      <div class="card">
+        <p class="text-xs text-gray-500 uppercase">Receipts</p>
+        <p class="text-2xl font-semibold mt-1" id="sum-receipts">--</p>
+      </div>
+    </div>
+
+    <!-- Category breakdown -->
+    <div class="card">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="font-medium">By Category</h3>
+        <a href="/api/tax/export?token=" id="export-link" class="text-xs text-oc-500 hover:text-oc-400">Export CSV</a>
+      </div>
+      <div id="category-list" class="space-y-2">
+        <p class="text-xs text-gray-600">Loading...</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Expenses tab -->
+  <div id="tab-expenses" class="hidden">
+    <!-- Add expense form -->
+    <div class="card mb-6">
+      <h3 class="font-medium mb-4">Log Expense</h3>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div>
+          <label class="label">Vendor</label>
+          <input type="text" id="exp-vendor" class="input" placeholder="Home Depot">
+        </div>
+        <div>
+          <label class="label">Amount</label>
+          <input type="text" id="exp-amount" class="input" placeholder="45.99">
+        </div>
+        <div>
+          <label class="label">Category</label>
+          <select id="exp-category" class="input"></select>
+        </div>
+        <div>
+          <label class="label">Date</label>
+          <input type="date" id="exp-date" class="input">
+        </div>
+      </div>
+      <div class="grid grid-cols-2 gap-3 mt-3">
+        <div>
+          <label class="label">Description (optional)</label>
+          <input type="text" id="exp-desc" class="input" placeholder="2x4 lumber for shelving project">
+        </div>
+        <div>
+          <label class="label">Entity</label>
+          <select id="exp-entity" class="input">
+            <option value="business">Business</option>
+            <option value="personal">Personal</option>
+          </select>
+        </div>
+      </div>
+      <div class="mt-3 flex items-center gap-3">
+        <button onclick="addExpense()" class="btn-primary">Add Expense</button>
+        <span id="exp-status" class="text-xs text-gray-500"></span>
+      </div>
+    </div>
+
+    <!-- Expense list -->
+    <div class="card">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="font-medium">Recent Expenses</h3>
+        <div class="flex gap-2">
+          <select id="exp-filter-entity" class="input w-auto" onchange="loadExpenses()">
+            <option value="">All</option>
+            <option value="business">Business</option>
+            <option value="personal">Personal</option>
+          </select>
+        </div>
+      </div>
+      <div id="expense-list" class="space-y-2">
+        <p class="text-xs text-gray-600">Loading...</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Receipts tab -->
+  <div id="tab-receipts" class="hidden">
+    <!-- Upload -->
+    <div class="card mb-6">
+      <h3 class="font-medium mb-3">Upload Receipt</h3>
+      <p class="text-xs text-gray-500 mb-3">Upload a photo or PDF of a receipt. AI will automatically extract the vendor, amount, date, and category.</p>
+      <div class="flex items-center gap-3">
+        <label class="btn-primary cursor-pointer">
+          Choose File
+          <input type="file" class="hidden" accept="image/*,.pdf" onchange="uploadReceipt(this)" id="receipt-input">
+        </label>
+        <span id="receipt-status" class="text-xs text-gray-500"></span>
+      </div>
+    </div>
+
+    <!-- Receipt gallery -->
+    <div class="card">
+      <h3 class="font-medium mb-4">Receipts</h3>
+      <div id="receipt-list" class="grid grid-cols-2 md:grid-cols-3 gap-3">
+        <p class="text-xs text-gray-600 col-span-full">Loading...</p>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const token = sessionStorage.getItem('syntaur_token') || '';
+if (!token) { window.location.href = '/'; }
+
+function authFetch(url, opts = {}) {
+  opts.headers = opts.headers || {};
+  opts.headers['Authorization'] = 'Bearer ' + token;
+  return fetch(url, opts);
+}
+
+function showTab(name) {
+  ['overview', 'expenses', 'receipts'].forEach(t => {
+    document.getElementById('tab-' + t).classList.toggle('hidden', t !== name);
+    const btn = document.getElementById('tab-btn-' + t);
+    btn.className = 'tab ' + (t === name ? 'text-white' : 'text-gray-400 hover:text-gray-300');
+  });
+  if (name === 'expenses') loadExpenses();
+  if (name === 'receipts') loadReceipts();
+}
+
+// Overview
+async function loadOverview() {
+  try {
+    const resp = await authFetch(`/api/tax/summary?token=${token}`);
+    const data = await resp.json();
+    document.getElementById('sum-total').textContent = data.total_display || '$0.00';
+    document.getElementById('sum-business').textContent = data.business_display || '$0.00';
+    document.getElementById('sum-deductible').textContent = data.deductible_display || '$0.00';
+    document.getElementById('sum-receipts').textContent = data.receipt_count || '0';
+    document.getElementById('export-link').href = `/api/tax/export?token=${token}`;
+
+    const cats = data.categories || [];
+    const list = document.getElementById('category-list');
+    if (cats.length === 0) {
+      list.innerHTML = '<p class="text-sm text-gray-600">No expenses yet. Start by logging an expense or uploading a receipt.</p>';
+    } else {
+      list.innerHTML = cats.map(c => `
+        <div class="flex items-center justify-between py-2 border-b border-gray-700/50 last:border-0">
+          <div class="flex items-center gap-2">
+            <span class="text-sm text-gray-300">${c.category}</span>
+            <span class="text-xs px-1.5 py-0.5 rounded ${c.entity === 'business' ? 'bg-oc-900/50 text-oc-400' : 'bg-gray-700 text-gray-400'}">${c.entity}</span>
+            ${c.tax_deductible ? '<span class="text-xs text-green-500">deductible</span>' : ''}
+          </div>
+          <div class="text-right">
+            <span class="text-sm font-medium text-gray-200">${c.total_display}</span>
+            <span class="text-xs text-gray-600 ml-2">${c.count} items</span>
+          </div>
+        </div>
+      `).join('');
+    }
+  } catch(e) { console.log('overview:', e); }
+}
+
+// Expenses
+async function loadExpenses() {
+  try {
+    const entity = document.getElementById('exp-filter-entity').value;
+    let url = `/api/tax/expenses?token=${token}`;
+    if (entity) url += `&entity=${entity}`;
+    const resp = await authFetch(url);
+    const data = await resp.json();
+    const list = document.getElementById('expense-list');
+    const expenses = data.expenses || [];
+    if (expenses.length === 0) {
+      list.innerHTML = '<p class="text-sm text-gray-600">No expenses yet.</p>';
+    } else {
+      list.innerHTML = expenses.map(e => `
+        <div class="flex items-center justify-between py-2 border-b border-gray-700/50 last:border-0">
+          <div>
+            <p class="text-sm text-gray-300">${esc(e.vendor)}</p>
+            <p class="text-xs text-gray-500">${e.expense_date} &middot; ${e.category || 'Uncategorized'} &middot; ${e.entity}</p>
+            ${e.description ? '<p class="text-xs text-gray-600">' + esc(e.description) + '</p>' : ''}
+          </div>
+          <span class="text-sm font-medium text-gray-200">${e.amount_display}</span>
+        </div>
+      `).join('');
+    }
+  } catch(e) { console.log('expenses:', e); }
+}
+
+async function addExpense() {
+  const vendor = document.getElementById('exp-vendor').value.trim();
+  const amount = document.getElementById('exp-amount').value.trim();
+  const date = document.getElementById('exp-date').value;
+  if (!vendor || !amount || !date) { document.getElementById('exp-status').textContent = 'Fill in vendor, amount, and date'; return; }
+
+  const cat = document.getElementById('exp-category');
+  const body = {
+    token, vendor, amount, date,
+    category: cat.value || null,
+    description: document.getElementById('exp-desc').value || null,
+    entity: document.getElementById('exp-entity').value,
+  };
+
+  try {
+    const resp = await authFetch('/api/tax/expenses', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    const data = await resp.json();
+    document.getElementById('exp-status').textContent = `Added: ${data.amount_display} at ${vendor}`;
+    document.getElementById('exp-vendor').value = '';
+    document.getElementById('exp-amount').value = '';
+    document.getElementById('exp-desc').value = '';
+    loadExpenses();
+    loadOverview();
+  } catch(e) { document.getElementById('exp-status').textContent = 'Error adding expense'; }
+}
+
+// Receipts
+async function loadReceipts() {
+  try {
+    const resp = await authFetch(`/api/tax/receipts?token=${token}`);
+    const data = await resp.json();
+    const list = document.getElementById('receipt-list');
+    const receipts = data.receipts || [];
+    if (receipts.length === 0) {
+      list.innerHTML = '<p class="text-sm text-gray-600 col-span-full">No receipts uploaded yet. Upload a photo or PDF above.</p>';
+    } else {
+      list.innerHTML = receipts.map(r => `
+        <div class="bg-gray-900 rounded-lg border border-gray-700 overflow-hidden">
+          <img src="${r.image_url}?token=${token}" class="w-full h-32 object-cover bg-gray-800" alt="" onerror="this.style.display='none'">
+          <div class="p-3">
+            <p class="text-sm font-medium text-gray-300">${esc(r.vendor || 'Scanning...')}</p>
+            <p class="text-xs text-gray-500">${r.receipt_date || ''} ${r.amount_display ? '&middot; ' + r.amount_display : ''}</p>
+            <p class="text-xs text-gray-600">${r.category || ''}</p>
+            <span class="inline-block mt-1 text-xs px-1.5 py-0.5 rounded ${r.status === 'scanned' ? 'bg-green-900/50 text-green-400' : 'bg-yellow-900/50 text-yellow-400'}">${r.status}</span>
+          </div>
+        </div>
+      `).join('');
+    }
+  } catch(e) { console.log('receipts:', e); }
+}
+
+async function uploadReceipt(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const status = document.getElementById('receipt-status');
+  status.textContent = 'Uploading...';
+
+  try {
+    const resp = await fetch(`/api/tax/receipts?token=${token}`, {
+      method: 'POST',
+      headers: { 'Content-Type': file.type },
+      body: file
+    });
+    const data = await resp.json();
+    status.textContent = data.message || 'Uploaded!';
+    setTimeout(() => loadReceipts(), 3000); // Wait for vision scan
+    loadReceipts();
+  } catch(e) { status.textContent = 'Upload failed'; }
+  input.value = '';
+}
+
+// Load categories for the form
+async function loadCategories() {
+  try {
+    const resp = await authFetch(`/api/tax/categories?token=${token}`);
+    const data = await resp.json();
+    const sel = document.getElementById('exp-category');
+    sel.innerHTML = '<option value="">Select category</option>' +
+      (data.categories || []).map(c =>
+        `<option value="${c.name}">${c.name} (${c.entity})</option>`
+      ).join('');
+  } catch(e) {}
+}
+
+function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+// Set today's date as default
+document.getElementById('exp-date').value = new Date().toISOString().split('T')[0];
+
+// Init
+loadOverview();
+loadCategories();
+</script>
+</body>
+</html>

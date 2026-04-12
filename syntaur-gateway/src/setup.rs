@@ -1008,6 +1008,11 @@ pub async fn handle_agent_avatar_upload(
     Ok(axum::Json(serde_json::json!({ "success": true, "path": path })))
 }
 
+/// GET /tax — tax & expenses page
+pub async fn handle_tax_page() -> axum::response::Html<&'static str> {
+    axum::response::Html(include_str!("../static/tax.html"))
+}
+
 /// GET /tailwind.js — bundled Tailwind CSS (no CDN dependency)
 pub async fn handle_tailwind() -> (axum::http::HeaderMap, &'static str) {
     let mut headers = axum::http::HeaderMap::new();

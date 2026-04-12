@@ -3307,6 +3307,7 @@ async fn main() {
         .route("/setup", get(setup::handle_setup_page))
         .route("/modules", get(setup::handle_modules_page))
         .route("/settings", get(setup::handle_settings_page))
+        .route("/tax", get(setup::handle_tax_page))
         .route("/chat", get(setup::handle_chat_page))
         .route("/history", get(setup::handle_history_page))
         .route("/landing", get(setup::handle_landing_page))
