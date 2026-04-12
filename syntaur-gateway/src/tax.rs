@@ -182,7 +182,8 @@ async fn scan_receipt_vision(state: &AppState, receipt_id: i64) -> Result<(), St
     };
 
     let image_bytes = std::fs::read(&image_path).map_err(|e| e.to_string())?;
-    let base64_image = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &image_bytes);
+    use base64::Engine;
+    let base64_image = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
 
     let ext = image_path.rsplit('.').next().unwrap_or("jpg");
     let mime = match ext {
@@ -195,17 +196,29 @@ async fn scan_receipt_vision(state: &AppState, receipt_id: i64) -> Result<(), St
     let client = &state.client;
     let config = &state.config;
 
-    // Find a provider that supports vision (prefer cloud for accuracy)
+    // Find a provider that supports vision. Use OpenRouter with a vision model.
+    // The user's configured model may not support images, so we override to a
+    // known vision-capable model on whatever cloud provider is available.
     let provider = config.models.providers.iter()
         .find(|(_, p)| p.base_url.contains("openrouter") || p.base_url.contains("openai") || p.base_url.contains("anthropic"))
         .or_else(|| config.models.providers.iter().next());
 
     let (provider_name, provider_config) = provider.ok_or("No LLM provider configured")?;
 
-    let model = provider_config.models.first()
-        .map(|m| m.id.as_str())
-        .or_else(|| provider_config.extra.get("model").and_then(|v| v.as_str()))
-        .unwrap_or("gpt-4o-mini");
+    // Force a vision-capable model regardless of what's configured
+    let model = if provider_config.base_url.contains("openrouter") {
+        "google/gemini-2.0-flash-001" // Free, vision-capable on OpenRouter
+    } else if provider_config.base_url.contains("anthropic") {
+        "claude-sonnet-4-6"
+    } else if provider_config.base_url.contains("openai") {
+        "gpt-4o-mini"
+    } else {
+        // Local models rarely support vision — try anyway with configured model
+        provider_config.models.first()
+            .map(|m| m.id.as_str())
+            .or_else(|| provider_config.extra.get("model").and_then(|v| v.as_str()))
+            .unwrap_or("gpt-4o-mini")
+    };
 
     let url = format!("{}/chat/completions", provider_config.base_url.trim_end_matches('/'));
 

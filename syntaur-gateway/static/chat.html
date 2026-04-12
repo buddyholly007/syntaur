@@ -574,6 +574,17 @@ function handleFileSelect(event) {
 }
 
 async function addPendingFile(file) {
+  // Detect receipt images — auto-upload to tax module
+  const isImage = file.type.startsWith('image/') || file.type === 'application/pdf';
+  const isLikelyReceipt = isImage && file.size < 10 * 1024 * 1024;
+
+  if (isLikelyReceipt) {
+    // Show receipt scanning UI
+    showReceiptScan(file);
+    return;
+  }
+
+  // Regular file attachment
   const container = document.getElementById('pending-files');
   container.classList.remove('hidden');
   const sizeStr = file.size > 1048576 ? `${(file.size/1048576).toFixed(1)}MB` : `${(file.size/1024).toFixed(0)}KB`;
@@ -601,6 +612,89 @@ async function addPendingFile(file) {
     pill.innerHTML = '<span class="text-red-400">Error</span>';
     setTimeout(() => pill.remove(), 2000);
   }
+}
+
+// Receipt scanning overlay
+async function showReceiptScan(file) {
+  // Show scanning indicator in chat
+  const container = document.getElementById('messages');
+  const scroll = document.getElementById('messages-scroll');
+  const scanEl = document.createElement('div');
+  scanEl.className = 'flex gap-4';
+  scanEl.id = 'receipt-scan-msg';
+
+  const previewUrl = URL.createObjectURL(file);
+  scanEl.innerHTML = `
+    <img src="/agent-avatar/main" class="w-8 h-8 rounded-lg flex-shrink-0" alt="">
+    <div class="flex-1 min-w-0">
+      <div class="p-3 rounded-lg bg-gray-800 border border-gray-700">
+        <div class="flex items-start gap-3">
+          <img src="${previewUrl}" class="w-20 h-20 object-cover rounded-lg flex-shrink-0">
+          <div class="flex-1">
+            <p class="text-sm text-gray-300 font-medium">Scanning receipt...</p>
+            <p class="text-xs text-gray-500 mt-1">AI is extracting vendor, amount, date, and category.</p>
+            <div class="flex gap-1 mt-2">
+              <span class="w-1.5 h-1.5 rounded-full bg-oc-500 animate-bounce" style="animation-delay:0ms"></span>
+              <span class="w-1.5 h-1.5 rounded-full bg-oc-500 animate-bounce" style="animation-delay:150ms"></span>
+              <span class="w-1.5 h-1.5 rounded-full bg-oc-500 animate-bounce" style="animation-delay:300ms"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  container.appendChild(scanEl);
+  scroll.scrollTop = scroll.scrollHeight;
+
+  // Upload to tax receipt API
+  try {
+    const resp = await fetch(`/api/tax/receipts?token=${token}`, {
+      method: 'POST',
+      headers: { 'Content-Type': file.type },
+      body: file
+    });
+    const data = await resp.json();
+    const receiptId = data.id;
+
+    // Poll for scan results
+    pollReceiptResult(receiptId, scanEl, previewUrl);
+  } catch(e) {
+    scanEl.querySelector('.flex-1 > div').innerHTML = `
+      <p class="text-sm text-red-400">Receipt upload failed: ${e.message}</p>`;
+  }
+}
+
+async function pollReceiptResult(receiptId, el, previewUrl) {
+  const poll = async () => {
+    try {
+      const resp = await fetch(`/api/tax/receipts?token=${token}`);
+      const data = await resp.json();
+      const receipt = (data.receipts || []).find(r => r.id === receiptId);
+      if (receipt && receipt.status === 'scanned') {
+        // Show results with edit options
+        el.querySelector('.flex-1 > div').innerHTML = `
+          <div class="flex items-start gap-3">
+            <img src="${previewUrl}" class="w-20 h-20 object-cover rounded-lg flex-shrink-0">
+            <div class="flex-1 space-y-2">
+              <p class="text-sm text-green-400 font-medium">Receipt scanned</p>
+              <div class="grid grid-cols-2 gap-2 text-xs">
+                <div><span class="text-gray-500">Vendor:</span> <span class="text-gray-300">${esc(receipt.vendor || '?')}</span></div>
+                <div><span class="text-gray-500">Amount:</span> <span class="text-white font-medium">${receipt.amount_display || '?'}</span></div>
+                <div><span class="text-gray-500">Date:</span> <span class="text-gray-300">${receipt.receipt_date || '?'}</span></div>
+                <div><span class="text-gray-500">Category:</span> <span class="text-gray-300">${receipt.category || '?'}</span></div>
+              </div>
+              <p class="text-xs text-gray-500">${esc(receipt.description || '')}</p>
+              <div class="flex gap-2 mt-1">
+                <span class="text-xs text-green-500">Expense auto-saved</span>
+                <a href="/tax" class="text-xs text-oc-500 hover:text-oc-400">View in Tax Module</a>
+              </div>
+            </div>
+          </div>`;
+        return;
+      }
+    } catch(e) {}
+    setTimeout(poll, 2000);
+  };
+  setTimeout(poll, 3000);
 }
 
 // Override send to include file context

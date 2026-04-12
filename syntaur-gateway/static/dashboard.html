@@ -161,18 +161,7 @@
       </div>
     </div>
 
-    <!-- Tax Summary -->
-    <div class="card" id="tax-widget">
-      <div class="flex items-center justify-between mb-3">
-        <h3 class="font-medium text-sm text-gray-400">Expenses (YTD)</h3>
-        <a href="/tax" class="text-xs text-oc-500 hover:text-oc-400">View All</a>
-      </div>
-      <div id="tax-summary-content">
-        <p class="text-xs text-gray-600">Loading...</p>
-      </div>
-    </div>
-
-    <!-- Quick Actions -->
+    <!-- Quick Actions + Modules -->
     <div class="card">
       <h3 class="font-medium text-sm text-gray-400 mb-3">Quick Actions</h3>
       <div class="space-y-1.5">
@@ -182,8 +171,15 @@
         <button onclick="showPhoneAccess()" class="w-full flex items-center gap-2 p-2 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors text-sm text-left">
           <span class="text-gray-500">&#128241;</span> Open on Phone
         </button>
+      </div>
+
+      <h3 class="font-medium text-sm text-gray-400 mb-2 mt-4">Modules</h3>
+      <div class="space-y-1.5">
+        <a href="/tax" class="flex items-center gap-2 p-2 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors text-sm">
+          <span class="text-green-500">&#128176;</span> Tax & Expenses
+        </a>
         <a href="/modules" class="flex items-center gap-2 p-2 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors text-sm">
-          <span class="text-gray-500">&#9881;</span> Manage Modules
+          <span class="text-gray-500">&#9881;</span> All Modules
         </a>
       </div>
     </div>
@@ -905,7 +901,6 @@ function showPhoneAccess() {
   loadDashboard();
   loadTodos();
   loadCalendarEvents();
-  loadTaxSummary();
   setInterval(loadDashboard, 30000);
   setInterval(loadTodos, 60000);
 })();
