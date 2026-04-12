@@ -50,16 +50,29 @@
     Multi-agent chat, voice assistant, and smart home control in a single binary.
     Talk to it, type to it, or just say the wake word. It remembers you, controls your devices, and delegates to specialist agents when it needs to.
   </p>
-  <div class="flex flex-col sm:flex-row gap-3 justify-center" id="download">
-    <a href="https://github.com/buddyholly007/syntaur/releases/latest" class="bg-oc-600 hover:bg-oc-700 text-white px-8 py-3.5 rounded-xl font-semibold text-lg transition-colors inline-flex items-center justify-center gap-2">
-      Download Syntaur
-      <span class="text-sm opacity-70">6.6 MB</span>
-    </a>
-    <div class="bg-gray-800 border border-gray-700 rounded-xl px-6 py-3.5 font-mono text-sm text-gray-300 select-all">
+  <div class="flex flex-col gap-4 items-center" id="download">
+    <div class="flex flex-wrap gap-3 justify-center">
+      <a href="https://github.com/buddyholly007/syntaur/releases/latest/download/syntaur-linux-x86_64" class="bg-oc-600 hover:bg-oc-700 text-white px-6 py-3 rounded-xl font-semibold transition-colors inline-flex items-center gap-2">
+        <svg class="w-5 h-5" viewBox="0 0 24 24" fill="currentColor"><path d="M12.5 2c-5.52 0-10 4.48-10 10s4.48 10 10 10 10-4.48 10-10-4.48-10-10-10zm-2 15l-5-5 1.41-1.41L10.5 14.17l7.09-7.09L19 8.5l-8.5 8.5z"/></svg>
+        Linux x86_64
+      </a>
+      <a href="https://github.com/buddyholly007/syntaur/releases/latest/download/syntaur-macos-aarch64" class="bg-oc-600 hover:bg-oc-700 text-white px-6 py-3 rounded-xl font-semibold transition-colors inline-flex items-center gap-2">
+        <svg class="w-5 h-5" viewBox="0 0 24 24" fill="currentColor"><path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83"/></svg>
+        macOS (Apple Silicon)
+      </a>
+      <a href="https://github.com/buddyholly007/syntaur/releases/latest/download/syntaur-macos-x86_64" class="bg-gray-700 hover:bg-gray-600 text-white px-6 py-3 rounded-xl font-medium transition-colors inline-flex items-center gap-2">
+        macOS (Intel)
+      </a>
+      <a href="https://github.com/buddyholly007/syntaur/releases/latest/download/syntaur-windows-x86_64.exe" class="bg-gray-700 hover:bg-gray-600 text-white px-6 py-3 rounded-xl font-medium transition-colors inline-flex items-center gap-2">
+        <svg class="w-5 h-5" viewBox="0 0 24 24" fill="currentColor"><path d="M3 12V6.75l6-1.32v6.48L3 12zm6.73-.07l8.27.07V4.7L9.73 5.64v6.29zM21 11.18V4l-11.47 1.4v5.71L21 11.18zM3 13l6 .09v6.42l-6-1.01V13zm6.73.07v6.34l8.27 1.29v-7.56l-8.27-.07zM21 13.11l-11.47.07v6.52L21 21v-7.89z"/></svg>
+        Windows
+      </a>
+    </div>
+    <div class="bg-gray-800 border border-gray-700 rounded-xl px-6 py-3 font-mono text-sm text-gray-300 select-all">
       curl -sSL https://buddyholly007.github.io/syntaur/install.sh | sh
     </div>
   </div>
-  <p class="text-xs text-gray-600 mt-4">Linux, macOS, Windows &middot; Free tier included &middot; No account required</p>
+  <p class="text-xs text-gray-600 mt-4">All platforms &middot; Free tier included &middot; No account required</p>
 </section>
 
 <!-- Chat Demo -->
@@ -251,7 +264,7 @@ WLED            Z-Wave
         <li class="flex items-center gap-2"><span class="text-green-400">&#10003;</span> Telegram integration</li>
         <li class="flex items-center gap-2"><span class="text-green-400">&#10003;</span> Web search and file management</li>
       </ul>
-      <a href="https://github.com/buddyholly007/syntaur/releases/latest" class="block mt-6 text-center bg-gray-700 hover:bg-gray-600 text-white px-6 py-2.5 rounded-lg font-medium transition-colors">Download Free</a>
+      <a href="#download" class="block mt-6 text-center bg-gray-700 hover:bg-gray-600 text-white px-6 py-2.5 rounded-lg font-medium transition-colors">Download Free</a>
     </div>
     <div class="bg-gray-800/50 border-2 border-oc-600 rounded-2xl p-8 relative">
       <span class="absolute -top-3 left-1/2 -translate-x-1/2 bg-oc-600 text-white text-xs font-bold px-3 py-1 rounded-full">Most Popular</span>
@@ -276,7 +289,7 @@ WLED            Z-Wave
 <section class="max-w-5xl mx-auto px-4 py-20 text-center">
   <h2 class="text-3xl font-bold mb-4">Your AI. Your hardware. Your rules.</h2>
   <p class="text-gray-400 mb-8 max-w-lg mx-auto">Download Syntaur and talk to it in 5 minutes. No account, no Docker, no cloud dependency.</p>
-  <a href="https://github.com/buddyholly007/syntaur/releases/latest" class="bg-oc-600 hover:bg-oc-700 text-white px-8 py-3.5 rounded-xl font-semibold text-lg transition-colors inline-block">Download Syntaur</a>
+  <a href="#download" class="bg-oc-600 hover:bg-oc-700 text-white px-8 py-3.5 rounded-xl font-semibold text-lg transition-colors inline-block">Download for your platform</a>
 </section>
 
 <!-- Footer -->
