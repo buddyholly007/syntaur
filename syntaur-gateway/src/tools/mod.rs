@@ -108,6 +108,8 @@ pub struct ToolRegistry {
     /// web_fetch, etc). When None, those tools get `ctx.http = None` and
     /// must handle gracefully. Set via `set_http_client`.
     http_client: Option<Arc<reqwest::Client>>,
+    /// Path to index.db for tools that need direct DB access (todos, calendar).
+    db_path: Option<PathBuf>,
 }
 
 /// Per-request approval wiring. Set when the agent has an approval-capable
@@ -296,6 +298,10 @@ impl ToolRegistry {
         reg!(built_in_tools::BrowserReadBriefTool);
         reg!(built_in_tools::BrowserReadTool);
         reg!(built_in_tools::BrowserFindInputsTool);
+        reg!(built_in_tools::AddTodoTool);
+        reg!(built_in_tools::CompleteTodoTool);
+        reg!(built_in_tools::ListTodosTool);
+        reg!(built_in_tools::AddCalendarEventTool);
         reg!(built_in_tools::BrowserScreenshotTool);
         reg!(built_in_tools::BrowserExecuteJsTool);
         reg!(built_in_tools::BrowserClickAtTool);
@@ -319,8 +325,12 @@ impl ToolRegistry {
             user_id: 0,
             tool_hooks: None,
             http_client: None,
+            db_path: None,
         }
     }
+
+    /// Set the db_path for tools that need direct database access (todos, calendar).
+    pub fn set_db_path(&mut self, path: PathBuf) { self.db_path = Some(path); }
 
     /// Set the shared HTTP client for outbound-request tools. Call from
     /// voice_chat or any other path that wants tools like `weather` and
@@ -581,6 +591,7 @@ impl ToolRegistry {
             circuit_breakers: self.circuit_breakers.clone(),
             allowed_scripts: &self.allowed_scripts,
             user_id: self.user_id,
+            db_path: self.db_path.as_deref(),
         };
         let started = Instant::now();
         let result = match adaptive_timeout {

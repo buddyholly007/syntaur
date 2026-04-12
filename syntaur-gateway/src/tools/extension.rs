@@ -46,6 +46,8 @@ pub struct ToolContext<'a> {
     pub circuit_breakers: Option<Arc<Mutex<std::collections::HashMap<String, CircuitBreaker>>>>,
     pub allowed_scripts: &'a [String],
     pub user_id: i64,
+    /// Path to index.db for direct queries (todos, calendar, bug reports).
+    pub db_path: Option<&'a Path>,
 }
 
 // ── Gateway-internal Tool trait ─────────────────────────────────────────

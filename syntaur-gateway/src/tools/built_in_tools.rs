@@ -1631,3 +1631,139 @@ impl Tool for BrowserWaitTool {
             .map(RichToolResult::text)
     }
 }
+
+// ── Todos ───────────────────────────────────────────────────────────────────
+
+pub struct AddTodoTool;
+
+#[async_trait]
+impl Tool for AddTodoTool {
+    fn name(&self) -> &str { "add_todo" }
+    fn description(&self) -> &str { "Add a task to the user's to-do list. The task appears on their dashboard across all devices." }
+    fn parameters(&self) -> Value {
+        json!({ "type": "object", "properties": {
+            "text": { "type": "string", "description": "The task description" },
+            "due_date": { "type": "string", "description": "Optional due date (YYYY-MM-DD)" }
+        }, "required": ["text"] })
+    }
+    fn capabilities(&self) -> ToolCapabilities { ToolCapabilities::default() }
+    async fn execute(&self, args: Value, ctx: &ToolContext<'_>) -> Result<RichToolResult, String> {
+        let text = arg_str(&args, "text");
+        if text.is_empty() { return Err("text is required".into()); }
+        let due = args.get("due_date").and_then(|v| v.as_str());
+        let db = ctx.db_path.ok_or("database not available")?;
+        let uid = ctx.user_id;
+        let now = chrono::Utc::now().timestamp();
+        let text_owned = text.to_string();
+        let due_owned = due.map(String::from);
+        let db_owned = db.to_path_buf();
+        let id = tokio::task::spawn_blocking(move || -> Result<i64, String> {
+            let conn = rusqlite::Connection::open(&db_owned).map_err(|e| e.to_string())?;
+            conn.execute("INSERT INTO todos (user_id, text, due_date, created_at) VALUES (?, ?, ?, ?)",
+                rusqlite::params![uid, &text_owned, &due_owned, now]).map_err(|e| e.to_string())?;
+            Ok(conn.last_insert_rowid())
+        }).await.map_err(|e| e.to_string())?.map_err(|e| e)?;
+        Ok(RichToolResult::text(format!("Added todo #{}: {}", id, text)))
+    }
+}
+
+pub struct CompleteTodoTool;
+
+#[async_trait]
+impl Tool for CompleteTodoTool {
+    fn name(&self) -> &str { "complete_todo" }
+    fn description(&self) -> &str { "Mark a to-do item as completed." }
+    fn parameters(&self) -> Value {
+        json!({ "type": "object", "properties": {
+            "id": { "type": "integer", "description": "The todo ID to complete" }
+        }, "required": ["id"] })
+    }
+    fn capabilities(&self) -> ToolCapabilities { ToolCapabilities::default() }
+    async fn execute(&self, args: Value, ctx: &ToolContext<'_>) -> Result<RichToolResult, String> {
+        let id = args.get("id").and_then(|v| v.as_i64()).ok_or("id is required")?;
+        let db = ctx.db_path.ok_or("database not available")?.to_path_buf();
+        let uid = ctx.user_id;
+        let now = chrono::Utc::now().timestamp();
+        tokio::task::spawn_blocking(move || -> Result<(), String> {
+            let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+            conn.execute("UPDATE todos SET done = 1, completed_at = ? WHERE id = ? AND user_id = ?",
+                rusqlite::params![now, id, uid]).map_err(|e| e.to_string())?;
+            Ok(())
+        }).await.map_err(|e| e.to_string())?.map_err(|e| e)?;
+        Ok(RichToolResult::text(format!("Completed todo #{}", id)))
+    }
+}
+
+pub struct ListTodosTool;
+
+#[async_trait]
+impl Tool for ListTodosTool {
+    fn name(&self) -> &str { "list_todos" }
+    fn description(&self) -> &str { "List all to-do items for the current user." }
+    fn parameters(&self) -> Value { json!({ "type": "object", "properties": {} }) }
+    fn capabilities(&self) -> ToolCapabilities { ToolCapabilities::default() }
+    async fn execute(&self, _args: Value, ctx: &ToolContext<'_>) -> Result<RichToolResult, String> {
+        let db = ctx.db_path.ok_or("database not available")?.to_path_buf();
+        let uid = ctx.user_id;
+        let todos = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+            let mut stmt = conn.prepare("SELECT id, text, done, due_date FROM todos WHERE user_id = ? ORDER BY done ASC, created_at DESC")
+                .map_err(|e| e.to_string())?;
+            let rows: Vec<String> = stmt.query_map(rusqlite::params![uid], |r| {
+                let id: i64 = r.get(0)?;
+                let text: String = r.get(1)?;
+                let done: bool = r.get::<_, i64>(2)? != 0;
+                let due: Option<String> = r.get(3)?;
+                let check = if done { "x" } else { " " };
+                let due_str = due.map(|d| format!(" (due: {})", d)).unwrap_or_default();
+                Ok(format!("[{}] #{} {}{}", check, id, text, due_str))
+            }).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
+            if rows.is_empty() { Ok("No todos.".to_string()) }
+            else { Ok(rows.join("\n")) }
+        }).await.map_err(|e| e.to_string())?.map_err(|e| e)?;
+        Ok(RichToolResult::text(todos))
+    }
+}
+
+// ── Calendar Events ─────────────────────────────────────────────────────────
+
+pub struct AddCalendarEventTool;
+
+#[async_trait]
+impl Tool for AddCalendarEventTool {
+    fn name(&self) -> &str { "add_calendar_event" }
+    fn description(&self) -> &str { "Add an event to the user's calendar. Appears on the dashboard calendar across all devices." }
+    fn parameters(&self) -> Value {
+        json!({ "type": "object", "properties": {
+            "title": { "type": "string", "description": "Event title" },
+            "start_time": { "type": "string", "description": "Start time (ISO 8601 or YYYY-MM-DD for all-day)" },
+            "end_time": { "type": "string", "description": "Optional end time" },
+            "description": { "type": "string", "description": "Optional description" },
+            "all_day": { "type": "boolean", "description": "True for all-day events" }
+        }, "required": ["title", "start_time"] })
+    }
+    fn capabilities(&self) -> ToolCapabilities { ToolCapabilities::default() }
+    async fn execute(&self, args: Value, ctx: &ToolContext<'_>) -> Result<RichToolResult, String> {
+        let title = arg_str(&args, "title");
+        let start = arg_str(&args, "start_time");
+        if title.is_empty() || start.is_empty() { return Err("title and start_time required".into()); }
+        let db = ctx.db_path.ok_or("database not available")?.to_path_buf();
+        let uid = ctx.user_id;
+        let now = chrono::Utc::now().timestamp();
+        let title_owned = title.to_string();
+        let desc = args.get("description").and_then(|v| v.as_str()).map(String::from);
+        let start_owned = start.to_string();
+        let end = args.get("end_time").and_then(|v| v.as_str()).map(String::from);
+        let all_day = args.get("all_day").and_then(|v| v.as_bool()).unwrap_or(false);
+        let source = format!("agent:{}", ctx.agent_id);
+        let id = tokio::task::spawn_blocking(move || -> Result<i64, String> {
+            let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+            conn.execute(
+                "INSERT INTO calendar_events (user_id, title, description, start_time, end_time, all_day, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                rusqlite::params![uid, &title_owned, &desc, &start_owned, &end, all_day as i64, &source, now],
+            ).map_err(|e| e.to_string())?;
+            Ok(conn.last_insert_rowid())
+        }).await.map_err(|e| e.to_string())?.map_err(|e| e)?;
+        Ok(RichToolResult::text(format!("Added calendar event #{}: {} on {}", id, title, start)))
+    }
+}

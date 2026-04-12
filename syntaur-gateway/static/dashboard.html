@@ -269,8 +269,17 @@ function showPanel(name) {
 
 function openFullChat() { location.href = '/chat'; }
 
-// ── Todo List (localStorage) ──
-let todos = JSON.parse(localStorage.getItem('syntaur_todos') || '[]');
+// ── Todo List (server-synced) ──
+let todos = [];
+
+async function loadTodos() {
+  try {
+    const resp = await authFetch(`/api/todos?token=${authToken}`);
+    const data = await resp.json();
+    todos = data.todos || [];
+    renderTodos();
+  } catch(e) { console.log('todo load:', e); }
+}
 
 function renderTodos() {
   const list = document.getElementById('todo-list');
@@ -281,39 +290,69 @@ function renderTodos() {
     list.innerHTML = '<p class="text-xs text-gray-600 py-2">No tasks yet</p>';
     return;
   }
-  list.innerHTML = todos.map((t, i) => `
+  list.innerHTML = todos.map(t => `
     <div class="flex items-center gap-2 group">
-      <input type="checkbox" ${t.done ? 'checked' : ''} onchange="toggleTodo(${i})" class="rounded border-gray-600 bg-gray-900 text-oc-500 focus:ring-oc-500 cursor-pointer">
+      <input type="checkbox" ${t.done ? 'checked' : ''} onchange="toggleTodo(${t.id})" class="rounded border-gray-600 bg-gray-900 text-oc-500 focus:ring-oc-500 cursor-pointer">
       <span class="flex-1 text-sm ${t.done ? 'text-gray-600 line-through' : 'text-gray-300'}">${escapeHtml(t.text)}</span>
-      <button onclick="deleteTodo(${i})" class="text-gray-700 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity text-xs">&times;</button>
+      ${t.due_date ? '<span class="text-xs text-gray-600">' + t.due_date + '</span>' : ''}
+      <button onclick="deleteTodo(${t.id})" class="text-gray-700 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity text-xs">&times;</button>
     </div>
   `).join('');
 }
 
-function addTodo() {
+async function addTodo() {
   const input = document.getElementById('todo-input');
   const text = input.value.trim();
   if (!text) return;
-  todos.unshift({ text, done: false, created: Date.now() });
-  localStorage.setItem('syntaur_todos', JSON.stringify(todos));
   input.value = '';
-  renderTodos();
+  try {
+    await authFetch('/api/todos', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ token: authToken, text })
+    });
+    await loadTodos();
+  } catch(e) { console.log('todo add:', e); }
 }
 
-function toggleTodo(i) {
-  todos[i].done = !todos[i].done;
-  localStorage.setItem('syntaur_todos', JSON.stringify(todos));
-  renderTodos();
+async function toggleTodo(id) {
+  const todo = todos.find(t => t.id === id);
+  if (!todo) return;
+  try {
+    await authFetch(`/api/todos/${id}`, {
+      method: 'PUT', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ token: authToken, done: !todo.done })
+    });
+    await loadTodos();
+  } catch(e) { console.log('todo toggle:', e); }
 }
 
-function deleteTodo(i) {
-  todos.splice(i, 1);
-  localStorage.setItem('syntaur_todos', JSON.stringify(todos));
-  renderTodos();
+async function deleteTodo(id) {
+  try {
+    await authFetch(`/api/todos/${id}`, {
+      method: 'DELETE', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ token: authToken })
+    });
+    await loadTodos();
+  } catch(e) { console.log('todo delete:', e); }
 }
 
 // ── Mini Calendar ──
 let calDate = new Date();
+let calEvents = [];
+
+async function loadCalendarEvents() {
+  const year = calDate.getFullYear();
+  const month = calDate.getMonth();
+  const start = `${year}-${String(month+1).padStart(2,'0')}-01`;
+  const endDate = new Date(year, month+1, 0);
+  const end = `${year}-${String(month+1).padStart(2,'0')}-${endDate.getDate()}`;
+  try {
+    const resp = await authFetch(`/api/calendar?token=${authToken}&start=${start}&end=${end}`);
+    const data = await resp.json();
+    calEvents = data.events || [];
+  } catch(e) { calEvents = []; }
+  renderCalendar();
+}
 
 function renderCalendar() {
   const grid = document.getElementById('cal-grid');
@@ -328,17 +367,26 @@ function renderCalendar() {
   const today = new Date();
   const isCurrentMonth = today.getFullYear() === year && today.getMonth() === month;
 
+  // Build set of days with events
+  const eventDays = new Set();
+  for (const ev of calEvents) {
+    const d = parseInt(ev.start_time.split('-')[2]);
+    if (!isNaN(d)) eventDays.add(d);
+  }
+
   let html = '';
   for (let i = 0; i < firstDay; i++) html += '<span class="py-1"></span>';
   for (let d = 1; d <= daysInMonth; d++) {
     const isToday = isCurrentMonth && d === today.getDate();
-    html += `<span class="py-1 rounded ${isToday ? 'bg-oc-600 text-white font-bold' : 'text-gray-400 hover:bg-gray-700 cursor-pointer'}">${d}</span>`;
+    const hasEvent = eventDays.has(d);
+    const dot = hasEvent ? '<span class="block w-1 h-1 rounded-full bg-oc-500 mx-auto -mt-0.5"></span>' : '';
+    html += `<span class="py-1 rounded relative ${isToday ? 'bg-oc-600 text-white font-bold' : 'text-gray-400 hover:bg-gray-700 cursor-pointer'}">${d}${dot}</span>`;
   }
   grid.innerHTML = html;
 }
 
-function calPrev() { calDate.setMonth(calDate.getMonth() - 1); renderCalendar(); }
-function calNext() { calDate.setMonth(calDate.getMonth() + 1); renderCalendar(); }
+function calPrev() { calDate.setMonth(calDate.getMonth() - 1); loadCalendarEvents(); }
+function calNext() { calDate.setMonth(calDate.getMonth() + 1); loadCalendarEvents(); }
 
 // ── Dashboard Agent Switcher ──
 let dashAgents = [];
@@ -383,7 +431,7 @@ function getDashAgentId(name) {
   return dashAgentIdMap[name] || name.toLowerCase().replace(/\s+/g, '-');
 }
 
-// Init widgets
+// Init widgets — rendered empty first, populated after auth
 renderTodos();
 renderCalendar();
 
@@ -712,7 +760,10 @@ function showPhoneAccess() {
   } catch(e) {}
   await checkAuth();
   loadDashboard();
+  loadTodos();
+  loadCalendarEvents();
   setInterval(loadDashboard, 30000);
+  setInterval(loadTodos, 60000);
 })();
 </script>
 

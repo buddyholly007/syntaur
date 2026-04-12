@@ -343,6 +343,35 @@ const MIGRATIONS: &[&str] = &[
         created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     "#,
+    // v11: todos + calendar events — server-side storage for dashboard widgets.
+    // Agents can create/complete todos and add calendar events via tools.
+    // Cross-device: state lives on the server, all devices see the same data.
+    r#"
+    CREATE TABLE IF NOT EXISTS todos (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id     INTEGER NOT NULL DEFAULT 0,
+        text        TEXT NOT NULL,
+        done        INTEGER NOT NULL DEFAULT 0,
+        due_date    TEXT,
+        created_at  INTEGER NOT NULL,
+        completed_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_todos_user ON todos(user_id);
+
+    CREATE TABLE IF NOT EXISTS calendar_events (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id     INTEGER NOT NULL DEFAULT 0,
+        title       TEXT NOT NULL,
+        description TEXT,
+        start_time  TEXT NOT NULL,
+        end_time    TEXT,
+        all_day     INTEGER NOT NULL DEFAULT 0,
+        source      TEXT NOT NULL DEFAULT 'manual',
+        created_at  INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_calendar_user ON calendar_events(user_id);
+    CREATE INDEX IF NOT EXISTS idx_calendar_start ON calendar_events(start_time);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

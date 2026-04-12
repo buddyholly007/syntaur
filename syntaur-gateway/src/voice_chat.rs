@@ -411,6 +411,7 @@ pub async fn handle_chat_completions(
         Arc::clone(&state.tool_circuit_breakers),
     );
     registry.set_user_id(0); // voice path = legacy admin
+    registry.set_db_path(state.db_path.clone());
     registry.set_tool_hooks(Arc::clone(&state.tool_hooks));
     registry.set_http_client(Arc::new(state.client.clone()));
 

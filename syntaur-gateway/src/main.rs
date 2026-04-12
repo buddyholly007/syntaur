@@ -517,6 +517,170 @@ async fn handle_bug_report_list(
     Ok(Json(serde_json::json!({ "reports": reports })))
 }
 
+// ── Todos ───────────────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct TodoCreateRequest { token: String, text: String, due_date: Option<String> }
+#[derive(serde::Deserialize)]
+struct TodoUpdateRequest { token: String, done: Option<bool> }
+#[derive(serde::Deserialize)]
+struct TodoDeleteRequest { token: String }
+
+async fn handle_todo_list(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let todos = tokio::task::spawn_blocking(move || -> Result<Vec<serde_json::Value>, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare("SELECT id, text, done, due_date, created_at, completed_at FROM todos WHERE user_id = ? ORDER BY done ASC, created_at DESC")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(rusqlite::params![uid], |r| Ok(serde_json::json!({
+            "id": r.get::<_, i64>(0)?, "text": r.get::<_, String>(1)?,
+            "done": r.get::<_, i64>(2)? != 0, "due_date": r.get::<_, Option<String>>(3)?,
+            "created_at": r.get::<_, i64>(4)?, "completed_at": r.get::<_, Option<i64>>(5)?,
+        }))).map_err(|e| e.to_string())?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({ "todos": todos })))
+}
+
+async fn handle_todo_create(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<TodoCreateRequest>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let principal = resolve_principal(&state, &req.token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let text = req.text.clone();
+    let due = req.due_date.clone();
+    let now = chrono::Utc::now().timestamp();
+    let id = tokio::task::spawn_blocking(move || -> Result<i64, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        conn.execute("INSERT INTO todos (user_id, text, due_date, created_at) VALUES (?, ?, ?, ?)",
+            rusqlite::params![uid, &text, &due, now]).map_err(|e| e.to_string())?;
+        Ok(conn.last_insert_rowid())
+    }).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({ "id": id, "text": req.text, "done": false })))
+}
+
+async fn handle_todo_update(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    Json(req): Json<TodoUpdateRequest>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let principal = resolve_principal(&state, &req.token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let done = req.done.unwrap_or(false);
+    let now = chrono::Utc::now().timestamp();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let completed = if done { Some(now) } else { None };
+        conn.execute("UPDATE todos SET done = ?, completed_at = ? WHERE id = ? AND user_id = ?",
+            rusqlite::params![done as i64, completed, id, uid]).map_err(|e| e.to_string())?;
+        Ok(())
+    }).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({ "id": id, "done": done })))
+}
+
+async fn handle_todo_delete(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    Json(req): Json<TodoDeleteRequest>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let principal = resolve_principal(&state, &req.token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM todos WHERE id = ? AND user_id = ?",
+            rusqlite::params![id, uid]).map_err(|e| e.to_string())?;
+        Ok(())
+    }).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({ "deleted": true })))
+}
+
+// ── Calendar Events ─────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct CalendarEventCreateRequest {
+    token: String,
+    title: String,
+    description: Option<String>,
+    start_time: String,
+    end_time: Option<String>,
+    all_day: Option<bool>,
+}
+
+async fn handle_calendar_list(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let start = params.get("start").cloned();
+    let end = params.get("end").cloned();
+    let events = tokio::task::spawn_blocking(move || -> Result<Vec<serde_json::Value>, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let (sql, p): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match (&start, &end) {
+            (Some(s), Some(e)) => (
+                "SELECT id, title, description, start_time, end_time, all_day, source, created_at FROM calendar_events WHERE user_id = ? AND start_time >= ? AND start_time <= ? ORDER BY start_time".to_string(),
+                vec![Box::new(uid) as Box<dyn rusqlite::types::ToSql>, Box::new(s.clone()), Box::new(e.clone())],
+            ),
+            _ => (
+                "SELECT id, title, description, start_time, end_time, all_day, source, created_at FROM calendar_events WHERE user_id = ? ORDER BY start_time DESC LIMIT 50".to_string(),
+                vec![Box::new(uid) as Box<dyn rusqlite::types::ToSql>],
+            ),
+        };
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let refs: Vec<&dyn rusqlite::types::ToSql> = p.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(refs.as_slice(), |r| Ok(serde_json::json!({
+            "id": r.get::<_, i64>(0)?, "title": r.get::<_, String>(1)?,
+            "description": r.get::<_, Option<String>>(2)?, "start_time": r.get::<_, String>(3)?,
+            "end_time": r.get::<_, Option<String>>(4)?, "all_day": r.get::<_, i64>(5)? != 0,
+            "source": r.get::<_, String>(6)?, "created_at": r.get::<_, i64>(7)?,
+        }))).map_err(|e| e.to_string())?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({ "events": events })))
+}
+
+async fn handle_calendar_create(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CalendarEventCreateRequest>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let principal = resolve_principal(&state, &req.token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let title = req.title.clone();
+    let desc = req.description.clone();
+    let start = req.start_time.clone();
+    let end = req.end_time.clone();
+    let all_day = req.all_day.unwrap_or(false);
+    let now = chrono::Utc::now().timestamp();
+    let id = tokio::task::spawn_blocking(move || -> Result<i64, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO calendar_events (user_id, title, description, start_time, end_time, all_day, source, created_at) VALUES (?, ?, ?, ?, ?, ?, 'manual', ?)",
+            rusqlite::params![uid, &title, &desc, &start, &end, all_day as i64, now],
+        ).map_err(|e| e.to_string())?;
+        Ok(conn.last_insert_rowid())
+    }).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({ "id": id, "title": req.title })))
+}
+
 // ── Chat ────────────────────────────────────────────────────────────────────
 
 async fn handle_api_message(
@@ -587,6 +751,7 @@ async fn handle_api_message(
         Arc::clone(&state.tool_circuit_breakers),
     );
     tool_registry.set_user_id(principal.user_id());
+    tool_registry.set_db_path(state.db_path.clone());
     tool_registry.set_tool_hooks(Arc::clone(&state.tool_hooks));
     {
         let run_skill: Arc<dyn crate::tools::extension::Tool> =
@@ -695,6 +860,7 @@ async fn handle_research(
         Arc::clone(&state.tool_circuit_breakers),
     );
     tr.set_user_id(principal.user_id());
+    tr.set_db_path(state.db_path.clone());
     tr.set_tool_hooks(Arc::clone(&state.tool_hooks));
     {
         let run_skill: Arc<dyn crate::tools::extension::Tool> =
@@ -902,6 +1068,7 @@ async fn handle_message_start(
             Arc::clone(&state_clone.tool_circuit_breakers),
         );
         tr.set_user_id(principal_user_id);
+        tr.set_db_path(state_clone.db_path.clone());
         tr.set_tool_hooks(Arc::clone(&state_clone.tool_hooks));
         {
             let run_skill: Arc<dyn crate::tools::extension::Tool> =
@@ -1094,6 +1261,7 @@ async fn handle_research_start(
             Arc::clone(&state.tool_circuit_breakers),
         );
         tr.set_user_id(principal.user_id());
+        tr.set_db_path(state.db_path.clone());
         tr.set_tool_hooks(Arc::clone(&state.tool_hooks));
         {
             let run_skill: Arc<dyn crate::tools::extension::Tool> =
@@ -1914,6 +2082,7 @@ pub(crate) fn spawn_plan_executor(state: Arc<AppState>, plan_id: i64) {
                             Arc::clone(&state.tool_circuit_breakers),
                         );
                         tr.set_user_id(plan_user_id);
+                        tr.set_db_path(state.db_path.clone());
                         tr.set_tool_hooks(Arc::clone(&state.tool_hooks));
                         {
                             let run_skill: Arc<dyn crate::tools::extension::Tool> =
@@ -3149,6 +3318,12 @@ async fn main() {
         .route("/api/settings/install-shortcut", post(setup::handle_install_shortcut))
         .route("/api/bug-reports", post(handle_bug_report_submit))
         .route("/api/bug-reports", get(handle_bug_report_list))
+        .route("/api/todos", get(handle_todo_list))
+        .route("/api/todos", post(handle_todo_create))
+        .route("/api/todos/{id}", axum::routing::put(handle_todo_update))
+        .route("/api/todos/{id}", axum::routing::delete(handle_todo_delete))
+        .route("/api/calendar", get(handle_calendar_list))
+        .route("/api/calendar", post(handle_calendar_create))
         .with_state(Arc::clone(&state))
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),
