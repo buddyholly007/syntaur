@@ -92,11 +92,15 @@
         </div>
       </div>
       <div class="flex items-center gap-2">
-        <button onclick="clearChat()" class="text-xs text-gray-500 hover:text-gray-300">New Chat</button>
+        <div class="flex bg-gray-800 rounded-lg text-xs">
+          <button onclick="showChatTab('chat')" id="tab-chat" class="px-2.5 py-1 rounded-lg bg-gray-700 text-gray-200 transition-colors">Chat</button>
+          <button onclick="showChatTab('telegram')" id="tab-telegram" class="px-2.5 py-1 rounded-lg text-gray-500 hover:text-gray-300 transition-colors">Telegram</button>
+        </div>
+        <button onclick="clearChat()" class="text-xs text-gray-500 hover:text-gray-300">New</button>
         <button onclick="openFullChat()" class="text-xs text-gray-500 hover:text-gray-300">Expand</button>
       </div>
     </div>
-    <!-- Messages -->
+    <!-- Chat Messages -->
     <div class="flex-1 overflow-y-auto p-4 space-y-4" id="chat-messages">
       <div class="flex gap-3">
         <div class="w-7 h-7 rounded-full bg-oc-600 flex items-center justify-center text-xs font-bold flex-shrink-0 mt-0.5">&#9813;</div>
@@ -109,8 +113,12 @@
         </div>
       </div>
     </div>
-    <!-- Input -->
-    <div class="p-3 border-t border-gray-800">
+    <!-- Telegram Messages (hidden by default) -->
+    <div class="flex-1 overflow-y-auto p-4 space-y-3 hidden" id="telegram-messages">
+      <p class="text-xs text-gray-600 text-center py-4">Loading Telegram messages...</p>
+    </div>
+    <!-- Input (hidden when viewing Telegram) -->
+    <div class="p-3 border-t border-gray-800" id="chat-input-area">
       <div class="flex gap-2 items-end">
         <textarea id="chat-input" rows="1" class="flex-1 bg-gray-800 border border-gray-700 rounded-xl px-4 py-2.5 text-white placeholder-gray-400 focus:border-oc-500 focus:ring-1 focus:ring-oc-500 outline-none resize-none text-sm" placeholder="Message..." onkeydown="chatKeydown(event)" oninput="autoResize(this)" style="max-height:120px"></textarea>
         <button onclick="sendMessage()" class="bg-oc-600 hover:bg-oc-700 text-white rounded-xl p-2.5 transition-colors flex-shrink-0" id="send-btn">
@@ -268,6 +276,53 @@ function showPanel(name) {
 }
 
 function openFullChat() { location.href = '/chat'; }
+
+// ── Chat/Telegram tab switching ──
+let currentChatTab = 'chat';
+let telegramLoaded = false;
+
+function showChatTab(tab) {
+  currentChatTab = tab;
+  document.getElementById('chat-messages').classList.toggle('hidden', tab !== 'chat');
+  document.getElementById('telegram-messages').classList.toggle('hidden', tab !== 'telegram');
+  document.getElementById('chat-input-area').classList.toggle('hidden', tab !== 'chat');
+  document.getElementById('tab-chat').className = `px-2.5 py-1 rounded-lg transition-colors ${tab === 'chat' ? 'bg-gray-700 text-gray-200' : 'text-gray-500 hover:text-gray-300'}`;
+  document.getElementById('tab-telegram').className = `px-2.5 py-1 rounded-lg transition-colors ${tab === 'telegram' ? 'bg-gray-700 text-gray-200' : 'text-gray-500 hover:text-gray-300'}`;
+  if (tab === 'telegram' && !telegramLoaded) loadTelegramMessages();
+}
+
+async function loadTelegramMessages() {
+  const container = document.getElementById('telegram-messages');
+  try {
+    const resp = await authFetch(`/messages?token=${authToken}&n=50`);
+    const messages = await resp.json();
+    telegramLoaded = true;
+    if (!messages || messages.length === 0) {
+      container.innerHTML = '<div class="text-center py-8"><p class="text-sm text-gray-500">No Telegram messages yet</p><p class="text-xs text-gray-600 mt-2">Connect a Telegram bot in Settings to chat from your phone.</p><p class="text-xs text-gray-600 mt-1">Messages sent via Telegram will appear here.</p></div>';
+      return;
+    }
+    container.innerHTML = messages.reverse().map(m => {
+      const from = m.from || m.sender || 'Unknown';
+      const text = m.text || m.message || '';
+      const time = m.timestamp ? new Date(m.timestamp * 1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '';
+      const date = m.timestamp ? new Date(m.timestamp * 1000).toLocaleDateString() : '';
+      const isUser = m.direction === 'incoming' || m.from_user;
+      return `
+        <div class="flex gap-2 ${isUser ? '' : 'justify-end'}">
+          ${isUser ? '<div class="w-6 h-6 rounded-full bg-blue-600 flex items-center justify-center text-xs flex-shrink-0">T</div>' : ''}
+          <div class="max-w-[80%] ${isUser ? 'bg-gray-800 border border-gray-700' : 'bg-oc-900/40 border border-oc-800/40'} rounded-xl px-3 py-2">
+            ${isUser ? '<p class="text-xs text-gray-500 mb-0.5">' + escapeHtml(from) + '</p>' : ''}
+            <p class="text-sm text-gray-300">${escapeHtml(text)}</p>
+            <p class="text-xs text-gray-600 mt-0.5 text-right">${time} ${date}</p>
+          </div>
+          ${!isUser ? '<div class="w-6 h-6 rounded-full bg-oc-600 flex items-center justify-center text-xs flex-shrink-0">&#9813;</div>' : ''}
+        </div>`;
+    }).join('');
+    container.scrollTop = container.scrollHeight;
+  } catch(e) {
+    container.innerHTML = '<p class="text-xs text-gray-600 text-center py-4">Could not load Telegram messages</p>';
+  }
+}
 
 // ── Todo List (server-synced) ──
 let todos = [];
