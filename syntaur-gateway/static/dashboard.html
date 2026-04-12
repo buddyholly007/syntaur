@@ -57,106 +57,179 @@
 
 <!-- Top bar -->
 <div class="border-b border-gray-800 bg-gray-900/50 backdrop-blur sticky top-0 z-40">
-  <div class="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
+  <div class="px-4 py-2.5 flex items-center justify-between">
     <div class="flex items-center gap-3">
       <img src="/icon.svg" class="w-5 h-5" alt="">
-      <span class="font-semibold text-lg">Syntaur</span>
-      <span class="badge badge-green" id="status-badge">
-        <span class="w-1.5 h-1.5 rounded-full bg-green-400 mr-1"></span>
-        Online
+      <span class="font-semibold">Syntaur</span>
+      <span class="badge badge-green text-xs" id="status-badge">
+        <span class="w-1.5 h-1.5 rounded-full bg-green-400 mr-1"></span>Online
       </span>
-    </div>
-    <div class="flex items-center gap-3">
       <span id="license-badge" class="badge badge-gray text-xs hidden"></span>
-      <a href="/chat" class="btn-primary text-sm inline-block">Chat</a>
-      <a href="/settings" class="text-sm text-gray-400 hover:text-gray-300">Settings</a>
+    </div>
+    <div class="flex items-center gap-3 text-sm">
+      <button onclick="showPanel('main')" class="text-gray-400 hover:text-white transition-colors" id="nav-main">Home</button>
+      <button onclick="showPanel('more')" class="text-gray-400 hover:text-white transition-colors" id="nav-more">Modules &amp; System</button>
+      <a href="/settings" class="text-gray-400 hover:text-gray-300">Settings</a>
     </div>
   </div>
 </div>
 
-<div class="max-w-6xl mx-auto px-4 py-6">
+<!-- Main panel: Chat + Widgets -->
+<div class="flex h-[calc(100vh-45px)]" id="panel-main">
 
-  <!-- Welcome -->
-  <div class="mb-6">
-    <h1 class="text-2xl font-bold" id="welcome-text">Welcome back</h1>
-    <p class="text-gray-400 mt-1" id="welcome-sub">Your AI assistant is running.</p>
-  </div>
-
-  <!-- Status cards row -->
-  <div class="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4 mb-6">
-    <div class="card">
-      <p class="text-xs text-gray-500 uppercase tracking-wider">Uptime</p>
-      <p class="text-2xl font-semibold mt-1" id="stat-uptime">--</p>
+  <!-- LEFT: Chat (60%) -->
+  <div class="w-[60%] border-r border-gray-800 flex flex-col">
+    <!-- Chat header -->
+    <div class="flex items-center justify-between px-4 py-2.5 border-b border-gray-800">
+      <div class="flex items-center gap-2">
+        <div class="w-7 h-7 rounded-lg bg-oc-600 flex items-center justify-center text-xs font-bold">&#9813;</div>
+        <div class="relative" id="dash-agent-switcher">
+          <button onclick="toggleDashAgentMenu()" class="flex items-center gap-1 font-medium text-sm text-gray-300 hover:text-white transition-colors">
+            <span id="chat-agent-name">Chat</span>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="text-gray-500"><path d="M6 9l6 6 6-6"/></svg>
+          </button>
+          <div id="dash-agent-menu" class="hidden absolute left-0 top-full mt-1 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1 min-w-[160px] z-50"></div>
+        </div>
+      </div>
+      <div class="flex items-center gap-2">
+        <button onclick="clearChat()" class="text-xs text-gray-500 hover:text-gray-300">New Chat</button>
+        <button onclick="openFullChat()" class="text-xs text-gray-500 hover:text-gray-300">Expand</button>
+      </div>
     </div>
-    <div class="card">
-      <p class="text-xs text-gray-500 uppercase tracking-wider">LLM Backend</p>
-      <p class="text-sm font-medium mt-1 text-gray-300" id="stat-llm">Loading...</p>
-      <p class="text-xs text-gray-500 mt-0.5" id="stat-llm-status"></p>
+    <!-- Messages -->
+    <div class="flex-1 overflow-y-auto p-4 space-y-4" id="chat-messages">
+      <div class="flex gap-3">
+        <div class="w-7 h-7 rounded-full bg-oc-600 flex items-center justify-center text-xs font-bold flex-shrink-0 mt-0.5">&#9813;</div>
+        <div class="flex-1 text-sm text-gray-300" id="chat-greeting">
+          <p id="welcome-sub">Hey! How can I help you?</p>
+          <div class="flex flex-wrap gap-2 mt-3">
+            <button onclick="quickChat('What can you do?')" class="text-xs bg-gray-800 hover:bg-gray-700 border border-gray-600 rounded-full px-3 py-1 transition-colors">What can you do?</button>
+            <button onclick="quickChat('Search the web for today\\'s top news')" class="text-xs bg-gray-800 hover:bg-gray-700 border border-gray-600 rounded-full px-3 py-1 transition-colors">Today's news</button>
+          </div>
+        </div>
+      </div>
     </div>
-    <div class="card">
-      <p class="text-xs text-gray-500 uppercase tracking-wider">Modules</p>
-      <p class="text-2xl font-semibold mt-1" id="stat-modules">--</p>
-      <p class="text-xs text-gray-500 mt-0.5" id="stat-tools">-- tools</p>
-    </div>
-    <div class="card">
-      <p class="text-xs text-gray-500 uppercase tracking-wider">Agents</p>
-      <p class="text-sm font-medium mt-1 text-gray-300" id="stat-agents">--</p>
-    </div>
-  </div>
-
-  <!-- Main content grid -->
-  <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-
-    <!-- Quick Actions -->
-    <div class="card md:col-span-1">
-      <h3 class="font-medium text-sm text-gray-400 mb-3">Quick Actions</h3>
-      <div class="space-y-2">
-        <a href="/chat" class="block w-full text-left p-3 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors">
-          <p class="font-medium text-sm">Chat with your AI</p>
-          <p class="text-xs text-gray-500">Ask questions, run tasks, control your home</p>
-        </a>
-        <a href="/settings" class="block w-full text-left p-3 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors">
-          <p class="font-medium text-sm">Settings</p>
-          <p class="text-xs text-gray-500">LLM backends, modules, account</p>
-        </a>
-        <a href="/modules" class="block w-full text-left p-3 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors">
-          <p class="font-medium text-sm">Manage Modules</p>
-          <p class="text-xs text-gray-500">Enable, disable, configure</p>
-        </a>
-        <a href="/history" class="block w-full text-left p-3 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors">
-          <p class="font-medium text-sm">Conversation History</p>
-          <p class="text-xs text-gray-500">Browse and search past chats</p>
-        </a>
-        <button onclick="showPhoneAccess()" class="w-full text-left p-3 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors">
-          <p class="font-medium text-sm">Open on Phone</p>
-          <p class="text-xs text-gray-500">QR code + save as app</p>
+    <!-- Input -->
+    <div class="p-3 border-t border-gray-800">
+      <div class="flex gap-2 items-end">
+        <textarea id="chat-input" rows="1" class="flex-1 bg-gray-800 border border-gray-700 rounded-xl px-4 py-2.5 text-white placeholder-gray-400 focus:border-oc-500 focus:ring-1 focus:ring-oc-500 outline-none resize-none text-sm" placeholder="Message..." onkeydown="chatKeydown(event)" oninput="autoResize(this)" style="max-height:120px"></textarea>
+        <button onclick="sendMessage()" class="bg-oc-600 hover:bg-oc-700 text-white rounded-xl p-2.5 transition-colors flex-shrink-0" id="send-btn">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13"/><path d="M22 2L15 22L11 13L2 9L22 2Z"/></svg>
         </button>
       </div>
     </div>
+  </div>
 
-    <!-- Modules -->
-    <div class="card md:col-span-2">
+  <!-- RIGHT: Widgets (40%) -->
+  <div class="w-[40%] overflow-y-auto p-4 space-y-4">
+
+    <!-- To Do List -->
+    <div class="card">
       <div class="flex items-center justify-between mb-3">
-        <h3 class="font-medium text-sm text-gray-400">Active Modules</h3>
-        <span class="text-xs text-gray-500" id="module-count"></span>
+        <h3 class="font-medium text-sm text-gray-400">To Do</h3>
+        <span class="text-xs text-gray-500" id="todo-count">0 items</span>
       </div>
-      <div class="grid grid-cols-2 sm:grid-cols-3 gap-2" id="module-grid">
+      <div id="todo-list" class="space-y-1.5 mb-3">
+        <!-- Populated by JS -->
+      </div>
+      <div class="flex gap-2">
+        <input type="text" id="todo-input" class="flex-1 bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-white placeholder-gray-500 outline-none focus:border-oc-500" placeholder="Add a task..." onkeydown="if(event.key==='Enter')addTodo()">
+        <button onclick="addTodo()" class="text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded-lg transition-colors">Add</button>
+      </div>
+    </div>
+
+    <!-- Mini Calendar -->
+    <div class="card">
+      <div class="flex items-center justify-between mb-3">
+        <button onclick="calPrev()" class="text-gray-500 hover:text-gray-300 text-sm">&larr;</button>
+        <h3 class="font-medium text-sm text-gray-300" id="cal-title">April 2026</h3>
+        <button onclick="calNext()" class="text-gray-500 hover:text-gray-300 text-sm">&rarr;</button>
+      </div>
+      <div class="grid grid-cols-7 gap-0.5 text-center text-xs">
+        <span class="text-gray-600 py-1">Su</span><span class="text-gray-600 py-1">Mo</span><span class="text-gray-600 py-1">Tu</span><span class="text-gray-600 py-1">We</span><span class="text-gray-600 py-1">Th</span><span class="text-gray-600 py-1">Fr</span><span class="text-gray-600 py-1">Sa</span>
+      </div>
+      <div class="grid grid-cols-7 gap-0.5 text-center text-xs" id="cal-grid">
         <!-- Populated by JS -->
       </div>
     </div>
 
-  </div>
-
-  <!-- System Info -->
-  <div class="card mt-4">
-    <div class="flex items-center justify-between mb-3">
-      <h3 class="font-medium text-sm text-gray-400">System</h3>
-      <span class="text-xs text-gray-500" id="sys-version"></span>
+    <!-- Quick Actions -->
+    <div class="card">
+      <h3 class="font-medium text-sm text-gray-400 mb-3">Quick Actions</h3>
+      <div class="space-y-1.5">
+        <a href="/history" class="flex items-center gap-2 p-2 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors text-sm">
+          <span class="text-gray-500">&#128340;</span> Conversation History
+        </a>
+        <button onclick="showPhoneAccess()" class="w-full flex items-center gap-2 p-2 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors text-sm text-left">
+          <span class="text-gray-500">&#128241;</span> Open on Phone
+        </button>
+        <a href="/modules" class="flex items-center gap-2 p-2 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors text-sm">
+          <span class="text-gray-500">&#9881;</span> Manage Modules
+        </a>
+      </div>
     </div>
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm" id="sys-info">
+
+    <!-- Status bar -->
+    <div class="flex items-center gap-3 text-xs text-gray-600 px-1">
+      <span id="stat-uptime">--</span> uptime
+      <span>&middot;</span>
+      <span id="stat-modules">--</span> modules
+      <span>&middot;</span>
+      <span id="stat-tools">-- tools</span>
+      <span>&middot;</span>
+      <span id="stat-agents">--</span>
+    </div>
+
+  </div>
+</div>
+
+<!-- Modules & System panel (hidden by default, shown on nav click) -->
+<div class="hidden h-[calc(100vh-45px)] overflow-y-auto p-6" id="panel-more">
+  <div class="max-w-4xl mx-auto space-y-6">
+
+    <!-- Status cards -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div class="card">
+        <p class="text-xs text-gray-500 uppercase tracking-wider">Uptime</p>
+        <p class="text-2xl font-semibold mt-1" id="stat-uptime2">--</p>
+      </div>
+      <div class="card">
+        <p class="text-xs text-gray-500 uppercase tracking-wider">LLM Backend</p>
+        <p class="text-sm font-medium mt-1 text-gray-300" id="stat-llm">Loading...</p>
+        <p class="text-xs text-gray-500 mt-0.5" id="stat-llm-status"></p>
+      </div>
+      <div class="card">
+        <p class="text-xs text-gray-500 uppercase tracking-wider">Modules</p>
+        <p class="text-2xl font-semibold mt-1" id="stat-modules2">--</p>
+      </div>
+      <div class="card">
+        <p class="text-xs text-gray-500 uppercase tracking-wider">Agents</p>
+        <p class="text-sm font-medium mt-1 text-gray-300" id="stat-agents2">--</p>
+      </div>
+    </div>
+
+    <!-- Modules grid -->
+    <div class="card">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-medium text-sm text-gray-400">Active Modules</h3>
+        <span class="text-xs text-gray-500" id="module-count"></span>
+      </div>
+      <div class="grid grid-cols-2 sm:grid-cols-3 gap-2" id="module-grid"></div>
+    </div>
+
+    <!-- System -->
+    <div class="card">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-medium text-sm text-gray-400">System</h3>
+        <span class="text-xs text-gray-500" id="sys-version"></span>
+      </div>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm" id="sys-info"></div>
+    </div>
+
+    <div class="text-center">
+      <button onclick="showPanel('main')" class="text-sm text-gray-500 hover:text-gray-300">&larr; Back to Dashboard</button>
     </div>
   </div>
-
 </div>
 
 <!-- Phone access modal -->
@@ -173,63 +246,146 @@
       </div>
       <p class="text-xs text-gray-500 font-mono mt-3 select-all" id="phone-url"></p>
     </div>
-    <div class="mt-4 p-3 rounded-lg bg-gray-900 text-xs space-y-2">
-      <p class="text-gray-300 font-medium">Save as an app on your phone:</p>
-      <p class="text-gray-500"><strong class="text-gray-400">iPhone:</strong> Open in Safari &rarr; tap <span class="inline-block border border-gray-600 rounded px-1">Share &#8599;</span> &rarr; "Add to Home Screen"</p>
-      <p class="text-gray-500"><strong class="text-gray-400">Android:</strong> Open in Chrome &rarr; tap <span class="inline-block border border-gray-600 rounded px-1">&#8942;</span> menu &rarr; "Add to Home screen"</p>
-      <p class="text-gray-500 mt-1">This creates a full-screen app icon with the Syntaur logo — no browser bar, looks like a native app.</p>
-    </div>
     <p class="text-xs text-gray-600 mt-3 text-center">Your phone must be on the same network, or use Tailscale for remote access.</p>
   </div>
 </div>
 
-<!-- Chat panel (slide-in from right) -->
-<div id="chat-container" class="fixed inset-0 z-50 flex">
-  <div class="flex-1 bg-black/50 backdrop-blur-sm" onclick="toggleChat()"></div>
-  <div class="w-full max-w-xl bg-gray-900 border-l border-gray-700 flex flex-col">
-    <!-- Chat header -->
-    <div class="flex items-center justify-between p-4 border-b border-gray-700">
-      <div class="flex items-center gap-3">
-        <div class="w-8 h-8 rounded-full bg-oc-600 flex items-center justify-center text-sm font-bold">&#9813;</div>
-        <div>
-          <p class="font-semibold" id="chat-agent-name">Chat</p>
-          <p class="text-xs text-gray-500">Enter to send &middot; Shift+Enter for newline</p>
-        </div>
-      </div>
-      <div class="flex items-center gap-2">
-        <button onclick="clearChat()" class="text-xs text-gray-500 hover:text-gray-300 px-2 py-1">Clear</button>
-        <button onclick="toggleChat()" class="text-gray-400 hover:text-white text-xl leading-none">&times;</button>
-      </div>
-    </div>
-    <!-- Messages -->
-    <div class="flex-1 overflow-y-auto p-4 space-y-4" id="chat-messages">
-      <div class="flex gap-3">
-        <div class="w-7 h-7 rounded-full bg-oc-600 flex items-center justify-center text-xs font-bold flex-shrink-0 mt-0.5">&#9813;</div>
-        <div class="flex-1 text-sm text-gray-300" id="chat-greeting">
-          <p>Hey! How can I help you?</p>
-          <div class="flex flex-wrap gap-2 mt-3">
-            <button onclick="quickChat('What can you do?')" class="text-xs bg-gray-800 hover:bg-gray-700 border border-gray-600 rounded-full px-3 py-1 transition-colors">What can you do?</button>
-            <button onclick="quickChat('Search the web for today\\'s top news')" class="text-xs bg-gray-800 hover:bg-gray-700 border border-gray-600 rounded-full px-3 py-1 transition-colors">Today's news</button>
-            <button onclick="quickChat('Create a simple budget spreadsheet')" class="text-xs bg-gray-800 hover:bg-gray-700 border border-gray-600 rounded-full px-3 py-1 transition-colors">Create a spreadsheet</button>
-          </div>
-        </div>
-      </div>
-    </div>
-    <!-- Input -->
-    <div class="p-4 border-t border-gray-700">
-      <div class="flex gap-2 items-end">
-        <textarea id="chat-input" rows="1" class="flex-1 bg-gray-800 border border-gray-600 rounded-xl px-4 py-2.5 text-white placeholder-gray-400 focus:border-oc-500 focus:ring-1 focus:ring-oc-500 outline-none resize-none text-sm" placeholder="Ask anything..." onkeydown="chatKeydown(event)" oninput="autoResize(this)" style="max-height:120px"></textarea>
-        <button onclick="sendMessage()" class="bg-oc-600 hover:bg-oc-700 text-white rounded-xl p-2.5 transition-colors flex-shrink-0" id="send-btn">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13"/><path d="M22 2L15 22L11 13L2 9L22 2Z"/></svg>
-        </button>
-      </div>
-    </div>
-  </div>
-</div>
+<!-- Hidden elements for backward compat with JS -->
+<span id="welcome-text" class="hidden"></span>
+<span id="chat-container" class="hidden"></span>
 
 <script>
-let chatOpen = false;
 let authToken = sessionStorage.getItem('syntaur_token') || '';
+
+// Panel switching
+function showPanel(name) {
+  document.getElementById('panel-main').classList.toggle('hidden', name !== 'main');
+  document.getElementById('panel-more').classList.toggle('hidden', name !== 'more');
+  document.getElementById('nav-main').classList.toggle('text-white', name === 'main');
+  document.getElementById('nav-more').classList.toggle('text-white', name === 'more');
+  document.getElementById('nav-main').classList.toggle('text-gray-400', name !== 'main');
+  document.getElementById('nav-more').classList.toggle('text-gray-400', name !== 'more');
+}
+
+function openFullChat() { location.href = '/chat'; }
+
+// ── Todo List (localStorage) ──
+let todos = JSON.parse(localStorage.getItem('syntaur_todos') || '[]');
+
+function renderTodos() {
+  const list = document.getElementById('todo-list');
+  const count = document.getElementById('todo-count');
+  const open = todos.filter(t => !t.done).length;
+  count.textContent = `${open} open`;
+  if (todos.length === 0) {
+    list.innerHTML = '<p class="text-xs text-gray-600 py-2">No tasks yet</p>';
+    return;
+  }
+  list.innerHTML = todos.map((t, i) => `
+    <div class="flex items-center gap-2 group">
+      <input type="checkbox" ${t.done ? 'checked' : ''} onchange="toggleTodo(${i})" class="rounded border-gray-600 bg-gray-900 text-oc-500 focus:ring-oc-500 cursor-pointer">
+      <span class="flex-1 text-sm ${t.done ? 'text-gray-600 line-through' : 'text-gray-300'}">${escapeHtml(t.text)}</span>
+      <button onclick="deleteTodo(${i})" class="text-gray-700 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity text-xs">&times;</button>
+    </div>
+  `).join('');
+}
+
+function addTodo() {
+  const input = document.getElementById('todo-input');
+  const text = input.value.trim();
+  if (!text) return;
+  todos.unshift({ text, done: false, created: Date.now() });
+  localStorage.setItem('syntaur_todos', JSON.stringify(todos));
+  input.value = '';
+  renderTodos();
+}
+
+function toggleTodo(i) {
+  todos[i].done = !todos[i].done;
+  localStorage.setItem('syntaur_todos', JSON.stringify(todos));
+  renderTodos();
+}
+
+function deleteTodo(i) {
+  todos.splice(i, 1);
+  localStorage.setItem('syntaur_todos', JSON.stringify(todos));
+  renderTodos();
+}
+
+// ── Mini Calendar ──
+let calDate = new Date();
+
+function renderCalendar() {
+  const grid = document.getElementById('cal-grid');
+  const title = document.getElementById('cal-title');
+  const year = calDate.getFullYear();
+  const month = calDate.getMonth();
+  const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  title.textContent = `${months[month]} ${year}`;
+
+  const firstDay = new Date(year, month, 1).getDay();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const today = new Date();
+  const isCurrentMonth = today.getFullYear() === year && today.getMonth() === month;
+
+  let html = '';
+  for (let i = 0; i < firstDay; i++) html += '<span class="py-1"></span>';
+  for (let d = 1; d <= daysInMonth; d++) {
+    const isToday = isCurrentMonth && d === today.getDate();
+    html += `<span class="py-1 rounded ${isToday ? 'bg-oc-600 text-white font-bold' : 'text-gray-400 hover:bg-gray-700 cursor-pointer'}">${d}</span>`;
+  }
+  grid.innerHTML = html;
+}
+
+function calPrev() { calDate.setMonth(calDate.getMonth() - 1); renderCalendar(); }
+function calNext() { calDate.setMonth(calDate.getMonth() + 1); renderCalendar(); }
+
+// ── Dashboard Agent Switcher ──
+let dashAgents = [];
+let dashCurrentAgent = 'main';
+let dashAgentIdMap = {};
+
+function toggleDashAgentMenu() {
+  const menu = document.getElementById('dash-agent-menu');
+  menu.classList.toggle('hidden');
+  if (!menu.classList.contains('hidden')) {
+    setTimeout(() => {
+      document.addEventListener('click', function close(e) {
+        if (!menu.contains(e.target) && !e.target.closest('#dash-agent-switcher')) {
+          menu.classList.add('hidden');
+        }
+        document.removeEventListener('click', close);
+      });
+    }, 10);
+  }
+}
+
+function buildDashAgentMenu() {
+  const menu = document.getElementById('dash-agent-menu');
+  menu.innerHTML = dashAgents.map(a => `
+    <button onclick="switchDashAgent('${escapeHtml(a)}')" class="w-full text-left px-4 py-2 text-sm hover:bg-gray-700 transition-colors ${a === dashCurrentAgent ? 'text-oc-500 font-medium' : 'text-gray-300'}">
+      ${escapeHtml(a)}
+    </button>
+  `).join('');
+}
+
+function switchDashAgent(name) {
+  document.getElementById('dash-agent-menu').classList.add('hidden');
+  if (name === dashCurrentAgent) return;
+  dashCurrentAgent = name;
+  document.getElementById('chat-agent-name').textContent = name;
+  buildDashAgentMenu();
+  // Clear chat and update greeting
+  clearChat();
+}
+
+function getDashAgentId(name) {
+  return dashAgentIdMap[name] || name.toLowerCase().replace(/\s+/g, '-');
+}
+
+// Init widgets
+renderTodos();
+renderCalendar();
 
 // Login
 async function doLogin() {
@@ -283,12 +439,7 @@ async function checkAuth() {
   return new Promise(resolve => { window._authResolve = resolve; });
 }
 
-// Toggle chat panel
-function toggleChat() {
-  chatOpen = !chatOpen;
-  document.getElementById('chat-container').classList.toggle('open', chatOpen);
-  if (chatOpen) document.getElementById('chat-input').focus();
-}
+// Chat is now embedded in the dashboard, no toggle needed
 
 function chatKeydown(e) {
   if (e.key === 'Enter' && !e.shiftKey) {
@@ -367,7 +518,7 @@ async function sendMessage() {
     const resp = await fetch('/api/message', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: msg, agent: 'main', token: authToken })
+      body: JSON.stringify({ message: msg, agent: getDashAgentId(dashCurrentAgent), token: authToken })
     });
     const data = await resp.json();
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -460,14 +611,28 @@ async function loadDashboard() {
     const uptime = health.uptime_secs || 0;
     const h = Math.floor(uptime / 3600);
     const m = Math.floor((uptime % 3600) / 60);
-    document.getElementById('stat-uptime').textContent = h > 0 ? `${h}h ${m}m` : `${m}m`;
+    const uptimeStr = h > 0 ? `${h}h ${m}m` : `${m}m`;
+    document.getElementById('stat-uptime').textContent = uptimeStr;
+    const el2 = document.getElementById('stat-uptime2');
+    if (el2) el2.textContent = uptimeStr;
     const agentNames = (health.agents || []).map(a => typeof a === 'object' ? a.name : a);
     document.getElementById('stat-agents').textContent = agentNames.join(', ');
+    const ag2 = document.getElementById('stat-agents2');
+    if (ag2) ag2.textContent = agentNames.join(', ');
     document.getElementById('sys-version').textContent = `v${health.version || '?'}`;
 
-    if (agentNames.length > 0) {
-      document.getElementById('chat-agent-name').textContent = agentNames[0];
+    // Build agent switcher
+    const rawAgents = health.agents || [];
+    dashAgentIdMap = {};
+    dashAgents = rawAgents.map(a => {
+      if (typeof a === 'object') { dashAgentIdMap[a.name] = a.id; return a.name; }
+      return a;
+    });
+    if (dashAgents.length > 0 && !dashAgents.includes(dashCurrentAgent)) {
+      dashCurrentAgent = dashAgents[0];
     }
+    document.getElementById('chat-agent-name').textContent = dashCurrentAgent;
+    buildDashAgentMenu();
 
     // Setup status
     const setup = await (await authFetch('/api/setup/status')).json();
@@ -485,6 +650,8 @@ async function loadDashboard() {
     const totalTools = enabled.reduce((s, m) => s + m.tool_count, 0);
 
     document.getElementById('stat-modules').textContent = enabled.length;
+    const sm2 = document.getElementById('stat-modules2');
+    if (sm2) sm2.textContent = enabled.length;
     document.getElementById('stat-tools').textContent = `${totalTools} tools`;
     document.getElementById('module-count').textContent = `${enabled.length} of ${allMods.length}`;
 
