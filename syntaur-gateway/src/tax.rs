@@ -1,0 +1,636 @@
+//! Tax module — receipt scanning, expense tracking, tax dashboard.
+//! Premium add-on module ($49).
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::Json;
+use log::{error, info};
+use serde::{Deserialize, Serialize};
+
+use crate::AppState;
+
+// ── Types ───────────────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct Receipt {
+    pub id: i64,
+    pub vendor: Option<String>,
+    pub amount_cents: Option<i64>,
+    pub amount_display: Option<String>,
+    pub category: Option<String>,
+    pub receipt_date: Option<String>,
+    pub description: Option<String>,
+    pub status: String,
+    pub image_url: String,
+    pub created_at: i64,
+}
+
+#[derive(Serialize)]
+pub struct Expense {
+    pub id: i64,
+    pub amount_cents: i64,
+    pub amount_display: String,
+    pub vendor: String,
+    pub category: Option<String>,
+    pub expense_date: String,
+    pub description: Option<String>,
+    pub entity: String,
+    pub receipt_id: Option<i64>,
+    pub created_at: i64,
+}
+
+#[derive(Serialize)]
+pub struct CategorySummary {
+    pub category: String,
+    pub entity: String,
+    pub total_cents: i64,
+    pub total_display: String,
+    pub count: i64,
+    pub tax_deductible: bool,
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+fn cents_to_display(cents: i64) -> String {
+    let negative = cents < 0;
+    let abs = cents.unsigned_abs();
+    let dollars = abs / 100;
+    let c = abs % 100;
+    if negative {
+        format!("-${}.{:02}", dollars, c)
+    } else {
+        format!("${}.{:02}", dollars, c)
+    }
+}
+
+fn parse_cents(s: &str) -> Option<i64> {
+    let cleaned = s.replace(['$', ',', ' '], "");
+    let parts: Vec<&str> = cleaned.split('.').collect();
+    match parts.len() {
+        1 => parts[0].parse::<i64>().ok().map(|d| d * 100),
+        2 => {
+            let dollars = parts[0].parse::<i64>().ok()?;
+            let mut cents_str = parts[1].to_string();
+            if cents_str.len() == 1 { cents_str.push('0'); }
+            if cents_str.len() > 2 { cents_str.truncate(2); }
+            let cents = cents_str.parse::<i64>().ok()?;
+            Some(dollars * 100 + if dollars < 0 { -cents } else { cents })
+        }
+        _ => None,
+    }
+}
+
+fn receipts_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
+    let dir = PathBuf::from(format!("{}/.syntaur/receipts", home));
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+// ── Receipt Upload ──────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct ReceiptUploadQuery {
+    pub token: String,
+}
+
+pub async fn handle_receipt_upload(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<ReceiptUploadQuery>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &params.token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+
+    if body.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "No image data".to_string()));
+    }
+    if body.len() > 10 * 1024 * 1024 {
+        return Err((StatusCode::BAD_REQUEST, "Image too large (max 10MB)".to_string()));
+    }
+
+    let content_type = headers.get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("image/jpeg");
+    let ext = if content_type.contains("png") { "png" }
+        else if content_type.contains("pdf") { "pdf" }
+        else { "jpg" };
+
+    // Save image
+    let filename = format!("{}.{}", uuid::Uuid::new_v4(), ext);
+    let path = receipts_dir().join(&filename);
+    std::fs::write(&path, &body).map_err(|e|
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Could not save receipt: {}", e))
+    )?;
+
+    // Insert receipt record
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let now = chrono::Utc::now().timestamp();
+    let path_str = path.to_string_lossy().to_string();
+    let fname = filename.clone();
+
+    let receipt_id = tokio::task::spawn_blocking(move || -> Result<i64, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO receipts (user_id, image_path, status, created_at) VALUES (?, ?, 'pending', ?)",
+            rusqlite::params![uid, &path_str, now],
+        ).map_err(|e| e.to_string())?;
+        Ok(conn.last_insert_rowid())
+    }).await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    info!("[tax] Receipt #{} uploaded: {}", receipt_id, filename);
+
+    // Kick off async vision scan
+    let state2 = Arc::clone(&state);
+    let rid = receipt_id;
+    tokio::spawn(async move {
+        if let Err(e) = scan_receipt_vision(&state2, rid).await {
+            error!("[tax] Vision scan failed for receipt #{}: {}", rid, e);
+        }
+    });
+
+    Ok(Json(serde_json::json!({
+        "id": receipt_id,
+        "status": "pending",
+        "image_url": format!("/api/tax/receipts/{}/image", receipt_id),
+        "message": "Receipt uploaded. Scanning with AI..."
+    })))
+}
+
+/// Vision scan a receipt — extract vendor, amount, date, category via LLM
+async fn scan_receipt_vision(state: &AppState, receipt_id: i64) -> Result<(), String> {
+    let db = state.db_path.clone();
+
+    // Load the image
+    let image_path: String = {
+        let db2 = db.clone();
+        tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let conn = rusqlite::Connection::open(&db2).map_err(|e| e.to_string())?;
+            conn.query_row(
+                "SELECT image_path FROM receipts WHERE id = ?",
+                rusqlite::params![receipt_id],
+                |r| r.get(0),
+            ).map_err(|e| e.to_string())
+        }).await.map_err(|e| e.to_string())??
+    };
+
+    let image_bytes = std::fs::read(&image_path).map_err(|e| e.to_string())?;
+    let base64_image = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &image_bytes);
+
+    let ext = image_path.rsplit('.').next().unwrap_or("jpg");
+    let mime = match ext {
+        "png" => "image/png",
+        "pdf" => "application/pdf",
+        _ => "image/jpeg",
+    };
+
+    // Call LLM with vision
+    let client = &state.client;
+    let config = &state.config;
+
+    // Find a provider that supports vision (prefer cloud for accuracy)
+    let provider = config.models.providers.iter()
+        .find(|(_, p)| p.base_url.contains("openrouter") || p.base_url.contains("openai") || p.base_url.contains("anthropic"))
+        .or_else(|| config.models.providers.iter().next());
+
+    let (provider_name, provider_config) = provider.ok_or("No LLM provider configured")?;
+
+    let model = provider_config.models.first()
+        .map(|m| m.id.as_str())
+        .or_else(|| provider_config.extra.get("model").and_then(|v| v.as_str()))
+        .unwrap_or("gpt-4o-mini");
+
+    let url = format!("{}/chat/completions", provider_config.base_url.trim_end_matches('/'));
+
+    let prompt = r#"Analyze this receipt image. Extract:
+1. Vendor/Store name
+2. Total amount (in dollars, e.g. "45.99")
+3. Date (YYYY-MM-DD format)
+4. Category (one of: Advertising & Marketing, Equipment & Tools, Hardware & Supplies, Lumber & Raw Materials, Office Supplies, Professional Services, Rent & Utilities, Insurance, Software & Subscriptions, Shipping & Packaging, Vehicle & Mileage, Education & Training, Meals & Entertainment, Travel, Tools - Consumables, Safety Gear, Medical, Mortgage, Vehicle, Donations, Education, Home Improvement, Utilities, Groceries, Dining, Entertainment, Other)
+5. Brief description of items
+
+Respond ONLY with JSON: {"vendor":"...","amount":"...","date":"...","category":"...","description":"..."}"#;
+
+    let payload = serde_json::json!({
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": format!("data:{};base64,{}", mime, base64_image)}}
+            ]
+        }],
+        "max_tokens": 500,
+        "temperature": 0.1
+    });
+
+    let resp = client.post(&url)
+        .header("Authorization", format!("Bearer {}", provider_config.api_key))
+        .header("Content-Type", "application/json")
+        .json(&payload)
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+        .map_err(|e| format!("LLM request: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("LLM HTTP {}: {}", status, &body[..body.len().min(200)]));
+    }
+
+    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let content = body["choices"][0]["message"]["content"].as_str().unwrap_or("");
+
+    // Parse the JSON from the response
+    let extracted: serde_json::Value = serde_json::from_str(
+        content.trim().trim_start_matches("```json").trim_end_matches("```").trim()
+    ).map_err(|e| format!("Parse vision result: {} — raw: {}", e, &content[..content.len().min(200)]))?;
+
+    let vendor = extracted["vendor"].as_str().unwrap_or("").to_string();
+    let amount_str = extracted["amount"].as_str().unwrap_or("0");
+    let amount_cents = parse_cents(amount_str).unwrap_or(0);
+    let date = extracted["date"].as_str().unwrap_or("").to_string();
+    let category_name = extracted["category"].as_str().unwrap_or("Other").to_string();
+    let description = extracted["description"].as_str().unwrap_or("").to_string();
+
+    // Look up category ID
+    let db2 = db.clone();
+    let cat_name = category_name.clone();
+    let category_id: Option<i64> = tokio::task::spawn_blocking(move || -> Option<i64> {
+        let conn = rusqlite::Connection::open(&db2).ok()?;
+        conn.query_row(
+            "SELECT id FROM expense_categories WHERE name = ?",
+            rusqlite::params![&cat_name],
+            |r| r.get(0),
+        ).ok()
+    }).await.unwrap_or(None);
+
+    // Update receipt
+    let db3 = db.clone();
+    let vendor_log = vendor.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db3).map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE receipts SET vendor = ?, amount_cents = ?, category_id = ?, receipt_date = ?, description = ?, status = 'scanned' WHERE id = ?",
+            rusqlite::params![&vendor, amount_cents, category_id, &date, &description, receipt_id],
+        ).map_err(|e| e.to_string())?;
+
+        // Auto-create expense from scanned receipt
+        let uid: i64 = conn.query_row("SELECT user_id FROM receipts WHERE id = ?", rusqlite::params![receipt_id], |r| r.get(0))
+            .unwrap_or(0);
+        let entity = if category_id.map(|c| c <= 17).unwrap_or(false) { "business" } else { "personal" };
+        conn.execute(
+            "INSERT INTO expenses (user_id, amount_cents, vendor, category_id, expense_date, description, entity, receipt_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rusqlite::params![uid, amount_cents, &vendor, category_id, &date, &description, entity, receipt_id, chrono::Utc::now().timestamp()],
+        ).map_err(|e| e.to_string())?;
+
+        Ok(())
+    }).await.map_err(|e| e.to_string())??;
+
+    info!("[tax] Receipt #{} scanned: {} {}", receipt_id, vendor_log, cents_to_display(amount_cents));
+    Ok(())
+}
+
+// ── Receipt List ────────────────────────────────────────────────────────────
+
+pub async fn handle_receipt_list(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+
+    let receipts = tokio::task::spawn_blocking(move || -> Result<Vec<serde_json::Value>, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT r.id, r.vendor, r.amount_cents, r.receipt_date, r.description, r.status, r.created_at, c.name \
+             FROM receipts r LEFT JOIN expense_categories c ON r.category_id = c.id \
+             WHERE r.user_id = ? ORDER BY r.created_at DESC LIMIT 100"
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(rusqlite::params![uid], |r| {
+            let cents: Option<i64> = r.get(2)?;
+            Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?,
+                "vendor": r.get::<_, Option<String>>(1)?,
+                "amount_cents": cents,
+                "amount_display": cents.map(cents_to_display),
+                "receipt_date": r.get::<_, Option<String>>(3)?,
+                "description": r.get::<_, Option<String>>(4)?,
+                "status": r.get::<_, String>(5)?,
+                "created_at": r.get::<_, i64>(6)?,
+                "category": r.get::<_, Option<String>>(7)?,
+                "image_url": format!("/api/tax/receipts/{}/image", r.get::<_, i64>(0)?),
+            }))
+        }).map_err(|e| e.to_string())?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(serde_json::json!({ "receipts": receipts })))
+}
+
+// ── Receipt Image ───────────────────────────────────────────────────────────
+
+pub async fn handle_receipt_image(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<(axum::http::HeaderMap, Vec<u8>), StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let _principal = crate::resolve_principal(&state, token).await?;
+    let db = state.db_path.clone();
+
+    let path: String = tokio::task::spawn_blocking(move || -> Result<String, ()> {
+        let conn = rusqlite::Connection::open(&db).map_err(|_| ())?;
+        conn.query_row("SELECT image_path FROM receipts WHERE id = ?", rusqlite::params![id], |r| r.get(0))
+            .map_err(|_| ())
+    }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    let data = std::fs::read(&path).map_err(|_| StatusCode::NOT_FOUND)?;
+    let mut headers = axum::http::HeaderMap::new();
+    let ct = if path.ends_with(".png") { "image/png" }
+        else if path.ends_with(".pdf") { "application/pdf" }
+        else { "image/jpeg" };
+    headers.insert("content-type", ct.parse().unwrap());
+    headers.insert("cache-control", "private, max-age=3600".parse().unwrap());
+    Ok((headers, data))
+}
+
+// ── Expense CRUD ────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct ExpenseCreateRequest {
+    pub token: String,
+    pub amount: String,
+    pub vendor: String,
+    pub category: Option<String>,
+    pub date: String,
+    pub description: Option<String>,
+    pub entity: Option<String>,
+}
+
+pub async fn handle_expense_create(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ExpenseCreateRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &req.token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+
+    let amount_cents = parse_cents(&req.amount)
+        .ok_or((StatusCode::BAD_REQUEST, "Invalid amount format".to_string()))?;
+
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let vendor = req.vendor.clone();
+    let date = req.date.clone();
+    let desc = req.description.clone();
+    let entity = req.entity.clone().unwrap_or_else(|| "personal".to_string());
+    let cat = req.category.clone();
+    let now = chrono::Utc::now().timestamp();
+
+    let id = tokio::task::spawn_blocking(move || -> Result<i64, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let category_id: Option<i64> = cat.as_deref().and_then(|c| {
+            conn.query_row("SELECT id FROM expense_categories WHERE name = ?", rusqlite::params![c], |r| r.get(0)).ok()
+        });
+        conn.execute(
+            "INSERT INTO expenses (user_id, amount_cents, vendor, category_id, expense_date, description, entity, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            rusqlite::params![uid, amount_cents, &vendor, category_id, &date, &desc, &entity, now],
+        ).map_err(|e| e.to_string())?;
+        Ok(conn.last_insert_rowid())
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(serde_json::json!({
+        "id": id,
+        "amount_display": cents_to_display(amount_cents),
+        "vendor": req.vendor,
+    })))
+}
+
+pub async fn handle_expense_list(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let entity_filter = params.get("entity").cloned();
+    let start = params.get("start").cloned();
+    let end = params.get("end").cloned();
+
+    let expenses = tokio::task::spawn_blocking(move || -> Result<Vec<serde_json::Value>, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let mut sql = "SELECT e.id, e.amount_cents, e.vendor, e.expense_date, e.description, e.entity, e.receipt_id, e.created_at, c.name \
+                       FROM expenses e LEFT JOIN expense_categories c ON e.category_id = c.id \
+                       WHERE e.user_id = ?".to_string();
+        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(uid)];
+
+        if let Some(ref ent) = entity_filter {
+            sql.push_str(" AND e.entity = ?");
+            params_vec.push(Box::new(ent.clone()));
+        }
+        if let Some(ref s) = start {
+            sql.push_str(" AND e.expense_date >= ?");
+            params_vec.push(Box::new(s.clone()));
+        }
+        if let Some(ref e) = end {
+            sql.push_str(" AND e.expense_date <= ?");
+            params_vec.push(Box::new(e.clone()));
+        }
+        sql.push_str(" ORDER BY e.expense_date DESC LIMIT 200");
+
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(refs.as_slice(), |r| {
+            let cents: i64 = r.get(1)?;
+            Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?,
+                "amount_cents": cents,
+                "amount_display": cents_to_display(cents),
+                "vendor": r.get::<_, String>(2)?,
+                "expense_date": r.get::<_, String>(3)?,
+                "description": r.get::<_, Option<String>>(4)?,
+                "entity": r.get::<_, String>(5)?,
+                "receipt_id": r.get::<_, Option<i64>>(6)?,
+                "created_at": r.get::<_, i64>(7)?,
+                "category": r.get::<_, Option<String>>(8)?,
+            }))
+        }).map_err(|e| e.to_string())?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(serde_json::json!({ "expenses": expenses })))
+}
+
+// ── Summary ─────────────────────────────────────────────────────────────────
+
+pub async fn handle_expense_summary(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+
+    // Default to YTD
+    let year = chrono::Utc::now().format("%Y").to_string();
+    let start = params.get("start").cloned().unwrap_or_else(|| format!("{}-01-01", year));
+    let end = params.get("end").cloned().unwrap_or_else(|| format!("{}-12-31", year));
+
+    let summary = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+
+        // By category
+        let mut stmt = conn.prepare(
+            "SELECT c.name, c.entity, c.tax_deductible, SUM(e.amount_cents), COUNT(*) \
+             FROM expenses e JOIN expense_categories c ON e.category_id = c.id \
+             WHERE e.user_id = ? AND e.expense_date >= ? AND e.expense_date <= ? \
+             GROUP BY c.id ORDER BY SUM(e.amount_cents) DESC"
+        ).map_err(|e| e.to_string())?;
+        let categories: Vec<serde_json::Value> = stmt.query_map(
+            rusqlite::params![uid, &start, &end],
+            |r| {
+                let total: i64 = r.get(3)?;
+                Ok(serde_json::json!({
+                    "category": r.get::<_, String>(0)?,
+                    "entity": r.get::<_, String>(1)?,
+                    "tax_deductible": r.get::<_, i64>(2)? != 0,
+                    "total_cents": total,
+                    "total_display": cents_to_display(total),
+                    "count": r.get::<_, i64>(4)?,
+                }))
+            }
+        ).map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok()).collect();
+
+        // Totals
+        let total_all: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(amount_cents), 0) FROM expenses WHERE user_id = ? AND expense_date >= ? AND expense_date <= ?",
+            rusqlite::params![uid, &start, &end], |r| r.get(0)
+        ).unwrap_or(0);
+
+        let total_business: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(amount_cents), 0) FROM expenses WHERE user_id = ? AND entity = 'business' AND expense_date >= ? AND expense_date <= ?",
+            rusqlite::params![uid, &start, &end], |r| r.get(0)
+        ).unwrap_or(0);
+
+        let total_deductible: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(e.amount_cents), 0) FROM expenses e JOIN expense_categories c ON e.category_id = c.id \
+             WHERE e.user_id = ? AND c.tax_deductible = 1 AND e.expense_date >= ? AND e.expense_date <= ?",
+            rusqlite::params![uid, &start, &end], |r| r.get(0)
+        ).unwrap_or(0);
+
+        let receipt_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM receipts WHERE user_id = ? AND created_at >= ? AND created_at <= ?",
+            rusqlite::params![uid, chrono::NaiveDate::parse_from_str(&start, "%Y-%m-%d").map(|d| d.and_hms_opt(0,0,0).unwrap().and_utc().timestamp()).unwrap_or(0),
+                chrono::NaiveDate::parse_from_str(&end, "%Y-%m-%d").map(|d| d.and_hms_opt(23,59,59).unwrap().and_utc().timestamp()).unwrap_or(i64::MAX)],
+            |r| r.get(0)
+        ).unwrap_or(0);
+
+        Ok(serde_json::json!({
+            "period": { "start": start, "end": end },
+            "total_cents": total_all,
+            "total_display": cents_to_display(total_all),
+            "business_cents": total_business,
+            "business_display": cents_to_display(total_business),
+            "deductible_cents": total_deductible,
+            "deductible_display": cents_to_display(total_deductible),
+            "receipt_count": receipt_count,
+            "categories": categories,
+        }))
+    }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(summary))
+}
+
+// ── Categories ──────────────────────────────────────────────────────────────
+
+pub async fn handle_category_list(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let _principal = crate::resolve_principal(&state, token).await?;
+    let db = state.db_path.clone();
+
+    let categories = tokio::task::spawn_blocking(move || -> Result<Vec<serde_json::Value>, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, entity, tax_deductible FROM expense_categories ORDER BY entity, name"
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |r| Ok(serde_json::json!({
+            "id": r.get::<_, i64>(0)?,
+            "name": r.get::<_, String>(1)?,
+            "entity": r.get::<_, String>(2)?,
+            "tax_deductible": r.get::<_, i64>(3)? != 0,
+        }))).map_err(|e| e.to_string())?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(serde_json::json!({ "categories": categories })))
+}
+
+// ── CSV Export ───────────────────────────────────────────────────────────────
+
+pub async fn handle_expense_export(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<(axum::http::HeaderMap, String), StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+
+    let year = chrono::Utc::now().format("%Y").to_string();
+    let start = params.get("start").cloned().unwrap_or_else(|| format!("{}-01-01", year));
+    let end = params.get("end").cloned().unwrap_or_else(|| format!("{}-12-31", year));
+
+    let csv = tokio::task::spawn_blocking(move || -> Result<String, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT e.expense_date, e.vendor, e.amount_cents, c.name, e.entity, e.description \
+             FROM expenses e LEFT JOIN expense_categories c ON e.category_id = c.id \
+             WHERE e.user_id = ? AND e.expense_date >= ? AND e.expense_date <= ? \
+             ORDER BY e.expense_date"
+        ).map_err(|e| e.to_string())?;
+        let mut lines = vec!["Date,Vendor,Amount,Category,Entity,Description".to_string()];
+        let rows = stmt.query_map(rusqlite::params![uid, &start, &end], |r| {
+            let cents: i64 = r.get(2)?;
+            Ok(format!("{},{},{},{},{},{}",
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?.replace(',', ";"),
+                cents_to_display(cents),
+                r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                r.get::<_, String>(4)?,
+                r.get::<_, Option<String>>(5)?.unwrap_or_default().replace(',', ";"),
+            ))
+        }).map_err(|e| e.to_string())?;
+        for r in rows { if let Ok(line) = r { lines.push(line); } }
+        Ok(lines.join("\n"))
+    }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("content-type", "text/csv".parse().unwrap());
+    let s = params.get("start").cloned().unwrap_or_default();
+    let e = params.get("end").cloned().unwrap_or_default();
+    headers.insert("content-disposition", format!("attachment; filename=\"expenses-{}-{}.csv\"", s, e).parse().unwrap());
+    Ok((headers, csv))
+}

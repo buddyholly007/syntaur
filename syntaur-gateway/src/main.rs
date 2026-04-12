@@ -25,6 +25,7 @@ mod voice_chat;
 mod modules;
 mod setup;
 mod license;
+mod tax;
 
 /// Brand name constant — used in user-facing messages.
 pub const BRAND: &str = "Syntaur";
@@ -3328,6 +3329,14 @@ async fn main() {
         .route("/api/settings/install-shortcut", post(setup::handle_install_shortcut))
         .route("/api/bug-reports", post(handle_bug_report_submit))
         .route("/api/bug-reports", get(handle_bug_report_list))
+        .route("/api/tax/receipts", post(tax::handle_receipt_upload))
+        .route("/api/tax/receipts", get(tax::handle_receipt_list))
+        .route("/api/tax/receipts/{id}/image", get(tax::handle_receipt_image))
+        .route("/api/tax/expenses", post(tax::handle_expense_create))
+        .route("/api/tax/expenses", get(tax::handle_expense_list))
+        .route("/api/tax/summary", get(tax::handle_expense_summary))
+        .route("/api/tax/categories", get(tax::handle_category_list))
+        .route("/api/tax/export", get(tax::handle_expense_export))
         .route("/api/todos", get(handle_todo_list))
         .route("/api/todos", post(handle_todo_create))
         .route("/api/todos/{id}", axum::routing::put(handle_todo_update))

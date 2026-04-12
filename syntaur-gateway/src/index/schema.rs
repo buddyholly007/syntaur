@@ -372,6 +372,79 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX IF NOT EXISTS idx_calendar_user ON calendar_events(user_id);
     CREATE INDEX IF NOT EXISTS idx_calendar_start ON calendar_events(start_time);
     "#,
+    // v12: tax module — receipts, expenses, categories (premium module).
+    r#"
+    CREATE TABLE IF NOT EXISTS expense_categories (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        name            TEXT NOT NULL UNIQUE,
+        entity          TEXT NOT NULL DEFAULT 'personal',
+        tax_deductible  INTEGER NOT NULL DEFAULT 0,
+        parent_category TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS receipts (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id         INTEGER NOT NULL DEFAULT 0,
+        image_path      TEXT NOT NULL,
+        vendor          TEXT,
+        amount_cents    INTEGER,
+        category_id     INTEGER REFERENCES expense_categories(id),
+        receipt_date    TEXT,
+        description     TEXT,
+        raw_ocr         TEXT,
+        status          TEXT NOT NULL DEFAULT 'pending',
+        created_at      INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_receipts_user ON receipts(user_id);
+    CREATE INDEX IF NOT EXISTS idx_receipts_date ON receipts(receipt_date);
+
+    CREATE TABLE IF NOT EXISTS expenses (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id         INTEGER NOT NULL DEFAULT 0,
+        amount_cents    INTEGER NOT NULL,
+        vendor          TEXT NOT NULL,
+        category_id     INTEGER REFERENCES expense_categories(id),
+        expense_date    TEXT NOT NULL,
+        description     TEXT,
+        entity          TEXT NOT NULL DEFAULT 'personal',
+        receipt_id      INTEGER REFERENCES receipts(id),
+        created_at      INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_expenses_user ON expenses(user_id);
+    CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(expense_date);
+    CREATE INDEX IF NOT EXISTS idx_expenses_category ON expenses(category_id);
+
+    -- Seed default categories
+    INSERT OR IGNORE INTO expense_categories (name, entity, tax_deductible) VALUES
+        ('Advertising & Marketing', 'business', 1),
+        ('Equipment & Tools', 'business', 1),
+        ('Hardware & Supplies', 'business', 1),
+        ('Lumber & Raw Materials', 'business', 1),
+        ('Office Supplies', 'business', 1),
+        ('Professional Services', 'business', 1),
+        ('Rent & Utilities', 'business', 1),
+        ('Insurance', 'business', 1),
+        ('Software & Subscriptions', 'business', 1),
+        ('Shipping & Packaging', 'business', 1),
+        ('Vehicle & Mileage', 'business', 1),
+        ('Education & Training', 'business', 1),
+        ('Meals & Entertainment', 'business', 1),
+        ('Travel', 'business', 1),
+        ('Tools - Consumables', 'business', 1),
+        ('Safety Gear', 'business', 1),
+        ('Miscellaneous Business', 'business', 1),
+        ('Medical', 'personal', 1),
+        ('Mortgage', 'personal', 1),
+        ('Vehicle', 'personal', 0),
+        ('Donations', 'personal', 1),
+        ('Education', 'personal', 1),
+        ('Home Improvement', 'personal', 0),
+        ('Utilities', 'personal', 0),
+        ('Groceries', 'personal', 0),
+        ('Dining', 'personal', 0),
+        ('Entertainment', 'personal', 0),
+        ('Other', 'personal', 0);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
