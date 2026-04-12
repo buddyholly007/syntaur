@@ -1,4 +1,4 @@
-//! `ocmod` — Syntaur module manager CLI.
+//! `syntaur-mod` — Syntaur module manager CLI.
 //!
 //! Manages core and extension modules: list, install, remove, enable, disable.
 
@@ -252,7 +252,7 @@ fn cmd_remove(id: &str) -> Result<()> {
 
     // Check it's not a core module
     if CORE_MODULES.iter().any(|m| m.id == id) {
-        bail!("Cannot remove core module '{}'. Use 'ocmod disable {}' instead.", id, id);
+        bail!("Cannot remove core module '{}'. Use 'syntaur-mod disable {}' instead.", id, id);
     }
 
     fs::remove_dir_all(&mod_dir).context("removing module directory")?;
@@ -379,42 +379,42 @@ fn main() {
         "status" | "st" => cmd_status(),
         "enable" => {
             let id = args.get(1).map(|s| s.as_str()).unwrap_or_else(|| {
-                eprintln!("Usage: ocmod enable <module-id>");
+                eprintln!("Usage: syntaur-mod enable <module-id>");
                 std::process::exit(1);
             });
             cmd_enable(id)
         }
         "disable" => {
             let id = args.get(1).map(|s| s.as_str()).unwrap_or_else(|| {
-                eprintln!("Usage: ocmod disable <module-id>");
+                eprintln!("Usage: syntaur-mod disable <module-id>");
                 std::process::exit(1);
             });
             cmd_disable(id)
         }
         "install" => {
             let source = args.get(1).map(|s| s.as_str()).unwrap_or_else(|| {
-                eprintln!("Usage: ocmod install <path>");
+                eprintln!("Usage: syntaur-mod install <path>");
                 std::process::exit(1);
             });
             cmd_install(source)
         }
         "remove" | "rm" => {
             let id = args.get(1).map(|s| s.as_str()).unwrap_or_else(|| {
-                eprintln!("Usage: ocmod remove <module-id>");
+                eprintln!("Usage: syntaur-mod remove <module-id>");
                 std::process::exit(1);
             });
             cmd_remove(id)
         }
         "info" => {
             let id = args.get(1).map(|s| s.as_str()).unwrap_or_else(|| {
-                eprintln!("Usage: ocmod info <module-id>");
+                eprintln!("Usage: syntaur-mod info <module-id>");
                 std::process::exit(1);
             });
             cmd_info(id)
         }
         "help" | "--help" | "-h" => {
-            println!("ocmod — Syntaur module manager\n");
-            println!("Usage: ocmod <command> [args]\n");
+            println!("syntaur-mod — Syntaur module manager\n");
+            println!("Usage: syntaur-mod <command> [args]\n");
             println!("Commands:");
             println!("  list, ls              List all modules with status");
             println!("  status, st            Gateway status + module list");
@@ -427,7 +427,7 @@ fn main() {
             Ok(())
         }
         other => {
-            eprintln!("Unknown command: {}\nRun 'ocmod help' for usage.", other);
+            eprintln!("Unknown command: {}\nRun 'syntaur-mod help' for usage.", other);
             std::process::exit(1);
         }
     };

@@ -11,7 +11,7 @@
 //!
 //! - **Extension modules** are separate binaries that communicate with the
 //!   gateway via the MCP (Model Context Protocol) over stdio. They ship
-//!   a `syntaur.module.toml` manifest and are managed by `ocmod`.
+//!   a `syntaur.module.toml` manifest and are managed by `syntaur-mod`.
 
 pub mod types;
 pub mod capabilities;

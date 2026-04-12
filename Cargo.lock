@@ -2480,66 +2480,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
-name = "syntaur-capability-shim"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "env_logger",
- "log",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "syntaur-hwscan"
-version = "0.1.0"
-dependencies = [
- "log",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "syntaur-mod"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "syntaur-sdk",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "syntaur-sdk"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "reqwest",
- "semver",
- "serde",
- "serde_json",
- "tokio",
- "toml",
-]
-
-[[package]]
-name = "syntaur-setup"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "syntaur-sdk",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "openssl"
 version = "0.10.76"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3259,59 +3199,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rust-syntaur"
-version = "0.1.0"
-dependencies = [
- "async-stream",
- "async-trait",
- "axum",
- "base64 0.22.1",
- "chrono",
- "chrono-tz",
- "ed25519-dalek",
- "env_logger",
- "fastembed",
- "futures-util",
- "hex",
- "libc",
- "log",
- "lru",
- "mcp-protocol",
- "syntaur-sdk",
- "rand 0.8.5",
- "regex",
- "reqwest",
- "rusqlite",
- "rustls 0.23.37",
- "rustls-pemfile",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2",
- "snow",
- "tokio",
- "tokio-tungstenite",
- "uuid",
- "webpki-roots 1.0.6",
-]
-
-[[package]]
-name = "rust-voice-pipeline"
-version = "0.1.0"
-dependencies = [
- "byteorder",
- "chrono",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "sherpa-onnx",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "rustc-hash"
 version = "2.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3890,6 +3777,119 @@ dependencies = [
  "tokio-tungstenite",
  "urlencoding",
  "uuid",
+]
+
+[[package]]
+name = "syntaur-capability-shim"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "env_logger",
+ "log",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "syntaur-gateway"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "chrono-tz",
+ "ed25519-dalek",
+ "env_logger",
+ "fastembed",
+ "futures-util",
+ "hex",
+ "libc",
+ "log",
+ "lru",
+ "mcp-protocol",
+ "rand 0.8.5",
+ "regex",
+ "reqwest",
+ "rusqlite",
+ "rustls 0.23.37",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "snow",
+ "syntaur-sdk",
+ "tokio",
+ "tokio-tungstenite",
+ "uuid",
+ "webpki-roots 1.0.6",
+]
+
+[[package]]
+name = "syntaur-hwscan"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "syntaur-mod"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "syntaur-sdk",
+]
+
+[[package]]
+name = "syntaur-sdk"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "reqwest",
+ "semver",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+]
+
+[[package]]
+name = "syntaur-setup"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "syntaur-sdk",
+]
+
+[[package]]
+name = "syntaur-voice-pipeline"
+version = "0.1.0"
+dependencies = [
+ "byteorder",
+ "chrono",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sherpa-onnx",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

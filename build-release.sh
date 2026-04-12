@@ -14,16 +14,16 @@ cd "$WORKSPACE"
 
 # Build gateway
 echo "  Building gateway..."
-cargo build --release -p rust-syntaur 2>&1 | tail -1
+cargo build --release -p syntaur-gateway 2>&1 | tail -1
 
 # Build module manager
-echo "  Building ocmod..."
+echo "  Building syntaur-mod..."
 cargo build --release -p syntaur-mod 2>&1 | tail -1
 
 # Collect artifacts
 mkdir -p "$OUTPUT"
-cp target/release/rust-syntaur "$OUTPUT/syntaur"
-cp target/release/ocmod "$OUTPUT/ocmod"
+cp target/release/syntaur-gateway "$OUTPUT/syntaur"
+cp target/release/syntaur-mod "$OUTPUT/syntaur-mod"
 cp README-syntaur.md "$OUTPUT/README.md"
 cp install.sh "$OUTPUT/install.sh"
 

@@ -5,7 +5,7 @@ edition.workspace = true
 description = "Module manager CLI for Syntaur"
 
 [[bin]]
-name = "ocmod"
+name = "syntaur-mod"
 path = "src/main.rs"
 
 [dependencies]

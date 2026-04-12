@@ -1,5 +1,5 @@
 [package]
-name = "rust-syntaur"
+name = "syntaur-gateway"
 version = "0.1.0"
 edition.workspace = true
 

@@ -96,7 +96,7 @@ pub struct SatelliteConfig {
     pub host: String,
     /// Noise PSK (base64-encoded 32-byte key)
     pub noise_psk: String,
-    /// STT server URL (rust-voice-pipeline Wyoming, e.g., "127.0.0.1:10300")
+    /// STT server URL (syntaur-voice-pipeline Wyoming, e.g., "127.0.0.1:10300")
     pub stt_host: String,
     /// syntaur voice_chat URL (e.g., "http://127.0.0.1:18789")
     pub gateway_url: String,
@@ -612,7 +612,7 @@ async fn run_voice_pipeline(
     audio_pcm: &[u8],
     _conversation_id: &str,
 ) -> Result<PipelineResult, String> {
-    // 1. STT — send audio to rust-voice-pipeline Wyoming server
+    // 1. STT — send audio to syntaur-voice-pipeline Wyoming server
     let transcript = run_stt(&config.stt_host, audio_pcm).await?;
     if transcript.is_empty() {
         return Ok(PipelineResult {

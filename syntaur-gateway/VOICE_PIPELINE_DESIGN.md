@@ -19,7 +19,7 @@ Sat1 ESPHome → Wyoming protocol → HA assist_pipeline →
 ## Target Architecture
 
 ```
-Sat1 ESPHome → Wyoming protocol → rust-voice-pipeline (new Rust binary)
+Sat1 ESPHome → Wyoming protocol → syntaur-voice-pipeline (new Rust binary)
   ├── STT: embedded whisper.cpp via whisper-rs crate (GPU on gaming PC)
   │   or: HTTP call to a whisper.cpp server (like TurboQuant but for whisper)
   ├── Intent: regex first-pass for instant commands (lights, thermostat)
@@ -31,7 +31,7 @@ Sat1 ESPHome → Wyoming protocol → rust-voice-pipeline (new Rust binary)
 
 ## Component Design
 
-### 1. rust-voice-pipeline binary
+### 1. syntaur-voice-pipeline binary
 
 New standalone Rust binary in the Syntaur workspace. Runs on the **gaming PC**
 (where the GPU lives for STT + TTS) and listens for Wyoming protocol connections
@@ -39,7 +39,7 @@ from the Sat1.
 
 ```
 [package]
-name = "rust-voice-pipeline"
+name = "syntaur-voice-pipeline"
 # deps: wyoming-rs (Wyoming protocol), whisper-rs or HTTP to whisper server,
 #        reqwest (for Syntaur + TTS calls), tokio, tracing
 ```
@@ -156,7 +156,7 @@ When it triggers, the satellite opens a Wyoming connection to the pipeline's TCP
 
 ```
 syntaur-workspace/
-  rust-voice-pipeline/       # new crate in the workspace
+  syntaur-voice-pipeline/       # new crate in the workspace
     Cargo.toml
     src/
       main.rs                # TCP server, orchestrator

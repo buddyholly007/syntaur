@@ -1,4 +1,4 @@
-//! rust-voice-pipeline — Pure-Rust voice pipeline for Peter.
+//! syntaur-voice-pipeline — Pure-Rust voice pipeline for Peter.
 //!
 //! Two modes:
 //!
@@ -16,10 +16,10 @@
 //!
 //! ```bash
 //! # STT server for HA Wyoming integration
-//! RUST_LOG=info rust-voice-pipeline --mode stt --port 10300 --model-dir /opt/models
+//! RUST_LOG=info syntaur-voice-pipeline --mode stt --port 10300 --model-dir /opt/models
 //!
 //! # Full pipeline (future)
-//! RUST_LOG=info rust-voice-pipeline --mode pipeline --port 10500 \
+//! RUST_LOG=info syntaur-voice-pipeline --mode pipeline --port 10500 \
 //!   --syntaur-url http://192.168.1.35:18789 \
 //!   --syntaur-secret <voice_secret> \
 //!   --tts-url http://192.168.1.69:10400
@@ -302,7 +302,7 @@ async fn main() {
     let config = Arc::new(Config::from_args());
 
     // Load Parakeet model
-    info!("rust-voice-pipeline v0.1.0");
+    info!("syntaur-voice-pipeline v0.1.0");
     info!("  mode: {}", config.mode);
     info!("  model-dir: {}", config.model_dir);
 

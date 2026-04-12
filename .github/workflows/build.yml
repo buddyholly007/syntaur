@@ -39,7 +39,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
       - name: Build gateway
-        run: cargo build --release --target ${{ matrix.target }} -p rust-syntaur
+        run: cargo build --release --target ${{ matrix.target }} -p syntaur-gateway
         env:
           OPENSSL_STATIC: "1"
 
@@ -51,13 +51,13 @@ jobs:
         run: |
           mkdir -p dist
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            cp target/${{ matrix.target }}/release/rust-syntaur.exe dist/${{ matrix.artifact }}
-            cp target/${{ matrix.target }}/release/ocmod.exe dist/ocmod-windows-x86_64.exe
+            cp target/${{ matrix.target }}/release/syntaur-gateway.exe dist/${{ matrix.artifact }}
+            cp target/${{ matrix.target }}/release/syntaur-mod.exe dist/syntaur-mod-windows-x86_64.exe
           else
-            cp target/${{ matrix.target }}/release/rust-syntaur dist/${{ matrix.artifact }}
+            cp target/${{ matrix.target }}/release/syntaur-gateway dist/${{ matrix.artifact }}
             SUFFIX="${{ matrix.artifact }}"
             SUFFIX="${SUFFIX#syntaur-}"
-            cp target/${{ matrix.target }}/release/ocmod dist/ocmod-${SUFFIX}
+            cp target/${{ matrix.target }}/release/syntaur-mod dist/syntaur-mod-${SUFFIX}
             chmod +x dist/*
           fi
 
