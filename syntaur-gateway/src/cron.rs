@@ -328,7 +328,7 @@ async fn execute_agent_turn(
                         error!("[cron:{}] LLM error (round {}): {}", job.id, round, e);
                         return JobResult {
                             success: false,
-                            output: format!("LLM error: {}", e),
+                            output: format!("LLM unavailable for job '{}': {}", job.id, e),
                             duration_ms: start.elapsed().as_millis() as u64,
                         };
                     }
@@ -390,7 +390,7 @@ async fn execute_agent_turn(
                 },
                 Err(e) => JobResult {
                     success: false,
-                    output: format!("Final LLM call failed: {}", e),
+                    output: format!("Job '{}' used all {} tool rounds but the final summary call also failed: {}", job.id, max_rounds, e),
                     duration_ms: start.elapsed().as_millis() as u64,
                 },
             }
@@ -403,7 +403,7 @@ async fn execute_agent_turn(
             error!("[cron:{}] Agent-turn timed out after {}s", job.id, timeout_secs);
             JobResult {
                 success: false,
-                output: format!("Agent-turn timed out after {}s", timeout_secs),
+                output: format!("Job '{}' timed out after {}s — the task may be too complex or the LLM too slow. Consider increasing timeoutSeconds in the job config.", job.id, timeout_secs),
                 duration_ms: start.elapsed().as_millis() as u64,
             }
         }
@@ -474,7 +474,7 @@ pub async fn execute_job(job: &CronJob) -> JobResult {
                 output: if success {
                     stdout.chars().take(1000).collect()
                 } else {
-                    format!("STDERR: {}", stderr.chars().take(500).collect::<String>())
+                    format!("error: {}", stderr.chars().take(500).collect::<String>())
                 },
                 duration_ms,
             }
@@ -483,7 +483,7 @@ pub async fn execute_job(job: &CronJob) -> JobResult {
             error!("[cron:{}] Exec error: {}", job.id, e);
             JobResult {
                 success: false,
-                output: format!("Exec error: {}", e),
+                output: format!("Could not run command for job '{}': {} — check that the script exists and is executable", job.id, e),
                 duration_ms,
             }
         }
@@ -491,7 +491,7 @@ pub async fn execute_job(job: &CronJob) -> JobResult {
             error!("[cron:{}] Timed out after {}s", job.id, timeout.as_secs());
             JobResult {
                 success: false,
-                output: format!("Timed out after {}s", timeout.as_secs()),
+                output: format!("Job '{}' script timed out after {}s — the command may be hung. Consider increasing timeoutSeconds.", job.id, timeout.as_secs()),
                 duration_ms,
             }
         }

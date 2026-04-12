@@ -62,7 +62,7 @@ async fn shelly_gen2(client: &Client, base: &str, device_id: &str, command: &Dev
             state.raw = Some(result);
             state
         }
-        Err(e) => DeviceState::err(device_id, format!("shelly rpc: {}", e)),
+        Err(e) => DeviceState::err(device_id, format!("Can't reach Shelly device — check it's powered on and connected to WiFi")),
     }
 }
 
@@ -83,7 +83,7 @@ async fn shelly_gen1(client: &Client, base: &str, device_id: &str, command: &Dev
             state.raw = Some(json);
             state
         }
-        Err(e) => DeviceState::err(device_id, format!("shelly gen1: {}", e)),
+        Err(e) => DeviceState::err(device_id, format!("Can't reach Shelly Gen1 device — check it's powered on and connected to WiFi")),
     }
 }
 
@@ -114,7 +114,7 @@ async fn wled(client: &Client, device: &Device, command: &DeviceCommand) -> Devi
                     state.raw = Some(json);
                     return state;
                 }
-                Err(e) => return DeviceState::err(device_id, format!("wled status: {}", e)),
+                Err(e) => return DeviceState::err(device_id, format!("Can't reach WLED device — check it's powered on and connected to WiFi")),
             }
         }
         _ => return DeviceState::err(device_id, "unsupported for WLED"),
@@ -129,7 +129,7 @@ async fn wled(client: &Client, device: &Device, command: &DeviceCommand) -> Devi
             state.raw = Some(json);
             state
         }
-        Err(e) => DeviceState::err(device_id, format!("wled: {}", e)),
+        Err(e) => DeviceState::err(device_id, format!("Can't reach WLED device — check it's powered on and connected to WiFi")),
     }
 }
 
@@ -169,7 +169,7 @@ async fn tasmota_cmd(client: &Client, base: &str, device_id: &str, cmnd: &str) -
             state.raw = Some(json);
             state
         }
-        Err(e) => DeviceState::err(device_id, format!("tasmota: {}", e)),
+        Err(e) => DeviceState::err(device_id, format!("Can't reach Tasmota device — check it's powered on and connected to WiFi")),
     }
 }
 
@@ -213,7 +213,7 @@ async fn esphome_post(
     };
     match req.send().await {
         Ok(_) => DeviceState::ok(device_id),
-        Err(e) => DeviceState::err(device_id, format!("esphome: {}", e)),
+        Err(e) => DeviceState::err(device_id, format!("Can't reach ESPHome device — check it's powered on and connected to WiFi")),
     }
 }
 
@@ -224,7 +224,7 @@ async fn esphome_status(client: &Client, base: &str, device_id: &str) -> DeviceS
             state.raw = resp.json().await.ok();
             state
         }
-        Err(e) => DeviceState::err(device_id, format!("esphome status: {}", e)),
+        Err(e) => DeviceState::err(device_id, format!("Can't get ESPHome device status — check it's powered on and connected to WiFi")),
     }
 }
 
@@ -261,7 +261,7 @@ async fn hue(client: &Client, device: &Device, command: &DeviceCommand) -> Devic
                     state.raw = Some(json);
                     return state;
                 }
-                Err(e) => return DeviceState::err(device_id, format!("hue: {}", e)),
+                Err(e) => return DeviceState::err(device_id, format!("Can't reach Hue Bridge — check it's powered on and connected to the network")),
             }
         }
         _ => return DeviceState::err(device_id, "unsupported for Hue"),
@@ -277,7 +277,7 @@ async fn hue(client: &Client, device: &Device, command: &DeviceCommand) -> Devic
             };
             state
         }
-        Err(e) => DeviceState::err(device_id, format!("hue: {}", e)),
+        Err(e) => DeviceState::err(device_id, format!("Can't reach Hue Bridge — check it's powered on and connected to the network")),
     }
 }
 
@@ -301,6 +301,6 @@ async fn generic(client: &Client, device: &Device, command: &DeviceCommand) -> D
             state.raw = resp.json().await.ok();
             state
         }
-        Err(e) => DeviceState::err(device_id, format!("generic: {}", e)),
+        Err(e) => DeviceState::err(device_id, format!("Can't reach device — check it's powered on and connected to the network")),
     }
 }

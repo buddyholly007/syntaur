@@ -1,0 +1,13 @@
+[package]
+name = "syntaur-viewer"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight dashboard viewer for Syntaur — native OS webview, no full browser needed"
+
+[[bin]]
+name = "syntaur-viewer"
+path = "src/main.rs"
+
+[dependencies]
+tao = "0.30"
+wry = "0.47"

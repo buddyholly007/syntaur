@@ -3031,6 +3031,7 @@ async fn main() {
         .route("/api/license/status", get(setup::handle_license_status))
         .route("/api/license/activate", post(setup::handle_license_activate))
         .route("/api/setup/apply", post(setup::handle_setup_apply))
+        .route("/api/settings/install-shortcut", post(setup::handle_install_shortcut))
         .with_state(Arc::clone(&state))
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),
@@ -3045,6 +3046,8 @@ async fn main() {
     }
 
     info!("HTTP server on {}", bind_addr);
+    info!("Dashboard: http://127.0.0.1:{}", config.gateway.port);
+    info!("Open 'Syntaur' from your app launcher, or visit the URL above.");
 
     // Auto-open browser on first start (only if interactive terminal)
     if std::env::var("DISPLAY").is_ok() || std::env::var("WAYLAND_DISPLAY").is_ok() || cfg!(target_os = "macos") || cfg!(target_os = "windows") {

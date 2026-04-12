@@ -1645,3 +1645,204 @@ pub struct FileUploadResponse {
     pub content_type: String,
     pub error: Option<String>,
 }
+
+// ── Desktop Shortcut Installation ──────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct InstallShortcutRequest {
+    pub target: String, // "menu" or "desktop"
+}
+
+#[derive(Serialize)]
+pub struct InstallShortcutResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+const SHORTCUT_ICON_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0ea5e9"/>
+      <stop offset="100%" stop-color="#0369a1"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="12" fill="#0a0a0a"/>
+  <path d="M16 44 C16 38 20 34 26 34 L38 34 C44 34 48 38 48 44 L48 48 C48 52 44 52 42 48 L40 44 L38 48 C36 52 32 52 30 48 L28 44 L26 48 C24 52 20 52 18 48 L16 44Z" fill="url(#g)"/>
+  <path d="M30 34 L30 20 C30 16 32 14 34 14 L34 14 C36 14 38 16 38 20 L38 34" fill="url(#g)"/>
+  <circle cx="34" cy="11" r="5" fill="url(#g)"/>
+  <path d="M36 20 L46 16 L48 14" stroke="url(#g)" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+  <path d="M16 38 C12 36 10 32 12 28" stroke="url(#g)" stroke-width="2" stroke-linecap="round" fill="none"/>
+</svg>"##;
+
+/// POST /api/settings/install-shortcut — create desktop or app-menu shortcut.
+pub async fn handle_install_shortcut(
+    axum::Json(req): axum::Json<InstallShortcutRequest>,
+) -> axum::Json<InstallShortcutResponse> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
+    let dashboard_url = "http://localhost:18789";
+
+    #[cfg(target_os = "linux")]
+    {
+        // Ensure icon is installed
+        let icon_dir = format!("{}/.local/share/icons/hicolor/scalable/apps", home);
+        let _ = std::fs::create_dir_all(&icon_dir);
+        let _ = std::fs::write(format!("{}/syntaur.svg", icon_dir), SHORTCUT_ICON_SVG);
+
+        // Update icon cache
+        let _ = std::process::Command::new("gtk-update-icon-cache")
+            .args(["-f", "-t", &format!("{}/.local/share/icons/hicolor", home)])
+            .output();
+
+        if req.target == "desktop" {
+            let desktop_dir = std::env::var("XDG_DESKTOP_DIR")
+                .unwrap_or_else(|_| format!("{}/Desktop", home));
+            let _ = std::fs::create_dir_all(&desktop_dir);
+            let path = format!("{}/syntaur.desktop", desktop_dir);
+            let content = format!(
+                "[Desktop Entry]\nName=Syntaur\nComment=Your personal AI platform\nExec=xdg-open {}\nIcon=syntaur\nType=Application\nCategories=Utility;Development;\nStartupNotify=false\n",
+                dashboard_url
+            );
+            return match std::fs::write(&path, &content) {
+                Ok(_) => {
+                    // Mark as trusted (GNOME requires this for desktop files)
+                    let _ = std::process::Command::new("gio")
+                        .args(["set", &path, "metadata::trusted", "true"])
+                        .output();
+                    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from(
+                        std::os::unix::fs::PermissionsExt::from_mode(0o755)
+                    ));
+                    axum::Json(InstallShortcutResponse {
+                        success: true,
+                        message: "Desktop shortcut created — look for 'Syntaur' on your desktop.".into(),
+                    })
+                }
+                Err(e) => axum::Json(InstallShortcutResponse {
+                    success: false,
+                    message: format!("Could not create desktop shortcut: {}", e),
+                }),
+            };
+        } else {
+            let app_dir = format!("{}/.local/share/applications", home);
+            let _ = std::fs::create_dir_all(&app_dir);
+            let path = format!("{}/syntaur.desktop", app_dir);
+            let content = format!(
+                "[Desktop Entry]\nName=Syntaur\nComment=Your personal AI platform\nExec=xdg-open {}\nIcon=syntaur\nType=Application\nCategories=Utility;Development;\nStartupNotify=false\n",
+                dashboard_url
+            );
+            return match std::fs::write(&path, content) {
+                Ok(_) => axum::Json(InstallShortcutResponse {
+                    success: true,
+                    message: "App launcher shortcut installed — find 'Syntaur' in your application menu.".into(),
+                }),
+                Err(e) => axum::Json(InstallShortcutResponse {
+                    success: false,
+                    message: format!("Could not create app shortcut: {}", e),
+                }),
+            };
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if req.target == "desktop" {
+            let path = format!("{}/Desktop/Syntaur.webloc", home);
+            let content = format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+                <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+                <plist version=\"1.0\"><dict><key>URL</key><string>{}</string></dict></plist>",
+                dashboard_url
+            );
+            return match std::fs::write(&path, content) {
+                Ok(_) => axum::Json(InstallShortcutResponse {
+                    success: true,
+                    message: "Desktop shortcut created — look for 'Syntaur' on your desktop.".into(),
+                }),
+                Err(e) => axum::Json(InstallShortcutResponse {
+                    success: false,
+                    message: format!("Could not create desktop shortcut: {}", e),
+                }),
+            };
+        } else {
+            // Create ~/Applications/Syntaur.app
+            let app_path = format!("{}/Applications/Syntaur.app", home);
+            let _ = std::fs::create_dir_all(format!("{}/Contents/MacOS", app_path));
+            let _ = std::fs::create_dir_all(format!("{}/Contents/Resources", app_path));
+            let _ = std::fs::write(
+                format!("{}/Contents/Info.plist", app_path),
+                format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+                    <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+                    <plist version=\"1.0\"><dict>\
+                    <key>CFBundleName</key><string>Syntaur</string>\
+                    <key>CFBundleDisplayName</key><string>Syntaur</string>\
+                    <key>CFBundleIdentifier</key><string>dev.syntaur.app</string>\
+                    <key>CFBundleVersion</key><string>{}</string>\
+                    <key>CFBundleExecutable</key><string>syntaur-open</string>\
+                    <key>LSUIElement</key><true/>\
+                    </dict></plist>",
+                    env!("CARGO_PKG_VERSION")
+                ),
+            );
+            let launcher = format!("{}/Contents/MacOS/syntaur-open", app_path);
+            let _ = std::fs::write(&launcher, format!("#!/bin/sh\nopen \"{}\"\n", dashboard_url));
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755));
+            }
+            let _ = std::fs::write(format!("{}/Contents/Resources/icon.svg", app_path), SHORTCUT_ICON_SVG);
+
+            return axum::Json(InstallShortcutResponse {
+                success: true,
+                message: "App installed to ~/Applications — find 'Syntaur' in Spotlight or Launchpad.".into(),
+            });
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let target_dir = if req.target == "desktop" {
+            std::env::var("USERPROFILE").unwrap_or_default() + "\\Desktop"
+        } else {
+            std::env::var("APPDATA").unwrap_or_default() + "\\Microsoft\\Windows\\Start Menu\\Programs"
+        };
+
+        // Use PowerShell to create .lnk via COM (the only reliable way on Windows)
+        let ps_script = format!(
+            "$ws = New-Object -ComObject WScript.Shell; \
+            $s = $ws.CreateShortcut('{}\\Syntaur.lnk'); \
+            $s.TargetPath = '{}'; \
+            $s.Description = 'Syntaur - Your personal AI platform'; \
+            $s.Save()",
+            target_dir.replace('\'', "''"),
+            dashboard_url,
+        );
+
+        return match std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &ps_script])
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                let where_msg = if req.target == "desktop" { "your desktop" } else { "the Start Menu" };
+                axum::Json(InstallShortcutResponse {
+                    success: true,
+                    message: format!("Shortcut created — find 'Syntaur' in {}.", where_msg),
+                })
+            }
+            Ok(out) => axum::Json(InstallShortcutResponse {
+                success: false,
+                message: format!("PowerShell shortcut creation failed: {}", String::from_utf8_lossy(&out.stderr)),
+            }),
+            Err(e) => axum::Json(InstallShortcutResponse {
+                success: false,
+                message: format!("Could not run PowerShell: {}", e),
+            }),
+        };
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    axum::Json(InstallShortcutResponse {
+        success: false,
+        message: "Desktop shortcuts are not supported on this platform. Bookmark http://localhost:18789 in your browser instead.".into(),
+    })
+}

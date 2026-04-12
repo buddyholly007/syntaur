@@ -99,7 +99,7 @@ impl BackendRouter {
 
         if candidates.is_empty() {
             return Err(BackendError::Unavailable(
-                "no backends available matching requirements".into(),
+                "no AI backends are currently available — check that at least one provider is configured and running".into(),
             ));
         }
 
@@ -141,7 +141,7 @@ impl BackendRouter {
             }
         }
 
-        Err(last_error.unwrap_or(BackendError::Unavailable("no backends tried".into())))
+        Err(last_error.unwrap_or(BackendError::Unavailable("all AI backends failed — check provider configuration and connectivity".into())))
     }
 
     /// Select and rank candidate backends for a request.

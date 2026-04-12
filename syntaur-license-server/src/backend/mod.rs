@@ -151,18 +151,20 @@ pub enum BackendError {
 impl fmt::Display for BackendError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unavailable(msg) => write!(f, "backend unavailable: {}", msg),
+            Self::Unavailable(msg) => write!(f, "AI model is temporarily unavailable: {}", msg),
             Self::RateLimited { retry_after_secs } => {
-                write!(f, "rate limited")?;
+                write!(f, "AI model is rate limited — too many requests.")?;
                 if let Some(s) = retry_after_secs {
-                    write!(f, " (retry after {}s)", s)?;
+                    write!(f, " Try again in {}s.", s)?;
+                } else {
+                    write!(f, " Wait a moment and try again.")?;
                 }
                 Ok(())
             }
-            Self::Timeout => write!(f, "request timed out"),
-            Self::InvalidRequest(msg) => write!(f, "invalid request: {}", msg),
-            Self::ModelError(msg) => write!(f, "model error: {}", msg),
-            Self::NetworkError(msg) => write!(f, "network error: {}", msg),
+            Self::Timeout => write!(f, "AI model took too long to respond — it may be overloaded, try again"),
+            Self::InvalidRequest(msg) => write!(f, "Request could not be processed: {}", msg),
+            Self::ModelError(msg) => write!(f, "AI model returned an error: {}", msg),
+            Self::NetworkError(msg) => write!(f, "Can't reach AI model server — check that it's running: {}", msg),
         }
     }
 }

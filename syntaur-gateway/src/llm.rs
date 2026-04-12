@@ -518,6 +518,22 @@ impl LlmChain {
     }
 }
 
+/// Return a dashboard/status link for a provider, if known.
+fn provider_dashboard_link(name: &str, base_url: &str) -> Option<&'static str> {
+    let lower = name.to_lowercase();
+    if lower.contains("openrouter") || base_url.contains("openrouter.ai") {
+        Some("https://openrouter.ai/credits")
+    } else if lower.contains("openai") || base_url.contains("api.openai.com") {
+        Some("https://platform.openai.com/usage")
+    } else if lower.contains("anthropic") || base_url.contains("api.anthropic.com") {
+        Some("https://console.anthropic.com/settings/billing")
+    } else if lower.contains("google") || base_url.contains("generativelanguage.googleapis.com") {
+        Some("https://console.cloud.google.com/billing")
+    } else {
+        None
+    }
+}
+
 async fn call_provider(
     client: &Client,
     provider: &LlmProvider,
@@ -552,11 +568,11 @@ async fn call_provider(
         .await
         .map_err(|e| {
             let msg = if e.is_timeout() {
-                format!("timed out after {}s", timeout.as_secs())
+                format!("{} timed out after {}s — the model may be overloaded or the server may be down", provider.name, timeout.as_secs())
             } else if e.is_connect() {
-                format!("connection failed: {}", e)
+                format!("Can't reach {} — check that the server is running and the URL is correct", provider.name)
             } else {
-                format!("request error: {}", e)
+                format!("{} request failed: {}", provider.name, e)
             };
             error!("[llm:{}] HTTP error: {}", provider.name, msg);
             msg
@@ -566,29 +582,32 @@ async fn call_provider(
     debug!("[llm:{}] HTTP {}", provider.name, status);
 
     // Handle rate limit and server errors
+    let dashboard = provider_dashboard_link(&provider.name, &provider.base_url);
+    let link_hint = dashboard.map(|url| format!("\n\nCheck status and billing:\n{}", url)).unwrap_or_default();
+
     if status.as_u16() == 429 {
-        return Err("rate limited (429)".to_string());
+        return Err(format!("{} is rate limited (HTTP 429) — too many requests, will retry later.{}", provider.name, link_hint));
     }
     if status.as_u16() == 402 {
-        return Err("billing error (402)".to_string());
+        return Err(format!("{} billing error (HTTP 402) — check API credits or payment method.{}", provider.name, link_hint));
     }
     if status.is_server_error() {
-        return Err(format!("server error ({})", status));
+        return Err(format!("{} returned server error ({}) — this is usually temporary, will retry.{}", provider.name, status, link_hint));
     }
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("HTTP {} — {}", status, body.chars().take(200).collect::<String>()));
+        return Err(format!("{} returned HTTP {} — {}{}", provider.name, status, body.chars().take(200).collect::<String>(), link_hint));
     }
 
     let raw_body = resp.text().await
-        .map_err(|e| format!("response read error: {}", e))?;
+        .map_err(|e| format!("{} response could not be read: {}", provider.name, e))?;
 
     debug!("[llm:{}] Raw response: {}...", provider.name, &raw_body[..raw_body.len().min(500)]);
 
     let body: LlmResponse = serde_json::from_str(&raw_body)
         .map_err(|e| {
             error!("[llm:{}] Response parse error: {} — raw: {}...", provider.name, e, &raw_body[..raw_body.len().min(200)]);
-            format!("response parse error: {}", e)
+            format!("{} returned an unexpected response format — the model endpoint may have changed or be misconfigured.{}", provider.name, link_hint)
         })?;
 
     let message = body.choices
@@ -635,7 +654,7 @@ async fn call_provider(
     }
 
     if content.is_empty() {
-        return Err(format!("empty response from LLM (raw: {}...)", &raw_body[..raw_body.len().min(100)]));
+        return Err(format!("{} returned an empty response — the model may be overloaded or misconfigured", provider.name));
     }
 
     // Strip <think> blocks
@@ -683,42 +702,41 @@ async fn call_provider_capped(
         .await
         .map_err(|e| {
             let msg = if e.is_timeout() {
-                format!("timed out after {}s", timeout.as_secs())
+                format!("{} timed out after {}s — the model may be overloaded or the server may be down", provider.name, timeout.as_secs())
             } else if e.is_connect() {
-                format!("connection failed: {}", e)
+                format!("Can't reach {} — check that the server is running and the URL is correct", provider.name)
             } else {
-                format!("request error: {}", e)
+                format!("{} request failed: {}", provider.name, e)
             };
             error!("[llm:{}] HTTP error: {}", provider.name, msg);
             msg
         })?;
 
     let status = resp.status();
+    let dashboard = provider_dashboard_link(&provider.name, &provider.base_url);
+    let link_hint = dashboard.map(|url| format!("\n\nCheck status and billing:\n{}", url)).unwrap_or_default();
+
     if status.as_u16() == 429 {
-        return Err("rate limited (429)".to_string());
+        return Err(format!("{} is rate limited (HTTP 429) — too many requests, will retry later.{}", provider.name, link_hint));
     }
     if status.as_u16() == 402 {
-        return Err("billing error (402)".to_string());
+        return Err(format!("{} billing error (HTTP 402) — check API credits or payment method.{}", provider.name, link_hint));
     }
     if status.is_server_error() {
-        return Err(format!("server error ({})", status));
+        return Err(format!("{} returned server error ({}) — this is usually temporary, will retry.{}", provider.name, status, link_hint));
     }
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!(
-            "HTTP {} — {}",
-            status,
-            body.chars().take(200).collect::<String>()
-        ));
+        return Err(format!("{} returned HTTP {} — {}{}", provider.name, status, body.chars().take(200).collect::<String>(), link_hint));
     }
 
     let raw_body = resp
         .text()
         .await
-        .map_err(|e| format!("response read error: {}", e))?;
+        .map_err(|e| format!("{} response could not be read: {}", provider.name, e))?;
 
     let body: LlmResponse = serde_json::from_str(&raw_body)
-        .map_err(|e| format!("response parse error: {}", e))?;
+        .map_err(|e| format!("{} returned an unexpected response format — the model endpoint may have changed.{}", provider.name, link_hint))?;
 
     let message = body
         .choices

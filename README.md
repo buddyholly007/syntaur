@@ -6,13 +6,15 @@ Your personal AI platform. One binary, runs on your hardware, stays private.
 
 ```bash
 # Linux / macOS
-curl -sSL https://buddyholly007.github.io/syntaur/install.sh | sh
+curl -sSL https://get.syntaur.dev | sh
 
-# Or download directly and run
-./syntaur
+# Windows (PowerShell)
+irm https://get.syntaur.dev/install.ps1 | iex
 ```
 
 Your browser opens automatically. Follow the setup wizard.
+
+The installer creates a **Syntaur** shortcut in your app launcher (Linux), Applications folder (macOS), or Start Menu and Desktop (Windows).
 
 ## What You Get
 

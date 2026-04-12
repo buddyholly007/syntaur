@@ -121,7 +121,8 @@ pub async fn handle_stt(
 
     Err((
         StatusCode::SERVICE_UNAVAILABLE,
-        "no STT backend configured (set STT_URL or OPENAI_STT_URL+OPENAI_API_KEY)".into(),
+        "Speech-to-text is not configured. Set STT_URL (for Wyoming/Parakeet) or OPENAI_STT_URL + OPENAI_API_KEY (for Whisper) in your environment.\n\n\
+        Get an OpenAI API key for Whisper STT:\nhttps://platform.openai.com/api-keys".into(),
     ))
 }
 
@@ -135,16 +136,16 @@ async fn wyoming_stt(client: &reqwest::Client, base_url: &str, audio: &[u8]) -> 
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
-        .map_err(|e| format!("wyoming stt request: {}", e))?;
+        .map_err(|e| format!("Can't reach STT server at {} — check that it's running: {}", base_url, e))?;
 
     if !resp.status().is_success() {
-        return Err(format!("wyoming stt HTTP {}", resp.status()));
+        return Err(format!("STT server returned HTTP {} — it may be overloaded or misconfigured", resp.status()));
     }
 
     let body: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| format!("wyoming stt parse: {}", e))?;
+        .map_err(|e| format!("STT server returned an unexpected response format: {}", e))?;
 
     Ok(body
         .get("text")
@@ -183,17 +184,23 @@ async fn openai_stt(
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
-        .map_err(|e| format!("openai stt: {}", e))?;
+        .map_err(|e| format!("Can't reach OpenAI STT service: {}", e))?;
 
     if !resp.status().is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("openai stt error: {}", &body[..body.len().min(200)]));
+        let status = resp.status();
+        let _body = resp.text().await.unwrap_or_default();
+        let hint = match status.as_u16() {
+            401 => " — check your OPENAI_API_KEY.\n\nManage API keys:\nhttps://platform.openai.com/api-keys",
+            429 => " — rate limited, try again shortly.\n\nCheck usage limits:\nhttps://platform.openai.com/usage",
+            _ => "",
+        };
+        return Err(format!("OpenAI STT returned HTTP {}{}", status, hint));
     }
 
     let body: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| format!("openai stt parse: {}", e))?;
+        .map_err(|e| format!("OpenAI STT returned an unexpected response format: {}", e))?;
 
     Ok(body
         .get("text")
@@ -310,7 +317,7 @@ async fn generate_tts(
             warn!("[tts] edge-tts failed: {}", e);
             Err((
                 StatusCode::SERVICE_UNAVAILABLE,
-                format!("all TTS backends failed: {}", e),
+                format!("Voice synthesis is temporarily unavailable — all TTS backends failed. Last error: {}", e),
             ))
         }
     }
@@ -325,16 +332,16 @@ async fn wyoming_tts(client: &reqwest::Client, base_url: &str, text: &str) -> Re
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
-        .map_err(|e| format!("wyoming tts: {}", e))?;
+        .map_err(|e| format!("Can't reach TTS server at {} — check that it's running: {}", base_url, e))?;
 
     if !resp.status().is_success() {
-        return Err(format!("wyoming tts HTTP {}", resp.status()));
+        return Err(format!("TTS server returned HTTP {} — it may be overloaded or misconfigured", resp.status()));
     }
 
     resp.bytes()
         .await
         .map(|b| b.to_vec())
-        .map_err(|e| format!("wyoming tts body: {}", e))
+        .map_err(|e| format!("TTS server returned audio but it couldn't be read: {}", e))
 }
 
 async fn openai_tts(
@@ -357,17 +364,22 @@ async fn openai_tts(
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
-        .map_err(|e| format!("openai tts: {}", e))?;
+        .map_err(|e| format!("Can't reach OpenAI TTS service: {}", e))?;
 
     if !resp.status().is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("openai tts error: {}", &body[..body.len().min(200)]));
+        let status = resp.status();
+        let hint = match status.as_u16() {
+            401 => " — check your OPENAI_API_KEY.\n\nManage API keys:\nhttps://platform.openai.com/api-keys",
+            429 => " — rate limited, try again shortly.\n\nCheck usage limits:\nhttps://platform.openai.com/usage",
+            _ => "",
+        };
+        return Err(format!("OpenAI TTS returned HTTP {}{}", status, hint));
     }
 
     resp.bytes()
         .await
         .map(|b| b.to_vec())
-        .map_err(|e| format!("openai tts body: {}", e))
+        .map_err(|e| format!("OpenAI TTS returned audio but it couldn't be read: {}", e))
 }
 
 // Voice round-trip (audio → STT → LLM → TTS) is done client-side by

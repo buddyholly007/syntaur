@@ -137,14 +137,15 @@ async fn handle_checkout(
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Stripe error: {}", e),
+                "Could not connect to Stripe — check your internet connection and try again.\n\n\
+                Check Stripe service status:\nhttps://status.stripe.com/".to_string(),
             )
         })?;
 
     let body: serde_json::Value = resp.json().await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Parse error: {}", e),
+            "Received an unexpected response from Stripe — please try again".to_string(),
         )
     })?;
 
@@ -155,7 +156,7 @@ async fn handle_checkout(
             error!("Stripe response missing URL: {:?}", body);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Stripe error".to_string(),
+                "Checkout is temporarily unavailable — please try again in a moment".to_string(),
             )
         })?;
 
@@ -213,11 +214,12 @@ async fn handle_webhook(
         .unwrap_or("");
 
     if !verify_stripe_signature(&body, sig_header, &state.config.stripe_webhook_secret) {
-        return Err((StatusCode::BAD_REQUEST, "Invalid signature".to_string()));
+        return Err((StatusCode::BAD_REQUEST, "Webhook signature verification failed — the webhook secret may not match your Stripe dashboard.\n\n\
+            Verify your webhook signing secret here:\nhttps://dashboard.stripe.com/webhooks".to_string()));
     }
 
     let event: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Bad JSON: {}", e)))?;
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Webhook payload was not valid JSON: {}", e)))?;
 
     let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -281,7 +283,10 @@ async fn handle_webhook(
                 Utc::now().to_rfc3339(),
             ],
         )
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {}", e)))?;
+        .map_err(|e| {
+            error!("Database error saving purchase: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Purchase recorded with Stripe but could not save locally — contact support".to_string())
+        })?;
 
         info!(
             "[license] Generated key for {} (session: {})",
@@ -337,20 +342,20 @@ fn verify_license_key(
     verifying_key: &VerifyingKey,
 ) -> Result<LicensePayload, String> {
     let signed: SignedLicense =
-        serde_json::from_str(key_json).map_err(|_| "Invalid key format".to_string())?;
+        serde_json::from_str(key_json).map_err(|_| "License key format is not recognized — make sure you pasted the complete key from your purchase email".to_string())?;
 
     let payload_json =
-        serde_json::to_string(&signed.payload).map_err(|_| "Serialization error".to_string())?;
+        serde_json::to_string(&signed.payload).map_err(|_| "License key could not be processed — contact support".to_string())?;
 
     let sig_bytes =
-        hex::decode(&signed.signature).map_err(|_| "Invalid signature encoding".to_string())?;
+        hex::decode(&signed.signature).map_err(|_| "License key appears corrupted — make sure you pasted the complete key without modifications".to_string())?;
 
     let signature = ed25519_dalek::Signature::from_slice(&sig_bytes)
-        .map_err(|_| "Invalid signature".to_string())?;
+        .map_err(|_| "License key appears corrupted — make sure you pasted the complete key without modifications".to_string())?;
 
     verifying_key
         .verify_strict(payload_json.as_bytes(), &signature)
-        .map_err(|_| "Signature verification failed".to_string())?;
+        .map_err(|_| "License key signature is invalid — this key may have been modified or issued by a different server".to_string())?;
 
     if signed.payload.expires_at != 0 {
         let now = std::time::SystemTime::now()
@@ -358,7 +363,8 @@ fn verify_license_key(
             .unwrap_or_default()
             .as_secs();
         if now > signed.payload.expires_at {
-            return Err("License expired".to_string());
+            return Err("License has expired — visit the Syntaur store to purchase a new one.\n\n\
+                Renew your license:\nhttps://syntaur.dev/checkout".to_string());
         }
     }
 

@@ -293,6 +293,21 @@ impl CloudBackend {
         })
     }
 
+    fn dashboard_link(&self) -> Option<&'static str> {
+        let lower = self.id.to_lowercase();
+        if lower.contains("openrouter") || self.url.contains("openrouter.ai") {
+            Some("https://openrouter.ai/credits")
+        } else if lower.contains("openai") || self.url.contains("api.openai.com") {
+            Some("https://platform.openai.com/usage")
+        } else if lower.contains("anthropic") || self.url.contains("api.anthropic.com") {
+            Some("https://console.anthropic.com/settings/billing")
+        } else if lower.contains("google") || self.url.contains("generativelanguage.googleapis.com") {
+            Some("https://console.cloud.google.com/billing")
+        } else {
+            None
+        }
+    }
+
     fn parse_error(&self, status: u16, body: &serde_json::Value) -> BackendError {
         let msg = body
             .get("error")
@@ -302,14 +317,18 @@ impl CloudBackend {
 
         warn!("[cloud:{}] error {}: {}", self.id, status, msg);
 
+        let link_hint = self.dashboard_link()
+            .map(|url| format!("\n\nCheck status and billing:\n{}", url))
+            .unwrap_or_default();
+
         match status {
             429 => BackendError::RateLimited {
                 retry_after_secs: None,
             },
-            402 => BackendError::Unavailable(format!("payment required: {}", msg)),
-            502 | 503 | 504 => BackendError::Unavailable(msg.to_string()),
+            402 => BackendError::Unavailable(format!("API credits exhausted or payment required for {}.{}", self.id, link_hint)),
+            502 | 503 | 504 => BackendError::Unavailable(format!("{} is temporarily down (HTTP {}) — this is usually brief.{}", self.id, status, link_hint)),
             400 => BackendError::InvalidRequest(msg.to_string()),
-            _ => BackendError::ModelError(format!("{}: {}", status, msg)),
+            _ => BackendError::ModelError(format!("{} HTTP {}: {}{}", self.id, status, msg, link_hint)),
         }
     }
 }

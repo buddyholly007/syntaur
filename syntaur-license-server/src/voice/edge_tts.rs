@@ -82,9 +82,10 @@ pub async fn synthesize(text: &str, voice: &str) -> Result<Vec<u8>, String> {
         .await
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                "edge-tts not installed (pip install edge-tts)".to_string()
+                "Text-to-speech is not available — the edge-tts tool is not installed. Run: pip install edge-tts\n\n\
+                edge-tts package info:\nhttps://pypi.org/project/edge-tts/".to_string()
             } else {
-                format!("edge-tts exec: {}", e)
+                format!("Text-to-speech failed to start: {}", e)
             }
         })?;
 
@@ -92,19 +93,19 @@ pub async fn synthesize(text: &str, voice: &str) -> Result<Vec<u8>, String> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         // Clean up temp file on error
         let _ = tokio::fs::remove_file(&tmp_path).await;
-        return Err(format!("edge-tts failed: {}", stderr.trim()));
+        return Err(format!("Text-to-speech generation failed — this may be a temporary Microsoft service issue. Try again in a moment."));
     }
 
     // Read the generated audio
     let audio = tokio::fs::read(&tmp_path)
         .await
-        .map_err(|e| format!("read tts output: {}", e))?;
+        .map_err(|e| format!("Text-to-speech completed but the audio file couldn't be read: {}", e))?;
 
     // Clean up temp file
     let _ = tokio::fs::remove_file(&tmp_path).await;
 
     if audio.is_empty() {
-        return Err("edge-tts produced empty audio".into());
+        return Err("Text-to-speech produced no audio — the input text may be too short or the service may be having issues".into());
     }
 
     info!(

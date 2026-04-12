@@ -78,12 +78,35 @@ pub async fn stream_completion(
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("stream request failed: {}", e))?;
+        .map_err(|e| {
+            if e.is_timeout() {
+                format!("LLM server timed out — the model may be overloaded")
+            } else if e.is_connect() {
+                format!("Can't reach LLM server — check that it's running")
+            } else {
+                format!("LLM request failed: {}", e)
+            }
+        })?;
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("stream HTTP {}: {}", status, &body[..body.len().min(200)]));
+        let link = if base_url.contains("openrouter.ai") {
+            "\n\nCheck OpenRouter balance and usage:\nhttps://openrouter.ai/credits"
+        } else if base_url.contains("api.openai.com") {
+            "\n\nCheck OpenAI usage:\nhttps://platform.openai.com/usage"
+        } else if base_url.contains("api.anthropic.com") {
+            "\n\nCheck Anthropic billing:\nhttps://console.anthropic.com/settings/billing"
+        } else {
+            ""
+        };
+        let hint = match status.as_u16() {
+            429 => format!(" — rate limited, try again shortly.{}", link),
+            402 => format!(" — check API credits or payment method.{}", link),
+            401 => format!(" — API key is invalid or expired.{}", link),
+            s if s >= 500 => format!(" — server error, this is usually temporary.{}", link),
+            _ => String::new(),
+        };
+        return Err(format!("LLM returned HTTP {}{}", status, hint));
     }
 
     let (tx, rx) = mpsc::channel(64);
@@ -97,7 +120,7 @@ pub async fn stream_completion(
             let bytes = match chunk {
                 Ok(b) => b,
                 Err(e) => {
-                    let _ = tx.send(StreamChunk::Error(e.to_string())).await;
+                    let _ = tx.send(StreamChunk::Error("LLM stream interrupted — connection to the model was lost".to_string())).await;
                     break;
                 }
             };
