@@ -115,7 +115,7 @@ pub struct AppState {
     /// pure-Rust skills land. None when fastembed init fails (degrades
     /// gracefully — find_tool returns "router has no entries").
     pub tool_router: Option<Arc<tokio::sync::RwLock<crate::tools::router::ToolRouter>>>,
-    /// Buffer for Telegram callback_query events that syntaur doesn't handle
+    /// Buffer for Telegram callback_query events that Syntaur doesn't handle
     /// internally (e.g. bsky-post:approve:*, yt-reply:*, threads-post:*).
     /// External consumers (rust-social-manager bsky-approve) drain via
     /// GET /external-callbacks.
@@ -360,7 +360,7 @@ pub struct GatewayStats {
 // ── HTTP Handlers ───────────────────────────────────────────────────────────
 
 /// Drain buffered external callbacks (Telegram callback_query events that
-/// syntaur doesn't handle internally). Used by rust-social-manager bsky-approve.
+/// Syntaur doesn't handle internally). Used by rust-social-manager bsky-approve.
 async fn handle_external_callbacks(
     State(state): State<Arc<AppState>>,
 ) -> Json<Vec<serde_json::Value>> {

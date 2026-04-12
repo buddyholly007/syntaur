@@ -1,5 +1,5 @@
 //! syntaur-capability-shim — tiny HTTP server that runs one or more
-//! "capabilities" on behalf of syntaurprod, so the gateway can offload
+//! "capabilities" on behalf of the Syntaur gateway, so it can offload
 //! specific tools to a different host without committing to the full v5
 //! distributed multi-host architecture.
 //!
@@ -19,7 +19,7 @@
 //! holds the bearer.
 //!
 //! Listen address: `SHIM_BIND` env, default `127.0.0.1:18790`. Bind to
-//! `0.0.0.0:18790` to accept connections from syntaurprod, but only do
+//! `0.0.0.0:18790` to accept connections from the gateway host, but only do
 //! that on a trusted LAN segment. The shim does no TLS termination of its
 //! own — front it with Tailscale or stick to localhost.
 //!
@@ -29,9 +29,9 @@
 //!   capability routing, no failover, no gRPC, no shared SQLite replica.
 //! * Not a generic RPC framework. The shim only knows about a fixed set
 //!   of capabilities defined at compile time below.
-//! * Not invoked by rust-syntaur automatically. You wire syntaurprod
+//! * Not invoked by the gateway automatically. You wire the gateway
 //!   to call this shim manually (e.g. point a tool's HTTP fallback URL
-//!   at it, or write a wrapper tool in rust-syntaur that POSTs here).
+//!   at it, or write a wrapper tool in the gateway that POSTs here).
 //!
 //! ## Adding a new capability
 //!
@@ -199,7 +199,7 @@ async fn dispatch(state: &ShimState, tool: &str, args: Value) -> Result<String, 
 // ── capability: http_fetch ────────────────────────────────────────────────
 //
 // Simple GET-only HTTP client. Useful for offloading network egress when
-// syntaurprod's outbound is constrained or you want a different egress
+// the gateway host's outbound is constrained or you want a different egress
 // IP for fetching content.
 //
 // Args: { "url": "<url>" }
@@ -238,7 +238,7 @@ async fn run_http_fetch(state: &ShimState, args: Value) -> Result<String, String
 
 // ── capability: code_execute ──────────────────────────────────────────────
 //
-// Bubblewrap-sandboxed code execution. Mirrors the rust-syntaur
+// Bubblewrap-sandboxed code execution. Mirrors the Syntaur gateway's
 // code_execute tool's isolation model: bwrap with --unshare-all,
 // read-only /usr, fresh /tmp, no network, RLIMITs via shell ulimit.
 //

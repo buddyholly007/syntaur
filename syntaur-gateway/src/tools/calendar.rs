@@ -140,7 +140,7 @@ impl Tool for CalendarTool {
     }
 }
 
-// ── Google Calendar (via OAuth2 token from syntaur) ────────────────────────
+// ── Google Calendar (via OAuth2 token from Syntaur) ────────────────────────
 
 /// Check if Google Calendar OAuth2 is connected. Returns the access token
 /// if available, or a helpful error message if not.
@@ -363,7 +363,7 @@ async fn google_add_event(
 
 // ── iCloud Calendar (CalDAV) ───────────────────────────────────────────────
 
-/// Read iCloud CalDAV credentials from syntaur config.
+/// Read iCloud CalDAV credentials from Syntaur config.
 /// Returns (email, app_password) or a helpful setup error.
 fn icloud_get_creds() -> Result<(String, String), String> {
     let config_path = format!(

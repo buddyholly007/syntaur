@@ -2,7 +2,7 @@
 //!
 //! This crate carries the JSON-RPC framing, request/response/notification
 //! types, error codes, and the stdio framing helpers used by both:
-//!   * `rust-syntaur`'s MCP **client** (spawning servers as children)
+//!   * Syntaur's MCP **client** (spawning servers as children)
 //!   * `mcp-server-filesystem-rs` and `mcp-server-search-rs` **servers**
 //!
 //! Wire format is newline-delimited JSON-RPC 2.0. The protocol version we

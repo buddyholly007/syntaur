@@ -174,7 +174,7 @@ fn dispatch(name: &str, args: Value, allowed: &[PathBuf]) -> Result<String, Stri
             } else {
                 "blob"
             };
-            // The rust-syntaur client only forwards text-content blocks back
+            // The Syntaur MCP client only forwards text-content blocks back
             // to the LLM, so we serialize the media as a JSON envelope inside
             // a text block. Same data, just one layer of unwrapping for the
             // model. Future work: extend the protocol layer to carry typed

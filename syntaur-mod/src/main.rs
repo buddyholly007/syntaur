@@ -60,11 +60,28 @@ fn default_true() -> bool { true }
 
 fn syntaur_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/home/sean".to_string());
-    PathBuf::from(home).join(".syntaur")
+    let new_dir = PathBuf::from(&home).join(".syntaur");
+    let legacy_dir = PathBuf::from(&home).join(".syntaur");
+    if new_dir.exists() {
+        new_dir
+    } else if legacy_dir.exists() {
+        legacy_dir
+    } else {
+        new_dir
+    }
 }
 
 fn config_path() -> PathBuf {
-    syntaur_dir().join("syntaur.json")
+    let dir = syntaur_dir();
+    let new_cfg = dir.join("syntaur.json");
+    let legacy_cfg = dir.join("syntaur.json");
+    if new_cfg.exists() {
+        new_cfg
+    } else if legacy_cfg.exists() {
+        legacy_cfg
+    } else {
+        new_cfg
+    }
 }
 
 fn modules_dir() -> PathBuf {

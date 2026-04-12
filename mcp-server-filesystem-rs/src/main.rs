@@ -1,7 +1,7 @@
 //! Pure-Rust replacement for `@modelcontextprotocol/server-filesystem`.
 //!
 //! Drop-in replacement: same tool names, same input schemas, same text
-//! output format. Driven from `rust-syntaur`'s MCP client.
+//! output format. Driven from Syntaur's MCP client.
 //!
 //! Usage:
 //!     mcp-server-filesystem-rs <allowed-dir> [<allowed-dir>...]

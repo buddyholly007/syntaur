@@ -1,6 +1,6 @@
 //! Matter device controller via python-matter-server WebSocket.
 //!
-//! Ported from rust-syntaur's production matter.rs. Talks directly to
+//! Ported from Syntaur's production matter.rs. Talks directly to
 //! python-matter-server at ws://<host>:5580/ws, bypassing Home Assistant.
 //!
 //! Supports: on/off, brightness, color temperature, device status, node listing.

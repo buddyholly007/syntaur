@@ -9,7 +9,7 @@
 //!
 //! ## Pipeline mode (--mode pipeline, future)
 //! Full pipeline — satellite connects directly. Handles wake word
-//! detection, STT, intent matching, LLM via syntaur, TTS routing,
+//! detection, STT, intent matching, LLM via Syntaur, TTS routing,
 //! and audio response. Replaces HA entirely for voice.
 //!
 //! ## Running
@@ -60,8 +60,8 @@ impl Config {
                 "--mode" => { i += 1; mode = args.get(i).cloned().unwrap_or(mode); }
                 "--port" => { i += 1; port = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(port); }
                 "--model-dir" => { i += 1; model_dir = args.get(i).cloned().unwrap_or(model_dir); }
-                "--syntaur-url" => { i += 1; syntaur_url = args.get(i).cloned().unwrap_or(syntaur_url); }
-                "--syntaur-secret" => { i += 1; syntaur_secret = args.get(i).cloned().unwrap_or_default(); }
+                "--syntaur-url" | "--syntaur-url" => { i += 1; syntaur_url = args.get(i).cloned().unwrap_or(syntaur_url); }
+                "--syntaur-secret" | "--syntaur-secret" => { i += 1; syntaur_secret = args.get(i).cloned().unwrap_or_default(); }
                 "--tts-url" => { i += 1; tts_url = args.get(i).cloned().unwrap_or(tts_url); }
                 _ => {}
             }
@@ -225,7 +225,7 @@ async fn handle_pipeline_session(
                     &wyoming::WyomingMessage::transcript(&transcript),
                 ).await;
 
-                // 2. LLM via syntaur
+                // 2. LLM via Syntaur
                 let response = match call_syntaur_voice_chat(&http, &config, &transcript).await {
                     Ok(text) => text,
                     Err(e) => {
