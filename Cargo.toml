@@ -11,6 +11,7 @@ members = [
     "openclaw-mod",
     "openclaw-hwscan",
     "openclaw-setup",
+    "syntaur-license-server",
 ]
 
 [workspace.package]

@@ -371,11 +371,18 @@ async fn handle_external_callbacks(
 
 async fn handle_health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let uptime = state.start_time.elapsed().as_secs();
+
+    // Build per-provider stats from the primary agent's LLM chain
+    let default_agent = state.config.agents.list.first().map(|a| a.id.as_str()).unwrap_or("main");
+    let chain = llm::LlmChain::from_config(&state.config, default_agent, state.client.clone());
+    let providers = chain.provider_stats().await;
+
     Json(serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_secs": uptime,
         "agents": state.config.agents.list.iter().map(|a| &a.id).collect::<Vec<_>>(),
+        "providers": providers,
     }))
 }
 
@@ -466,7 +473,12 @@ async fn handle_api_message(
     {
         let run_skill: Arc<dyn crate::tools::extension::Tool> =
             Arc::new(skills::RunSkillTool { store: Arc::clone(&state.skills) });
-        tool_registry.add_extension_tools(&[run_skill]);
+        let delegate: Arc<dyn crate::tools::extension::Tool> =
+            Arc::new(crate::tools::subagent::DelegateTool::new(
+                Arc::new(state.config.clone()),
+                state.client.clone(),
+            ));
+        tool_registry.add_extension_tools(&[run_skill, delegate]);
     }
     tool_registry.apply_module_filter(&state.disabled_tools);
     let tools = tool_registry.tool_definitions();
@@ -569,7 +581,12 @@ async fn handle_research(
     {
         let run_skill: Arc<dyn crate::tools::extension::Tool> =
             Arc::new(skills::RunSkillTool { store: Arc::clone(&state.skills) });
-        tr.add_extension_tools(&[run_skill]);
+        let delegate: Arc<dyn crate::tools::extension::Tool> =
+            Arc::new(crate::tools::subagent::DelegateTool::new(
+                Arc::new(state.config.clone()),
+                state.client.clone(),
+            ));
+        tr.add_extension_tools(&[run_skill, delegate]);
     }
     let tool_registry = std::sync::Arc::new(tr);
 
@@ -771,7 +788,12 @@ async fn handle_message_start(
         {
             let run_skill: Arc<dyn crate::tools::extension::Tool> =
                 Arc::new(skills::RunSkillTool { store: Arc::clone(&state_clone.skills) });
-            tr.add_extension_tools(&[run_skill]);
+            let delegate: Arc<dyn crate::tools::extension::Tool> =
+                Arc::new(crate::tools::subagent::DelegateTool::new(
+                    Arc::new(state_clone.config.clone()),
+                    state_clone.client.clone(),
+                ));
+            tr.add_extension_tools(&[run_skill, delegate]);
         }
         tr.apply_module_filter(&state.disabled_tools);
         let tool_registry = std::sync::Arc::new(tr);
@@ -958,7 +980,12 @@ async fn handle_research_start(
         {
             let run_skill: Arc<dyn crate::tools::extension::Tool> =
                 Arc::new(skills::RunSkillTool { store: Arc::clone(&state.skills) });
-            tr.add_extension_tools(&[run_skill]);
+            let delegate: Arc<dyn crate::tools::extension::Tool> =
+                Arc::new(crate::tools::subagent::DelegateTool::new(
+                    Arc::new(state.config.clone()),
+                    state.client.clone(),
+                ));
+            tr.add_extension_tools(&[run_skill, delegate]);
         }
         std::sync::Arc::new(tr)
     };
@@ -1733,7 +1760,12 @@ pub(crate) fn spawn_plan_executor(state: Arc<AppState>, plan_id: i64) {
                                 Arc::new(skills::RunSkillTool {
                                     store: Arc::clone(&state.skills),
                                 });
-                            tr.add_extension_tools(&[run_skill]);
+                            let delegate: Arc<dyn crate::tools::extension::Tool> =
+                                Arc::new(crate::tools::subagent::DelegateTool::new(
+                                    Arc::new(state.config.clone()),
+                                    state.client.clone(),
+                                ));
+                            tr.add_extension_tools(&[run_skill, delegate]);
                         }
                         let call = crate::tools::ToolCall {
                             id: format!("plan-{}-step", plan_id),

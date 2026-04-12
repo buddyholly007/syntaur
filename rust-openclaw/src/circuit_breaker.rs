@@ -137,6 +137,30 @@ impl CircuitBreaker {
         self.state
     }
 
+    /// Read-only availability check (doesn't mutate state like `can_execute`).
+    /// Use for scoring/ranking providers without triggering Open→HalfOpen transition.
+    pub fn is_available(&self) -> bool {
+        match self.state {
+            CircuitState::Closed | CircuitState::HalfOpen => true,
+            CircuitState::Open => {
+                if let Some(last) = self.last_failure {
+                    last.elapsed() >= self.recovery_timeout
+                } else {
+                    true
+                }
+            }
+        }
+    }
+
+    /// Average latency from recent calls (0.0 if no data).
+    pub fn avg_latency_ms(&self) -> f64 {
+        if self.latencies.is_empty() {
+            return 0.0;
+        }
+        let sum: u64 = self.latencies.iter().sum();
+        sum as f64 / self.latencies.len() as f64
+    }
+
     fn update_adaptive_timeout(&mut self) {
         if self.latencies.len() >= 5 {
             // Calculate p95
