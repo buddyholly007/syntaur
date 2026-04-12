@@ -26,16 +26,19 @@ async fn run_llm_with_tools(
     circuit_breakers: Arc<
         tokio::sync::Mutex<std::collections::HashMap<String, crate::circuit_breaker::CircuitBreaker>>,
     >,
+    config: Option<Arc<crate::config::Config>>,
 ) -> String {
     let mut tool_registry = crate::tools::ToolRegistry::with_mcp(workspace.to_path_buf(), mcp);
     if let Some(ctx) = approval_ctx {
         tool_registry.set_approval(ctx);
     }
     tool_registry.set_infra(rate_limiter, circuit_breakers);
-    // Apply per-agent approval overrides from config (if any).
-    // The telegram bot doesn't have direct access to the global config here —
-    // we'd need to pass it through. For v1 we leave overrides as a future
-    // enhancement when telegram.rs is refactored to receive the config.
+    // Inject sub-agent delegation tool
+    if let Some(cfg) = config {
+        let delegate: Arc<dyn crate::tools::extension::Tool> =
+            Arc::new(crate::tools::subagent::DelegateTool::new(cfg, client.clone()));
+        tool_registry.add_extension_tools(&[delegate]);
+    }
     let tools = tool_registry.tool_definitions();
     let max_tool_rounds = 30;
 
@@ -673,6 +676,7 @@ pub async fn run_bot(
                 approval_ctx,
                 Arc::clone(&rate_limiter),
                 Arc::clone(&circuit_breakers),
+                Some(Arc::new(app_state.config.clone())),
             ).await;
 
             // Save to history

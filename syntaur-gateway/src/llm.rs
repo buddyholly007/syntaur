@@ -4,8 +4,71 @@ use log::{debug, error, info, warn};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
+
+// ── Global in-flight tracking ───────────────────────────────────────────────
+// Shared across all LlmChain instances so concurrent requests from different
+// agents/handlers see each other's in-flight counts for the same provider.
+
+/// Global per-provider metrics shared across all LlmChain instances.
+struct GlobalProviderMetrics {
+    in_flight: AtomicU32,
+    /// Latency EMA stored as microseconds (avoids float atomics).
+    latency_ema_us: std::sync::atomic::AtomicU64,
+    total_requests: std::sync::atomic::AtomicU64,
+}
+
+static PROVIDER_METRICS: OnceLock<std::sync::Mutex<HashMap<String, Arc<GlobalProviderMetrics>>>> =
+    OnceLock::new();
+
+fn provider_metrics(name: &str) -> Arc<GlobalProviderMetrics> {
+    let map = PROVIDER_METRICS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut guard = map.lock().unwrap();
+    guard
+        .entry(name.to_string())
+        .or_insert_with(|| {
+            Arc::new(GlobalProviderMetrics {
+                in_flight: AtomicU32::new(0),
+                latency_ema_us: std::sync::atomic::AtomicU64::new(0),
+                total_requests: std::sync::atomic::AtomicU64::new(0),
+            })
+        })
+        .clone()
+}
+
+impl GlobalProviderMetrics {
+    fn record_latency(&self, latency_ms: u64) {
+        let latency_us = latency_ms * 1000;
+        self.total_requests
+            .fetch_add(1, Ordering::Relaxed);
+        let prev = self.latency_ema_us.load(Ordering::Relaxed);
+        let ema = if prev == 0 {
+            latency_us
+        } else {
+            // EMA with alpha=0.2
+            (prev * 4 + latency_us) / 5
+        };
+        self.latency_ema_us.store(ema, Ordering::Relaxed);
+    }
+
+    fn avg_latency_ms(&self) -> f64 {
+        self.latency_ema_us.load(Ordering::Relaxed) as f64 / 1000.0
+    }
+}
+
+/// Snapshot of a provider's current state for introspection.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderSnapshot {
+    pub name: String,
+    pub model_id: String,
+    pub in_flight: u32,
+    pub avg_latency_ms: f64,
+    pub total_requests: u64,
+    pub circuit_state: String,
+}
 
 // ── LLM Messages ────────────────────────────────────────────────────────────
 
@@ -236,6 +299,57 @@ impl LlmChain {
             .any(|p| p.model_id.contains("embed") || p.model_id.contains("Embed"))
     }
 
+    /// Score all providers and return indices in best-first order.
+    /// Uses circuit breaker state, average latency, and in-flight count
+    /// to pick the best provider — not just the first in config order.
+    async fn ranked_order(&self) -> Vec<usize> {
+        let mut scored: Vec<(usize, f64)> = Vec::with_capacity(self.providers.len());
+
+        for (i, provider) in self.providers.iter().enumerate() {
+            let circuit = provider.circuit.lock().await;
+            let score;
+
+            if !circuit.is_available() {
+                score = 100_000.0;
+            } else {
+                let metrics = provider_metrics(&provider.name);
+                let global_avg = metrics.avg_latency_ms();
+                let circuit_avg = circuit.avg_latency_ms();
+                // Use whichever has data; prefer global (cross-chain)
+                let avg_lat = if global_avg > 0.0 { global_avg } else { circuit_avg };
+                let base = if avg_lat > 0.0 { avg_lat } else { 500.0 };
+
+                let active = metrics.in_flight.load(Ordering::Relaxed) as f64;
+                let penalty = active * base.max(500.0) * 0.5;
+
+                score = base + penalty;
+            }
+
+            scored.push((i, score));
+        }
+
+        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.into_iter().map(|(i, _)| i).collect()
+    }
+
+    /// Get stats for all providers in this chain (for diagnostics).
+    pub async fn provider_stats(&self) -> Vec<ProviderSnapshot> {
+        let mut stats = Vec::new();
+        for provider in &self.providers {
+            let circuit = provider.circuit.lock().await;
+            let metrics = provider_metrics(&provider.name);
+            stats.push(ProviderSnapshot {
+                name: provider.name.clone(),
+                model_id: provider.model_id.clone(),
+                in_flight: metrics.in_flight.load(Ordering::Relaxed),
+                avg_latency_ms: metrics.avg_latency_ms(),
+                total_requests: metrics.total_requests.load(Ordering::Relaxed),
+                circuit_state: format!("{:?}", circuit.state()),
+            });
+        }
+        stats
+    }
+
     /// Call LLM — returns text only
     pub async fn call(&self, messages: &[ChatMessage]) -> Result<String, String> {
         match self.call_raw(messages, None).await? {
@@ -244,10 +358,17 @@ impl LlmChain {
         }
     }
 
-    /// Call LLM with tools — returns structured result
+    /// Call LLM with tools — returns structured result.
+    /// Providers are tried in load-aware ranked order (best score first)
+    /// rather than simple config order, with in-flight tracking across chains.
     pub async fn call_raw(&self, messages: &[ChatMessage], tools: Option<&Vec<serde_json::Value>>) -> Result<LlmResult, String> {
-        for (i, provider) in self.providers.iter().enumerate() {
-            // Check circuit breaker
+        let order = self.ranked_order().await;
+        let total = order.len();
+
+        for (attempt, &idx) in order.iter().enumerate() {
+            let provider = &self.providers[idx];
+
+            // Check circuit breaker (may transition Open→HalfOpen)
             {
                 let mut circuit = provider.circuit.lock().await;
                 if !circuit.can_execute() {
@@ -261,11 +382,19 @@ impl LlmChain {
                 circuit.timeout()
             };
 
+            let metrics = provider_metrics(&provider.name);
+            metrics.in_flight.fetch_add(1, Ordering::Relaxed);
+
             let start = Instant::now();
-            info!("[llm:{}] Calling model={} timeout={}s", provider.name, provider.model_id, timeout.as_secs());
-            match call_provider(&self.client, provider, messages, timeout, tools).await {
+            info!("[llm:{}] Calling model={} timeout={}s in_flight={}", provider.name, provider.model_id, timeout.as_secs(), metrics.in_flight.load(Ordering::Relaxed));
+            let result = call_provider(&self.client, provider, messages, timeout, tools).await;
+
+            metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
+
+            match result {
                 Ok(result) => {
                     let latency = start.elapsed().as_millis() as u64;
+                    metrics.record_latency(latency);
                     let desc = match &result {
                         LlmResult::Text(t) => format!("text {} chars", t.len()),
                         LlmResult::ToolCalls { tool_calls, .. } => format!("{} tool calls", tool_calls.len()),
@@ -285,7 +414,7 @@ impl LlmChain {
                         circuit.record_failure(was_timeout);
                     }
 
-                    if i < self.providers.len() - 1 {
+                    if attempt < total - 1 {
                         warn!("[llm:{}] Failed after {}ms ({}), trying next provider", provider.name, latency, e);
                     } else {
                         error!("[llm] All {} providers failed after {}ms. Last error: {}", self.providers.len(), latency, e);
@@ -308,7 +437,11 @@ impl LlmChain {
         tools: Option<&Vec<serde_json::Value>>,
         max_tokens_override: u32,
     ) -> Result<LlmResult, String> {
-        for (i, provider) in self.providers.iter().enumerate() {
+        let order = self.ranked_order().await;
+        let total = order.len();
+
+        for (attempt, &idx) in order.iter().enumerate() {
+            let provider = &self.providers[idx];
             {
                 let mut circuit = provider.circuit.lock().await;
                 if !circuit.can_execute() {
@@ -320,12 +453,16 @@ impl LlmChain {
                 let circuit = provider.circuit.lock().await;
                 circuit.timeout()
             };
+
+            let metrics = provider_metrics(&provider.name);
+            metrics.in_flight.fetch_add(1, Ordering::Relaxed);
+
             let start = Instant::now();
             info!(
-                "[llm:{}] Calling model={} timeout={}s max_tokens={} (capped)",
-                provider.name, provider.model_id, timeout.as_secs(), max_tokens_override
+                "[llm:{}] Calling model={} timeout={}s max_tokens={} in_flight={} (capped)",
+                provider.name, provider.model_id, timeout.as_secs(), max_tokens_override, metrics.in_flight.load(Ordering::Relaxed)
             );
-            match call_provider_capped(
+            let result = call_provider_capped(
                 &self.client,
                 provider,
                 messages,
@@ -333,10 +470,14 @@ impl LlmChain {
                 tools,
                 max_tokens_override,
             )
-            .await
-            {
+            .await;
+
+            metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
+
+            match result {
                 Ok(result) => {
                     let latency = start.elapsed().as_millis() as u64;
+                    metrics.record_latency(latency);
                     let desc = match &result {
                         LlmResult::Text(t) => format!("text {} chars", t.len()),
                         LlmResult::ToolCalls { tool_calls, .. } => {
@@ -357,7 +498,7 @@ impl LlmChain {
                         let mut circuit = provider.circuit.lock().await;
                         circuit.record_failure(was_timeout);
                     }
-                    if i < self.providers.len() - 1 {
+                    if attempt < total - 1 {
                         warn!(
                             "[llm:{}] Failed after {}ms ({}), trying next provider",
                             provider.name, latency, e

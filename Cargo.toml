@@ -11,6 +11,7 @@ members = [
     "syntaur-mod",
     "syntaur-hwscan",
     "syntaur-setup",
+    "syntaur-license-server",
 ]
 
 [workspace.package]

@@ -37,6 +37,8 @@ pub mod media_control;
 pub mod matter;
 // Phase 5: direct protocol tools.
 pub mod camera;
+// Sub-agent delegation: search, coder, researcher specialists.
+pub mod subagent;
 
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
