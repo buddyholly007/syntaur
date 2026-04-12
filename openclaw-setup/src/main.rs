@@ -38,7 +38,7 @@ fn main() {
         disabled_modules: vec!["mod-captcha".to_string(), "mod-accounts".to_string()],
         admin_username: "admin".to_string(),
         admin_password: "test-password-123".to_string(),
-        data_dir: "/tmp/openclaw-test".into(),
+        data_dir: "/tmp/syntaur-test".into(),
         conversation_retention_days: Some(90),
         telemetry: false,
         gateway_port: 18789,
@@ -50,9 +50,9 @@ fn main() {
             println!("Generated successfully!\n");
 
             // Show what was created
-            let base = std::path::Path::new("/tmp/openclaw-test");
-            println!("=== openclaw.json ===");
-            println!("{}", std::fs::read_to_string(base.join("openclaw.json")).unwrap());
+            let base = std::path::Path::new("/tmp/syntaur-test");
+            println!("=== syntaur.json ===");
+            println!("{}", std::fs::read_to_string(base.join("syntaur.json")).unwrap());
 
             println!("\n=== Workspace files ===");
             for entry in std::fs::read_dir(base.join("workspace-atlas")).unwrap() {

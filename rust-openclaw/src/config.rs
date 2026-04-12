@@ -123,7 +123,7 @@ pub struct HomeAssistantConnectorConfig {
     #[serde(default = "default_true_bool")]
     pub enabled: bool,
     /// ESPHome satellite host:port (e.g., "192.168.1.190:6053"). When set,
-    /// openclaw connects directly to the satellite, replacing HA for voice.
+    /// Syntaur connects directly to the satellite, replacing HA for voice.
     #[serde(default)]
     pub satellite_host: Option<String>,
     /// Noise PSK for ESPHome API encryption (base64-encoded 32-byte key).

@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 const DEFAULT_SEARXNG: &str = "http://localhost:4242";
 const REQUEST_TIMEOUT_SECS: u64 = 15;
 const MAX_FETCH_BYTES: usize = 8_000;
-const USER_AGENT: &str = "Mozilla/5.0 (compatible; openclaw-mcp-search-rs/0.1)";
+const USER_AGENT: &str = "Mozilla/5.0 (compatible; syntaur-mcp-search-rs/0.1)";
 
 struct SearchHandler {
     searxng_url: String,

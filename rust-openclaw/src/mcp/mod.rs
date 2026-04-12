@@ -30,7 +30,7 @@ const NAMESPACE_PREFIX: &str = "mcp/";
 /// ```json
 /// "syntaur-server-fs": {
 ///     "command": "ssh",
-///     "args": ["sean@192.168.1.35", "mcp-server-filesystem", "/home/sean/.openclaw"],
+///     "args": ["sean@192.168.1.35", "mcp-server-filesystem", "/home/sean/.syntaur"],
 ///     "env": {},
 ///     "enabled": true
 /// }

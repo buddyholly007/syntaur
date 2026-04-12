@@ -1,4 +1,4 @@
-//! OpenAI-compatible `/v1/chat/completions` endpoint that fronts openclaw
+//! OpenAI-compatible `/v1/chat/completions` endpoint that fronts Syntaur
 //! for voice clients (Home Assistant's `extended_openai_conversation`).
 //!
 //! ## Why this exists
@@ -15,20 +15,20 @@
 //!     surfaced back to the LLM as text errors that the model then has to
 //!     reason about.
 //!
-//! Routing through openclaw fixes both:
+//! Routing through Syntaur fixes both:
 //!   1. We give the LLM **typed tools** (`control_light`, `set_thermostat`,
 //!      `query_state`, `call_ha_service`) with crisp JSON schemas, so the
 //!      model has way less surface area to hallucinate.
-//!   2. The whole tool-call loop runs **server-side in openclaw** — no HA
+//!   2. The whole tool-call loop runs **server-side in Syntaur** — no HA
 //!      round-trips between rounds. We only return the FINAL plain-text
 //!      response to HA, which speaks it via Wyoming TTS.
 //!
 //! ## Wire shape
 //! Accepts the standard OpenAI `POST /v1/chat/completions` body
 //! (`model`, `messages[]`, optional `tools[]`, optional `tool_choice`,
-//! optional `max_tokens`, etc.). The `model` field is ignored — openclaw
+//! optional `max_tokens`, etc.). The `model` field is ignored — Syntaur
 //! always routes through its configured LlmChain. The caller's `tools[]`
-//! is also ignored — we replace it with openclaw's own ToolRegistry tools
+//! is also ignored — we replace it with Syntaur's own ToolRegistry tools
 //! so the LLM only sees the schemas we vetted.
 //!
 //! Returns the canonical OpenAI v1 chat completion shape:
@@ -273,13 +273,13 @@ pub async fn handle_chat_completions(
         req.model
     );
 
-    // 1. Use openclaw's voice system prompt — and ONLY that. Discard
+    // 1. Use Syntaur's voice system prompt — and ONLY that. Discard
     //    whatever the caller sent. HA's extended_openai_conversation ships
     //    an ~8000 char persona prompt of its own which, when stacked with
     //    our tool-discipline prompt, bloats context to ~2500 tokens and
     //    reliably tips the Qwen distillation into reasoning rather than
     //    acting. Persona flavor lives in VOICE_SYSTEM_PROMPT now that
-    //    openclaw is the brain.
+    //    Syntaur is the brain.
     //    Inject current date/time so Peter always knows without a tool call.
     // Use America/Los_Angeles (Sean's timezone) instead of server local (UTC)
     use chrono::TimeZone;
@@ -294,7 +294,7 @@ pub async fn handle_chat_completions(
     // 2. Extract ONLY the latest user message from HA's request.
     //    HA's extended_openai_conversation sends the FULL accumulated
     //    conversation history with every wake-word trigger. We ignore all
-    //    of it — openclaw owns the conversation state, not HA.
+    //    of it — Syntaur owns the conversation state, not HA.
     let raw_user_text = req
         .messages
         .iter()
@@ -380,7 +380,7 @@ pub async fn handle_chat_completions(
     ));
 
     // 4. Build the ToolRegistry — we want a SUBSET focused on HA control
-    //    plus a couple openclaw extras (memory read for persistence,
+    //    plus a couple Syntaur extras (memory read for persistence,
     //    web_search if the user asks something the model can't answer).
     //    The full registry is overkill and bloats the LLM context.
     let workspace = state.config.agent_workspace(&agent_id);

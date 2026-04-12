@@ -1,5 +1,5 @@
-//! openclaw-capability-shim — tiny HTTP server that runs one or more
-//! "capabilities" on behalf of openclawprod, so the gateway can offload
+//! syntaur-capability-shim — tiny HTTP server that runs one or more
+//! "capabilities" on behalf of the Syntaur gateway, so it can offload
 //! specific tools to a different host without committing to the full v5
 //! distributed multi-host architecture.
 //!
@@ -19,7 +19,7 @@
 //! holds the bearer.
 //!
 //! Listen address: `SHIM_BIND` env, default `127.0.0.1:18790`. Bind to
-//! `0.0.0.0:18790` to accept connections from openclawprod, but only do
+//! `0.0.0.0:18790` to accept connections from the gateway host, but only do
 //! that on a trusted LAN segment. The shim does no TLS termination of its
 //! own — front it with Tailscale or stick to localhost.
 //!
@@ -29,9 +29,9 @@
 //!   capability routing, no failover, no gRPC, no shared SQLite replica.
 //! * Not a generic RPC framework. The shim only knows about a fixed set
 //!   of capabilities defined at compile time below.
-//! * Not invoked by rust-openclaw automatically. You wire openclawprod
+//! * Not invoked by the gateway automatically. You wire the gateway
 //!   to call this shim manually (e.g. point a tool's HTTP fallback URL
-//!   at it, or write a wrapper tool in rust-openclaw that POSTs here).
+//!   at it, or write a wrapper tool in the gateway that POSTs here).
 //!
 //! ## Adding a new capability
 //!
@@ -116,7 +116,7 @@ async fn main() -> anyhow::Result<()> {
 
     let http = reqwest::Client::builder()
         .timeout(HTTP_FETCH_TIMEOUT)
-        .user_agent("openclaw-capability-shim/0.1")
+        .user_agent("syntaur-capability-shim/0.1")
         .build()
         .context("build reqwest client")?;
 
@@ -131,7 +131,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/execute", post(handle_execute))
         .with_state(state);
 
-    info!("openclaw-capability-shim listening on {}", bind);
+    info!("syntaur-capability-shim listening on {}", bind);
     let listener = tokio::net::TcpListener::bind(bind).await?;
     axum::serve(listener, app).await?;
     Ok(())
@@ -140,7 +140,7 @@ async fn main() -> anyhow::Result<()> {
 // ── handlers ──────────────────────────────────────────────────────────────
 
 async fn handle_health() -> Json<Value> {
-    Json(json!({"status": "ok", "shim": "openclaw-capability-shim", "version": env!("CARGO_PKG_VERSION")}))
+    Json(json!({"status": "ok", "shim": "syntaur-capability-shim", "version": env!("CARGO_PKG_VERSION")}))
 }
 
 async fn handle_execute(
@@ -199,7 +199,7 @@ async fn dispatch(state: &ShimState, tool: &str, args: Value) -> Result<String, 
 // ── capability: http_fetch ────────────────────────────────────────────────
 //
 // Simple GET-only HTTP client. Useful for offloading network egress when
-// openclawprod's outbound is constrained or you want a different egress
+// the gateway host's outbound is constrained or you want a different egress
 // IP for fetching content.
 //
 // Args: { "url": "<url>" }
@@ -238,7 +238,7 @@ async fn run_http_fetch(state: &ShimState, args: Value) -> Result<String, String
 
 // ── capability: code_execute ──────────────────────────────────────────────
 //
-// Bubblewrap-sandboxed code execution. Mirrors the rust-openclaw
+// Bubblewrap-sandboxed code execution. Mirrors the Syntaur gateway's
 // code_execute tool's isolation model: bwrap with --unshare-all,
 // read-only /usr, fresh /tmp, no network, RLIMITs via shell ulimit.
 //
@@ -348,10 +348,10 @@ async fn run_code_execute(state: &ShimState, args: Value) -> Result<String, Stri
     Ok(combined)
 }
 
-/// Create a fresh subdirectory under /tmp/openclaw-shim that the caller
+/// Create a fresh subdirectory under /tmp/syntaur-shim that the caller
 /// owns. We don't use the `tempfile` crate so the dep tree stays minimal.
 fn tempdir() -> Result<String, String> {
-    let parent = "/tmp/openclaw-shim";
+    let parent = "/tmp/syntaur-shim";
     std::fs::create_dir_all(parent).map_err(|e| format!("mkdir parent: {}", e))?;
     let pid = std::process::id();
     let nanos = std::time::SystemTime::now()

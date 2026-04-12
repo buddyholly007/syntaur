@@ -1,4 +1,4 @@
-//! `ocmod` — OpenClaw module manager CLI.
+//! `ocmod` — Syntaur module manager CLI.
 //!
 //! Manages core and extension modules: list, install, remove, enable, disable.
 
@@ -33,7 +33,7 @@ const CORE_MODULES: &[CoreModuleDef] = &[
 // ── Config types ────────────────────────────────────────────────────────
 
 #[derive(serde::Deserialize, serde::Serialize, Default)]
-struct OpenClawConfig {
+struct SyntaurConfig {
     #[serde(default)]
     modules: ModulesConfig,
     #[serde(flatten)]
@@ -58,32 +58,49 @@ fn default_true() -> bool { true }
 
 // ── Paths ───────────────────────────────────────────────────────────────
 
-fn openclaw_dir() -> PathBuf {
+fn syntaur_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/home/sean".to_string());
-    PathBuf::from(home).join(".openclaw")
+    let new_dir = PathBuf::from(&home).join(".syntaur");
+    let legacy_dir = PathBuf::from(&home).join(".openclaw");
+    if new_dir.exists() {
+        new_dir
+    } else if legacy_dir.exists() {
+        legacy_dir
+    } else {
+        new_dir
+    }
 }
 
 fn config_path() -> PathBuf {
-    openclaw_dir().join("openclaw.json")
+    let dir = syntaur_dir();
+    let new_cfg = dir.join("syntaur.json");
+    let legacy_cfg = dir.join("openclaw.json");
+    if new_cfg.exists() {
+        new_cfg
+    } else if legacy_cfg.exists() {
+        legacy_cfg
+    } else {
+        new_cfg
+    }
 }
 
 fn modules_dir() -> PathBuf {
-    openclaw_dir().join("modules")
+    syntaur_dir().join("modules")
 }
 
-fn load_config() -> Result<OpenClawConfig> {
+fn load_config() -> Result<SyntaurConfig> {
     let path = config_path();
     if !path.exists() {
-        return Ok(OpenClawConfig::default());
+        return Ok(SyntaurConfig::default());
     }
-    let text = fs::read_to_string(&path).context("reading openclaw.json")?;
-    serde_json::from_str(&text).context("parsing openclaw.json")
+    let text = fs::read_to_string(&path).context("reading syntaur.json")?;
+    serde_json::from_str(&text).context("parsing syntaur.json")
 }
 
-fn save_config(config: &OpenClawConfig) -> Result<()> {
+fn save_config(config: &SyntaurConfig) -> Result<()> {
     let path = config_path();
     let text = serde_json::to_string_pretty(config).context("serializing config")?;
-    fs::write(&path, text).context("writing openclaw.json")?;
+    fs::write(&path, text).context("writing syntaur.json")?;
     Ok(())
 }
 
@@ -99,7 +116,7 @@ fn discover_extensions() -> Vec<ExtensionModule> {
     let mut modules = Vec::new();
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
-            let manifest_path = entry.path().join("openclaw.module.toml");
+            let manifest_path = entry.path().join("syntaur.module.toml");
             if let Ok(manifest) = ModuleManifest::from_file(&manifest_path) {
                 modules.push(ExtensionModule {
                     manifest,
@@ -202,9 +219,9 @@ fn cmd_install(source: &str) -> Result<()> {
 
     if source_path.is_dir() {
         // Install from directory — copy manifest + bin
-        let manifest_path = source_path.join("openclaw.module.toml");
+        let manifest_path = source_path.join("syntaur.module.toml");
         if !manifest_path.exists() {
-            bail!("No openclaw.module.toml found in {}", source);
+            bail!("No syntaur.module.toml found in {}", source);
         }
         let manifest = ModuleManifest::from_file(&manifest_path)
             .context("parsing manifest")?;
@@ -396,7 +413,7 @@ fn main() {
             cmd_info(id)
         }
         "help" | "--help" | "-h" => {
-            println!("ocmod — OpenClaw module manager\n");
+            println!("ocmod — Syntaur module manager\n");
             println!("Usage: ocmod <command> [args]\n");
             println!("Commands:");
             println!("  list, ls              List all modules with status");

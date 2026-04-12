@@ -1,4 +1,4 @@
-//! Module manifest — parsed from `openclaw.module.toml`.
+//! Module manifest — parsed from `syntaur.module.toml`.
 //!
 //! Every module (core or extension) declares its metadata, configuration
 //! schema, and provided capabilities in a TOML manifest file.
@@ -71,7 +71,7 @@ pub struct ExtensionRuntime {
     pub health_check: Option<HealthCheck>,
 }
 
-/// The module manifest — parsed from `openclaw.module.toml`.
+/// The module manifest — parsed from `syntaur.module.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModuleManifest {
     /// Unique module identifier (e.g. "home-assistant", "social-manager").

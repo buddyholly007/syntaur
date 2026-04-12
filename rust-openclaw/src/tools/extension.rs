@@ -5,7 +5,7 @@
 //! with its own `impl Tool for FooTool`.
 //!
 //! Data types (`Citation`, `Artifact`, `RichToolResult`, `ToolCapabilities`)
-//! are defined in `openclaw-sdk` and re-exported here for backward
+//! are defined in the SDK crate and re-exported here for backward
 //! compatibility. The `Tool` trait and `ToolContext` remain gateway-internal
 //! because they reference gateway subsystems (indexer, circuit breakers,
 //! rate limiters).
@@ -21,9 +21,9 @@ use crate::circuit_breaker::CircuitBreaker;
 use crate::index::Indexer;
 use crate::rate_limit::RateLimiter;
 
-// ── Re-exports from openclaw-sdk ────────────────────────────────────────
+// ── Re-exports from Syntaur SDK ────────────────────────────────────────
 //
-// These were originally defined here. Now they live in openclaw-sdk so
+// These were originally defined here. Now they live in the SDK crate so
 // module authors can depend on a lightweight crate without pulling in
 // the entire gateway. All existing `use crate::tools::extension::*`
 // imports continue to work via these re-exports.

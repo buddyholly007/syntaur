@@ -1,7 +1,7 @@
-//! First-run configuration generator for OpenClaw.
+//! First-run configuration generator for Syntaur.
 //!
 //! Takes installer choices (LLM backend, agent name, voice settings,
-//! modules, etc.) and produces a complete `openclaw.json` + populated
+//! modules, etc.) and produces a complete `syntaur.json` + populated
 //! agent workspace with templated default files.
 
 use std::collections::HashMap;
@@ -101,7 +101,7 @@ impl Default for InstallChoices {
             disabled_modules: Vec::new(),
             admin_username: "admin".to_string(),
             admin_password: String::new(),
-            data_dir: PathBuf::from("~/.openclaw"),
+            data_dir: PathBuf::from("~/.syntaur"),
             conversation_retention_days: None,
             telemetry: false,
             gateway_port: 18789,
@@ -110,18 +110,18 @@ impl Default for InstallChoices {
     }
 }
 
-/// Generate a complete OpenClaw installation from installer choices.
+/// Generate a complete Syntaur installation from installer choices.
 pub fn generate(choices: &InstallChoices) -> Result<()> {
     let base = expand_tilde(&choices.data_dir);
 
     // Create directory structure
     create_dirs(&base)?;
 
-    // Generate openclaw.json
+    // Generate syntaur.json
     let config = generate_config(choices);
-    let config_path = base.join("openclaw.json");
+    let config_path = base.join("syntaur.json");
     fs::write(&config_path, serde_json::to_string_pretty(&config)?)
-        .context("writing openclaw.json")?;
+        .context("writing syntaur.json")?;
 
     // Generate agent workspace from templates
     let workspace = base.join(format!("workspace-{}", slug(&choices.agent_name)));

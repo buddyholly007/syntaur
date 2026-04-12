@@ -27,7 +27,7 @@ pub struct ModuleToolContext {
     pub user_id: i64,
     /// Shared HTTP client with connection pooling.
     pub http: Arc<reqwest::Client>,
-    /// Module-specific configuration from `openclaw.json`.
+    /// Module-specific configuration from `syntaur.json`.
     pub config: Value,
     /// Module-private persistent data directory.
     pub data_dir: PathBuf,

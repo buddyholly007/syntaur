@@ -3,7 +3,7 @@ use openclaw_hwscan::recommend::*;
 
 #[tokio::main]
 async fn main() {
-    println!("=== OpenClaw Hardware Scan ===\n");
+    println!("=== Syntaur Hardware Scan ===\n");
     let (hw, net, rec) = openclaw_hwscan::full_scan().await;
 
     // Hardware summary

@@ -2,7 +2,7 @@
 name = "openclaw-hwscan"
 version = "0.1.0"
 edition.workspace = true
-description = "Hardware detection and LLM service discovery for OpenClaw"
+description = "Hardware detection and LLM service discovery for Syntaur"
 
 [dependencies]
 serde = { workspace = true }

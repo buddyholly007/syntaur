@@ -2,7 +2,7 @@
 name = "openclaw-mod"
 version = "0.1.0"
 edition.workspace = true
-description = "Module manager CLI for OpenClaw"
+description = "Module manager CLI for Syntaur"
 
 [[bin]]
 name = "ocmod"

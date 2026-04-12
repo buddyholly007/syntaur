@@ -30,7 +30,7 @@ mod license;
 pub const BRAND: &str = "Syntaur";
 
 /// Resolve the data directory. Checks ~/.syntaur/ first (new brand),
-/// falls back to ~/.syntaur/ (legacy), creates ~/.syntaur/ if neither exists.
+/// falls back to ~/.openclaw/ (legacy), creates ~/.syntaur/ if neither exists.
 pub fn resolve_data_dir() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
     let new_dir = std::path::PathBuf::from(&home).join(".syntaur");
@@ -40,7 +40,7 @@ pub fn resolve_data_dir() -> std::path::PathBuf {
         new_dir
     } else if legacy_dir.exists() {
         // Legacy install — use existing data, log migration hint
-        log::info!("[{}] Using legacy data dir at ~/.syntaur/ (rename to ~/.syntaur/ when ready)", BRAND);
+        log::info!("[{}] Using legacy data dir at ~/.openclaw/ (rename to ~/.syntaur/ when ready)", BRAND);
         legacy_dir
     } else {
         // Fresh install — use new brand
@@ -115,7 +115,7 @@ pub struct AppState {
     /// pure-Rust skills land. None when fastembed init fails (degrades
     /// gracefully — find_tool returns "router has no entries").
     pub tool_router: Option<Arc<tokio::sync::RwLock<crate::tools::router::ToolRouter>>>,
-    /// Buffer for Telegram callback_query events that openclaw doesn't handle
+    /// Buffer for Telegram callback_query events that Syntaur doesn't handle
     /// internally (e.g. bsky-post:approve:*, yt-reply:*, threads-post:*).
     /// External consumers (rust-social-manager bsky-approve) drain via
     /// GET /external-callbacks.
@@ -360,7 +360,7 @@ pub struct GatewayStats {
 // ── HTTP Handlers ───────────────────────────────────────────────────────────
 
 /// Drain buffered external callbacks (Telegram callback_query events that
-/// openclaw doesn't handle internally). Used by rust-social-manager bsky-approve.
+/// Syntaur doesn't handle internally). Used by rust-social-manager bsky-approve.
 async fn handle_external_callbacks(
     State(state): State<Arc<AppState>>,
 ) -> Json<Vec<serde_json::Value>> {

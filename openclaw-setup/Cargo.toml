@@ -2,7 +2,7 @@
 name = "openclaw-setup"
 version = "0.1.0"
 edition.workspace = true
-description = "First-run configuration generator for OpenClaw"
+description = "First-run configuration generator for Syntaur"
 
 [dependencies]
 openclaw-sdk = { path = "../openclaw-sdk" }

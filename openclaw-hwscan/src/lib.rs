@@ -1,4 +1,4 @@
-//! Hardware detection and LLM service discovery for OpenClaw.
+//! Hardware detection and LLM service discovery for Syntaur.
 //!
 //! Used by both the installer and the management dashboard to:
 //! - Detect GPUs, CPU, RAM, and disk space

@@ -1,6 +1,6 @@
 //! Satellite client — connects to the ESPHome satellite and runs the voice pipeline.
 //!
-//! This replaces HA's role entirely. openclaw connects to the satellite
+//! This replaces HA's role entirely. Syntaur connects to the satellite
 //! as an ESPHome native API client, subscribes to voice assistant events,
 //! and handles the full pipeline: STT → LLM → TTS.
 

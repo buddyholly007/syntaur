@@ -127,7 +127,7 @@ pub struct SetupStep {
     pub command: Option<String>,
     /// If this step involves visiting a URL.
     pub url: Option<String>,
-    /// Whether OpenClaw can do this step automatically.
+    /// Whether Syntaur can do this step automatically.
     pub automatable: bool,
 }
 
@@ -165,17 +165,17 @@ fn anthropic_backend() -> LlmBackend {
 
 const RESILIENCE_CLOUD_PRIMARY: &str =
     "Cloud APIs can have outages. Always configure a backup — either a local model \
-     (even a small one) or a second cloud provider. OpenClaw will automatically \
+     (even a small one) or a second cloud provider. Syntaur will automatically \
      switch to the fallback if the primary fails.";
 
 const RESILIENCE_LOCAL_PRIMARY: &str =
     "Local inference is reliable, but it's good to have a cloud fallback for when you \
-     need a larger model or your machine is under heavy load. OpenClaw will automatically \
+     need a larger model or your machine is under heavy load. Syntaur will automatically \
      route to the fallback when needed.";
 
 const RESILIENCE_NETWORK_PRIMARY: &str =
     "Network services depend on the other machine being online. Configure a cloud API \
-     or local model as backup so OpenClaw keeps working if the network service goes down.";
+     or local model as backup so Syntaur keeps working if the network service goes down.";
 
 // ── OpenRouter free model discovery ─────────────────────────────────────
 
@@ -281,7 +281,7 @@ fn ollama_download(model: &str, quant: &str, size_gb: f64) -> DownloadGuide {
             "  Windows: Download from https://ollama.com/download".to_string(),
             format!("Download the model: ollama pull {}", ollama_model),
             format!("Ollama will automatically serve it on port 11434."),
-            "OpenClaw will auto-detect it — no manual config needed.".to_string(),
+            "Syntaur will auto-detect it — no manual config needed.".to_string(),
         ],
     }
 }
@@ -302,7 +302,7 @@ fn llamacpp_download(model: &str, quant: &str, size_gb: f64) -> DownloadGuide {
                 "Start the server: ./build/bin/llama-server -m {}.{}.gguf --port 1235 -ngl 99",
                 model, quant
             ),
-            "OpenClaw will auto-detect it on port 1235.".to_string(),
+            "Syntaur will auto-detect it on port 1235.".to_string(),
         ],
     }
 }
@@ -520,7 +520,7 @@ fn recommend_limited(
             setup_steps: vec![
                 SetupStep {
                     title: "Use the network LLM".to_string(),
-                    description: format!("OpenClaw detected {} — it will be configured automatically.", svc.name),
+                    description: format!("Syntaur detected {} — it will be configured automatically.", svc.name),
                     command: None, url: None, automatable: true,
                 },
                 SetupStep {
@@ -719,7 +719,7 @@ fn recommend_minimal(
                 },
                 SetupStep {
                     title: "Set up cloud API backup".to_string(),
-                    description: "A cloud API ensures OpenClaw keeps working if the network LLM goes offline.".to_string(),
+                    description: "A cloud API ensures Syntaur keeps working if the network LLM goes offline.".to_string(),
                     command: None,
                     url: Some("https://openrouter.ai/keys".to_string()),
                     automatable: false,
@@ -727,7 +727,7 @@ fn recommend_minimal(
             ],
             upgrade_hint: Some(
                 "This machine has limited RAM and no GPU. For the best experience, \
-                 run OpenClaw on a machine with at least 8GB RAM, or use a cloud API.".to_string()
+                 run Syntaur on a machine with at least 8GB RAM, or use a cloud API.".to_string()
             ),
             resilience_note: RESILIENCE_NETWORK_PRIMARY.to_string(),
         };
@@ -741,7 +741,7 @@ fn recommend_minimal(
             "This machine doesn't have enough resources for local AI inference. \
              A cloud API is the best option — OpenRouter offers free models to get started. \
              A second cloud provider protects against outages. You can also run Ollama \
-             on another machine on your network and OpenClaw will detect it automatically."
+             on another machine on your network and Syntaur will detect it automatically."
                 .to_string(),
         hardware_tier: HardwareTier::Minimal,
         setup_steps: vec![
@@ -762,7 +762,7 @@ fn recommend_minimal(
             SetupStep {
                 title: "Or: run Ollama on another machine".to_string(),
                 description: "If you have a more powerful computer, install Ollama there. \
-                              OpenClaw will detect it on your network automatically.".to_string(),
+                              Syntaur will detect it on your network automatically.".to_string(),
                 command: None,
                 url: Some("https://ollama.com".to_string()),
                 automatable: false,

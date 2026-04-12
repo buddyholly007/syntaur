@@ -1,6 +1,6 @@
 # {{agent_name}} Workspace
 
-This is the active OpenClaw workspace for **{{agent_name}}**, {{user_name}}'s personal AI assistant.
+This is the active Syntaur workspace for **{{agent_name}}**, {{user_name}}'s personal AI assistant.
 
 ## Key files
 

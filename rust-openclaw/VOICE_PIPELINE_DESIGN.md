@@ -11,7 +11,7 @@ bridge for the 53 devices until rs-matter ships CASE initiator, (3) Z-Wave bridg
 ```
 Sat1 ESPHome → Wyoming protocol → HA assist_pipeline →
   STT: core_whisper addon (faster-whisper, distil-medium.en, CPU on HA mini-PC)
-  LLM: extended_openai_conversation → openclaw /v1/chat/completions
+  LLM: extended_openai_conversation → Syntaur /v1/chat/completions
   TTS: Wyoming fish-audio → rust-llm-proxy → Fish Audio cloud / s2.cpp local
 ← Wyoming protocol ← Sat1 plays audio
 ```
@@ -23,7 +23,7 @@ Sat1 ESPHome → Wyoming protocol → rust-voice-pipeline (new Rust binary)
   ├── STT: embedded whisper.cpp via whisper-rs crate (GPU on gaming PC)
   │   or: HTTP call to a whisper.cpp server (like TurboQuant but for whisper)
   ├── Intent: regex first-pass for instant commands (lights, thermostat)
-  │   fallback: openclaw voice_chat HTTP call (LLM + tools)
+  │   fallback: Syntaur voice_chat HTTP call (LLM + tools)
   ├── TTS: existing rust-llm-proxy Wyoming TTS on port 10400
   │   (already Rust, Fish Audio cloud primary, s2.cpp local fallback)
   └── Audio: Wyoming protocol response back to satellite
@@ -33,7 +33,7 @@ Sat1 ESPHome → Wyoming protocol → rust-voice-pipeline (new Rust binary)
 
 ### 1. rust-voice-pipeline binary
 
-New standalone Rust binary in the openclaw workspace. Runs on the **gaming PC**
+New standalone Rust binary in the Syntaur workspace. Runs on the **gaming PC**
 (where the GPU lives for STT + TTS) and listens for Wyoming protocol connections
 from the Sat1.
 
@@ -41,7 +41,7 @@ from the Sat1.
 [package]
 name = "rust-voice-pipeline"
 # deps: wyoming-rs (Wyoming protocol), whisper-rs or HTTP to whisper server,
-#        reqwest (for openclaw + TTS calls), tokio, tracing
+#        reqwest (for Syntaur + TTS calls), tokio, tracing
 ```
 
 **Wyoming protocol**: The satellite connects via TCP and sends/receives Wyoming
@@ -91,7 +91,7 @@ lazy_static! {
 ```
 
 If a pattern matches → execute the tool directly (no LLM round-trip, sub-200ms).
-If no pattern matches → call openclaw voice_chat (LLM path, ~2-5s).
+If no pattern matches → call Syntaur voice_chat (LLM path, ~2-5s).
 
 This mirrors HA's `prefer_local_intents=True` but in Rust.
 
@@ -120,7 +120,7 @@ When it triggers, the satellite opens a Wyoming connection to the pipeline's TCP
 
 ### Step 3: Intent matching + LLM fallback (~1 day)
 - Regex-based fast-path matcher for common commands
-- HTTP call to openclaw voice_chat for everything else
+- HTTP call to Syntaur voice_chat for everything else
 - Response text → TTS → audio back to satellite
 
 ### Step 4: TTS response (~half day)
@@ -171,7 +171,7 @@ openclaw-workspace/
 
 - `tokio` (async runtime, TCP)
 - `serde` + `serde_json` (Wyoming protocol)
-- `reqwest` (HTTP to whisper server + openclaw + TTS)
+- `reqwest` (HTTP to whisper server + Syntaur + TTS)
 - `tracing` (logging)
 - `regex` (intent matching)
 - `byteorder` (audio frame handling)

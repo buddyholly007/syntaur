@@ -1,7 +1,7 @@
-//! OpenClaw SDK — the public interface for building OpenClaw modules.
+//! Syntaur SDK — the public interface for building Syntaur modules.
 //!
 //! This crate defines the traits and types that module authors implement
-//! to extend OpenClaw with new tools, services, and capabilities.
+//! to extend Syntaur with new tools, services, and capabilities.
 //!
 //! # Module tiers
 //!
@@ -11,7 +11,7 @@
 //!
 //! - **Extension modules** are separate binaries that communicate with the
 //!   gateway via the MCP (Model Context Protocol) over stdio. They ship
-//!   an `openclaw.module.toml` manifest and are managed by `ocmod`.
+//!   a `syntaur.module.toml` manifest and are managed by `ocmod`.
 
 pub mod types;
 pub mod capabilities;

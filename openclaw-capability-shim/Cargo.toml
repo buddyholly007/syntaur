@@ -2,7 +2,7 @@
 name = "openclaw-capability-shim"
 version = "0.1.0"
 edition.workspace = true
-description = "Tiny standalone HTTP server that exposes one or more capabilities for openclaw to call into. Run on any always-on host to offload work from openclawprod without committing to the full v5 distributed multi-host design."
+description = "Tiny standalone HTTP server that exposes one or more capabilities for Syntaur to call into. Run on any always-on host to offload work from the gateway without committing to the full v5 distributed multi-host design."
 
 [[bin]]
 name = "openclaw-capability-shim"

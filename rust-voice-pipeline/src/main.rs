@@ -9,7 +9,7 @@
 //!
 //! ## Pipeline mode (--mode pipeline, future)
 //! Full pipeline — satellite connects directly. Handles wake word
-//! detection, STT, intent matching, LLM via openclaw, TTS routing,
+//! detection, STT, intent matching, LLM via Syntaur, TTS routing,
 //! and audio response. Replaces HA entirely for voice.
 //!
 //! ## Running
@@ -20,8 +20,8 @@
 //!
 //! # Full pipeline (future)
 //! RUST_LOG=info rust-voice-pipeline --mode pipeline --port 10500 \
-//!   --openclaw-url http://192.168.1.35:18789 \
-//!   --openclaw-secret <voice_secret> \
+//!   --syntaur-url http://192.168.1.35:18789 \
+//!   --syntaur-secret <voice_secret> \
 //!   --tts-url http://192.168.1.69:10400
 //! ```
 
@@ -39,8 +39,8 @@ struct Config {
     mode: String,
     port: u16,
     model_dir: String,
-    openclaw_url: String,
-    openclaw_secret: String,
+    syntaur_url: String,
+    syntaur_secret: String,
     tts_url: String,
 }
 
@@ -49,8 +49,8 @@ impl Config {
         let mut mode = "stt".to_string();
         let mut port = 10300u16;
         let mut model_dir = "/opt/models/stt".to_string();
-        let mut openclaw_url = "http://192.168.1.35:18789".to_string();
-        let mut openclaw_secret = String::new();
+        let mut syntaur_url = "http://192.168.1.35:18789".to_string();
+        let mut syntaur_secret = String::new();
         let mut tts_url = "http://192.168.1.69:10400".to_string();
 
         let args: Vec<String> = std::env::args().collect();
@@ -60,15 +60,15 @@ impl Config {
                 "--mode" => { i += 1; mode = args.get(i).cloned().unwrap_or(mode); }
                 "--port" => { i += 1; port = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(port); }
                 "--model-dir" => { i += 1; model_dir = args.get(i).cloned().unwrap_or(model_dir); }
-                "--openclaw-url" => { i += 1; openclaw_url = args.get(i).cloned().unwrap_or(openclaw_url); }
-                "--openclaw-secret" => { i += 1; openclaw_secret = args.get(i).cloned().unwrap_or_default(); }
+                "--syntaur-url" | "--openclaw-url" => { i += 1; syntaur_url = args.get(i).cloned().unwrap_or(syntaur_url); }
+                "--syntaur-secret" | "--openclaw-secret" => { i += 1; syntaur_secret = args.get(i).cloned().unwrap_or_default(); }
                 "--tts-url" => { i += 1; tts_url = args.get(i).cloned().unwrap_or(tts_url); }
                 _ => {}
             }
             i += 1;
         }
 
-        Self { mode, port, model_dir, openclaw_url, openclaw_secret, tts_url }
+        Self { mode, port, model_dir, syntaur_url, syntaur_secret, tts_url }
     }
 }
 
@@ -225,8 +225,8 @@ async fn handle_pipeline_session(
                     &wyoming::WyomingMessage::transcript(&transcript),
                 ).await;
 
-                // 2. LLM via openclaw
-                let response = match call_openclaw_voice_chat(&http, &config, &transcript).await {
+                // 2. LLM via Syntaur
+                let response = match call_syntaur_voice_chat(&http, &config, &transcript).await {
                     Ok(text) => text,
                     Err(e) => {
                         error!("[pipeline] LLM failed: {}", e);
@@ -254,30 +254,30 @@ async fn handle_pipeline_session(
     info!("[pipeline] {} disconnected", peer);
 }
 
-async fn call_openclaw_voice_chat(
+async fn call_syntaur_voice_chat(
     http: &reqwest::Client,
     config: &Config,
     transcript: &str,
 ) -> Result<String, String> {
-    let url = format!("{}/v1/chat/completions", config.openclaw_url);
+    let url = format!("{}/v1/chat/completions", config.syntaur_url);
     let body = serde_json::json!({
         "model": "gpt-4o-mini",
         "messages": [{"role": "user", "content": transcript}],
     });
 
     let mut req = http.post(&url).json(&body);
-    if !config.openclaw_secret.is_empty() {
-        req = req.header("Authorization", format!("Bearer {}", config.openclaw_secret));
+    if !config.syntaur_secret.is_empty() {
+        req = req.header("Authorization", format!("Bearer {}", config.syntaur_secret));
     }
 
     let resp = req
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
-        .map_err(|e| format!("openclaw: {}", e))?;
+        .map_err(|e| format!("syntaur: {}", e))?;
 
     if !resp.status().is_success() {
-        return Err(format!("openclaw: HTTP {}", resp.status()));
+        return Err(format!("syntaur: HTTP {}", resp.status()));
     }
 
     let body: serde_json::Value = resp.json().await.map_err(|e| format!("parse: {}", e))?;
@@ -339,7 +339,7 @@ async fn main() {
                     .unwrap_or_default(),
             );
             info!("Full pipeline mode");
-            info!("  openclaw: {}", config.openclaw_url);
+            info!("  syntaur: {}", config.syntaur_url);
             info!("  TTS: {}", config.tts_url);
             loop {
                 match listener.accept().await {

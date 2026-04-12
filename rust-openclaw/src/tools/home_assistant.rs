@@ -1,7 +1,7 @@
 //! Home Assistant integration tools — voice / agent control of HA entities
 //! via the HA REST API.
 //!
-//! These tools let any LLM running through the openclaw chat completions
+//! These tools let any LLM running through the Syntaur chat completions
 //! endpoint actually change the state of smart home devices. They were
 //! added to give Peter (the satellite voice assistant) a sane tool surface
 //! that the model can reason about, instead of HA's `execute_services`

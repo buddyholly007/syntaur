@@ -12,9 +12,9 @@ use crate::tool::ModuleTool;
 /// Context provided to a module during initialization.
 pub struct ModuleContext {
     /// Module-private persistent data directory
-    /// (e.g. `/data/openclaw/modules/<module-id>/data/`).
+    /// (e.g. `/data/syntaur/modules/<module-id>/data/`).
     pub data_dir: PathBuf,
-    /// Module-specific configuration from `openclaw.json`.
+    /// Module-specific configuration from `syntaur.json`.
     pub config: Value,
     /// Shared HTTP client.
     pub http: Arc<reqwest::Client>,
