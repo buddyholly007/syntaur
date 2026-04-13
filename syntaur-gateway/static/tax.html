@@ -34,6 +34,7 @@
       <button onclick="showTab('overview')" class="tab text-white" id="tab-btn-overview">Overview</button>
       <button onclick="showTab('expenses')" class="tab text-gray-400" id="tab-btn-expenses">Expenses</button>
       <button onclick="showTab('receipts')" class="tab text-gray-400" id="tab-btn-receipts">Receipts</button>
+      <select id="year-select" class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-sm text-gray-300 outline-none" onchange="changeYear()"></select>
       <a href="/" class="text-gray-500 hover:text-gray-300">Home</a>
     </div>
   </div>
@@ -221,13 +222,13 @@ function showTab(name) {
 // Overview
 async function loadOverview() {
   try {
-    const resp = await authFetch(`/api/tax/summary?token=${token}`);
+    const resp = await authFetch(`/api/tax/summary?token=${token}&start=${yearStart()}&end=${yearEnd()}`);
     const data = await resp.json();
     document.getElementById('sum-total').textContent = data.total_display || '$0.00';
     document.getElementById('sum-business').textContent = data.business_display || '$0.00';
     document.getElementById('sum-deductible').textContent = data.deductible_display || '$0.00';
     document.getElementById('sum-receipts').textContent = data.receipt_count || '0';
-    document.getElementById('export-link').href = `/api/tax/export?token=${token}`;
+    document.getElementById('export-link').href = `/api/tax/export?token=${token}&start=${yearStart()}&end=${yearEnd()}`;
 
     const cats = data.categories || [];
     const list = document.getElementById('category-list');
@@ -255,7 +256,7 @@ async function loadOverview() {
 async function loadExpenses() {
   try {
     const entity = document.getElementById('exp-filter-entity').value;
-    let url = `/api/tax/expenses?token=${token}`;
+    let url = `/api/tax/expenses?token=${token}&start=${yearStart()}&end=${yearEnd()}`;
     if (entity) url += `&entity=${entity}`;
     const resp = await authFetch(url);
     const data = await resp.json();
@@ -444,6 +445,41 @@ async function sendTaxChat() {
   taxChatSending = false;
   input.focus();
 }
+
+// ── Year selector ──
+let selectedYear = new Date().getFullYear();
+
+function initYearSelector() {
+  const sel = document.getElementById('year-select');
+  const current = new Date().getFullYear();
+  // Show current year and a few previous
+  for (let y = current; y >= current - 5; y--) {
+    const opt = document.createElement('option');
+    opt.value = y;
+    opt.textContent = y;
+    sel.appendChild(opt);
+  }
+  // Default to previous year during tax season (Jan-Oct)
+  // Most users are working on the prior year's taxes
+  const month = new Date().getMonth(); // 0-indexed
+  if (month < 10) { // Before November, default to prior year
+    sel.value = current - 1;
+    selectedYear = current - 1;
+  } else {
+    sel.value = current;
+  }
+}
+
+function changeYear() {
+  selectedYear = parseInt(document.getElementById('year-select').value);
+  loadOverview();
+  loadExpenses();
+}
+
+function yearStart() { return `${selectedYear}-01-01`; }
+function yearEnd() { return `${selectedYear}-12-31`; }
+
+initYearSelector();
 
 // Init
 loadOverview();
