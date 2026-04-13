@@ -3384,6 +3384,10 @@ async fn main() {
         .route("/api/tax/insurance/classify", post(tax::handle_insurance_classify))
         .route("/api/tax/wizard", get(tax::handle_tax_prep_wizard))
         .route("/api/tax/brackets/fetch", get(tax::handle_brackets_auto_fetch))
+        // Module licensing
+        .route("/api/modules/status", get(tax::handle_module_status))
+        .route("/api/modules/trial", post(tax::handle_start_trial))
+        .route("/api/modules/activate", post(tax::handle_activate_license))
         .route("/api/todos", get(handle_todo_list))
         .route("/api/todos", post(handle_todo_create))
         .route("/api/todos/{id}", axum::routing::put(handle_todo_update))

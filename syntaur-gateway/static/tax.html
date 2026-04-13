@@ -19,6 +19,43 @@
 </head>
 <body class="bg-gray-950 text-gray-100 min-h-screen">
 
+<!-- Module paywall overlay (hidden by default, shown if module is locked) -->
+<div id="module-paywall" class="hidden fixed inset-0 z-50 bg-gray-950/95 backdrop-blur-sm flex items-center justify-center">
+  <div class="max-w-md w-full mx-4">
+    <div class="card text-center">
+      <div class="text-4xl mb-4">&#128176;</div>
+      <h2 class="text-xl font-semibold text-white mb-2">Tax & Expenses Module</h2>
+      <p class="text-sm text-gray-400 mb-6">Receipt scanning, expense tracking, tax document management, deduction calculator, and year-end tax prep wizard.</p>
+
+      <div id="paywall-trial-available">
+        <button onclick="startFreeTrial()" class="w-full bg-oc-600 hover:bg-oc-700 text-white font-medium py-3 px-6 rounded-xl transition-colors text-base mb-3">
+          Start Free 3-Day Trial
+        </button>
+        <p class="text-xs text-gray-500 mb-4">No credit card required. Full access for 3 days.</p>
+      </div>
+
+      <div id="paywall-trial-expired" class="hidden">
+        <p class="text-sm text-yellow-400 mb-4">Your free trial has ended.</p>
+      </div>
+
+      <div class="border-t border-gray-700 pt-4">
+        <button onclick="upgradePro()" class="w-full bg-gradient-to-r from-purple-600 to-oc-600 hover:from-purple-700 hover:to-oc-700 text-white font-medium py-3 px-6 rounded-xl transition-all text-base">
+          Upgrade to Syntaur Pro — $49
+        </button>
+        <p class="text-xs text-gray-500 mt-2">One-time payment. Unlocks all modules forever.</p>
+      </div>
+
+      <a href="/" class="text-xs text-gray-500 hover:text-gray-300 mt-4 inline-block">Back to Dashboard</a>
+    </div>
+  </div>
+</div>
+
+<!-- Trial banner (shown when trial is active) -->
+<div id="trial-banner" class="hidden bg-gradient-to-r from-oc-700/30 to-purple-700/30 border-b border-oc-800/30 text-center py-1.5 text-xs text-gray-300">
+  <span id="trial-banner-text">Free trial — <strong id="trial-days-left">3</strong> days remaining</span>
+  <button onclick="upgradePro()" class="ml-3 bg-oc-600 hover:bg-oc-700 text-white px-3 py-0.5 rounded-full text-xs transition-colors">Upgrade to Pro</button>
+</div>
+
 <!-- Top bar -->
 <div class="border-b border-gray-800 bg-gray-900/50 backdrop-blur sticky top-0 z-40">
   <div class="max-w-6xl mx-auto px-4 py-2.5 flex items-center justify-between">
@@ -397,6 +434,78 @@
 <script>
 const token = sessionStorage.getItem('syntaur_token') || '';
 if (!token) { window.location.href = '/'; }
+
+// ── Module License Check ──
+let moduleUnlocked = false;
+
+async function checkModuleAccess() {
+  try {
+    const resp = await authFetch(`/api/modules/status?token=${token}&module=tax`);
+    const data = await resp.json();
+    const access = data.access || {};
+
+    if (access.granted) {
+      moduleUnlocked = true;
+      document.getElementById('module-paywall').classList.add('hidden');
+
+      // Show trial banner if on trial
+      if (access.reason === 'trial') {
+        const banner = document.getElementById('trial-banner');
+        banner.classList.remove('hidden');
+        document.getElementById('trial-days-left').textContent = access.trial_days_left || '?';
+        if (access.trial_days_left <= 1) {
+          document.getElementById('trial-banner-text').innerHTML = 'Trial expires <strong>today</strong>!';
+        }
+      }
+    } else {
+      moduleUnlocked = false;
+      const paywall = document.getElementById('module-paywall');
+      paywall.classList.remove('hidden');
+
+      if (access.reason === 'trial_expired') {
+        document.getElementById('paywall-trial-available').classList.add('hidden');
+        document.getElementById('paywall-trial-expired').classList.remove('hidden');
+      }
+    }
+  } catch(e) {
+    // If license check fails (e.g., table doesn't exist yet), allow access
+    moduleUnlocked = true;
+    console.log('License check skipped:', e);
+  }
+}
+
+async function startFreeTrial() {
+  try {
+    const resp = await authFetch('/api/modules/trial', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ token, module: 'tax' })
+    });
+    const data = await resp.json();
+    if (data.granted) {
+      moduleUnlocked = true;
+      document.getElementById('module-paywall').classList.add('hidden');
+      const banner = document.getElementById('trial-banner');
+      banner.classList.remove('hidden');
+      document.getElementById('trial-days-left').textContent = data.trial_days_left || '3';
+      loadOverview();
+    }
+  } catch(e) { console.log('Trial start failed:', e); }
+}
+
+function upgradePro() {
+  // TODO: integrate payment processor (Stripe, Paddle, etc.)
+  // For now, show a message
+  const paywall = document.getElementById('module-paywall');
+  if (paywall && !paywall.classList.contains('hidden')) {
+    paywall.querySelector('.card').insertAdjacentHTML('beforeend',
+      '<p class="text-xs text-oc-400 mt-3">Payment integration coming soon. Contact support to purchase.</p>');
+  } else {
+    alert('Syntaur Pro upgrade — payment integration coming soon.');
+  }
+}
+
+// Check license on page load
+checkModuleAccess();
 
 function authFetch(url, opts = {}) {
   opts.headers = opts.headers || {};

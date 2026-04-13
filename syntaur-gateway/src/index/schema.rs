@@ -544,6 +544,52 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX IF NOT EXISTS idx_insurance_class_user ON insurance_classifications(user_id);
     CREATE INDEX IF NOT EXISTS idx_insurance_class_vendor ON insurance_classifications(vendor);
     "#,
+    // v15: module licensing — free tier + $49 pro unlock + 3-day trials.
+    //
+    // **user_licenses**: one row per user who has purchased Pro. The $49
+    // payment unlocks ALL modules. license_key is a receipt/txn ID from
+    // the payment processor.
+    //
+    // **module_trials**: per-user, per-module trial tracking. Each module
+    // gets one 3-day trial. trial_started_at is set on first access;
+    // trial_expires_at = started + 3 days. After expiry the module locks
+    // until the user buys Pro.
+    //
+    // Free features (never gated): chat, todos, calendar, dashboard.
+    r#"
+    CREATE TABLE IF NOT EXISTS user_licenses (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        license_type    TEXT NOT NULL DEFAULT 'pro',
+        purchased_at    INTEGER NOT NULL,
+        payment_id      TEXT,
+        amount_cents    INTEGER NOT NULL DEFAULT 4900,
+        UNIQUE(user_id, license_type)
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_licenses_user ON user_licenses(user_id);
+
+    CREATE TABLE IF NOT EXISTS module_trials (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id           INTEGER NOT NULL DEFAULT 0,
+        module_name       TEXT NOT NULL,
+        trial_started_at  INTEGER NOT NULL,
+        trial_expires_at  INTEGER NOT NULL,
+        UNIQUE(user_id, module_name)
+    );
+    CREATE INDEX IF NOT EXISTS idx_module_trials_user ON module_trials(user_id);
+
+    -- Seed the module registry
+    CREATE TABLE IF NOT EXISTS modules (
+        name            TEXT PRIMARY KEY,
+        display_name    TEXT NOT NULL,
+        description     TEXT,
+        icon            TEXT,
+        trial_days      INTEGER NOT NULL DEFAULT 3,
+        enabled         INTEGER NOT NULL DEFAULT 1
+    );
+    INSERT OR IGNORE INTO modules (name, display_name, description, icon) VALUES
+        ('tax', 'Tax & Expenses', 'Receipt scanning, expense tracking, tax document management, deduction calculator, and year-end tax prep wizard.', '&#128176;');
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

@@ -12,6 +12,230 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 
+// ── Module Licensing ────────────────────────────────────────────────────────
+
+/// Check if a user has access to a given module.
+/// Returns Ok(access_info) with status, or Err for DB errors.
+/// Access is granted if: (1) user has Pro license, or (2) active trial.
+pub fn check_module_access(conn: &rusqlite::Connection, user_id: i64, module: &str) -> Result<ModuleAccess, String> {
+    let now = chrono::Utc::now().timestamp();
+
+    // 1. Check for Pro license
+    let has_license: bool = conn.query_row(
+        "SELECT COUNT(*) FROM user_licenses WHERE user_id = ? AND license_type = 'pro'",
+        rusqlite::params![user_id], |r| r.get::<_, i64>(0)
+    ).unwrap_or(0) > 0;
+
+    if has_license {
+        return Ok(ModuleAccess { granted: true, reason: "pro".to_string(), trial_expires_at: None, trial_days_left: None });
+    }
+
+    // 2. Check for active trial
+    let trial = conn.query_row(
+        "SELECT trial_started_at, trial_expires_at FROM module_trials WHERE user_id = ? AND module_name = ?",
+        rusqlite::params![user_id, module], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+    ).ok();
+
+    if let Some((started, expires)) = trial {
+        if now < expires {
+            let days_left = ((expires - now) as f64 / 86400.0).ceil() as i64;
+            return Ok(ModuleAccess {
+                granted: true,
+                reason: "trial".to_string(),
+                trial_expires_at: Some(expires),
+                trial_days_left: Some(days_left),
+            });
+        } else {
+            return Ok(ModuleAccess { granted: false, reason: "trial_expired".to_string(), trial_expires_at: Some(expires), trial_days_left: Some(0) });
+        }
+    }
+
+    // 3. No license, no trial — module is locked but trial is available
+    Ok(ModuleAccess { granted: false, reason: "no_access".to_string(), trial_expires_at: None, trial_days_left: None })
+}
+
+#[derive(Serialize, Clone)]
+pub struct ModuleAccess {
+    pub granted: bool,
+    pub reason: String,    // "pro", "trial", "trial_expired", "no_access"
+    pub trial_expires_at: Option<i64>,
+    pub trial_days_left: Option<i64>,
+}
+
+/// Start a free trial for a module. Returns the trial info.
+pub fn start_module_trial(conn: &rusqlite::Connection, user_id: i64, module: &str) -> Result<ModuleAccess, String> {
+    let now = chrono::Utc::now().timestamp();
+
+    // Check if trial already exists
+    let existing = conn.query_row(
+        "SELECT trial_expires_at FROM module_trials WHERE user_id = ? AND module_name = ?",
+        rusqlite::params![user_id, module], |r| r.get::<_, i64>(0)
+    ).ok();
+
+    if let Some(expires) = existing {
+        let days_left = std::cmp::max(0, ((expires - now) as f64 / 86400.0).ceil() as i64);
+        return Ok(ModuleAccess {
+            granted: now < expires,
+            reason: if now < expires { "trial".to_string() } else { "trial_expired".to_string() },
+            trial_expires_at: Some(expires),
+            trial_days_left: Some(days_left),
+        });
+    }
+
+    // Get trial duration from modules table (default 3 days)
+    let trial_days: i64 = conn.query_row(
+        "SELECT trial_days FROM modules WHERE name = ?",
+        rusqlite::params![module], |r| r.get(0)
+    ).unwrap_or(3);
+
+    let expires = now + (trial_days * 86400);
+    conn.execute(
+        "INSERT INTO module_trials (user_id, module_name, trial_started_at, trial_expires_at) VALUES (?, ?, ?, ?)",
+        rusqlite::params![user_id, module, now, expires],
+    ).map_err(|e| e.to_string())?;
+
+    info!("[license] Started {}-day trial for user {} on module {}", trial_days, user_id, module);
+
+    Ok(ModuleAccess {
+        granted: true,
+        reason: "trial".to_string(),
+        trial_expires_at: Some(expires),
+        trial_days_left: Some(trial_days),
+    })
+}
+
+/// API: Get module access status for the current user
+pub async fn handle_module_status(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let module = params.get("module").cloned().unwrap_or_else(|| "tax".to_string());
+
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+
+        let access = check_module_access(&conn, uid, &module)?;
+
+        // Get all available modules
+        let modules: Vec<serde_json::Value> = {
+            if let Ok(mut stmt) = conn.prepare("SELECT name, display_name, description, icon, trial_days, enabled FROM modules") {
+                stmt.query_map([], |r| Ok(serde_json::json!({
+                    "name": r.get::<_, String>(0)?,
+                    "display_name": r.get::<_, String>(1)?,
+                    "description": r.get::<_, Option<String>>(2)?,
+                    "icon": r.get::<_, Option<String>>(3)?,
+                    "trial_days": r.get::<_, i64>(4)?,
+                    "enabled": r.get::<_, i64>(5)? != 0,
+                }))).ok().map(|rows| rows.filter_map(|r| r.ok()).collect()).unwrap_or_default()
+            } else { vec![] }
+        };
+
+        // Check trial status for each module
+        let mut module_access: Vec<serde_json::Value> = Vec::new();
+        for m in &modules {
+            let name = m["name"].as_str().unwrap_or("");
+            let ma = check_module_access(&conn, uid, name).unwrap_or(ModuleAccess {
+                granted: false, reason: "error".to_string(), trial_expires_at: None, trial_days_left: None
+            });
+            module_access.push(serde_json::json!({
+                "module": m,
+                "access": {
+                    "granted": ma.granted,
+                    "reason": ma.reason,
+                    "trial_expires_at": ma.trial_expires_at,
+                    "trial_days_left": ma.trial_days_left,
+                }
+            }));
+        }
+
+        Ok(serde_json::json!({
+            "module": module,
+            "access": {
+                "granted": access.granted,
+                "reason": access.reason,
+                "trial_expires_at": access.trial_expires_at,
+                "trial_days_left": access.trial_days_left,
+            },
+            "has_pro": access.reason == "pro",
+            "all_modules": module_access,
+            "pro_price_cents": 4900,
+            "pro_price_display": "$49.00",
+        }))
+    }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(result))
+}
+
+/// API: Start a free trial for a module
+pub async fn handle_start_trial(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<TrialRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &req.token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let module = req.module.clone();
+
+    let result = tokio::task::spawn_blocking(move || -> Result<ModuleAccess, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        start_module_trial(&conn, uid, &module)
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "module": req.module,
+        "granted": result.granted,
+        "reason": result.reason,
+        "trial_expires_at": result.trial_expires_at,
+        "trial_days_left": result.trial_days_left,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct TrialRequest {
+    pub token: String,
+    pub module: String,
+}
+
+/// API: Activate a Pro license (called after payment verification)
+pub async fn handle_activate_license(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<LicenseActivateRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &req.token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let payment_id = req.payment_id.clone();
+
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let now = chrono::Utc::now().timestamp();
+        conn.execute(
+            "INSERT OR REPLACE INTO user_licenses (user_id, license_type, purchased_at, payment_id, amount_cents) VALUES (?, 'pro', ?, ?, 4900)",
+            rusqlite::params![uid, now, &payment_id],
+        ).map_err(|e| e.to_string())?;
+        info!("[license] Pro license activated for user {} (payment: {:?})", uid, payment_id);
+        Ok(())
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(serde_json::json!({ "success": true, "license": "pro" })))
+}
+
+#[derive(Deserialize)]
+pub struct LicenseActivateRequest {
+    pub token: String,
+    pub payment_id: Option<String>,
+}
+
 // ── Tax Bracket Loading ─────────────────────────────────────────────────────
 
 /// Load tax brackets from ~/.syntaur/tax_brackets.json or fall back to embedded defaults.
@@ -233,6 +457,39 @@ fn receipts_dir() -> PathBuf {
     dir
 }
 
+// ── Module Gate Helper ──────────────────────────────────────────────────────
+
+/// Check if the user has access to the tax module. Returns Ok(()) if granted,
+/// or Err with a 403 and a JSON body explaining the lock + how to unlock.
+async fn require_tax_module(state: &AppState, user_id: i64) -> Result<(), (StatusCode, String)> {
+    let db = state.db_path.clone();
+    let uid = user_id;
+    let access = tokio::task::spawn_blocking(move || -> Result<ModuleAccess, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        check_module_access(&conn, uid, "tax")
+    }).await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    if access.granted {
+        return Ok(());
+    }
+
+    let msg = match access.reason.as_str() {
+        "trial_expired" => "Your free trial of the Tax & Expenses module has ended. Upgrade to Syntaur Pro ($49) to unlock all modules.".to_string(),
+        _ => "The Tax & Expenses module requires Syntaur Pro ($49) or a free trial. Start a 3-day free trial to try it out.".to_string(),
+    };
+
+    Err((StatusCode::PAYMENT_REQUIRED, serde_json::json!({
+        "error": "module_locked",
+        "module": "tax",
+        "message": msg,
+        "reason": access.reason,
+        "trial_available": access.reason == "no_access",
+        "pro_price": "$49.00",
+    }).to_string()))
+}
+
 // ── Receipt Upload ──────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -248,6 +505,9 @@ pub async fn handle_receipt_upload(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let principal = crate::resolve_principal(&state, &params.token).await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+
+    // Module gate: receipt upload requires tax module access
+    require_tax_module(&state, principal.user_id()).await?;
 
     if body.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "No image data".to_string()));
@@ -552,6 +812,9 @@ pub async fn handle_tax_doc_upload(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let principal = crate::resolve_principal(&state, &params.token).await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+
+    // Module gate: tax document upload requires tax module access
+    require_tax_module(&state, principal.user_id()).await?;
 
     if body.is_empty() { return Err((StatusCode::BAD_REQUEST, "No file data".to_string())); }
     if body.len() > 10 * 1024 * 1024 { return Err((StatusCode::BAD_REQUEST, "File too large (max 10MB)".to_string())); }
@@ -1069,6 +1332,9 @@ pub async fn handle_expense_create(
     let principal = crate::resolve_principal(&state, &req.token).await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
 
+    // Module gate: expense creation requires tax module access
+    require_tax_module(&state, principal.user_id()).await?;
+
     let amount_cents = parse_cents(&req.amount)
         .ok_or((StatusCode::BAD_REQUEST, "Invalid amount format".to_string()))?;
 
@@ -1463,6 +1729,9 @@ pub async fn handle_smart_upload(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let principal = crate::resolve_principal(&state, &params.token).await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+
+    // Module gate: smart upload requires tax module access
+    require_tax_module(&state, principal.user_id()).await?;
 
     if body.is_empty() { return Err((StatusCode::BAD_REQUEST, "No file data".to_string())); }
     if body.len() > 10 * 1024 * 1024 { return Err((StatusCode::BAD_REQUEST, "File too large (max 10MB)".to_string())); }
