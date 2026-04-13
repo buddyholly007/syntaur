@@ -308,6 +308,10 @@ impl ToolRegistry {
         reg!(built_in_tools::EstimateTaxTool);
         reg!(built_in_tools::ScanReceiptTool);
         reg!(built_in_tools::UpdateTaxBracketsTool);
+        reg!(built_in_tools::TaxPrepWizardTool);
+        reg!(built_in_tools::FetchTaxBracketsTool);
+        reg!(built_in_tools::PropertyProfileTool);
+        reg!(built_in_tools::DeductionAutofillTool);
         reg!(built_in_tools::BrowserScreenshotTool);
         reg!(built_in_tools::BrowserExecuteJsTool);
         reg!(built_in_tools::BrowserClickAtTool);

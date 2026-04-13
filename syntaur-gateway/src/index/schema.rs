@@ -475,6 +475,75 @@ const MIGRATIONS: &[&str] = &[
         created_at  INTEGER NOT NULL
     );
     "#,
+    // v14: statement transactions + property profiles + insurance classifications.
+    //
+    // **statement_transactions** — individual line items extracted from bank/credit
+    // card statements via AI vision. Each row links back to the source tax_document.
+    //
+    // **property_profiles** — centralized property data (sqft, assessor values,
+    // mortgage, building/land split). Auto-populated from scanned docs.
+    //
+    // **insurance_classifications** — disambiguate same-vendor insurance payments
+    // (car vs home vs health) based on amount, frequency, and document context.
+    r#"
+    CREATE TABLE IF NOT EXISTS statement_transactions (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id         INTEGER NOT NULL DEFAULT 0,
+        document_id     INTEGER REFERENCES tax_documents(id),
+        transaction_date TEXT NOT NULL,
+        description     TEXT NOT NULL,
+        amount_cents    INTEGER NOT NULL,
+        category_id     INTEGER REFERENCES expense_categories(id),
+        vendor          TEXT,
+        insurance_type  TEXT,
+        is_deductible   INTEGER NOT NULL DEFAULT 0,
+        status          TEXT NOT NULL DEFAULT 'extracted',
+        created_at      INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_stmt_txn_user ON statement_transactions(user_id);
+    CREATE INDEX IF NOT EXISTS idx_stmt_txn_date ON statement_transactions(transaction_date);
+    CREATE INDEX IF NOT EXISTS idx_stmt_txn_doc ON statement_transactions(document_id);
+    CREATE INDEX IF NOT EXISTS idx_stmt_txn_vendor ON statement_transactions(vendor);
+
+    CREATE TABLE IF NOT EXISTS property_profiles (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id             INTEGER NOT NULL DEFAULT 0,
+        address             TEXT NOT NULL,
+        total_sqft          INTEGER,
+        workshop_sqft       INTEGER,
+        purchase_price_cents INTEGER,
+        purchase_date       TEXT,
+        building_value_cents INTEGER,
+        land_value_cents    INTEGER,
+        land_ratio          REAL,
+        assessor_total_cents INTEGER,
+        assessor_land_cents  INTEGER,
+        annual_property_tax_cents INTEGER,
+        annual_insurance_cents    INTEGER,
+        mortgage_lender     TEXT,
+        mortgage_interest_cents   INTEGER,
+        mortgage_principal_cents  INTEGER,
+        depreciation_basis_cents  INTEGER,
+        depreciation_annual_cents INTEGER,
+        notes               TEXT,
+        created_at          INTEGER NOT NULL,
+        updated_at          INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_property_user ON property_profiles(user_id);
+
+    CREATE TABLE IF NOT EXISTS insurance_classifications (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id         INTEGER NOT NULL DEFAULT 0,
+        vendor          TEXT NOT NULL,
+        amount_cents    INTEGER,
+        insurance_type  TEXT NOT NULL,
+        confidence      REAL NOT NULL DEFAULT 0.5,
+        evidence        TEXT,
+        created_at      INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_insurance_class_user ON insurance_classifications(user_id);
+    CREATE INDEX IF NOT EXISTS idx_insurance_class_vendor ON insurance_classifications(vendor);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

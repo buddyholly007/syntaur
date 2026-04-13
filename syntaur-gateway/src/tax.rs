@@ -1449,3 +1449,1215 @@ pub async fn handle_expense_export(
     headers.insert("content-disposition", format!("attachment; filename=\"expenses-{}-{}.csv\"", s, e).parse().unwrap());
     Ok((headers, csv))
 }
+
+// ── Item 10: Smart Document Routing ─────────────────────────────────────────
+
+/// Unified upload: accept any file, auto-classify it, route to the right handler.
+/// Returns: document type + extracted data. Replaces the need for separate
+/// receipt vs document upload buttons.
+pub async fn handle_smart_upload(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<ReceiptUploadQuery>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &params.token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+
+    if body.is_empty() { return Err((StatusCode::BAD_REQUEST, "No file data".to_string())); }
+    if body.len() > 10 * 1024 * 1024 { return Err((StatusCode::BAD_REQUEST, "File too large (max 10MB)".to_string())); }
+
+    let content_type = headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("application/octet-stream");
+    let ext = if content_type.contains("png") { "png" } else if content_type.contains("pdf") { "pdf" } else { "jpg" };
+
+    let filename = format!("upload-{}.{}", uuid::Uuid::new_v4(), ext);
+    let path = receipts_dir().join(&filename);
+    std::fs::write(&path, &body).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Save: {}", e)))?;
+
+    let uid = principal.user_id();
+    info!("[tax] Smart upload: {} ({} bytes) from user {}", filename, body.len(), uid);
+
+    // Quick classification via LLM vision
+    let path_str = path.to_string_lossy().to_string();
+    let state2 = Arc::clone(&state);
+    let classify_result = classify_document_type(&state2, &path_str).await;
+
+    let doc_class = match classify_result {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("[tax] Smart classification failed: {} — falling back to receipt", e);
+            "receipt".to_string()
+        }
+    };
+
+    info!("[tax] Smart upload classified as: {}", doc_class);
+
+    match doc_class.as_str() {
+        "receipt" | "invoice" => {
+            // Route to receipt handler
+            let db = state.db_path.clone();
+            let now = chrono::Utc::now().timestamp();
+            let ps = path.to_string_lossy().to_string();
+            let receipt_id = tokio::task::spawn_blocking(move || -> Result<i64, String> {
+                let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+                conn.execute(
+                    "INSERT INTO receipts (user_id, image_path, status, created_at) VALUES (?, ?, 'pending', ?)",
+                    rusqlite::params![uid, &ps, now],
+                ).map_err(|e| e.to_string())?;
+                Ok(conn.last_insert_rowid())
+            }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+            let s3 = Arc::clone(&state);
+            let rid = receipt_id;
+            tokio::spawn(async move {
+                if let Err(e) = scan_receipt_vision(&s3, rid).await {
+                    error!("[tax] Vision scan failed for receipt #{}: {}", rid, e);
+                }
+            });
+
+            Ok(Json(serde_json::json!({
+                "routed_to": "receipt",
+                "id": receipt_id,
+                "doc_type": doc_class,
+                "status": "pending",
+                "message": format!("Identified as {}. Scanning with AI...", doc_class),
+            })))
+        }
+        "bank_statement" | "credit_card_statement" => {
+            // Route to statement handler — create tax_document + extract transactions
+            let db = state.db_path.clone();
+            let now = chrono::Utc::now().timestamp();
+            let ps = path.to_string_lossy().to_string();
+            let dc = doc_class.clone();
+            let doc_id = tokio::task::spawn_blocking(move || -> Result<i64, String> {
+                let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+                conn.execute(
+                    "INSERT INTO tax_documents (user_id, doc_type, image_path, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
+                    rusqlite::params![uid, &dc, &ps, now],
+                ).map_err(|e| e.to_string())?;
+                Ok(conn.last_insert_rowid())
+            }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+            let s3 = Arc::clone(&state);
+            let did = doc_id;
+            tokio::spawn(async move {
+                if let Err(e) = classify_and_extract(&s3, did).await {
+                    error!("[tax] Doc classify failed #{}: {}", did, e);
+                }
+                if let Err(e) = extract_statement_transactions(&s3, did).await {
+                    error!("[tax] Statement extraction failed #{}: {}", did, e);
+                }
+            });
+
+            Ok(Json(serde_json::json!({
+                "routed_to": "statement",
+                "id": doc_id,
+                "doc_type": doc_class,
+                "status": "pending",
+                "message": "Identified as bank/credit card statement. Extracting transactions...",
+            })))
+        }
+        _ => {
+            // Route to tax document handler (W-2, 1099, 1098, etc.)
+            let db = state.db_path.clone();
+            let now = chrono::Utc::now().timestamp();
+            let ps = path.to_string_lossy().to_string();
+            let dc = doc_class.clone();
+            let doc_id = tokio::task::spawn_blocking(move || -> Result<i64, String> {
+                let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+                conn.execute(
+                    "INSERT INTO tax_documents (user_id, doc_type, image_path, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
+                    rusqlite::params![uid, &dc, &ps, now],
+                ).map_err(|e| e.to_string())?;
+                Ok(conn.last_insert_rowid())
+            }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+            let s3 = Arc::clone(&state);
+            let did = doc_id;
+            tokio::spawn(async move {
+                if let Err(e) = classify_and_extract(&s3, did).await {
+                    error!("[tax] Doc classify failed #{}: {}", did, e);
+                }
+            });
+
+            Ok(Json(serde_json::json!({
+                "routed_to": "document",
+                "id": doc_id,
+                "doc_type": doc_class,
+                "status": "pending",
+                "message": format!("Identified as {}. Extracting fields...", doc_class),
+            })))
+        }
+    }
+}
+
+/// Quick classification: what kind of document is this?
+async fn classify_document_type(state: &AppState, image_path: &str) -> Result<String, String> {
+    use base64::Engine;
+
+    let image_data = if image_path.ends_with(".pdf") {
+        match convert_pdf_to_png(image_path) {
+            Ok(png) => (base64::engine::general_purpose::STANDARD.encode(&png), "image/png"),
+            Err(_) => {
+                let raw = std::fs::read(image_path).map_err(|e| e.to_string())?;
+                (base64::engine::general_purpose::STANDARD.encode(&raw), "application/pdf")
+            }
+        }
+    } else {
+        let raw = std::fs::read(image_path).map_err(|e| e.to_string())?;
+        let ext = image_path.rsplit('.').next().unwrap_or("jpg");
+        let m = match ext { "png" => "image/png", _ => "image/jpeg" };
+        (base64::engine::general_purpose::STANDARD.encode(&raw), m)
+    };
+
+    let config = &state.config;
+    let provider = config.models.providers.iter()
+        .find(|(_, p)| p.base_url.contains("openrouter") || p.base_url.contains("openai") || p.base_url.contains("anthropic"))
+        .or_else(|| config.models.providers.iter().next());
+    let (_, provider_config) = provider.ok_or("No LLM provider")?;
+    let model = if provider_config.base_url.contains("openrouter") {
+        "nvidia/nemotron-nano-12b-v2-vl:free"
+    } else if provider_config.base_url.contains("anthropic") { "claude-sonnet-4-6" }
+    else { "gpt-4o-mini" };
+    let url = format!("{}/chat/completions", provider_config.base_url.trim_end_matches('/'));
+
+    let payload = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "What type of document is this? Respond with ONLY one word from this list: receipt, invoice, w2, 1099_int, 1099_div, 1099_b, 1099_misc, 1099_nec, 1095_c, mortgage_statement, property_tax_statement, bank_statement, credit_card_statement, insurance_policy, settlement_statement, other"},
+            {"type": "image_url", "image_url": {"url": format!("data:{};base64,{}", image_data.1, image_data.0)}}
+        ]}],
+        "max_tokens": 50,
+        "temperature": 0.0
+    });
+
+    let resp = state.client.post(&url)
+        .header("Authorization", format!("Bearer {}", provider_config.api_key))
+        .json(&payload)
+        .timeout(std::time::Duration::from_secs(30))
+        .send().await.map_err(|e| format!("LLM: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("LLM HTTP {}", resp.status()));
+    }
+
+    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let raw = body["choices"][0]["message"]["content"].as_str().unwrap_or("other");
+    let cleaned = raw.trim().to_lowercase().replace(['"', '.', ','], "");
+    Ok(cleaned)
+}
+
+// ── Item 11: Statement Transaction Extraction ───────────────────────────────
+
+/// Extract individual transactions from a bank/credit card statement.
+async fn extract_statement_transactions(state: &AppState, doc_id: i64) -> Result<(), String> {
+    let db = state.db_path.clone();
+
+    let (image_path, uid): (String, i64) = {
+        let db2 = db.clone();
+        tokio::task::spawn_blocking(move || -> Result<(String, i64), String> {
+            let conn = rusqlite::Connection::open(&db2).map_err(|e| e.to_string())?;
+            let path: String = conn.query_row("SELECT image_path FROM tax_documents WHERE id = ?", rusqlite::params![doc_id], |r| r.get(0))
+                .map_err(|e| e.to_string())?;
+            let uid: i64 = conn.query_row("SELECT user_id FROM tax_documents WHERE id = ?", rusqlite::params![doc_id], |r| r.get(0))
+                .unwrap_or(0);
+            Ok((path, uid))
+        }).await.map_err(|e| e.to_string())??
+    };
+
+    // Convert all pages to images for comprehensive extraction
+    use base64::Engine;
+    let image_parts: Vec<(String, &str)> = if image_path.ends_with(".pdf") {
+        match convert_pdf_to_pngs(&image_path) {
+            Ok(pages) => pages.into_iter().map(|p| (base64::engine::general_purpose::STANDARD.encode(&p), "image/png")).collect(),
+            Err(e) => {
+                let data = std::fs::read(&image_path).map_err(|e| e.to_string())?;
+                log::warn!("[tax] PDF conversion failed for statement ({}), sending raw", e);
+                vec![(base64::engine::general_purpose::STANDARD.encode(&data), "application/pdf")]
+            }
+        }
+    } else {
+        let data = std::fs::read(&image_path).map_err(|e| e.to_string())?;
+        let ext = image_path.rsplit('.').next().unwrap_or("jpg");
+        let m = match ext { "png" => "image/png", _ => "image/jpeg" };
+        vec![(base64::engine::general_purpose::STANDARD.encode(&data), m)]
+    };
+
+    let config = &state.config;
+    let provider = config.models.providers.iter()
+        .find(|(_, p)| p.base_url.contains("openrouter") || p.base_url.contains("openai") || p.base_url.contains("anthropic"))
+        .or_else(|| config.models.providers.iter().next());
+    let (_, provider_config) = provider.ok_or("No LLM provider")?;
+    // Use a model with large context for multi-page statements
+    let model = if provider_config.base_url.contains("openrouter") { "google/gemini-2.0-flash-001" }
+        else if provider_config.base_url.contains("anthropic") { "claude-sonnet-4-6" }
+        else { "gpt-4o-mini" };
+    let url = format!("{}/chat/completions", provider_config.base_url.trim_end_matches('/'));
+
+    let prompt = r#"Extract ALL individual transactions from this bank or credit card statement. For each transaction, provide:
+- date: transaction date (YYYY-MM-DD)
+- description: merchant/payee name as shown
+- amount: dollar amount (positive = charge/debit, negative = credit/payment)
+- vendor: cleaned-up vendor name (e.g. "AMZN Mktp US" → "Amazon")
+- category: best guess from: Utilities, Groceries, Dining, Entertainment, Insurance, Medical, Vehicle, Home Improvement, Software & Subscriptions, Professional Services, Education, Travel, Fuel, Mortgage, Other
+- insurance_type: if this looks like an insurance payment, specify: "auto", "home", "health", "life", or null
+
+IMPORTANT: Extract EVERY transaction on every page. Include payments, credits, and charges.
+
+For insurance payments, use these heuristics:
+- Auto insurance: typically $100-300/month, vendors like Safeco, GEICO, State Farm, Progressive, Allstate
+- Home insurance: typically $100-200/month, often escrowed in mortgage (may not appear on statements)
+- Health insurance: varies widely, vendors like Blue Cross, Aetna, Kaiser, UnitedHealth
+- Same vendor can have different insurance types (e.g., Safeco auto AND Safeco home)
+
+Respond with JSON array: [{"date":"2025-08-15","description":"SAFECO INS","amount":"165.41","vendor":"Safeco","category":"Insurance","insurance_type":"auto"}, ...]"#;
+
+    let mut content_parts: Vec<serde_json::Value> = vec![serde_json::json!({"type": "text", "text": prompt})];
+    for (b64, mime) in &image_parts {
+        content_parts.push(serde_json::json!({"type": "image_url", "image_url": {"url": format!("data:{};base64,{}", mime, b64)}}));
+    }
+
+    let payload = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": content_parts}],
+        "max_tokens": 4000,
+        "temperature": 0.1
+    });
+
+    let resp = state.client.post(&url)
+        .header("Authorization", format!("Bearer {}", provider_config.api_key))
+        .json(&payload)
+        .timeout(std::time::Duration::from_secs(120))
+        .send().await.map_err(|e| format!("LLM: {}", e))?;
+
+    if !resp.status().is_success() {
+        let s = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("LLM HTTP {}: {}", s, &body[..body.len().min(200)]));
+    }
+
+    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let content = body["choices"][0]["message"]["content"].as_str().unwrap_or("[]");
+    let cleaned = content.trim().trim_start_matches("```json").trim_end_matches("```").trim();
+    let transactions: Vec<serde_json::Value> = serde_json::from_str(cleaned)
+        .map_err(|e| format!("Parse transactions: {} — raw: {}", e, &cleaned[..cleaned.len().min(200)]))?;
+
+    info!("[tax] Extracted {} transactions from statement #{}", transactions.len(), doc_id);
+
+    // Insert transactions into database
+    let db2 = db.clone();
+    let txn_count = transactions.len();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db2).map_err(|e| e.to_string())?;
+        let now = chrono::Utc::now().timestamp();
+
+        // Load insurance classifications for disambiguation
+        let mut insurance_map: std::collections::HashMap<String, Vec<(i64, String, f64)>> = std::collections::HashMap::new();
+        if let Ok(mut stmt) = conn.prepare("SELECT vendor, amount_cents, insurance_type, confidence FROM insurance_classifications WHERE user_id = ?") {
+            if let Ok(rows) = stmt.query_map(rusqlite::params![uid], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?.unwrap_or(0), r.get::<_, String>(2)?, r.get::<_, f64>(3)?))
+            }) {
+                for r in rows.flatten() {
+                    insurance_map.entry(r.0.to_lowercase()).or_default().push((r.1, r.2, r.3));
+                }
+            }
+        }
+
+        for txn in &transactions {
+            let date = txn["date"].as_str().unwrap_or("").to_string();
+            let desc = txn["description"].as_str().unwrap_or("").to_string();
+            let amount_str = txn["amount"].as_str().unwrap_or("0");
+            let amount_cents = parse_cents(amount_str).unwrap_or(0);
+            let vendor = txn["vendor"].as_str().unwrap_or(&desc).to_string();
+            let category_name = txn["category"].as_str().unwrap_or("Other").to_string();
+            let insurance_type = txn["insurance_type"].as_str().map(String::from);
+
+            // Resolve insurance type using disambiguation rules
+            let final_insurance_type = if category_name == "Insurance" || insurance_type.is_some() {
+                let vendor_lower = vendor.to_lowercase();
+                // Check if we have a learned classification
+                if let Some(classes) = insurance_map.get(&vendor_lower) {
+                    // Find best match by amount similarity
+                    let best = classes.iter()
+                        .min_by_key(|(amt, _, _)| (amount_cents - amt).unsigned_abs());
+                    best.map(|(_, t, _)| t.clone()).or(insurance_type)
+                } else {
+                    // Heuristic: classify by amount range
+                    let abs = amount_cents.unsigned_abs() as i64;
+                    if abs > 0 {
+                        Some(classify_insurance_by_amount(abs, &vendor))
+                    } else {
+                        insurance_type
+                    }
+                }
+            } else {
+                None
+            };
+
+            let cat_id: Option<i64> = conn.query_row(
+                "SELECT id FROM expense_categories WHERE name = ?",
+                rusqlite::params![&category_name], |r| r.get(0)
+            ).ok();
+
+            let is_deductible = cat_id.map(|id| {
+                conn.query_row("SELECT tax_deductible FROM expense_categories WHERE id = ?",
+                    rusqlite::params![id], |r| r.get::<_, i64>(0)).unwrap_or(0)
+            }).unwrap_or(0);
+
+            conn.execute(
+                "INSERT INTO statement_transactions (user_id, document_id, transaction_date, description, amount_cents, category_id, vendor, insurance_type, is_deductible, status, created_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'extracted', ?)",
+                rusqlite::params![uid, doc_id, &date, &desc, amount_cents, cat_id, &vendor, &final_insurance_type, is_deductible, now],
+            ).map_err(|e| e.to_string())?;
+        }
+
+        Ok(())
+    }).await.map_err(|e| e.to_string())??;
+
+    info!("[tax] Stored {} transactions from statement #{}", txn_count, doc_id);
+    Ok(())
+}
+
+/// Heuristic insurance classification by amount (Item 14)
+fn classify_insurance_by_amount(amount_cents: i64, vendor: &str) -> String {
+    let monthly = amount_cents; // assume single payment
+    let vendor_lower = vendor.to_lowercase();
+
+    // Health insurance keywords
+    if vendor_lower.contains("blue cross") || vendor_lower.contains("aetna") ||
+       vendor_lower.contains("kaiser") || vendor_lower.contains("united health") ||
+       vendor_lower.contains("cigna") || vendor_lower.contains("humana") ||
+       vendor_lower.contains("anthem") || vendor_lower.contains("molina") {
+        return "health".to_string();
+    }
+
+    // Life insurance keywords
+    if vendor_lower.contains("life") || vendor_lower.contains("metlife") ||
+       vendor_lower.contains("prudential") || vendor_lower.contains("northwestern mutual") {
+        return "life".to_string();
+    }
+
+    // Amount-based heuristics (in cents)
+    // Auto: typically $80-$350/month
+    // Home: typically $80-$300/month (often escrowed, so won't appear on statements)
+    // Health: typically $200-$2000/month
+    if monthly >= 20_000 && monthly <= 200_000 {
+        // Could be auto or home. If escrowed, home won't show on credit card.
+        // Auto is more common as a standalone payment.
+        "auto".to_string()
+    } else if monthly > 200_000 {
+        "health".to_string()
+    } else {
+        "auto".to_string() // default for small insurance payments
+    }
+}
+
+// ── Statement Transaction List Endpoint ─────────────────────────────────────
+
+pub async fn handle_statement_transactions(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let doc_id_filter = params.get("document_id").and_then(|v| v.parse::<i64>().ok());
+    let start = params.get("start").cloned();
+    let end = params.get("end").cloned();
+
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+
+        let mut sql = "SELECT t.id, t.document_id, t.transaction_date, t.description, t.amount_cents, \
+                        t.vendor, t.insurance_type, t.is_deductible, t.status, c.name \
+                        FROM statement_transactions t LEFT JOIN expense_categories c ON t.category_id = c.id \
+                        WHERE t.user_id = ?".to_string();
+        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(uid)];
+
+        if let Some(did) = doc_id_filter {
+            sql.push_str(" AND t.document_id = ?");
+            params_vec.push(Box::new(did));
+        }
+        if let Some(ref s) = start {
+            sql.push_str(" AND t.transaction_date >= ?");
+            params_vec.push(Box::new(s.clone()));
+        }
+        if let Some(ref e) = end {
+            sql.push_str(" AND t.transaction_date <= ?");
+            params_vec.push(Box::new(e.clone()));
+        }
+        sql.push_str(" ORDER BY t.transaction_date DESC LIMIT 500");
+
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
+        let rows: Vec<serde_json::Value> = stmt.query_map(refs.as_slice(), |r| {
+            let cents: i64 = r.get(4)?;
+            Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?,
+                "document_id": r.get::<_, Option<i64>>(1)?,
+                "transaction_date": r.get::<_, String>(2)?,
+                "description": r.get::<_, String>(3)?,
+                "amount_cents": cents,
+                "amount_display": cents_to_display(cents),
+                "vendor": r.get::<_, Option<String>>(5)?,
+                "insurance_type": r.get::<_, Option<String>>(6)?,
+                "is_deductible": r.get::<_, i64>(7)? != 0,
+                "status": r.get::<_, String>(8)?,
+                "category": r.get::<_, Option<String>>(9)?,
+            }))
+        }).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
+
+        let total: i64 = rows.iter().map(|r| r["amount_cents"].as_i64().unwrap_or(0)).sum();
+
+        Ok(serde_json::json!({
+            "transactions": rows,
+            "count": rows.len(),
+            "total_cents": total,
+            "total_display": cents_to_display(total),
+        }))
+    }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(result))
+}
+
+// ── Item 12: Property Profile ───────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct PropertyProfileRequest {
+    pub token: String,
+    pub address: Option<String>,
+    pub total_sqft: Option<i64>,
+    pub workshop_sqft: Option<i64>,
+    pub purchase_price: Option<String>,
+    pub purchase_date: Option<String>,
+    pub building_value: Option<String>,
+    pub land_value: Option<String>,
+    pub land_ratio: Option<f64>,
+    pub assessor_total: Option<String>,
+    pub assessor_land: Option<String>,
+    pub annual_property_tax: Option<String>,
+    pub annual_insurance: Option<String>,
+    pub mortgage_lender: Option<String>,
+    pub mortgage_interest: Option<String>,
+    pub mortgage_principal: Option<String>,
+    pub notes: Option<String>,
+}
+
+pub async fn handle_property_profile_get(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+
+        // Check if table exists
+        let has_table: bool = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='property_profiles'",
+            [], |r| r.get::<_, i64>(0)
+        ).unwrap_or(0) > 0;
+        if !has_table {
+            return Ok(serde_json::json!({ "profiles": [] }));
+        }
+
+        let mut stmt = conn.prepare(
+            "SELECT id, address, total_sqft, workshop_sqft, purchase_price_cents, purchase_date, \
+             building_value_cents, land_value_cents, land_ratio, assessor_total_cents, assessor_land_cents, \
+             annual_property_tax_cents, annual_insurance_cents, mortgage_lender, mortgage_interest_cents, \
+             mortgage_principal_cents, depreciation_basis_cents, depreciation_annual_cents, notes \
+             FROM property_profiles WHERE user_id = ? ORDER BY id"
+        ).map_err(|e| e.to_string())?;
+
+        let rows: Vec<serde_json::Value> = stmt.query_map(rusqlite::params![uid], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?,
+                "address": r.get::<_, String>(1)?,
+                "total_sqft": r.get::<_, Option<i64>>(2)?,
+                "workshop_sqft": r.get::<_, Option<i64>>(3)?,
+                "purchase_price_cents": r.get::<_, Option<i64>>(4)?,
+                "purchase_price_display": r.get::<_, Option<i64>>(4)?.map(cents_to_display),
+                "purchase_date": r.get::<_, Option<String>>(5)?,
+                "building_value_cents": r.get::<_, Option<i64>>(6)?,
+                "building_value_display": r.get::<_, Option<i64>>(6)?.map(cents_to_display),
+                "land_value_cents": r.get::<_, Option<i64>>(7)?,
+                "land_value_display": r.get::<_, Option<i64>>(7)?.map(cents_to_display),
+                "land_ratio": r.get::<_, Option<f64>>(8)?,
+                "assessor_total_cents": r.get::<_, Option<i64>>(9)?,
+                "assessor_total_display": r.get::<_, Option<i64>>(9)?.map(cents_to_display),
+                "assessor_land_cents": r.get::<_, Option<i64>>(10)?,
+                "annual_property_tax_cents": r.get::<_, Option<i64>>(11)?,
+                "annual_property_tax_display": r.get::<_, Option<i64>>(11)?.map(cents_to_display),
+                "annual_insurance_cents": r.get::<_, Option<i64>>(12)?,
+                "annual_insurance_display": r.get::<_, Option<i64>>(12)?.map(cents_to_display),
+                "mortgage_lender": r.get::<_, Option<String>>(13)?,
+                "mortgage_interest_cents": r.get::<_, Option<i64>>(14)?,
+                "mortgage_interest_display": r.get::<_, Option<i64>>(14)?.map(cents_to_display),
+                "mortgage_principal_cents": r.get::<_, Option<i64>>(15)?,
+                "depreciation_basis_cents": r.get::<_, Option<i64>>(16)?,
+                "depreciation_basis_display": r.get::<_, Option<i64>>(16)?.map(cents_to_display),
+                "depreciation_annual_cents": r.get::<_, Option<i64>>(17)?,
+                "depreciation_annual_display": r.get::<_, Option<i64>>(17)?.map(cents_to_display),
+                "notes": r.get::<_, Option<String>>(18)?,
+            }))
+        }).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
+
+        Ok(serde_json::json!({ "profiles": rows }))
+    }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(result))
+}
+
+pub async fn handle_property_profile_save(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PropertyProfileRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &req.token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let now = chrono::Utc::now().timestamp();
+
+    let address = req.address.clone().unwrap_or_default();
+    if address.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Address is required".to_string()));
+    }
+
+    let purchase_price = req.purchase_price.as_deref().and_then(parse_cents);
+    let building_value = req.building_value.as_deref().and_then(parse_cents);
+    let land_value = req.land_value.as_deref().and_then(parse_cents);
+    let assessor_total = req.assessor_total.as_deref().and_then(parse_cents);
+    let assessor_land = req.assessor_land.as_deref().and_then(parse_cents);
+    let annual_tax = req.annual_property_tax.as_deref().and_then(parse_cents);
+    let annual_ins = req.annual_insurance.as_deref().and_then(parse_cents);
+    let mortgage_int = req.mortgage_interest.as_deref().and_then(parse_cents);
+    let mortgage_princ = req.mortgage_principal.as_deref().and_then(parse_cents);
+
+    // Calculate depreciation basis and annual depreciation
+    let depreciation_basis = building_value;
+    let depreciation_annual = depreciation_basis.map(|b| b / 2750); // 27.5 year residential
+
+    let total_sqft = req.total_sqft;
+    let workshop_sqft = req.workshop_sqft;
+    let purchase_date = req.purchase_date.clone();
+    let land_ratio = req.land_ratio;
+    let mortgage_lender = req.mortgage_lender.clone();
+    let notes = req.notes.clone();
+
+    let id = tokio::task::spawn_blocking(move || -> Result<i64, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+
+        // Upsert: update if exists for this user+address, otherwise insert
+        let existing: Option<i64> = conn.query_row(
+            "SELECT id FROM property_profiles WHERE user_id = ? AND address = ?",
+            rusqlite::params![uid, &address], |r| r.get(0)
+        ).ok();
+
+        if let Some(eid) = existing {
+            conn.execute(
+                "UPDATE property_profiles SET total_sqft=?, workshop_sqft=?, purchase_price_cents=?, purchase_date=?, \
+                 building_value_cents=?, land_value_cents=?, land_ratio=?, assessor_total_cents=?, assessor_land_cents=?, \
+                 annual_property_tax_cents=?, annual_insurance_cents=?, mortgage_lender=?, mortgage_interest_cents=?, \
+                 mortgage_principal_cents=?, depreciation_basis_cents=?, depreciation_annual_cents=?, notes=?, updated_at=? \
+                 WHERE id = ?",
+                rusqlite::params![total_sqft, workshop_sqft, purchase_price, &purchase_date, building_value, land_value,
+                    land_ratio, assessor_total, assessor_land, annual_tax, annual_ins, &mortgage_lender, mortgage_int,
+                    mortgage_princ, depreciation_basis, depreciation_annual, &notes, now, eid],
+            ).map_err(|e| e.to_string())?;
+            Ok(eid)
+        } else {
+            conn.execute(
+                "INSERT INTO property_profiles (user_id, address, total_sqft, workshop_sqft, purchase_price_cents, purchase_date, \
+                 building_value_cents, land_value_cents, land_ratio, assessor_total_cents, assessor_land_cents, \
+                 annual_property_tax_cents, annual_insurance_cents, mortgage_lender, mortgage_interest_cents, \
+                 mortgage_principal_cents, depreciation_basis_cents, depreciation_annual_cents, notes, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                rusqlite::params![uid, &address, total_sqft, workshop_sqft, purchase_price, &purchase_date,
+                    building_value, land_value, land_ratio, assessor_total, assessor_land,
+                    annual_tax, annual_ins, &mortgage_lender, mortgage_int, mortgage_princ,
+                    depreciation_basis, depreciation_annual, &notes, now, now],
+            ).map_err(|e| e.to_string())?;
+            Ok(conn.last_insert_rowid())
+        }
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(serde_json::json!({ "id": id, "success": true })))
+}
+
+// ── Item 13: Deduction Calculator Auto-Fill ─────────────────────────────────
+
+/// Auto-fill deduction data from scanned documents and existing records.
+/// Pulls mortgage interest from 1098s, property tax from tax_documents,
+/// insurance from settlement docs, utilities from statement_transactions.
+pub async fn handle_deduction_autofill(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let year: i64 = params.get("year").and_then(|y| y.parse().ok()).unwrap_or(2025);
+
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let start = format!("{}-01-01", year);
+        let end = format!("{}-12-31", year);
+
+        // 1. Mortgage interest from 1098 documents
+        let mortgage_interest_cents: i64 = {
+            let mut total = 0i64;
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT extracted_fields FROM tax_documents WHERE user_id = ? AND doc_type = 'mortgage_statement' AND tax_year = ? AND status = 'scanned'"
+            ) {
+                if let Ok(rows) = stmt.query_map(rusqlite::params![uid, year], |r| r.get::<_, Option<String>>(0)) {
+                    for row in rows.flatten() {
+                        if let Some(fields_str) = row {
+                            if let Ok(fields) = serde_json::from_str::<serde_json::Value>(&fields_str) {
+                                let interest = fields["box1_interest_paid"].as_str()
+                                    .and_then(|s| parse_cents(s))
+                                    .or_else(|| fields["box1_interest_paid"].as_f64().map(|f| (f * 100.0) as i64))
+                                    .unwrap_or(0);
+                                total += interest;
+                            }
+                        }
+                    }
+                }
+            }
+            total
+        };
+
+        // 2. Property tax from tax_documents or expenses
+        let property_tax_cents: i64 = {
+            let from_docs: i64 = conn.query_row(
+                "SELECT COALESCE(SUM(CAST(json_extract(extracted_fields, '$.amount') AS REAL) * 100), 0) \
+                 FROM tax_documents WHERE user_id = ? AND doc_type = 'property_tax_statement' AND tax_year = ? AND status = 'scanned'",
+                rusqlite::params![uid, year], |r| r.get(0)
+            ).unwrap_or(0);
+            if from_docs > 0 { from_docs } else {
+                // Fallback: from expenses
+                conn.query_row(
+                    "SELECT COALESCE(SUM(e.amount_cents), 0) FROM expenses e \
+                     JOIN expense_categories c ON e.category_id = c.id \
+                     WHERE e.user_id = ? AND (c.name LIKE '%Property Tax%' OR c.name = 'Mortgage') \
+                     AND e.expense_date >= ? AND e.expense_date <= ? AND e.description LIKE '%tax%'",
+                    rusqlite::params![uid, &start, &end], |r| r.get(0)
+                ).unwrap_or(0)
+            }
+        };
+
+        // 3. Insurance from settlement statement or expenses
+        let insurance_cents: i64 = {
+            // Try settlement statement first
+            let mut from_settlement = 0i64;
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT extracted_fields FROM tax_documents WHERE user_id = ? AND doc_type = 'settlement_statement' AND status = 'scanned'"
+            ) {
+                if let Ok(rows) = stmt.query_map(rusqlite::params![uid], |r| r.get::<_, Option<String>>(0)) {
+                    for row in rows.flatten() {
+                        if let Some(fields_str) = row {
+                            if let Ok(fields) = serde_json::from_str::<serde_json::Value>(&fields_str) {
+                                let ins = fields["homeowners_insurance_annual"].as_str()
+                                    .and_then(|s| parse_cents(s))
+                                    .or_else(|| fields["homeowners_insurance_annual"].as_f64().map(|f| (f * 100.0) as i64))
+                                    .unwrap_or(0);
+                                if ins > 0 { from_settlement = ins; }
+                            }
+                        }
+                    }
+                }
+            }
+            if from_settlement > 0 { from_settlement } else {
+                // Fallback: from insurance_classifications for "home" type
+                conn.query_row(
+                    "SELECT amount_cents FROM insurance_classifications WHERE user_id = ? AND insurance_type = 'home' ORDER BY confidence DESC LIMIT 1",
+                    rusqlite::params![uid], |r| r.get::<_, Option<i64>>(0)
+                ).unwrap_or(None).map(|monthly| monthly * 12).unwrap_or(0)
+            }
+        };
+
+        // 4. Utilities from statement_transactions or expenses
+        let utilities_cents: i64 = {
+            // Try statement_transactions first
+            let has_txn_table: bool = conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='statement_transactions'",
+                [], |r| r.get::<_, i64>(0)
+            ).unwrap_or(0) > 0;
+
+            if has_txn_table {
+                let from_stmts: i64 = conn.query_row(
+                    "SELECT COALESCE(SUM(t.amount_cents), 0) FROM statement_transactions t \
+                     JOIN expense_categories c ON t.category_id = c.id \
+                     WHERE t.user_id = ? AND c.name = 'Utilities' \
+                     AND t.transaction_date >= ? AND t.transaction_date <= ?",
+                    rusqlite::params![uid, &start, &end], |r| r.get(0)
+                ).unwrap_or(0);
+                if from_stmts > 0 { return Ok(build_autofill_json(mortgage_interest_cents, property_tax_cents, insurance_cents, from_stmts)); }
+            }
+
+            // Fallback: from expenses table
+            conn.query_row(
+                "SELECT COALESCE(SUM(e.amount_cents), 0) FROM expenses e \
+                 JOIN expense_categories c ON e.category_id = c.id \
+                 WHERE e.user_id = ? AND c.name = 'Utilities' \
+                 AND e.expense_date >= ? AND e.expense_date <= ?",
+                rusqlite::params![uid, &start, &end], |r| r.get(0)
+            ).unwrap_or(0)
+        };
+
+        // 5. Property profile data
+        let has_prop_table: bool = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='property_profiles'",
+            [], |r| r.get::<_, i64>(0)
+        ).unwrap_or(0) > 0;
+
+        let property = if has_prop_table {
+            conn.query_row(
+                "SELECT address, total_sqft, workshop_sqft, building_value_cents, depreciation_annual_cents \
+                 FROM property_profiles WHERE user_id = ? ORDER BY id LIMIT 1",
+                rusqlite::params![uid], |r| Ok(serde_json::json!({
+                    "address": r.get::<_, Option<String>>(0)?,
+                    "total_sqft": r.get::<_, Option<i64>>(1)?,
+                    "workshop_sqft": r.get::<_, Option<i64>>(2)?,
+                    "building_value_cents": r.get::<_, Option<i64>>(3)?,
+                    "depreciation_annual_cents": r.get::<_, Option<i64>>(4)?,
+                }))
+            ).ok()
+        } else { None };
+
+        let mut result = build_autofill_json(mortgage_interest_cents, property_tax_cents, insurance_cents, utilities_cents);
+        if let Some(prop) = property {
+            result["property"] = prop;
+        }
+        Ok(result)
+    }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(result))
+}
+
+fn build_autofill_json(mortgage: i64, property_tax: i64, insurance: i64, utilities: i64) -> serde_json::Value {
+    serde_json::json!({
+        "mortgage_interest_cents": mortgage,
+        "mortgage_interest_display": if mortgage > 0 { cents_to_display(mortgage) } else { "Not found".to_string() },
+        "property_tax_cents": property_tax,
+        "property_tax_display": if property_tax > 0 { cents_to_display(property_tax) } else { "Not found".to_string() },
+        "insurance_cents": insurance,
+        "insurance_display": if insurance > 0 { cents_to_display(insurance) } else { "Not found".to_string() },
+        "utilities_cents": utilities,
+        "utilities_display": if utilities > 0 { cents_to_display(utilities) } else { "Not found".to_string() },
+        "total_indirect_cents": mortgage + property_tax + insurance + utilities,
+        "total_indirect_display": cents_to_display(mortgage + property_tax + insurance + utilities),
+        "sources": {
+            "mortgage": if mortgage > 0 { "1098 documents" } else { "none" },
+            "property_tax": if property_tax > 0 { "tax documents / expenses" } else { "none" },
+            "insurance": if insurance > 0 { "settlement statement / classifications" } else { "none" },
+            "utilities": if utilities > 0 { "statement transactions / expenses" } else { "none" },
+        }
+    })
+}
+
+// ── Item 14: Insurance Classification ───────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct InsuranceClassifyRequest {
+    pub token: String,
+    pub vendor: String,
+    pub amount: Option<String>,
+    pub insurance_type: String, // "auto", "home", "health", "life"
+}
+
+pub async fn handle_insurance_classify(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<InsuranceClassifyRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &req.token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let now = chrono::Utc::now().timestamp();
+    let vendor = req.vendor.clone();
+    let amount_cents = req.amount.as_deref().and_then(parse_cents);
+    let insurance_type = req.insurance_type.clone();
+
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+
+        // Upsert classification
+        let existing: Option<i64> = conn.query_row(
+            "SELECT id FROM insurance_classifications WHERE user_id = ? AND vendor = ? AND amount_cents = ?",
+            rusqlite::params![uid, &vendor, amount_cents], |r| r.get(0)
+        ).ok();
+
+        if let Some(eid) = existing {
+            conn.execute(
+                "UPDATE insurance_classifications SET insurance_type = ?, confidence = 1.0 WHERE id = ?",
+                rusqlite::params![&insurance_type, eid],
+            ).map_err(|e| e.to_string())?;
+        } else {
+            conn.execute(
+                "INSERT INTO insurance_classifications (user_id, vendor, amount_cents, insurance_type, confidence, evidence, created_at) \
+                 VALUES (?, ?, ?, ?, 1.0, 'user-classified', ?)",
+                rusqlite::params![uid, &vendor, amount_cents, &insurance_type, now],
+            ).map_err(|e| e.to_string())?;
+        }
+
+        // Also update any statement transactions with this vendor
+        conn.execute(
+            "UPDATE statement_transactions SET insurance_type = ? WHERE user_id = ? AND LOWER(vendor) = LOWER(?)",
+            rusqlite::params![&insurance_type, uid, &vendor],
+        ).map_err(|e| e.to_string())?;
+
+        Ok(())
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(serde_json::json!({ "success": true, "vendor": req.vendor, "insurance_type": req.insurance_type })))
+}
+
+// ── Item 15: Year-End Tax Prep Wizard ───────────────────────────────────────
+
+pub async fn handle_tax_prep_wizard(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let year: i64 = params.get("year").and_then(|y| y.parse().ok()).unwrap_or(2025);
+
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let start = format!("{}-01-01", year);
+        let end = format!("{}-12-31", year);
+
+        // Step 1: Filing Status
+        // We can infer from W-2 count
+        let w2_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM tax_documents WHERE user_id = ? AND doc_type = 'w2' AND tax_year = ? AND status = 'scanned'",
+            rusqlite::params![uid, year], |r| r.get(0)
+        ).unwrap_or(0);
+
+        let w2_details: Vec<serde_json::Value> = {
+            let mut stmt = conn.prepare(
+                "SELECT issuer, extracted_fields FROM tax_documents WHERE user_id = ? AND doc_type = 'w2' AND tax_year = ? AND status = 'scanned'"
+            ).map_err(|e| e.to_string())?;
+            let rows = stmt.query_map(rusqlite::params![uid, year], |r| {
+                let fields_str: Option<String> = r.get(1)?;
+                let fields: serde_json::Value = fields_str.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(serde_json::json!({}));
+                Ok(serde_json::json!({
+                    "employer": r.get::<_, Option<String>>(0)?,
+                    "employee": fields["employee_name"].as_str(),
+                    "wages": fields["box1_wages"],
+                    "withheld": fields["box2_fed_withheld"],
+                }))
+            }).map_err(|e| e.to_string())?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
+        // Step 2: Income summary
+        let gross_income: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(amount_cents), 0) FROM tax_income WHERE user_id = ? AND tax_year = ? AND category != 'Federal Withholding'",
+            rusqlite::params![uid, year], |r| r.get(0)
+        ).unwrap_or(0);
+        let withheld: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(amount_cents), 0) FROM tax_income WHERE user_id = ? AND tax_year = ? AND category = 'Federal Withholding'",
+            rusqlite::params![uid, year], |r| r.get(0)
+        ).unwrap_or(0);
+
+        // Step 3: 1099s
+        let form_1099_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM tax_documents WHERE user_id = ? AND doc_type LIKE '1099%' AND tax_year = ? AND status = 'scanned'",
+            rusqlite::params![uid, year], |r| r.get(0)
+        ).unwrap_or(0);
+
+        // Step 4: 1098 mortgage statements
+        let form_1098_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM tax_documents WHERE user_id = ? AND doc_type = 'mortgage_statement' AND tax_year = ? AND status = 'scanned'",
+            rusqlite::params![uid, year], |r| r.get(0)
+        ).unwrap_or(0);
+
+        // Step 5: Expenses & deductions
+        let total_expenses: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(amount_cents), 0) FROM expenses WHERE user_id = ? AND expense_date >= ? AND expense_date <= ?",
+            rusqlite::params![uid, &start, &end], |r| r.get(0)
+        ).unwrap_or(0);
+        let business_expenses: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(amount_cents), 0) FROM expenses WHERE user_id = ? AND entity = 'business' AND expense_date >= ? AND expense_date <= ?",
+            rusqlite::params![uid, &start, &end], |r| r.get(0)
+        ).unwrap_or(0);
+        let deductible_expenses: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(e.amount_cents), 0) FROM expenses e JOIN expense_categories c ON e.category_id = c.id \
+             WHERE e.user_id = ? AND c.tax_deductible = 1 AND e.expense_date >= ? AND e.expense_date <= ?",
+            rusqlite::params![uid, &start, &end], |r| r.get(0)
+        ).unwrap_or(0);
+
+        // Step 6: Receipt count
+        let receipt_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM receipts WHERE user_id = ?",
+            rusqlite::params![uid], |r| r.get(0)
+        ).unwrap_or(0);
+
+        // Step 7: Property profile
+        let has_property: bool = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='property_profiles'",
+            [], |r| r.get::<_, i64>(0)
+        ).unwrap_or(0) > 0 && conn.query_row(
+            "SELECT COUNT(*) FROM property_profiles WHERE user_id = ?",
+            rusqlite::params![uid], |r| r.get::<_, i64>(0)
+        ).unwrap_or(0) > 0;
+
+        // Build completeness checklist
+        let mut steps: Vec<serde_json::Value> = Vec::new();
+        let mut missing: Vec<String> = Vec::new();
+
+        // Filing status
+        steps.push(serde_json::json!({
+            "step": 1, "title": "Filing Status",
+            "status": if w2_count > 0 { "complete" } else { "needs_attention" },
+            "detail": if w2_count >= 2 { "2 W-2s found — likely Married Filing Jointly" }
+                else if w2_count == 1 { "1 W-2 found — confirm filing status" }
+                else { "No W-2s uploaded yet" },
+            "data": { "w2_count": w2_count, "w2s": w2_details },
+        }));
+        if w2_count == 0 { missing.push("W-2 forms".to_string()); }
+
+        // Income
+        steps.push(serde_json::json!({
+            "step": 2, "title": "Income",
+            "status": if gross_income > 0 { "complete" } else { "needs_attention" },
+            "detail": format!("Gross income: {} | Withheld: {}", cents_to_display(gross_income), cents_to_display(withheld)),
+            "data": { "gross_income_cents": gross_income, "withheld_cents": withheld },
+        }));
+
+        // 1099 forms
+        steps.push(serde_json::json!({
+            "step": 3, "title": "1099 Forms (Interest, Dividends, etc.)",
+            "status": if form_1099_count > 0 { "complete" } else { "optional" },
+            "detail": format!("{} form(s) uploaded", form_1099_count),
+            "data": { "count": form_1099_count },
+        }));
+
+        // Mortgage
+        steps.push(serde_json::json!({
+            "step": 4, "title": "Mortgage Statements (1098)",
+            "status": if form_1098_count > 0 { "complete" } else { "needs_attention" },
+            "detail": format!("{} statement(s) uploaded", form_1098_count),
+            "data": { "count": form_1098_count },
+        }));
+        if form_1098_count == 0 { missing.push("1098 mortgage statements".to_string()); }
+
+        // Business expenses
+        steps.push(serde_json::json!({
+            "step": 5, "title": "Business Expenses (Schedule C)",
+            "status": if business_expenses > 0 { "complete" } else { "optional" },
+            "detail": format!("Business expenses: {} | Total deductible: {}", cents_to_display(business_expenses), cents_to_display(deductible_expenses)),
+            "data": { "business_cents": business_expenses, "deductible_cents": deductible_expenses },
+        }));
+
+        // Property / Home Office
+        steps.push(serde_json::json!({
+            "step": 6, "title": "Property & Home Office Deduction",
+            "status": if has_property { "complete" } else { "needs_attention" },
+            "detail": if has_property { "Property profile configured" } else { "Set up your property profile to calculate home office deduction" },
+        }));
+        if !has_property { missing.push("Property profile for home office deduction".to_string()); }
+
+        // Receipts
+        steps.push(serde_json::json!({
+            "step": 7, "title": "Receipts & Documentation",
+            "status": if receipt_count > 5 { "complete" } else if receipt_count > 0 { "partial" } else { "needs_attention" },
+            "detail": format!("{} receipt(s) on file", receipt_count),
+        }));
+
+        // Calculate estimated tax
+        let (brackets, top_rate, standard_deduction) = crate::tax::load_brackets(year, "married_jointly");
+        let agi = gross_income - business_expenses;
+        let deduction = std::cmp::max(standard_deduction, deductible_expenses);
+        let taxable = std::cmp::max(agi - deduction, 0);
+        let mut tax: i64 = 0;
+        let mut prev = 0i64;
+        for &(limit, rate_bps) in &brackets {
+            let bracket_income = std::cmp::min(taxable, limit) - prev;
+            if bracket_income <= 0 { break; }
+            tax += bracket_income * rate_bps / 10000;
+            prev = limit;
+        }
+        if taxable > prev { tax += (taxable - prev) * top_rate / 10000; }
+        let owed = tax - withheld;
+
+        let completeness = steps.iter().filter(|s| s["status"] == "complete").count() as f64 / steps.len() as f64;
+
+        Ok(serde_json::json!({
+            "year": year,
+            "completeness": (completeness * 100.0).round() as i64,
+            "steps": steps,
+            "missing": missing,
+            "summary": {
+                "gross_income": cents_to_display(gross_income),
+                "business_deductions": cents_to_display(business_expenses),
+                "agi": cents_to_display(agi),
+                "deduction": cents_to_display(deduction),
+                "deduction_type": if deductible_expenses > standard_deduction { "itemized" } else { "standard" },
+                "taxable_income": cents_to_display(taxable),
+                "estimated_tax": cents_to_display(tax),
+                "withheld": cents_to_display(withheld),
+                "estimated_owed": cents_to_display(owed),
+                "refund_or_owe": if owed > 0 { format!("Owe {}", cents_to_display(owed)) } else { format!("Refund {}", cents_to_display(-owed)) },
+            },
+            "bracket_warning": crate::tax::brackets_stale(),
+        }))
+    }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(result))
+}
+
+// ── Item 16: Tax Brackets Auto-Fetch ────────────────────────────────────────
+
+/// Auto-fetch latest IRS brackets by searching the web.
+/// This is called by an agent tool or can be triggered manually.
+pub async fn handle_brackets_auto_fetch(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let _principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+
+    let target_year: i64 = params.get("year").and_then(|y| y.parse().ok())
+        .unwrap_or_else(|| chrono::Utc::now().format("%Y").to_string().parse::<i64>().unwrap_or(2026));
+
+    // Check if we already have this year's brackets
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
+    let path = format!("{}/.syntaur/tax_brackets.json", home);
+    if let Ok(data) = std::fs::read_to_string(&path) {
+        if let Ok(config) = serde_json::from_str::<serde_json::Value>(&data) {
+            let year_str = target_year.to_string();
+            if config.get("brackets").and_then(|b| b.get(&year_str)).is_some() {
+                return Ok(Json(serde_json::json!({
+                    "status": "already_current",
+                    "year": target_year,
+                    "message": format!("Tax brackets for {} are already up to date.", target_year),
+                })));
+            }
+        }
+    }
+
+    // Use the LLM to search for and parse IRS brackets
+    let config = &state.config;
+    let provider = config.models.providers.iter()
+        .find(|(_, p)| p.base_url.contains("openrouter") || p.base_url.contains("openai") || p.base_url.contains("anthropic"))
+        .or_else(|| config.models.providers.iter().next());
+    let (_, provider_config) = provider.ok_or((StatusCode::INTERNAL_SERVER_ERROR, "No LLM provider".to_string()))?;
+    let model = if provider_config.base_url.contains("openrouter") { "nvidia/nemotron-3-super-120b-a12b:free" }
+        else if provider_config.base_url.contains("anthropic") { "claude-sonnet-4-6" }
+        else { "gpt-4o-mini" };
+    let url = format!("{}/chat/completions", provider_config.base_url.trim_end_matches('/'));
+
+    let prompt = format!(
+        r#"I need the US federal income tax brackets for tax year {}. The IRS publishes these in a Revenue Procedure each November (e.g., Rev. Proc. 2024-40 for 2025).
+
+Please provide the brackets for all three filing statuses (married filing jointly, single, head of household) in this exact JSON format:
+
+{{
+  "married_jointly": {{
+    "brackets": [[threshold_cents, rate_basis_points], ...],
+    "top_rate": 3700,
+    "standard_deduction": cents
+  }},
+  "single": {{ ... same format ... }},
+  "head_of_household": {{ ... same format ... }}
+}}
+
+Where:
+- threshold_cents = upper limit of that bracket in cents (e.g., $23,850 = 2385000)
+- rate_basis_points = marginal rate in basis points (e.g., 10% = 1000, 12% = 1200)
+- top_rate = rate for income above the highest bracket threshold
+- standard_deduction = standard deduction amount in cents
+
+Use the EXACT numbers from the IRS Revenue Procedure. Do NOT use 2024 numbers for {}.
+If the {} brackets have not been published yet, respond with: {{"not_available": true, "reason": "..."}}
+
+Respond with ONLY the JSON, no explanation."#,
+        target_year, target_year, target_year
+    );
+
+    let payload = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 2000,
+        "temperature": 0.0
+    });
+
+    let resp = state.client.post(&url)
+        .header("Authorization", format!("Bearer {}", provider_config.api_key))
+        .json(&payload)
+        .timeout(std::time::Duration::from_secs(30))
+        .send().await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("LLM: {}", e)))?;
+
+    if !resp.status().is_success() {
+        let s = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("LLM HTTP {}: {}", s, &body[..body.len().min(200)])));
+    }
+
+    let body: serde_json::Value = resp.json().await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let content = body["choices"][0]["message"]["content"].as_str().unwrap_or("");
+    let cleaned = content.trim().trim_start_matches("```json").trim_end_matches("```").trim();
+    let parsed: serde_json::Value = serde_json::from_str(cleaned)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Parse brackets: {}", e)))?;
+
+    // Check for "not_available" response
+    if parsed.get("not_available").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let reason = parsed["reason"].as_str().unwrap_or("Brackets not yet published");
+        return Ok(Json(serde_json::json!({
+            "status": "not_available",
+            "year": target_year,
+            "message": format!("{} tax brackets are not yet available: {}", target_year, reason),
+            "suggestion": "The IRS typically publishes new brackets each November. Use the update_tax_brackets agent tool as a fallback.",
+        })));
+    }
+
+    // Validate the response has the expected structure
+    for status in &["married_jointly", "single", "head_of_household"] {
+        let entry = parsed.get(status).ok_or((StatusCode::INTERNAL_SERVER_ERROR, format!("Missing {} brackets", status)))?;
+        let brackets = entry.get("brackets").and_then(|b| b.as_array())
+            .ok_or((StatusCode::INTERNAL_SERVER_ERROR, format!("Invalid brackets for {}", status)))?;
+        if brackets.is_empty() {
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Empty brackets for {}", status)));
+        }
+    }
+
+    // Save to config
+    let mut config_data: serde_json::Value = std::fs::read_to_string(&path).ok()
+        .and_then(|d| serde_json::from_str(&d).ok())
+        .unwrap_or(serde_json::json!({"brackets": {}, "source": "", "notes": ""}));
+
+    let year_str = target_year.to_string();
+    config_data["brackets"][&year_str] = parsed.clone();
+    config_data["last_updated"] = serde_json::json!(chrono::Utc::now().format("%Y-%m-%d").to_string());
+    config_data["source"] = serde_json::json!(format!("Auto-fetched for {} via LLM", target_year));
+
+    save_brackets(&config_data).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    info!("[tax] Auto-fetched {} tax brackets", target_year);
+
+    Ok(Json(serde_json::json!({
+        "status": "updated",
+        "year": target_year,
+        "message": format!("Successfully fetched and saved {} tax brackets.", target_year),
+        "brackets": parsed,
+    })))
+}

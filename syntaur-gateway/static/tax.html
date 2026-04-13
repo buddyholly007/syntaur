@@ -35,6 +35,8 @@
       <button onclick="showTab('expenses')" class="tab text-gray-400" id="tab-btn-expenses">Expenses</button>
       <button onclick="showTab('receipts')" class="tab text-gray-400" id="tab-btn-receipts">Receipts</button>
       <button onclick="showTab('documents')" class="tab text-gray-400" id="tab-btn-documents">Documents</button>
+      <button onclick="showTab('property')" class="tab text-gray-400" id="tab-btn-property">Property</button>
+      <button onclick="showTab('wizard')" class="tab text-gray-400" id="tab-btn-wizard">Wizard</button>
       <select id="year-select" class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-sm text-gray-300 outline-none" onchange="changeYear()"></select>
       <a href="/" class="text-gray-500 hover:text-gray-300">Home</a>
     </div>
@@ -187,8 +189,8 @@
   <!-- Documents tab -->
   <div id="tab-documents" class="hidden">
     <div class="card mb-6">
-      <h3 class="font-medium mb-3">Upload Tax Document</h3>
-      <p class="text-xs text-gray-500 mb-3">Upload W-2s, 1099s, mortgage statements, property tax bills, or any tax document. AI will identify the document type and extract all relevant fields automatically.</p>
+      <h3 class="font-medium mb-3">Smart Upload</h3>
+      <p class="text-xs text-gray-500 mb-3">Upload any tax document — receipts, W-2s, 1099s, bank statements, credit card statements, mortgage statements, or any other document. AI will automatically identify the type and route it to the correct handler.</p>
       <details class="mb-3">
         <summary class="text-xs text-gray-600 cursor-pointer hover:text-gray-400">Accuracy tips</summary>
         <div class="mt-2 p-2 rounded bg-gray-900 text-xs text-gray-500 space-y-1">
@@ -229,6 +231,128 @@
     <div class="card">
       <h3 class="font-medium mb-4">Tax Documents</h3>
       <div id="doc-list" class="space-y-3">
+        <p class="text-xs text-gray-600">Loading...</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Property tab -->
+  <div id="tab-property" class="hidden">
+    <div class="card mb-6">
+      <h3 class="font-medium mb-4">Property Profile</h3>
+      <p class="text-xs text-gray-500 mb-4">Your property details for home office / workshop deduction calculations. Values auto-populate from scanned 1098s, settlement statements, and tax documents.</p>
+      <div class="grid grid-cols-2 gap-4">
+        <div>
+          <label class="label">Address</label>
+          <input type="text" id="prop-address" class="input" placeholder="1406 Summit Lake Shore">
+        </div>
+        <div>
+          <label class="label">Purchase Date</label>
+          <input type="date" id="prop-purchase-date" class="input">
+        </div>
+        <div>
+          <label class="label">Total Sqft</label>
+          <input type="number" id="prop-total-sqft" class="input" placeholder="5206">
+        </div>
+        <div>
+          <label class="label">Workshop Sqft</label>
+          <input type="number" id="prop-workshop-sqft" class="input" placeholder="488">
+        </div>
+        <div>
+          <label class="label">Purchase Price</label>
+          <input type="text" id="prop-purchase-price" class="input" placeholder="1060000">
+        </div>
+        <div>
+          <label class="label">Building Value (from assessor)</label>
+          <input type="text" id="prop-building-value" class="input" placeholder="831762">
+        </div>
+        <div>
+          <label class="label">Land Value (from assessor)</label>
+          <input type="text" id="prop-land-value" class="input" placeholder="228238">
+        </div>
+        <div>
+          <label class="label">Land Ratio</label>
+          <input type="text" id="prop-land-ratio" class="input" placeholder="0.2153" readonly>
+        </div>
+      </div>
+      <div class="grid grid-cols-2 gap-4 mt-4">
+        <div>
+          <label class="label">Annual Property Tax</label>
+          <input type="text" id="prop-property-tax" class="input" placeholder="571.60">
+        </div>
+        <div>
+          <label class="label">Annual Insurance (Homeowner's)</label>
+          <input type="text" id="prop-insurance" class="input" placeholder="1680">
+        </div>
+        <div>
+          <label class="label">Mortgage Lender</label>
+          <input type="text" id="prop-mortgage-lender" class="input" placeholder="Chase">
+        </div>
+        <div>
+          <label class="label">Annual Mortgage Interest (from 1098)</label>
+          <input type="text" id="prop-mortgage-interest" class="input" placeholder="Will auto-fill from 1098">
+        </div>
+      </div>
+      <div class="mt-4">
+        <label class="label">Notes</label>
+        <textarea id="prop-notes" class="input" rows="2" placeholder="e.g., Workshop used exclusively for woodworking business"></textarea>
+      </div>
+      <div class="flex items-center gap-3 mt-4">
+        <button onclick="saveProperty()" class="btn-primary">Save Property</button>
+        <button onclick="autofillProperty()" class="text-xs text-oc-500 hover:text-oc-400">Auto-fill from documents</button>
+        <span id="prop-status" class="text-xs text-gray-500"></span>
+      </div>
+    </div>
+
+    <!-- Depreciation Calculator -->
+    <div class="card mb-6" id="depreciation-section">
+      <h3 class="font-medium mb-3">Depreciation Calculator</h3>
+      <div id="depreciation-result" class="text-sm text-gray-400">
+        <p class="text-xs text-gray-600">Save a property profile above to calculate depreciation.</p>
+      </div>
+    </div>
+
+    <!-- Statement Transactions -->
+    <div class="card">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="font-medium">Statement Transactions</h3>
+        <span class="text-xs text-gray-500" id="stmt-txn-count">—</span>
+      </div>
+      <p class="text-xs text-gray-500 mb-3">Individual transactions extracted from uploaded bank/credit card statements.</p>
+      <div id="stmt-txn-list" class="space-y-1 max-h-96 overflow-y-auto">
+        <p class="text-xs text-gray-600">No statement transactions yet. Upload a bank or credit card statement in the Documents tab.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Wizard tab -->
+  <div id="tab-wizard" class="hidden">
+    <div class="card mb-6">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="font-medium">Tax Prep Wizard — <span id="wizard-year">2025</span></h3>
+        <div class="flex items-center gap-2">
+          <span class="text-xs text-gray-500">Completeness:</span>
+          <div class="w-32 h-2 rounded-full bg-gray-700 overflow-hidden">
+            <div id="wizard-progress-bar" class="h-full rounded-full bg-green-500 transition-all" style="width:0%"></div>
+          </div>
+          <span id="wizard-pct" class="text-xs font-medium text-green-400">0%</span>
+        </div>
+      </div>
+      <div id="wizard-steps" class="space-y-3">
+        <p class="text-xs text-gray-600">Loading wizard...</p>
+      </div>
+    </div>
+
+    <!-- Missing Items -->
+    <div class="card mb-6" id="wizard-missing-section" style="display:none">
+      <h3 class="font-medium mb-3 text-yellow-400">Missing Items</h3>
+      <div id="wizard-missing" class="space-y-2"></div>
+    </div>
+
+    <!-- Tax Summary -->
+    <div class="card">
+      <h3 class="font-medium mb-4">Estimated Tax Summary</h3>
+      <div id="wizard-summary" class="space-y-2 text-sm">
         <p class="text-xs text-gray-600">Loading...</p>
       </div>
     </div>
@@ -281,14 +405,16 @@ function authFetch(url, opts = {}) {
 }
 
 function showTab(name) {
-  ['overview', 'expenses', 'receipts', 'documents'].forEach(t => {
+  ['overview', 'expenses', 'receipts', 'documents', 'property', 'wizard'].forEach(t => {
     document.getElementById('tab-' + t).classList.toggle('hidden', t !== name);
     const btn = document.getElementById('tab-btn-' + t);
-    btn.className = 'tab ' + (t === name ? 'text-white' : 'text-gray-400 hover:text-gray-300');
+    if (btn) btn.className = 'tab ' + (t === name ? 'text-white' : 'text-gray-400 hover:text-gray-300');
   });
   if (name === 'expenses') loadExpenses();
   if (name === 'receipts') loadReceipts();
   if (name === 'documents') loadDocuments();
+  if (name === 'property') loadPropertyProfile();
+  if (name === 'wizard') loadWizard();
 }
 
 // Overview
@@ -754,14 +880,33 @@ async function uploadTaxDoc(input) {
   const status = document.getElementById('doc-upload-status');
   status.textContent = 'Uploading & classifying...';
   try {
-    const resp = await fetch(`/api/tax/documents?token=${token}`, {
+    // Use smart upload endpoint — auto-routes to receipt, document, or statement handler
+    const resp = await fetch(`/api/tax/upload?token=${token}`, {
       method: 'POST', headers: { 'Content-Type': file.type }, body: file
     });
     const data = await resp.json();
+    const routedTo = data.routed_to || 'document';
     status.textContent = data.message || 'Uploaded!';
-    setTimeout(() => loadDocuments(), 5000);
+    status.innerHTML += ` <span class="text-oc-400">(${routedTo})</span>`;
+    // Refresh appropriate tab after processing
+    setTimeout(() => {
+      loadDocuments();
+      if (routedTo === 'receipt') loadReceipts();
+      if (routedTo === 'statement') loadStatementTransactions();
+    }, 5000);
     loadDocuments();
-  } catch(e) { status.textContent = 'Upload failed'; }
+  } catch(e) {
+    // Fallback to legacy endpoint
+    try {
+      const resp2 = await fetch(`/api/tax/documents?token=${token}`, {
+        method: 'POST', headers: { 'Content-Type': file.type }, body: file
+      });
+      const data2 = await resp2.json();
+      status.textContent = data2.message || 'Uploaded!';
+      setTimeout(() => loadDocuments(), 5000);
+      loadDocuments();
+    } catch(e2) { status.textContent = 'Upload failed'; }
+  }
   input.value = '';
 }
 
@@ -968,6 +1113,217 @@ async function saveMileageDeduction() {
 
 // Auto-calculate home office on load
 setTimeout(recalcHomeOffice, 500);
+
+// ── Property Profile ──
+async function loadPropertyProfile() {
+  try {
+    const resp = await authFetch(`/api/tax/property?token=${token}`);
+    const data = await resp.json();
+    const profiles = data.profiles || [];
+    if (profiles.length > 0) {
+      const p = profiles[0];
+      document.getElementById('prop-address').value = p.address || '';
+      document.getElementById('prop-total-sqft').value = p.total_sqft || '';
+      document.getElementById('prop-workshop-sqft').value = p.workshop_sqft || '';
+      document.getElementById('prop-purchase-price').value = p.purchase_price_cents ? (p.purchase_price_cents / 100).toFixed(0) : '';
+      document.getElementById('prop-purchase-date').value = p.purchase_date || '';
+      document.getElementById('prop-building-value').value = p.building_value_cents ? (p.building_value_cents / 100).toFixed(0) : '';
+      document.getElementById('prop-land-value').value = p.land_value_cents ? (p.land_value_cents / 100).toFixed(0) : '';
+      document.getElementById('prop-land-ratio').value = p.land_ratio ? p.land_ratio.toFixed(4) : '';
+      document.getElementById('prop-property-tax').value = p.annual_property_tax_cents ? (p.annual_property_tax_cents / 100).toFixed(2) : '';
+      document.getElementById('prop-insurance').value = p.annual_insurance_cents ? (p.annual_insurance_cents / 100).toFixed(2) : '';
+      document.getElementById('prop-mortgage-lender').value = p.mortgage_lender || '';
+      document.getElementById('prop-mortgage-interest').value = p.mortgage_interest_cents ? (p.mortgage_interest_cents / 100).toFixed(2) : '';
+      document.getElementById('prop-notes').value = p.notes || '';
+
+      // Show depreciation
+      if (p.building_value_cents) {
+        const basis = p.building_value_cents;
+        const annual = Math.round(basis / 2750);
+        const biz = p.workshop_sqft && p.total_sqft ? (p.workshop_sqft / p.total_sqft) : 0;
+        const bizAnnual = Math.round(annual * biz);
+        document.getElementById('depreciation-result').innerHTML = `
+          <div class="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+            <div class="flex justify-between"><span class="text-gray-500">Building basis:</span><span class="text-gray-300">${fmtDollars(basis/100)}</span></div>
+            <div class="flex justify-between"><span class="text-gray-500">Depreciation period:</span><span class="text-gray-300">27.5 years (residential)</span></div>
+            <div class="flex justify-between"><span class="text-gray-500">Annual depreciation:</span><span class="text-gray-300">${fmtDollars(annual/100)}/year</span></div>
+            <div class="flex justify-between"><span class="text-gray-500">Business portion (${(biz*100).toFixed(2)}%):</span><span class="text-green-400 font-medium">${fmtDollars(bizAnnual/100)}/year</span></div>
+          </div>`;
+      }
+    }
+    loadStatementTransactions();
+  } catch(e) { console.log('property:', e); }
+}
+
+async function saveProperty() {
+  const addr = document.getElementById('prop-address').value.trim();
+  if (!addr) { document.getElementById('prop-status').textContent = 'Address is required'; return; }
+
+  const buildingVal = parseFloat(document.getElementById('prop-building-value').value || 0);
+  const landVal = parseFloat(document.getElementById('prop-land-value').value || 0);
+  const totalVal = buildingVal + landVal;
+  const landRatio = totalVal > 0 ? landVal / totalVal : null;
+  if (landRatio !== null) document.getElementById('prop-land-ratio').value = landRatio.toFixed(4);
+
+  const body = {
+    token, address: addr,
+    total_sqft: parseInt(document.getElementById('prop-total-sqft').value) || null,
+    workshop_sqft: parseInt(document.getElementById('prop-workshop-sqft').value) || null,
+    purchase_price: document.getElementById('prop-purchase-price').value || null,
+    purchase_date: document.getElementById('prop-purchase-date').value || null,
+    building_value: document.getElementById('prop-building-value').value || null,
+    land_value: document.getElementById('prop-land-value').value || null,
+    land_ratio: landRatio,
+    annual_property_tax: document.getElementById('prop-property-tax').value || null,
+    annual_insurance: document.getElementById('prop-insurance').value || null,
+    mortgage_lender: document.getElementById('prop-mortgage-lender').value || null,
+    mortgage_interest: document.getElementById('prop-mortgage-interest').value || null,
+    notes: document.getElementById('prop-notes').value || null,
+  };
+
+  try {
+    const resp = await authFetch('/api/tax/property', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+    });
+    const data = await resp.json();
+    document.getElementById('prop-status').textContent = data.success ? 'Saved!' : 'Error saving';
+    document.getElementById('prop-status').className = data.success ? 'text-xs text-green-400' : 'text-xs text-red-400';
+    loadPropertyProfile();
+  } catch(e) { document.getElementById('prop-status').textContent = 'Error: ' + e.message; }
+}
+
+async function autofillProperty() {
+  document.getElementById('prop-status').textContent = 'Auto-filling from documents...';
+  try {
+    const resp = await authFetch(`/api/tax/deduction/autofill?token=${token}&year=${selectedYear}`);
+    const data = await resp.json();
+    if (data.mortgage_interest_cents > 0) {
+      document.getElementById('prop-mortgage-interest').value = (data.mortgage_interest_cents / 100).toFixed(2);
+    }
+    if (data.property_tax_cents > 0) {
+      document.getElementById('prop-property-tax').value = (data.property_tax_cents / 100).toFixed(2);
+    }
+    if (data.insurance_cents > 0) {
+      document.getElementById('prop-insurance').value = (data.insurance_cents / 100).toFixed(2);
+    }
+    if (data.property) {
+      if (data.property.address) document.getElementById('prop-address').value = data.property.address;
+      if (data.property.total_sqft) document.getElementById('prop-total-sqft').value = data.property.total_sqft;
+      if (data.property.workshop_sqft) document.getElementById('prop-workshop-sqft').value = data.property.workshop_sqft;
+    }
+    const sources = data.sources || {};
+    document.getElementById('prop-status').innerHTML = `Auto-filled! Sources: ${Object.entries(sources).filter(([k,v]) => v !== 'none').map(([k,v]) => `<span class="text-oc-400">${k}</span>: ${v}`).join(', ') || 'no data found'}`;
+    document.getElementById('prop-status').className = 'text-xs text-green-400';
+  } catch(e) { document.getElementById('prop-status').textContent = 'Auto-fill failed'; }
+}
+
+// ── Statement Transactions ──
+async function loadStatementTransactions() {
+  try {
+    const resp = await authFetch(`/api/tax/statements/transactions?token=${token}&start=${yearStart()}&end=${yearEnd()}`);
+    const data = await resp.json();
+    const txns = data.transactions || [];
+    const countEl = document.getElementById('stmt-txn-count');
+    if (countEl) countEl.textContent = `${txns.length} transactions | ${data.total_display || '$0.00'}`;
+
+    const list = document.getElementById('stmt-txn-list');
+    if (!list) return;
+    if (txns.length === 0) {
+      list.innerHTML = '<p class="text-xs text-gray-600">No statement transactions yet. Upload a bank or credit card statement in the Documents tab.</p>';
+      return;
+    }
+
+    list.innerHTML = txns.map(t => `
+      <div class="flex items-center justify-between py-1.5 border-b border-gray-700/30 last:border-0 text-xs">
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center gap-2">
+            <span class="text-gray-400">${t.transaction_date}</span>
+            <span class="text-gray-300 truncate">${esc(t.vendor || t.description)}</span>
+            ${t.insurance_type ? `<span class="px-1.5 py-0.5 rounded bg-purple-900/30 text-purple-400 text-[10px]">${t.insurance_type} ins</span>` : ''}
+            ${t.is_deductible ? '<span class="text-green-500 text-[10px]">deductible</span>' : ''}
+          </div>
+          <span class="text-gray-600">${t.category || ''}</span>
+        </div>
+        <span class="font-medium ${t.amount_cents < 0 ? 'text-green-400' : 'text-gray-200'} flex-shrink-0 ml-2">${t.amount_display}</span>
+      </div>
+    `).join('');
+  } catch(e) { console.log('stmt-txn:', e); }
+}
+
+// ── Tax Prep Wizard ──
+async function loadWizard() {
+  document.getElementById('wizard-year').textContent = selectedYear;
+  try {
+    const resp = await authFetch(`/api/tax/wizard?token=${token}&year=${selectedYear}`);
+    const data = await resp.json();
+
+    // Progress
+    document.getElementById('wizard-pct').textContent = data.completeness + '%';
+    document.getElementById('wizard-progress-bar').style.width = data.completeness + '%';
+    document.getElementById('wizard-progress-bar').className = `h-full rounded-full transition-all ${
+      data.completeness >= 80 ? 'bg-green-500' : data.completeness >= 50 ? 'bg-yellow-500' : 'bg-red-500'}`;
+
+    // Steps
+    const stepsEl = document.getElementById('wizard-steps');
+    stepsEl.innerHTML = (data.steps || []).map(s => {
+      const icon = s.status === 'complete' ? '<span class="text-green-400 text-sm">&#10004;</span>' :
+                    s.status === 'needs_attention' ? '<span class="text-yellow-400 text-sm">&#9888;</span>' :
+                    s.status === 'partial' ? '<span class="text-yellow-400 text-sm">&#8230;</span>' :
+                    '<span class="text-gray-500 text-sm">&#9675;</span>';
+      const borderColor = s.status === 'complete' ? 'border-green-800/30' :
+                           s.status === 'needs_attention' ? 'border-yellow-800/30' : 'border-gray-700/50';
+      const bgColor = s.status === 'complete' ? 'bg-green-900/10' :
+                       s.status === 'needs_attention' ? 'bg-yellow-900/10' : 'bg-gray-900';
+      return `
+        <div class="p-3 rounded-lg ${bgColor} border ${borderColor}">
+          <div class="flex items-center gap-2">
+            ${icon}
+            <span class="text-sm font-medium text-gray-300">Step ${s.step}: ${s.title}</span>
+          </div>
+          <p class="text-xs text-gray-500 mt-1 ml-6">${s.detail}</p>
+          ${s.data && s.data.w2s ? s.data.w2s.map(w => `
+            <p class="text-xs text-gray-600 ml-6 mt-0.5">&bull; ${esc(w.employer || '?')} — ${esc(w.employee || '?')}: wages ${w.wages || '?'}, withheld ${w.withheld || '?'}</p>
+          `).join('') : ''}
+        </div>`;
+    }).join('');
+
+    // Missing
+    const missing = data.missing || [];
+    const missingSection = document.getElementById('wizard-missing-section');
+    if (missing.length > 0) {
+      missingSection.style.display = '';
+      document.getElementById('wizard-missing').innerHTML = missing.map(m => `
+        <div class="flex items-center gap-2 p-2 rounded bg-yellow-900/20 border border-yellow-800/30">
+          <span class="text-yellow-400">&#9888;</span>
+          <span class="text-sm text-yellow-300">${esc(m)}</span>
+          <button onclick="showTab('documents')" class="text-xs text-oc-500 hover:text-oc-400 ml-auto">Upload &rarr;</button>
+        </div>
+      `).join('');
+    } else {
+      missingSection.style.display = 'none';
+    }
+
+    // Summary
+    const sum = data.summary || {};
+    document.getElementById('wizard-summary').innerHTML = `
+      <div class="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
+        <div class="flex justify-between"><span class="text-gray-500">Gross Income:</span><span class="text-gray-300">${sum.gross_income || '--'}</span></div>
+        <div class="flex justify-between"><span class="text-gray-500">Business Deductions:</span><span class="text-gray-300">-${sum.business_deductions || '--'}</span></div>
+        <div class="flex justify-between"><span class="text-gray-500">AGI:</span><span class="text-gray-300">${sum.agi || '--'}</span></div>
+        <div class="flex justify-between"><span class="text-gray-500">${(sum.deduction_type||'standard').charAt(0).toUpperCase()+(sum.deduction_type||'standard').slice(1)} Deduction:</span><span class="text-gray-300">-${sum.deduction || '--'}</span></div>
+        <div class="flex justify-between"><span class="text-gray-500">Taxable Income:</span><span class="text-white font-medium">${sum.taxable_income || '--'}</span></div>
+        <div class="flex justify-between"><span class="text-gray-500">Estimated Tax:</span><span class="text-gray-300">${sum.estimated_tax || '--'}</span></div>
+        <div class="flex justify-between"><span class="text-gray-500">Withheld:</span><span class="text-gray-300">-${sum.withheld || '--'}</span></div>
+        <div class="flex justify-between border-t border-gray-700 pt-2">
+          <span class="text-gray-400 font-medium">Result:</span>
+          <span class="font-semibold ${sum.estimated_owed && !sum.estimated_owed.startsWith('-') && !sum.refund_or_owe?.startsWith('Refund') ? 'text-red-400' : 'text-green-400'}">${sum.refund_or_owe || '--'}</span>
+        </div>
+      </div>
+      ${data.bracket_warning ? `<p class="text-xs text-yellow-400 mt-3">&#9888; ${esc(data.bracket_warning)}</p>` : ''}`;
+  } catch(e) { console.log('wizard:', e); }
+}
+
+function fmtDollars(n) { return '$' + Math.abs(n).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
 
 initYearSelector();
 

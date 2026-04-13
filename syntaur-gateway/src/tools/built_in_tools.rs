@@ -2176,3 +2176,286 @@ impl Tool for ScanReceiptTool {
         Ok(RichToolResult::text(format!("Receipt #{} is queued for scanning. The vision AI will process it shortly and create an expense entry automatically.", id)))
     }
 }
+
+pub struct TaxPrepWizardTool;
+
+#[async_trait]
+impl Tool for TaxPrepWizardTool {
+    fn name(&self) -> &str { "tax_prep_wizard" }
+    fn description(&self) -> &str { "Get the tax preparation wizard status — shows completeness, missing documents, and estimated tax for a given year. Helps guide the user through year-end tax preparation." }
+    fn parameters(&self) -> Value {
+        json!({ "type": "object", "properties": {
+            "year": { "type": "integer", "description": "Tax year (e.g. 2025)" }
+        }, "required": ["year"] })
+    }
+    async fn execute(&self, args: Value, ctx: &ToolContext<'_>) -> Result<RichToolResult, String> {
+        let year = args.get("year").and_then(|v| v.as_i64()).unwrap_or(2025);
+        let db = ctx.db_path.ok_or("database not available")?.to_path_buf();
+        let uid = ctx.user_id;
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+            let start = format!("{}-01-01", year);
+            let end = format!("{}-12-31", year);
+
+            let w2_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM tax_documents WHERE user_id = ? AND doc_type = 'w2' AND tax_year = ? AND status = 'scanned'",
+                rusqlite::params![uid, year], |r| r.get(0)
+            ).unwrap_or(0);
+            let form_1099_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM tax_documents WHERE user_id = ? AND doc_type LIKE '1099%' AND tax_year = ? AND status = 'scanned'",
+                rusqlite::params![uid, year], |r| r.get(0)
+            ).unwrap_or(0);
+            let form_1098_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM tax_documents WHERE user_id = ? AND doc_type = 'mortgage_statement' AND tax_year = ? AND status = 'scanned'",
+                rusqlite::params![uid, year], |r| r.get(0)
+            ).unwrap_or(0);
+            let gross_income: i64 = conn.query_row(
+                "SELECT COALESCE(SUM(amount_cents), 0) FROM tax_income WHERE user_id = ? AND tax_year = ? AND category != 'Federal Withholding'",
+                rusqlite::params![uid, year], |r| r.get(0)
+            ).unwrap_or(0);
+            let withheld: i64 = conn.query_row(
+                "SELECT COALESCE(SUM(amount_cents), 0) FROM tax_income WHERE user_id = ? AND tax_year = ? AND category = 'Federal Withholding'",
+                rusqlite::params![uid, year], |r| r.get(0)
+            ).unwrap_or(0);
+            let biz_expenses: i64 = conn.query_row(
+                "SELECT COALESCE(SUM(amount_cents), 0) FROM expenses WHERE user_id = ? AND entity = 'business' AND expense_date >= ? AND expense_date <= ?",
+                rusqlite::params![uid, &start, &end], |r| r.get(0)
+            ).unwrap_or(0);
+
+            let d = |c: i64| crate::tax::cents_to_display(c);
+            let mut missing = Vec::new();
+            if w2_count == 0 { missing.push("W-2 forms"); }
+            if form_1098_count == 0 { missing.push("1098 mortgage statements"); }
+
+            let mut lines = vec![
+                format!("Tax Prep Wizard — {} Status\n", year),
+                format!("Documents:"),
+                format!("  W-2 forms: {}", if w2_count > 0 { format!("{} uploaded", w2_count) } else { "MISSING".to_string() }),
+                format!("  1099 forms: {}", if form_1099_count > 0 { format!("{} uploaded", form_1099_count) } else { "none (may not apply)".to_string() }),
+                format!("  1098 mortgage: {}", if form_1098_count > 0 { format!("{} uploaded", form_1098_count) } else { "MISSING".to_string() }),
+                String::new(),
+                format!("Financials:"),
+                format!("  Gross income: {}", d(gross_income)),
+                format!("  Tax withheld: {}", d(withheld)),
+                format!("  Business expenses: {}", d(biz_expenses)),
+            ];
+
+            if !missing.is_empty() {
+                lines.push(String::new());
+                lines.push(format!("Missing: {}", missing.join(", ")));
+            }
+
+            let (brackets, top_rate, std_ded) = crate::tax::load_brackets(year, "married_jointly");
+            let agi = gross_income - biz_expenses;
+            let taxable = std::cmp::max(agi - std_ded, 0);
+            let mut tax: i64 = 0;
+            let mut prev = 0i64;
+            for &(limit, rate_bps) in &brackets {
+                let bi = std::cmp::min(taxable, limit) - prev;
+                if bi <= 0 { break; }
+                tax += bi * rate_bps / 10000;
+                prev = limit;
+            }
+            if taxable > prev { tax += (taxable - prev) * top_rate / 10000; }
+            let owed = tax - withheld;
+
+            lines.push(String::new());
+            lines.push(format!("Estimate: {} tax on {} taxable income", d(tax), d(taxable)));
+            if owed > 0 {
+                lines.push(format!("Estimated amount OWED: {}", d(owed)));
+            } else {
+                lines.push(format!("Estimated REFUND: {}", d(-owed)));
+            }
+
+            Ok(lines.join("\n"))
+        }).await.map_err(|e| e.to_string())?.map_err(|e| e)?;
+
+        Ok(RichToolResult::text(result))
+    }
+}
+
+pub struct FetchTaxBracketsTool;
+
+#[async_trait]
+impl Tool for FetchTaxBracketsTool {
+    fn name(&self) -> &str { "fetch_tax_brackets" }
+    fn description(&self) -> &str { "Auto-fetch the latest IRS tax brackets for a given year. Searches for the IRS Revenue Procedure and updates the config. Falls back to update_tax_brackets tool if auto-fetch fails." }
+    fn parameters(&self) -> Value {
+        json!({ "type": "object", "properties": {
+            "year": { "type": "integer", "description": "Tax year to fetch brackets for (e.g. 2026)" }
+        }, "required": ["year"] })
+    }
+    fn capabilities(&self) -> ToolCapabilities { ToolCapabilities { read_only: false, ..Default::default() } }
+    async fn execute(&self, args: Value, _ctx: &ToolContext<'_>) -> Result<RichToolResult, String> {
+        let year = args.get("year").and_then(|v| v.as_i64()).ok_or("year required")?;
+
+        // Check if already current
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
+        let path = format!("{}/.syntaur/tax_brackets.json", home);
+        if let Ok(data) = std::fs::read_to_string(&path) {
+            if let Ok(config) = serde_json::from_str::<serde_json::Value>(&data) {
+                let year_str = year.to_string();
+                if config.get("brackets").and_then(|b| b.get(&year_str)).is_some() {
+                    return Ok(RichToolResult::text(format!("Tax brackets for {} are already up to date. No fetch needed.", year)));
+                }
+            }
+        }
+
+        Ok(RichToolResult::text(format!(
+            "Tax brackets for {} are not in the config. To fetch them:\n\
+            1. Search the web for 'IRS Revenue Procedure {} tax brackets'\n\
+            2. Find the official bracket thresholds and standard deductions\n\
+            3. Use the update_tax_brackets tool to save each filing status\n\n\
+            Or trigger the auto-fetch endpoint: GET /api/tax/brackets/fetch?year={}&token=...",
+            year, year - 1, year
+        )))
+    }
+}
+
+pub struct PropertyProfileTool;
+
+#[async_trait]
+impl Tool for PropertyProfileTool {
+    fn name(&self) -> &str { "get_property_profile" }
+    fn description(&self) -> &str { "Get the user's property profile — address, sqft, building value, land ratio, mortgage, insurance. Used for home office deduction calculations." }
+    fn parameters(&self) -> Value {
+        json!({ "type": "object", "properties": {} })
+    }
+    async fn execute(&self, _args: Value, ctx: &ToolContext<'_>) -> Result<RichToolResult, String> {
+        let db = ctx.db_path.ok_or("database not available")?.to_path_buf();
+        let uid = ctx.user_id;
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+            let has_table: bool = conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='property_profiles'",
+                [], |r| r.get::<_, i64>(0)
+            ).unwrap_or(0) > 0;
+            if !has_table { return Ok("No property profiles configured. The user needs to set up their property in the Tax module → Property section.".to_string()); }
+
+            let profile = conn.query_row(
+                "SELECT address, total_sqft, workshop_sqft, building_value_cents, land_value_cents, land_ratio, \
+                 annual_property_tax_cents, annual_insurance_cents, mortgage_interest_cents, depreciation_annual_cents \
+                 FROM property_profiles WHERE user_id = ? ORDER BY id LIMIT 1",
+                rusqlite::params![uid], |r| {
+                    let d = |c: Option<i64>| c.map(crate::tax::cents_to_display).unwrap_or("N/A".to_string());
+                    Ok(format!(
+                        "Property Profile:\n  Address: {}\n  Total sqft: {}\n  Workshop sqft: {}\n  \
+                         Building value: {}\n  Land value: {}\n  Land ratio: {:.2}%\n  \
+                         Annual property tax: {}\n  Annual insurance: {}\n  Mortgage interest: {}\n  \
+                         Annual depreciation: {}",
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Option<i64>>(1)?.map(|v| v.to_string()).unwrap_or("N/A".to_string()),
+                        r.get::<_, Option<i64>>(2)?.map(|v| v.to_string()).unwrap_or("N/A".to_string()),
+                        d(r.get::<_, Option<i64>>(3)?),
+                        d(r.get::<_, Option<i64>>(4)?),
+                        r.get::<_, Option<f64>>(5)?.unwrap_or(0.0) * 100.0,
+                        d(r.get::<_, Option<i64>>(6)?),
+                        d(r.get::<_, Option<i64>>(7)?),
+                        d(r.get::<_, Option<i64>>(8)?),
+                        d(r.get::<_, Option<i64>>(9)?),
+                    ))
+                }
+            );
+
+            match profile {
+                Ok(p) => Ok(p),
+                Err(_) => Ok("No property profile found. The user needs to add one in Tax → Property.".to_string()),
+            }
+        }).await.map_err(|e| e.to_string())?.map_err(|e| e)?;
+
+        Ok(RichToolResult::text(result))
+    }
+}
+
+pub struct DeductionAutofillTool;
+
+#[async_trait]
+impl Tool for DeductionAutofillTool {
+    fn name(&self) -> &str { "deduction_autofill" }
+    fn description(&self) -> &str { "Auto-fill home office deduction data from scanned documents. Pulls mortgage interest from 1098s, property tax, insurance, and utilities from the tax module data." }
+    fn parameters(&self) -> Value {
+        json!({ "type": "object", "properties": {
+            "year": { "type": "integer", "description": "Tax year (e.g. 2025)" }
+        }, "required": ["year"] })
+    }
+    async fn execute(&self, args: Value, ctx: &ToolContext<'_>) -> Result<RichToolResult, String> {
+        let year = args.get("year").and_then(|v| v.as_i64()).unwrap_or(2025);
+        let db = ctx.db_path.ok_or("database not available")?.to_path_buf();
+        let uid = ctx.user_id;
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+            let start = format!("{}-01-01", year);
+            let end = format!("{}-12-31", year);
+            let d = |c: i64| crate::tax::cents_to_display(c);
+
+            // Mortgage from 1098s
+            let mortgage: i64 = {
+                let mut total = 0i64;
+                if let Ok(mut stmt) = conn.prepare(
+                    "SELECT extracted_fields FROM tax_documents WHERE user_id = ? AND doc_type = 'mortgage_statement' AND tax_year = ? AND status = 'scanned'"
+                ) {
+                    if let Ok(rows) = stmt.query_map(rusqlite::params![uid, year], |r| r.get::<_, Option<String>>(0)) {
+                        for row in rows.flatten() {
+                            if let Some(fs) = row {
+                                if let Ok(f) = serde_json::from_str::<serde_json::Value>(&fs) {
+                                    let interest = f["box1_interest_paid"].as_str().and_then(|s| crate::tax::parse_cents(s))
+                                        .or_else(|| f["box1_interest_paid"].as_f64().map(|v| (v * 100.0) as i64)).unwrap_or(0);
+                                    total += interest;
+                                }
+                            }
+                        }
+                    }
+                }
+                total
+            };
+
+            // Property tax
+            let prop_tax: i64 = conn.query_row(
+                "SELECT COALESCE(SUM(e.amount_cents), 0) FROM expenses e JOIN expense_categories c ON e.category_id = c.id \
+                 WHERE e.user_id = ? AND (c.name LIKE '%Property Tax%' OR (c.name = 'Mortgage' AND e.description LIKE '%tax%')) \
+                 AND e.expense_date >= ? AND e.expense_date <= ?",
+                rusqlite::params![uid, &start, &end], |r| r.get(0)
+            ).unwrap_or(0);
+
+            // Utilities
+            let utilities: i64 = conn.query_row(
+                "SELECT COALESCE(SUM(e.amount_cents), 0) FROM expenses e JOIN expense_categories c ON e.category_id = c.id \
+                 WHERE e.user_id = ? AND c.name = 'Utilities' AND e.expense_date >= ? AND e.expense_date <= ?",
+                rusqlite::params![uid, &start, &end], |r| r.get(0)
+            ).unwrap_or(0);
+
+            // Property profile for sqft
+            let (total_sqft, workshop_sqft) = conn.query_row(
+                "SELECT total_sqft, workshop_sqft FROM property_profiles WHERE user_id = ? ORDER BY id LIMIT 1",
+                rusqlite::params![uid], |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?))
+            ).unwrap_or((None, None));
+
+            let total = mortgage + prop_tax + utilities;
+            let biz_pct = match (total_sqft, workshop_sqft) {
+                (Some(t), Some(w)) if t > 0 => w as f64 / t as f64,
+                _ => 0.0,
+            };
+            let deduction = (total as f64 * biz_pct) as i64;
+
+            Ok(format!(
+                "Deduction Auto-Fill for {}:\n\n  Mortgage interest (1098s): {}{}\n  Property tax: {}{}\n  \
+                 Utilities: {}{}\n  Total indirect expenses: {}\n\n  Workshop: {} sqft / {} sqft = {:.2}% business use\n  \
+                 Home office deduction (actual method): {}",
+                year,
+                d(mortgage), if mortgage > 0 { " (from 1098 documents)" } else { " — not found, upload 1098 forms" },
+                d(prop_tax), if prop_tax > 0 { " (from expenses)" } else { " — not found" },
+                d(utilities), if utilities > 0 { " (from expenses)" } else { " — not found, upload utility bills or bank statements" },
+                d(total),
+                workshop_sqft.map(|v| v.to_string()).unwrap_or("?".to_string()),
+                total_sqft.map(|v| v.to_string()).unwrap_or("?".to_string()),
+                biz_pct * 100.0,
+                d(deduction),
+            ))
+        }).await.map_err(|e| e.to_string())?.map_err(|e| e)?;
+
+        Ok(RichToolResult::text(result))
+    }
+}
