@@ -1998,11 +1998,11 @@ impl Tool for EstimateTaxTool {
                 rusqlite::params![uid, &start, &end], |r| r.get(0)
             ).unwrap_or(0);
 
-            // Standard deduction (2025)
+            // Standard deduction (2025, IRS Rev. Proc. 2024-40)
             let standard_deduction: i64 = match status_owned.as_str() {
-                "married_jointly" => 3000000, // $30,000
-                "head_of_household" => 2250000,
-                _ => 1500000, // single / married_separately
+                "married_jointly" => 3020000,   // $30,200
+                "head_of_household" => 2265000, // $22,650
+                _ => 1510000,                    // $15,100 single / married_separately
             };
 
             let deduction = std::cmp::max(standard_deduction, itemized);
@@ -2080,15 +2080,15 @@ impl Tool for EstimateTaxTool {
 }
 
 fn calculate_tax_mfj(taxable_cents: i64) -> i64 {
-    // 2025 MFJ brackets (cents)
+    // 2025 MFJ brackets (IRS Rev. Proc. 2024-40)
     let brackets: &[(i64, i64)] = &[
-        (2350000, 1000),   // 10% up to $23,500
-        (9555000, 1200),   // 12% up to $95,550
-        (20160000, 2200),  // 22% up to $201,600
-        (38350000, 2400),  // 24% up to $383,500
-        (48700000, 3200),  // 32% up to $487,000
-        (73160000, 3500),  // 35% up to $731,600
-        (i64::MAX, 3700),  // 37% above
+        (2385000, 1000),    // 10% up to $23,850
+        (9695000, 1200),    // 12% up to $96,950
+        (20670000, 2200),   // 22% up to $206,700
+        (39460000, 2400),   // 24% up to $394,600
+        (50105000, 3200),   // 32% up to $501,050
+        (75160000, 3500),   // 35% up to $751,600
+        (i64::MAX, 3700),   // 37% above
     ];
     let mut tax: i64 = 0;
     let mut prev = 0i64;
@@ -2102,14 +2102,15 @@ fn calculate_tax_mfj(taxable_cents: i64) -> i64 {
 }
 
 fn calculate_tax_single(taxable_cents: i64) -> i64 {
+    // 2025 Single brackets (IRS Rev. Proc. 2024-40)
     let brackets: &[(i64, i64)] = &[
-        (1175000, 1000),
-        (4782500, 1200),
-        (10080000, 2200),
-        (19175000, 2400),
-        (24350000, 3200),
-        (60950000, 3500),
-        (i64::MAX, 3700),
+        (1192500, 1000),    // 10% up to $11,925
+        (4847500, 1200),    // 12% up to $48,475
+        (10335000, 2200),   // 22% up to $103,350
+        (19730000, 2400),   // 24% up to $197,300
+        (25052500, 3200),   // 32% up to $250,525
+        (62660000, 3500),   // 35% up to $626,600
+        (i64::MAX, 3700),   // 37% above
     ];
     let mut tax: i64 = 0;
     let mut prev = 0i64;
