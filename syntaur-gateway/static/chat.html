@@ -589,7 +589,7 @@ async function addPendingFile(file) {
   const isImage = file.type.startsWith('image/') || file.type === 'application/pdf';
   const couldBeFinancial = isImage && file.size < 10 * 1024 * 1024;
 
-  if (couldBeFinancial) {
+  if (couldBeFinancial && localStorage.getItem('syntaur_skip_doc_detect') !== '1') {
     // Show detection prompt — let user decide what to do
     showDocumentDetection(file);
     return;
@@ -694,6 +694,7 @@ async function showDocumentDetection(file) {
 
     if (isFinancial && moduleLocked) {
       // Financial doc detected but module is locked — show classification + trial prompt
+      const dismissCount = parseInt(localStorage.getItem('syntaur_doc_dismiss_count') || '0');
       contentEl.innerHTML = `
         <p class="text-sm text-gray-300">I noticed this looks like a <strong class="text-white">${esc(label)}</strong>.</p>
         <p class="text-xs text-gray-500 mt-1">File saved. Unlock the Tax Module to scan and track it automatically.</p>
@@ -701,12 +702,10 @@ async function showDocumentDetection(file) {
           <button onclick="startTrialFromChat(this)" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-3 py-1.5 rounded-lg transition-colors">
             Start Free 3-Day Trial
           </button>
-          <button onclick="this.closest('.flex.gap-4').querySelector('.doc-dismiss')?.classList.remove('hidden');this.parentElement.remove()" class="text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 px-3 py-1.5 rounded-lg transition-colors">
-            Not now
+          <button onclick="dismissDocDetect(this)" class="text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 px-3 py-1.5 rounded-lg transition-colors">
+            No thanks
           </button>
-        </div>
-        <div class="doc-dismiss hidden mt-2">
-          <p class="text-xs text-gray-500">File saved to your uploads.</p>
+          ${dismissCount >= 1 ? `<button onclick="disableDocDetect(this)" class="text-xs text-gray-600 hover:text-gray-400 px-2 py-1.5 transition-colors">Don't remind me again</button>` : ''}
         </div>`;
     } else if (isFinancial) {
       // Financial document detected + module unlocked — show prompt with options
@@ -716,6 +715,7 @@ async function showDocumentDetection(file) {
         : isStatement ? 'Extracting transactions...'
         : 'Extracting fields...';
 
+      const dismissCount2 = parseInt(localStorage.getItem('syntaur_doc_dismiss_count') || '0');
       contentEl.innerHTML = `
         <p class="text-sm text-gray-300">I noticed this looks like a <strong class="text-white">${esc(label)}</strong>.</p>
         <p class="text-xs text-gray-500 mt-1">${processingMsg}</p>
@@ -723,12 +723,10 @@ async function showDocumentDetection(file) {
           <a href="/tax" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-3 py-1.5 rounded-lg transition-colors inline-flex items-center gap-1">
             Open Tax Module &#8594;
           </a>
-          <button onclick="this.closest('.flex.gap-4').querySelector('.doc-dismiss')?.classList.remove('hidden');this.parentElement.remove()" class="text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 px-3 py-1.5 rounded-lg transition-colors">
-            Got it, thanks
+          <button onclick="dismissDocDetect(this)" class="text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 px-3 py-1.5 rounded-lg transition-colors">
+            Got it
           </button>
-        </div>
-        <div class="doc-dismiss hidden mt-2">
-          <p class="text-xs text-green-500">Saved to Tax Module. You can review it anytime.</p>
+          ${dismissCount2 >= 1 ? `<button onclick="disableDocDetect(this)" class="text-xs text-gray-600 hover:text-gray-400 px-2 py-1.5 transition-colors">Don't remind me again</button>` : ''}
         </div>`;
 
       // If it's a receipt, poll for scan results and update inline
@@ -781,6 +779,23 @@ async function pollReceiptInline(receiptId, el, previewUrl) {
     setTimeout(poll, 2500);
   };
   setTimeout(poll, 3000);
+}
+
+function dismissDocDetect(btn) {
+  const count = parseInt(localStorage.getItem('syntaur_doc_dismiss_count') || '0') + 1;
+  localStorage.setItem('syntaur_doc_dismiss_count', count);
+  const msg = btn.closest('.flex.gap-4');
+  if (msg) msg.remove();
+}
+
+function disableDocDetect(btn) {
+  localStorage.setItem('syntaur_skip_doc_detect', '1');
+  const msg = btn.closest('.flex.gap-4');
+  if (msg) {
+    const content = msg.querySelector('.flex-1');
+    if (content) content.innerHTML = '<p class="text-xs text-gray-500 p-3">Document detection disabled. You can re-enable it in Settings.</p>';
+    setTimeout(() => msg.remove(), 2000);
+  }
 }
 
 async function startTrialFromChat(btn) {
