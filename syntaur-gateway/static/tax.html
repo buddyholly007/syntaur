@@ -73,6 +73,8 @@
       <button onclick="showTab('receipts')" class="tab text-gray-400" id="tab-btn-receipts">Receipts</button>
       <button onclick="showTab('documents')" class="tab text-gray-400" id="tab-btn-documents">Documents</button>
       <button onclick="showTab('property')" class="tab text-gray-400" id="tab-btn-property">Property</button>
+      <button onclick="showTab('connections')" class="tab text-gray-400" id="tab-btn-connections">Connections</button>
+      <button onclick="showTab('investments')" class="tab text-gray-400" id="tab-btn-investments">Investments</button>
       <button onclick="showTab('wizard')" class="tab text-gray-400" id="tab-btn-wizard">Wizard</button>
       <select id="year-select" class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-sm text-gray-300 outline-none" onchange="changeYear()"></select>
       <a href="/" class="text-gray-500 hover:text-gray-300">Home</a>
@@ -395,6 +397,103 @@
     </div>
   </div>
 
+  <!-- Connections tab -->
+  <div id="tab-connections" class="hidden">
+    <div class="card mb-6">
+      <h3 class="font-medium mb-3">Connect Bank Account</h3>
+      <p class="text-xs text-gray-500 mb-4">Link your bank or credit card via Plaid for automatic transaction imports. Your credentials are never stored — Plaid handles authentication directly with your bank.</p>
+      <div class="flex items-center gap-3">
+        <button onclick="launchPlaidLink()" class="btn-primary" id="plaid-link-btn">Link Bank Account</button>
+        <span id="plaid-status" class="text-xs text-gray-500"></span>
+      </div>
+    </div>
+    <div class="card mb-6">
+      <h3 class="font-medium mb-3">Connect via SimpleFIN</h3>
+      <p class="text-xs text-gray-500 mb-4">Alternative to Plaid ($15/yr). Get a setup token from <a href="https://beta-bridge.simplefin.org" target="_blank" class="text-oc-500 hover:text-oc-400">SimpleFIN Bridge</a>, then paste it here.</p>
+      <div class="flex items-center gap-3">
+        <input type="text" id="simplefin-token" class="input flex-1" placeholder="Paste SimpleFIN setup token...">
+        <button onclick="connectSimpleFIN()" class="btn-primary">Connect</button>
+      </div>
+      <span id="simplefin-status" class="text-xs text-gray-500 mt-2 block"></span>
+    </div>
+    <div class="card mb-6">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="font-medium">Connected Accounts</h3>
+        <button onclick="loadConnections()" class="text-xs text-oc-500 hover:text-oc-400">Refresh</button>
+      </div>
+      <div id="connections-list" class="space-y-3">
+        <p class="text-xs text-gray-600">No accounts connected yet.</p>
+      </div>
+    </div>
+    <div class="card">
+      <h3 class="font-medium mb-3">Email Receipt Scanning</h3>
+      <p class="text-xs text-gray-500 mb-4">Connect Gmail to automatically find and import receipts from purchase confirmation emails.</p>
+      <div class="flex items-center gap-3">
+        <button onclick="connectGmail()" class="btn-primary">Connect Gmail</button>
+        <span id="gmail-status" class="text-xs text-gray-500"></span>
+      </div>
+      <div id="email-connections-list" class="mt-4 space-y-2"></div>
+    </div>
+  </div>
+
+  <!-- Investments tab -->
+  <div id="tab-investments" class="hidden">
+    <div class="card mb-6">
+      <h3 class="font-medium mb-3">Connect Brokerage</h3>
+      <p class="text-xs text-gray-500 mb-4">Connect your Alpaca account to import trades, dividends, and portfolio data.</p>
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="label">API Key</label><input type="text" id="alpaca-key" class="input" placeholder="PK..."></div>
+        <div><label class="label">API Secret</label><input type="password" id="alpaca-secret" class="input" placeholder="Secret key"></div>
+        <div><label class="label">Nickname</label><input type="text" id="alpaca-nickname" class="input" placeholder="e.g. Main Trading"></div>
+        <div><label class="label">Environment</label><select id="alpaca-env" class="input"><option value="https://api.alpaca.markets">Live</option><option value="https://paper-api.alpaca.markets">Paper</option></select></div>
+      </div>
+      <div class="mt-3 flex items-center gap-3">
+        <button onclick="connectAlpaca()" class="btn-primary">Connect Alpaca</button>
+        <span id="alpaca-status" class="text-xs text-gray-500"></span>
+      </div>
+    </div>
+    <div class="card mb-6">
+      <h3 class="font-medium mb-3">Connect Crypto Exchange</h3>
+      <p class="text-xs text-gray-500 mb-4">Import crypto trades from Coinbase for capital gains tracking.</p>
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="label">API Key</label><input type="text" id="coinbase-key" class="input" placeholder="API key"></div>
+        <div><label class="label">API Secret</label><input type="password" id="coinbase-secret" class="input" placeholder="API secret"></div>
+      </div>
+      <div class="mt-3 flex items-center gap-3">
+        <button onclick="connectCoinbase()" class="btn-primary">Connect Coinbase</button>
+        <span id="coinbase-status" class="text-xs text-gray-500"></span>
+      </div>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+      <div class="card"><p class="text-xs text-gray-500 uppercase">Short-Term Gains</p><p class="text-2xl font-semibold mt-1" id="inv-short-term">--</p></div>
+      <div class="card"><p class="text-xs text-gray-500 uppercase">Long-Term Gains</p><p class="text-2xl font-semibold mt-1 text-oc-500" id="inv-long-term">--</p></div>
+      <div class="card"><p class="text-xs text-gray-500 uppercase">Dividends</p><p class="text-2xl font-semibold mt-1 text-green-400" id="inv-dividends">--</p></div>
+      <div class="card"><p class="text-xs text-gray-500 uppercase">Net P/L</p><p class="text-2xl font-semibold mt-1" id="inv-net-pl">--</p></div>
+    </div>
+    <div class="card mb-6">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="font-medium">Connected Accounts</h3>
+        <button onclick="loadInvestmentAccounts()" class="text-xs text-oc-500 hover:text-oc-400">Refresh</button>
+      </div>
+      <div id="inv-accounts-list" class="space-y-2"><p class="text-xs text-gray-600">No brokerage accounts connected yet.</p></div>
+    </div>
+    <div class="card mb-6">
+      <div class="flex items-center justify-between mb-4"><h3 class="font-medium">Holdings</h3><span class="text-xs text-gray-500" id="holdings-as-of">--</span></div>
+      <div id="holdings-list" class="space-y-1"><p class="text-xs text-gray-600">Connect a brokerage to see holdings.</p></div>
+    </div>
+    <div class="card">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="font-medium">Investment Transactions</h3>
+        <div class="flex items-center gap-2">
+          <select id="inv-filter-type" class="input w-auto" onchange="loadInvestmentTransactions()"><option value="">All</option><option value="fill">Trades</option><option value="dividend">Dividends</option></select>
+          <select id="inv-filter-broker" class="input w-auto" onchange="loadInvestmentTransactions()"><option value="">All</option><option value="alpaca">Alpaca</option><option value="coinbase">Coinbase</option></select>
+          <span class="text-xs text-gray-500" id="inv-txn-count">--</span>
+        </div>
+      </div>
+      <div id="inv-txn-list" class="space-y-1 max-h-[500px] overflow-y-auto"><p class="text-xs text-gray-600">No transactions yet.</p></div>
+    </div>
+  </div>
+
   </div><!-- end left panel -->
 
   <!-- RIGHT: AI Chat -->
@@ -514,8 +613,9 @@ function authFetch(url, opts = {}) {
 }
 
 function showTab(name) {
-  ['overview', 'expenses', 'receipts', 'documents', 'property', 'wizard'].forEach(t => {
-    document.getElementById('tab-' + t).classList.toggle('hidden', t !== name);
+  ['overview', 'expenses', 'receipts', 'documents', 'property', 'connections', 'investments', 'wizard'].forEach(t => {
+    const el = document.getElementById('tab-' + t);
+    if (el) el.classList.toggle('hidden', t !== name);
     const btn = document.getElementById('tab-btn-' + t);
     if (btn) btn.className = 'tab ' + (t === name ? 'text-white' : 'text-gray-400 hover:text-gray-300');
   });
@@ -523,6 +623,8 @@ function showTab(name) {
   if (name === 'receipts') loadReceipts();
   if (name === 'documents') loadDocuments();
   if (name === 'property') loadPropertyProfile();
+  if (name === 'connections') loadConnections();
+  if (name === 'investments') { loadInvestmentAccounts(); loadInvestmentSummary(); loadInvestmentTransactions(); loadHoldings(); }
   if (name === 'wizard') loadWizard();
 }
 
@@ -1433,6 +1535,69 @@ async function loadWizard() {
 }
 
 function fmtDollars(n) { return '$' + Math.abs(n).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+function fmtSignedDollars(cents) { const abs = Math.abs(cents / 100); const f = '$' + abs.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ','); return cents < 0 ? '-' + f : f; }
+
+// ── Financial Connections ──
+async function launchPlaidLink() {
+  const status = document.getElementById('plaid-status');
+  status.textContent = 'Creating link session...';
+  try {
+    const resp = await authFetch('/api/financial/plaid/link-token', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({token}) });
+    const data = await resp.json();
+    if (data.error) { status.textContent = data.error; return; }
+    if (!window.Plaid) { const s=document.createElement('script'); s.src='https://cdn.plaid.com/link/v2/stable/link-initialize.js'; document.head.appendChild(s); await new Promise(r=>s.onload=r); }
+    const handler = window.Plaid.create({
+      token: data.link_token,
+      onSuccess: async (pub_tok, meta) => {
+        status.textContent = 'Linking...';
+        const exResp = await authFetch('/api/financial/plaid/exchange', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({token,public_token:pub_tok,institution:meta.institution}) });
+        const exData = await exResp.json();
+        status.textContent = exData.success ? 'Linked!' : (exData.error||'Failed');
+        if (exData.success) loadConnections();
+      },
+      onExit: (err) => { status.textContent = err ? 'Cancelled' : ''; }
+    });
+    handler.open();
+  } catch(e) { status.textContent = 'Error: '+e.message; }
+}
+
+async function connectSimpleFIN() {
+  const tok=document.getElementById('simplefin-token').value.trim(), status=document.getElementById('simplefin-status');
+  if (!tok) { status.textContent='Paste setup token'; return; }
+  status.textContent='Connecting...';
+  try {
+    const resp=await authFetch('/api/financial/connections',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,provider:'simplefin',setup_token:tok})});
+    const data=await resp.json();
+    status.textContent=data.success?'Connected!':data.error||'Failed'; status.className='text-xs mt-2 block '+(data.success?'text-green-400':'text-red-400');
+    if(data.success){document.getElementById('simplefin-token').value='';loadConnections();}
+  } catch(e){status.textContent='Error: '+e.message;}
+}
+
+async function loadConnections() {
+  try {
+    const [cr,er]=await Promise.all([authFetch(`/api/financial/connections?token=${token}`),authFetch(`/api/financial/email?token=${token}`).catch(()=>null)]);
+    const cd=await cr.json(), conns=cd.connections||[], list=document.getElementById('connections-list');
+    if(!conns.length){list.innerHTML='<p class="text-xs text-gray-600">No accounts connected yet.</p>';}
+    else{list.innerHTML=conns.map(c=>`<div class="p-3 rounded-lg bg-gray-900 border border-gray-700/50 flex items-center justify-between"><div class="flex-1"><div class="flex items-center gap-2"><span class="text-sm font-medium text-gray-300">${esc(c.institution_name||'Unknown')}</span><span class="text-xs px-1.5 py-0.5 rounded ${c.provider==='plaid'?'bg-indigo-900/50 text-indigo-400':'bg-emerald-900/50 text-emerald-400'}">${c.provider}</span><span class="text-xs px-1.5 py-0.5 rounded ${c.status==='active'?'bg-green-900/50 text-green-400':'bg-red-900/50 text-red-400'}">${c.status}</span></div><p class="text-xs text-gray-500 mt-1">${c.last_sync_at?'Synced: '+new Date(c.last_sync_at*1000).toLocaleDateString():'Never synced'}${c.error?' <span class="text-red-400">'+esc(c.error)+'</span>':''}</p></div><div class="flex gap-2 flex-shrink-0 ml-3"><button onclick="syncConn(${c.id})" class="text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 px-2.5 py-1.5 rounded-lg">Sync</button><button onclick="disconnConn(${c.id},'${esc(c.institution_name||'')}')" class="text-xs bg-red-900/30 hover:bg-red-900/50 text-red-400 px-2.5 py-1.5 rounded-lg">Disconnect</button></div></div>`).join('');}
+    if(er){const ed=await er.json(),emails=ed.connections||[],el=document.getElementById('email-connections-list');
+      if(emails.length){el.innerHTML=emails.map(e=>`<div class="flex items-center justify-between p-2 rounded-lg bg-gray-900 border border-gray-700/50"><span class="text-sm text-gray-300">${esc(e.email_address||'Gmail')}</span><div class="flex gap-2"><button onclick="scanEmail(${e.id})" class="text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 px-2 py-1 rounded">Scan</button><button onclick="disconnEmail(${e.id})" class="text-xs text-red-400">Remove</button></div></div>`).join('');}else{el.innerHTML='';}}
+  } catch(e){console.log('connections:',e);}
+}
+async function syncConn(id){try{await authFetch(`/api/financial/connections/${id}/sync`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});loadConnections();}catch(e){alert('Sync failed');}}
+async function disconnConn(id,name){if(!confirm(`Disconnect ${name}?`))return;try{await authFetch(`/api/financial/connections/${id}?token=${token}`,{method:'DELETE'});loadConnections();}catch(e){}}
+async function connectGmail(){const s=document.getElementById('gmail-status');s.textContent='Starting OAuth...';try{const r=await authFetch('/api/financial/email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,provider:'gmail'})});const d=await r.json();if(d.oauth_url){window.open(d.oauth_url,'_blank','width=600,height=700');s.textContent='Complete in popup...';}else{s.textContent=d.error||'Failed';}}catch(e){s.textContent='Error';}}
+async function scanEmail(id){try{await authFetch(`/api/financial/email/${id}/scan`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});loadConnections();}catch(e){}}
+async function disconnEmail(id){if(!confirm('Remove?'))return;try{await authFetch(`/api/financial/email/${id}?token=${token}`,{method:'DELETE'});loadConnections();}catch(e){}}
+
+// ── Investments ──
+async function connectAlpaca(){const k=document.getElementById('alpaca-key').value.trim(),s=document.getElementById('alpaca-secret').value.trim(),st=document.getElementById('alpaca-status');if(!k||!s){st.textContent='Key+secret required';return;}st.textContent='Connecting...';try{const r=await authFetch('/api/financial/investments/accounts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,broker:'alpaca',api_key:k,api_secret:s,base_url:document.getElementById('alpaca-env').value,nickname:document.getElementById('alpaca-nickname').value.trim()||null})});const d=await r.json();st.textContent=d.success?'Connected!':d.error||'Failed';st.className='text-xs '+(d.success?'text-green-400':'text-red-400');if(d.success){document.getElementById('alpaca-key').value='';document.getElementById('alpaca-secret').value='';loadInvestmentAccounts();loadInvestmentSummary();}}catch(e){st.textContent='Error';}}
+async function connectCoinbase(){const k=document.getElementById('coinbase-key').value.trim(),s=document.getElementById('coinbase-secret').value.trim(),st=document.getElementById('coinbase-status');if(!k||!s){st.textContent='Key+secret required';return;}st.textContent='Connecting...';try{const r=await authFetch('/api/financial/investments/accounts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,broker:'coinbase',api_key:k,api_secret:s})});const d=await r.json();st.textContent=d.success?'Connected!':d.error||'Failed';st.className='text-xs '+(d.success?'text-green-400':'text-red-400');if(d.success){document.getElementById('coinbase-key').value='';document.getElementById('coinbase-secret').value='';loadInvestmentAccounts();}}catch(e){st.textContent='Error';}}
+async function loadInvestmentAccounts(){try{const r=await authFetch(`/api/financial/investments/accounts?token=${token}`);const d=await r.json();const a=d.accounts||[],l=document.getElementById('inv-accounts-list');if(!a.length){l.innerHTML='<p class="text-xs text-gray-600">No brokerage accounts connected.</p>';return;}l.innerHTML=a.map(a=>`<div class="flex items-center justify-between p-3 rounded-lg bg-gray-900 border border-gray-700/50"><div class="flex-1"><div class="flex items-center gap-2"><span class="text-sm font-medium text-gray-300">${esc(a.nickname||a.broker)}</span><span class="text-xs px-1.5 py-0.5 rounded ${a.broker==='alpaca'?'bg-yellow-900/50 text-yellow-400':'bg-blue-900/50 text-blue-400'}">${a.broker}</span></div><p class="text-xs text-gray-500 mt-0.5">${a.last_sync_at?'Synced: '+new Date(a.last_sync_at*1000).toLocaleDateString():'Never synced'}</p></div><div class="flex gap-2 ml-3"><button onclick="syncInv(${a.id})" class="text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 px-2.5 py-1.5 rounded-lg">Sync</button><button onclick="disconnInv(${a.id},'${esc(a.nickname||a.broker)}')" class="text-xs bg-red-900/30 hover:bg-red-900/50 text-red-400 px-2.5 py-1.5 rounded-lg">Remove</button></div></div>`).join('');}catch(e){console.log('inv:',e);}}
+async function syncInv(id){try{const r=await authFetch(`/api/financial/investments/accounts/${id}/sync`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});const d=await r.json();if(d.success){loadInvestmentAccounts();loadInvestmentSummary();loadInvestmentTransactions();loadHoldings();}else{alert(d.error||'Failed');}}catch(e){alert('Error');}}
+async function disconnInv(id,name){if(!confirm(`Remove ${name}?`))return;try{await authFetch(`/api/financial/investments/accounts/${id}?token=${token}`,{method:'DELETE'});loadInvestmentAccounts();loadInvestmentSummary();}catch(e){}}
+async function loadInvestmentSummary(){try{const r=await authFetch(`/api/financial/investments?token=${token}&year=${selectedYear}`);const d=await r.json();document.getElementById('inv-short-term').textContent=fmtSignedDollars(d.short_term_cents||0);document.getElementById('inv-long-term').textContent=fmtSignedDollars(d.long_term_cents||0);document.getElementById('inv-dividends').textContent=fmtDollars((d.dividends_cents||0)/100);document.getElementById('inv-net-pl').textContent=fmtSignedDollars(d.net_realized_cents||0);}catch(e){console.log('inv sum:',e);}}
+async function loadInvestmentTransactions(){try{let url=`/api/financial/investments/transactions?token=${token}&start=${yearStart()}&end=${yearEnd()}`;const tf=document.getElementById('inv-filter-type')?.value;const bf=document.getElementById('inv-filter-broker')?.value;if(tf)url+=`&activity_type=${tf}`;if(bf)url+=`&broker=${bf}`;const r=await authFetch(url);const d=await r.json();const txns=d.transactions||[];document.getElementById('inv-txn-count').textContent=txns.length+' txns';const l=document.getElementById('inv-txn-list');if(!txns.length){l.innerHTML='<p class="text-xs text-gray-600">No transactions found.</p>';return;}l.innerHTML=txns.map(t=>{const sc=t.side==='buy'?'text-green-400':t.side==='sell'?'text-red-400':'text-gray-400';const pl=t.realized_pl_cents!=null?`<span class="${t.realized_pl_cents>=0?'text-green-400':'text-red-400'}">${fmtSignedDollars(t.realized_pl_cents)}</span>`:'';return`<div class="flex items-center justify-between py-1.5 border-b border-gray-700/30 text-xs"><div class="flex-1"><div class="flex items-center gap-2"><span class="text-gray-400">${t.transaction_date}</span><span class="px-1.5 py-0.5 rounded bg-gray-800 text-gray-400">${t.activity_type}</span>${t.symbol?`<span class="font-medium text-gray-200">${esc(t.symbol)}</span>`:''}${t.side?`<span class="${sc}">${t.side}</span>`:''}</div></div><div class="flex items-center gap-3 ml-3">${pl}<span class="font-medium text-gray-200">${fmtSignedDollars(t.amount_cents)}</span><span class="text-gray-600">${t.broker}</span></div></div>`;}).join('');}catch(e){console.log('inv txn:',e);}}
+async function loadHoldings(){try{const r=await authFetch(`/api/financial/investments/holdings?token=${token}`);const d=await r.json();const h=d.holdings||[];document.getElementById('holdings-as-of').textContent=d.as_of?'as of '+d.as_of:'';const l=document.getElementById('holdings-list');if(!h.length){l.innerHTML='<p class="text-xs text-gray-600">No holdings. Connect and sync a brokerage.</p>';return;}l.innerHTML=h.map(p=>`<div class="flex items-center justify-between py-1.5 border-b border-gray-700/30 text-xs"><span class="w-16 font-medium text-gray-200">${esc(p.symbol)}</span><span class="w-16 text-right text-gray-400">${p.qty}</span><span class="w-20 text-right text-gray-300">${p.market_value_cents?fmtDollars(p.market_value_cents/100):'--'}</span><span class="w-20 text-right ${(p.market_value_cents||0)-(p.cost_basis_cents||0)>=0?'text-green-400':'text-red-400'}">${fmtSignedDollars((p.market_value_cents||0)-(p.cost_basis_cents||0))}</span><span class="w-12 text-right text-gray-600">${p.broker}</span></div>`).join('');}catch(e){console.log('holdings:',e);}}
 
 initYearSelector();
 

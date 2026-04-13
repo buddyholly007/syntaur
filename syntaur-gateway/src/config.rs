@@ -670,18 +670,6 @@ impl Config {
         required
     }
 
-    /// Per-agent script execution allowlist. Returns the list of allowed
-    /// binary paths from `agents.list[id].scriptAllowlist` in the config.
-    /// If not set, returns an empty slice (no scripts allowed).
-    pub fn agent_script_allowlist(&self, agent_id: &str) -> Vec<String> {
-        self.agents.list.iter()
-            .find(|a| a.id == agent_id)
-            .and_then(|a| a.extra.get("scriptAllowlist"))
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-            .unwrap_or_default()
-    }
-
     /// Resolve a model string like "lmstudio/Qwen3.5-27B" to (provider_name, model_id)
     pub fn resolve_model(&self, model_str: &str) -> Option<(String, String)> {
         // Try "provider/model" format first (e.g., "primary/gpt-4o")

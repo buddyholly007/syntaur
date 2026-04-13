@@ -28,6 +28,7 @@ mod modules;
 mod setup;
 mod license;
 mod tax;
+mod financial;
 
 /// Brand name constant — used in user-facing messages.
 pub const BRAND: &str = "Syntaur";
@@ -3388,6 +3389,25 @@ async fn main() {
         .route("/api/modules/status", get(tax::handle_module_status))
         .route("/api/modules/trial", post(tax::handle_start_trial))
         .route("/api/modules/activate", post(tax::handle_activate_license))
+        // Financial integrations (Plaid, SimpleFIN, Alpaca, Coinbase, Stripe, Gmail)
+        .route("/api/financial/connections", get(financial::handle_connections_list))
+        .route("/api/financial/connections/{id}", axum::routing::delete(financial::handle_connection_delete))
+        .route("/api/financial/plaid/link-token", post(financial::handle_plaid_link_token))
+        .route("/api/financial/plaid/exchange", post(financial::handle_plaid_exchange))
+        .route("/api/financial/plaid/sync", post(financial::handle_plaid_sync))
+        .route("/api/financial/plaid/webhook", post(financial::handle_plaid_webhook))
+        .route("/api/financial/simplefin/connect", post(financial::handle_simplefin_connect))
+        .route("/api/financial/simplefin/sync", post(financial::handle_simplefin_sync))
+        .route("/api/financial/stripe/checkout", post(financial::handle_stripe_checkout))
+        .route("/api/financial/stripe/webhook", post(financial::handle_stripe_webhook))
+        .route("/api/financial/investments/summary", get(financial::handle_investment_summary))
+        .route("/api/financial/investments/transactions", get(financial::handle_investment_transactions))
+        .route("/api/financial/alpaca/connect", post(financial::handle_alpaca_connect))
+        .route("/api/financial/alpaca/sync", post(financial::handle_alpaca_sync))
+        .route("/api/financial/coinbase/connect", post(financial::handle_coinbase_connect))
+        .route("/api/financial/coinbase/sync", post(financial::handle_coinbase_sync))
+        .route("/api/financial/gmail/connect", post(financial::handle_gmail_connect))
+        .route("/api/financial/gmail/scan", post(financial::handle_gmail_scan))
         .route("/api/todos", get(handle_todo_list))
         .route("/api/todos", post(handle_todo_create))
         .route("/api/todos/{id}", axum::routing::put(handle_todo_update))

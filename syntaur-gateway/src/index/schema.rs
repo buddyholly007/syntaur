@@ -590,6 +590,77 @@ const MIGRATIONS: &[&str] = &[
     INSERT OR IGNORE INTO modules (name, display_name, description, icon) VALUES
         ('tax', 'Tax & Expenses', 'Receipt scanning, expense tracking, tax document management, deduction calculator, and year-end tax prep wizard.', '&#128176;');
     "#,
+    // v16: financial integrations — Plaid, Alpaca, Coinbase, SimpleFIN
+    // connections + investment data + email connections for receipt parsing.
+    r#"
+    CREATE TABLE IF NOT EXISTS connected_accounts (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id         INTEGER NOT NULL DEFAULT 0,
+        provider        TEXT NOT NULL,
+        institution_name TEXT,
+        institution_id  TEXT,
+        access_token    TEXT NOT NULL,
+        item_id         TEXT,
+        cursor          TEXT,
+        account_ids     TEXT,
+        status          TEXT NOT NULL DEFAULT 'active',
+        last_sync_at    INTEGER,
+        error           TEXT,
+        created_at      INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_connected_accounts_user ON connected_accounts(user_id);
+
+    CREATE TABLE IF NOT EXISTS investment_accounts (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id         INTEGER NOT NULL DEFAULT 0,
+        broker          TEXT NOT NULL,
+        api_key         TEXT NOT NULL,
+        api_secret      TEXT,
+        base_url        TEXT,
+        nickname        TEXT,
+        status          TEXT NOT NULL DEFAULT 'active',
+        last_sync_at    INTEGER,
+        created_at      INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_investment_accounts_user ON investment_accounts(user_id);
+
+    CREATE TABLE IF NOT EXISTS investment_transactions (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id         INTEGER NOT NULL DEFAULT 0,
+        account_id      INTEGER REFERENCES investment_accounts(id),
+        broker          TEXT NOT NULL,
+        activity_type   TEXT NOT NULL,
+        symbol          TEXT,
+        qty             REAL,
+        price_cents     INTEGER,
+        amount_cents    INTEGER NOT NULL,
+        side            TEXT,
+        realized_pl_cents INTEGER,
+        cost_basis_cents INTEGER,
+        transaction_date TEXT NOT NULL,
+        description     TEXT,
+        external_id     TEXT,
+        created_at      INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_inv_txn_user ON investment_transactions(user_id);
+    CREATE INDEX IF NOT EXISTS idx_inv_txn_date ON investment_transactions(transaction_date);
+    CREATE INDEX IF NOT EXISTS idx_inv_txn_symbol ON investment_transactions(symbol);
+    CREATE INDEX IF NOT EXISTS idx_inv_txn_external ON investment_transactions(external_id);
+
+    CREATE TABLE IF NOT EXISTS email_connections (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id         INTEGER NOT NULL DEFAULT 0,
+        provider        TEXT NOT NULL DEFAULT 'gmail',
+        email_address   TEXT,
+        oauth_token     TEXT,
+        refresh_token   TEXT,
+        token_expires_at INTEGER,
+        last_scan_at    INTEGER,
+        status          TEXT NOT NULL DEFAULT 'active',
+        created_at      INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_email_conn_user ON email_connections(user_id);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
