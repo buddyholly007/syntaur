@@ -18,6 +18,16 @@
   .chat-md pre { white-space: pre-wrap; word-break: break-word; }
   @keyframes bounce { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-4px)} }
   textarea { scrollbar-width: thin; }
+
+  @keyframes vm-pulse { 0%,100%{box-shadow:0 0 0 0 rgba(14,165,233,0.3)} 50%{box-shadow:0 0 0 20px rgba(14,165,233,0)} }
+  .vm-listening #vm-ring { border-color: #0ea5e9; animation: vm-pulse 2s infinite; }
+  .vm-listening #vm-mic-icon { color: #0ea5e9; }
+  .vm-speaking #vm-ring { border-color: #f59e0b; }
+  .vm-speaking #vm-mic-icon { color: #f59e0b; }
+  .vm-thinking #vm-ring { border-color: #8b5cf6; }
+  .vm-thinking #vm-mic-icon { color: #8b5cf6; }
+  .vm-playing #vm-ring { border-color: #10b981; }
+  .vm-playing #vm-mic-icon { color: #10b981; }
 </style>
 </head>
 <body class="bg-gray-950 text-gray-100 h-screen flex flex-col">
@@ -68,6 +78,20 @@
   </div>
 </div>
 
+<!-- Voice mode overlay -->
+<div id="voice-mode-overlay" class="fixed inset-0 z-40 bg-gray-950/95 hidden flex flex-col items-center justify-center">
+  <div class="text-center max-w-sm px-6">
+    <div id="vm-ring" class="w-32 h-32 mx-auto mb-6 rounded-full border-4 border-gray-700 flex items-center justify-center transition-all duration-300">
+      <svg id="vm-mic-icon" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="text-gray-500 transition-colors">
+        <path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>
+      </svg>
+    </div>
+    <div id="vm-status" class="text-lg text-gray-400 mb-2">Listening...</div>
+    <div id="vm-transcript" class="text-sm text-gray-500 min-h-[40px] mb-6"></div>
+    <button onclick="toggleVoiceMode()" class="text-sm text-gray-600 hover:text-gray-400 border border-gray-700 rounded-xl px-6 py-2">End voice mode</button>
+  </div>
+</div>
+
 <!-- Drop overlay -->
 <div id="drop-overlay" class="fixed inset-0 z-50 bg-oc-600/10 backdrop-blur-sm hidden flex items-center justify-center pointer-events-none">
   <div class="bg-gray-800 border-2 border-dashed border-oc-500 rounded-2xl p-12 text-center">
@@ -82,6 +106,9 @@
     <!-- Pending files -->
     <div id="pending-files" class="hidden mb-2 flex flex-wrap gap-2"></div>
     <div class="flex gap-2 sm:gap-3 items-end">
+      <button onclick="toggleVoiceMode()" class="flex-shrink-0 text-gray-500 hover:text-oc-500 p-2 rounded-lg hover:bg-gray-800 transition-colors" id="voice-mode-btn" title="Voice mode">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/><circle cx="12" cy="12" r="10" stroke-dasharray="4 4" opacity="0.3"/></svg>
+      </button>
       <label class="flex-shrink-0 cursor-pointer text-gray-500 hover:text-gray-300 p-2 rounded-lg hover:bg-gray-800 transition-colors" title="Attach file">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
         <input type="file" class="hidden" id="file-input" onchange="handleFileSelect(event)" multiple>
@@ -1011,6 +1038,280 @@ function stopVoice(e) {
   const btn = document.getElementById('mic-btn');
   btn.classList.remove('text-red-500');
   btn.classList.add('text-gray-500');
+}
+
+
+
+// ── Voice Mode (continuous conversation) ─────────────────────────
+const VM_SILENCE_THRESHOLD = 1200;   // RMS energy (browser mic is louder than satellite)
+const VM_SILENCE_CHUNKS = 8;         // ~330ms at 4096 samples/chunk @ 16kHz
+const VM_MAX_SILENCE_S = 30;         // exit voice mode after 30s total silence
+const VM_ECHO_WORDS = new Set([
+  'yeah','yes','yep','yup','no','nah','nope','ok','okay','sure','right',
+  'mm','hmm','uh','huh','oh','ah','so','well','hey','hi',
+  'thanks','cool','nice','good','great','alright',
+  'yeah yeah','ok ok','all right','oh yeah','oh ok','sounds good',
+  'got it','thank you','you good','for sure','no problem','of course'
+]);
+
+let vmActive = false;
+let vmWs = null;
+let vmAudioCtx = null;
+let vmStream = null;
+let vmState = 'idle'; // idle, listening, speaking, thinking, playing, cooldown
+let vmSilenceCount = 0;
+let vmHeardSpeech = false;
+let vmLastTtsDuration = 3;
+let vmCooldownTimer = null;
+let vmIdleTimer = null;
+
+function toggleVoiceMode() {
+  if (vmActive) {
+    stopVoiceMode();
+  } else {
+    startVoiceMode();
+  }
+}
+
+async function startVoiceMode() {
+  vmActive = true;
+  document.getElementById('voice-mode-overlay').classList.remove('hidden');
+  document.getElementById('voice-mode-btn').classList.add('text-oc-500');
+  document.getElementById('voice-mode-btn').classList.remove('text-gray-500');
+
+  // Connect STT WebSocket
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  vmWs = new WebSocket(`${proto}//${location.host}/ws/stt`);
+  vmWs.binaryType = 'arraybuffer';
+  vmWs.onclose = () => { if (vmActive) setTimeout(startVoiceMode, 1000); };
+  vmWs.onerror = () => vmWs.close();
+  vmWs.onmessage = handleVmTranscript;
+
+  await new Promise(r => {
+    const check = setInterval(() => {
+      if (vmWs && vmWs.readyState === 1) { clearInterval(check); r(); }
+    }, 50);
+    setTimeout(() => { clearInterval(check); r(); }, 2000);
+  });
+
+  // Start mic with VAD
+  const constraints = { sampleRate: 16000, channelCount: 1,
+    echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+  if (selectedMicId) constraints.deviceId = { exact: selectedMicId };
+
+  try {
+    vmStream = await navigator.mediaDevices.getUserMedia({ audio: constraints });
+  } catch {
+    try {
+      delete constraints.deviceId;
+      vmStream = await navigator.mediaDevices.getUserMedia({ audio: constraints });
+    } catch { stopVoiceMode(); return; }
+  }
+
+  vmAudioCtx = new AudioContext({ sampleRate: 16000 });
+  const source = vmAudioCtx.createMediaStreamSource(vmStream);
+  const processor = vmAudioCtx.createScriptProcessor(4096, 1, 1);
+  processor.onaudioprocess = handleVmAudio;
+  source.connect(processor);
+  processor.connect(vmAudioCtx.destination);
+
+  setVmState('listening');
+  resetVmIdle();
+}
+
+function stopVoiceMode() {
+  vmActive = false;
+  if (vmWs) { vmWs.close(); vmWs = null; }
+  if (vmStream) { vmStream.getTracks().forEach(t => t.stop()); vmStream = null; }
+  if (vmAudioCtx) { vmAudioCtx.close(); vmAudioCtx = null; }
+  if (vmCooldownTimer) { clearTimeout(vmCooldownTimer); vmCooldownTimer = null; }
+  if (vmIdleTimer) { clearTimeout(vmIdleTimer); vmIdleTimer = null; }
+
+  document.getElementById('voice-mode-overlay').classList.add('hidden');
+  document.getElementById('voice-mode-btn').classList.remove('text-oc-500');
+  document.getElementById('voice-mode-btn').classList.add('text-gray-500');
+  setVmState('idle');
+}
+
+function setVmState(state) {
+  vmState = state;
+  const overlay = document.getElementById('voice-mode-overlay');
+  overlay.className = overlay.className.replace(/vm-\S+/g, '');
+
+  const status = document.getElementById('vm-status');
+  switch (state) {
+    case 'listening':
+      overlay.classList.add('vm-listening');
+      status.textContent = 'Listening...';
+      break;
+    case 'speaking':
+      overlay.classList.add('vm-speaking');
+      status.textContent = 'Hearing you...';
+      break;
+    case 'thinking':
+      overlay.classList.add('vm-thinking');
+      status.textContent = 'Thinking...';
+      break;
+    case 'playing':
+      overlay.classList.add('vm-playing');
+      status.textContent = 'Speaking...';
+      break;
+    case 'cooldown':
+      overlay.classList.add('vm-listening');
+      status.textContent = 'Listening...';
+      break;
+  }
+}
+
+function handleVmAudio(e) {
+  if (!vmActive || vmState === 'thinking' || vmState === 'playing') return;
+
+  const f = e.inputBuffer.getChannelData(0);
+  // Calculate RMS
+  let sum = 0;
+  for (let i = 0; i < f.length; i++) sum += f[i] * f[i];
+  const rms = Math.sqrt(sum / f.length) * 32767; // scale to int16 range
+
+  if (rms >= VM_SILENCE_THRESHOLD) {
+    // Speech detected
+    if (!vmHeardSpeech) {
+      // Start of new utterance
+      vmHeardSpeech = true;
+      vmSilenceCount = 0;
+      setVmState('speaking');
+      if (vmWs && vmWs.readyState === 1) {
+        vmWs.send(JSON.stringify({ type: 'start' }));
+      }
+    }
+    vmSilenceCount = 0;
+    resetVmIdle();
+  } else if (vmHeardSpeech) {
+    vmSilenceCount++;
+    if (vmSilenceCount >= VM_SILENCE_CHUNKS) {
+      // End of utterance — send stop, wait for transcript
+      vmHeardSpeech = false;
+      vmSilenceCount = 0;
+      if (vmWs && vmWs.readyState === 1) {
+        vmWs.send(JSON.stringify({ type: 'stop' }));
+      }
+      setVmState('thinking');
+    }
+  }
+
+  // Forward audio if speaking
+  if (vmHeardSpeech && vmWs && vmWs.readyState === 1) {
+    const pcm = new Int16Array(f.length);
+    for (let i = 0; i < f.length; i++)
+      pcm[i] = Math.max(-32768, Math.min(32767, Math.round(f[i] * 32767)));
+    vmWs.send(pcm.buffer);
+  }
+}
+
+async function handleVmTranscript(e) {
+  try {
+    const msg = JSON.parse(e.data);
+    if (msg.type !== 'transcript' || !msg.text) return;
+    const text = msg.text.trim();
+    if (!text) { setVmState('listening'); return; }
+
+    // Echo filter
+    const lower = text.toLowerCase().replace(/[^a-z ]/g, '').trim();
+    if (VM_ECHO_WORDS.has(lower)) {
+      setVmState('listening');
+      return;
+    }
+
+    // Show transcript
+    document.getElementById('vm-transcript').textContent = '"' + text + '"';
+    setVmState('thinking');
+
+    // Send to agent (use existing send function, but intercept response for TTS)
+    voiceInitiated = true;
+
+    // Add user message to chat
+    const container = document.getElementById('messages');
+    const scroll = document.getElementById('messages-scroll');
+    const userEl = document.createElement('div');
+    userEl.className = 'flex gap-4 justify-end';
+    userEl.innerHTML = `<div class="max-w-[75%]"><div class="bg-oc-900/50 border border-oc-800/40 rounded-2xl rounded-br-md px-5 py-3 text-sm text-gray-200 leading-relaxed">${esc(text)}</div></div>`;
+    container.appendChild(userEl);
+    scroll.scrollTop = scroll.scrollHeight;
+
+    // Call agent
+    const startResp = await fetch('/api/message/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text, agent: 'main', token })
+    });
+    const startData = await startResp.json();
+    const turnId = startData.turn_id;
+
+    if (turnId) {
+      const evtSource = new EventSource(`/api/message/${turnId}/stream?token=${token}`);
+      evtSource.onmessage = async (event) => {
+        const ev = JSON.parse(event.data);
+        if (ev.event === 'complete') {
+          evtSource.close();
+
+          // Add response to chat
+          const aiEl = document.createElement('div');
+          aiEl.className = 'flex gap-4';
+          aiEl.innerHTML = `<div class="w-8 h-8 rounded-lg bg-oc-600 flex items-center justify-center text-sm font-bold flex-shrink-0">&#9813;</div>
+            <div class="flex-1"><div class="text-gray-300 leading-relaxed text-sm chat-md">${md(ev.response)}</div></div>`;
+          container.appendChild(aiEl);
+          scroll.scrollTop = scroll.scrollHeight;
+
+          // Play TTS
+          setVmState('playing');
+          document.getElementById('vm-transcript').textContent = '';
+          try {
+            const ttsResp = await fetch('/api/tts', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ text: ev.response.substring(0, 500) })
+            });
+            const ttsData = await ttsResp.json();
+            if (ttsData.audio_url) {
+              const audio = new Audio(ttsData.audio_url);
+              // Estimate duration from response length (~150ms per word)
+              const words = ev.response.split(/\s+/).length;
+              vmLastTtsDuration = Math.max(2, Math.round(words * 0.15));
+
+              audio.onended = () => {
+                // Enter cooldown, then resume listening
+                setVmState('cooldown');
+                vmCooldownTimer = setTimeout(() => {
+                  if (vmActive) setVmState('listening');
+                }, (vmLastTtsDuration + 1) * 1000);
+              };
+              audio.play().catch(() => {
+                if (vmActive) setVmState('listening');
+              });
+            } else {
+              if (vmActive) setVmState('listening');
+            }
+          } catch {
+            if (vmActive) setVmState('listening');
+          }
+        } else if (ev.event === 'error') {
+          evtSource.close();
+          if (vmActive) setVmState('listening');
+        }
+      };
+      evtSource.onerror = () => { evtSource.close(); if (vmActive) setVmState('listening'); };
+    }
+  } catch {
+    if (vmActive) setVmState('listening');
+  }
+}
+
+function resetVmIdle() {
+  if (vmIdleTimer) clearTimeout(vmIdleTimer);
+  vmIdleTimer = setTimeout(() => {
+    if (vmActive && vmState === 'listening') {
+      stopVoiceMode();
+    }
+  }, VM_MAX_SILENCE_S * 1000);
 }
 
 // TTS playback for voice-initiated responses
