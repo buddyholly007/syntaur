@@ -573,22 +573,54 @@ Respond ONLY with JSON: {"doc_type":"...","tax_year":2025,"issuer":"...","fields
     let fields = extracted.get("fields").cloned().unwrap_or(serde_json::json!({}));
     let fields_str = serde_json::to_string(&fields).unwrap_or("{}".to_string());
 
+    // Check for duplicate documents before saving
+    let db_dup = db.clone();
+    let doc_type_dup = doc_type.clone();
+    let issuer_dup = issuer.clone();
+    let tax_year_dup = tax_year;
+    let dup_check = tokio::task::spawn_blocking(move || -> Option<(i64, String)> {
+        let conn = rusqlite::Connection::open(&db_dup).ok()?;
+        let uid: i64 = conn.query_row("SELECT user_id FROM tax_documents WHERE id = ?", rusqlite::params![doc_id], |r| r.get(0)).ok()?;
+        // Look for existing document with same type, issuer, and year
+        conn.query_row(
+            "SELECT id, issuer FROM tax_documents WHERE user_id = ? AND doc_type = ? AND tax_year = ? AND id != ? AND status = 'scanned'",
+            rusqlite::params![uid, &doc_type_dup, tax_year_dup, doc_id],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?.unwrap_or_default()))
+        ).ok()
+    }).await.unwrap_or(None);
+
+    let is_duplicate = if let Some((existing_id, existing_issuer)) = &dup_check {
+        // Check if issuer is similar (same company, different wording)
+        let i1 = issuer.to_lowercase();
+        let i2 = existing_issuer.to_lowercase();
+        i1.contains(&i2) || i2.contains(&i1) ||
+        i1.split_whitespace().next() == i2.split_whitespace().next()
+    } else { false };
+
+    let status = if is_duplicate { "duplicate" } else { "scanned" };
+    if is_duplicate {
+        if let Some((eid, ei)) = &dup_check {
+            log::warn!("[tax] Document #{} appears to be a duplicate of #{} ({}) — marked for review", doc_id, eid, ei);
+        }
+    }
+
     // Update document record
     let db2 = db.clone();
     let doc_type2 = doc_type.clone();
     let issuer2 = issuer.clone();
     let fields_str2 = fields_str.clone();
+    let status2 = status.to_string();
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         let conn = rusqlite::Connection::open(&db2).map_err(|e| e.to_string())?;
         conn.execute(
-            "UPDATE tax_documents SET doc_type = ?, tax_year = ?, issuer = ?, extracted_fields = ?, status = 'scanned' WHERE id = ?",
-            rusqlite::params![&doc_type2, tax_year, &issuer2, &fields_str2, doc_id],
+            "UPDATE tax_documents SET doc_type = ?, tax_year = ?, issuer = ?, extracted_fields = ?, status = ? WHERE id = ?",
+            rusqlite::params![&doc_type2, tax_year, &issuer2, &fields_str2, &status2, doc_id],
         ).map_err(|e| e.to_string())?;
         Ok(())
     }).await.map_err(|e| e.to_string())??;
 
-    // Auto-populate income data from W-2s
-    if doc_type == "w2" {
+    // Auto-populate income data from W-2s (skip duplicates)
+    if doc_type == "w2" && !is_duplicate {
         let db3 = db.clone();
         let fields2 = fields.clone();
         let issuer3 = issuer.clone();
@@ -697,11 +729,11 @@ pub async fn handle_tax_doc_list(
         let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
         let (sql, p): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match year_filter {
             Some(y) => (
-                "SELECT id, doc_type, tax_year, issuer, extracted_fields, status, created_at, image_path FROM tax_documents WHERE user_id = ? AND tax_year = ? ORDER BY doc_type, created_at DESC".to_string(),
+                "SELECT id, doc_type, tax_year, issuer, extracted_fields, status, created_at, image_path FROM tax_documents WHERE user_id = ? AND tax_year = ? AND status != 'discarded' ORDER BY doc_type, created_at DESC".to_string(),
                 vec![Box::new(uid) as Box<dyn rusqlite::types::ToSql>, Box::new(y)],
             ),
             None => (
-                "SELECT id, doc_type, tax_year, issuer, extracted_fields, status, created_at, image_path FROM tax_documents WHERE user_id = ? ORDER BY doc_type, created_at DESC".to_string(),
+                "SELECT id, doc_type, tax_year, issuer, extracted_fields, status, created_at, image_path FROM tax_documents WHERE user_id = ? AND status != 'discarded' ORDER BY doc_type, created_at DESC".to_string(),
                 vec![Box::new(uid) as Box<dyn rusqlite::types::ToSql>],
             ),
         };
@@ -745,6 +777,49 @@ pub async fn handle_tax_doc_image(
     let ct = if path.ends_with(".png") { "image/png" } else if path.ends_with(".pdf") { "application/pdf" } else { "image/jpeg" };
     headers.insert("content-type", ct.parse().unwrap());
     Ok((headers, data))
+}
+
+// ── Update Document Status (keep/discard duplicates) ────────────────────────
+
+#[derive(Deserialize)]
+pub struct UpdateStatusRequest {
+    pub token: String,
+    pub status: String,
+}
+
+pub async fn handle_tax_doc_update_status(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    Json(req): Json<UpdateStatusRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &req.token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let new_status = req.status.clone();
+
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE tax_documents SET status = ? WHERE id = ? AND user_id = ?",
+            rusqlite::params![&new_status, id, uid],
+        ).map_err(|e| e.to_string())?;
+
+        // If discarding, also remove any income records created from this doc
+        if new_status == "discarded" {
+            // The income records don't directly reference doc_id, but we can
+            // remove the document's image to save space
+            if let Ok(path) = conn.query_row::<String, _, _>(
+                "SELECT image_path FROM tax_documents WHERE id = ?", rusqlite::params![id], |r| r.get(0)
+            ) {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+        Ok(())
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(serde_json::json!({ "success": true })))
 }
 
 // ── Update Document Field ────────────────────────────────────────────────────

@@ -760,17 +760,52 @@ async function loadDocuments() {
                   <p class="text-xs text-gray-600">Year: ${d.tax_year || '?'}</p>
                 </div>
                 <div class="flex items-center gap-2">
-                  <span class="text-xs px-2 py-0.5 rounded ${d.status === 'scanned' ? 'bg-green-900/50 text-green-400' : 'bg-yellow-900/50 text-yellow-400'}">${d.status}</span>
+                  <span class="text-xs px-2 py-0.5 rounded ${
+                    d.status === 'scanned' ? 'bg-green-900/50 text-green-400' :
+                    d.status === 'duplicate' ? 'bg-red-900/50 text-red-400' :
+                    'bg-yellow-900/50 text-yellow-400'
+                  }">${d.status === 'duplicate' ? 'Possible duplicate' : d.status}</span>
                   <a href="${d.image_url}?token=${token}" target="_blank" class="text-xs text-oc-500 hover:text-oc-400">View Original</a>
                 </div>
               </div>
               ${fieldsHtml}
+              ${d.status === 'duplicate' ? `
+                <div class="mt-2 p-2 rounded bg-red-900/20 border border-red-800/30 flex items-center justify-between">
+                  <p class="text-xs text-red-300">This looks like a duplicate of an existing document.</p>
+                  <div class="flex gap-2 flex-shrink-0">
+                    <button onclick="keepDoc(${d.id})" class="text-xs bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded transition-colors">Keep</button>
+                    <button onclick="discardDoc(${d.id})" class="text-xs bg-red-800 hover:bg-red-700 px-2 py-1 rounded transition-colors">Discard</button>
+                  </div>
+                </div>
+              ` : ''}
             </div>`;
           }).join('')}
         </div>
       </div>
     `).join('');
   } catch(e) { console.log('docs:', e); }
+}
+
+async function keepDoc(docId) {
+  try {
+    await authFetch(`/api/tax/documents/${docId}/status`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, status: 'scanned' })
+    });
+    loadDocuments();
+  } catch(e) { console.log('keep:', e); }
+}
+
+async function discardDoc(docId) {
+  try {
+    await authFetch(`/api/tax/documents/${docId}/status`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, status: 'discarded' })
+    });
+    loadDocuments();
+  } catch(e) { console.log('discard:', e); }
 }
 
 async function updateDocField(docId, field, value) {
