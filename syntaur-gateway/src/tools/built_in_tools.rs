@@ -1914,13 +1914,21 @@ impl Tool for GetIncomeTool {
                 Ok(format!("{}: {} ({})", r.get::<_, String>(0)?, crate::tax::cents_to_display(cents), r.get::<_, Option<String>>(3)?.unwrap_or_default()))
             }).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
 
-            let total: i64 = conn.query_row(
-                "SELECT COALESCE(SUM(amount_cents), 0) FROM tax_income WHERE user_id = ? AND tax_year = ?",
+            let gross: i64 = conn.query_row(
+                "SELECT COALESCE(SUM(amount_cents), 0) FROM tax_income WHERE user_id = ? AND tax_year = ? AND category != 'Federal Withholding'",
+                rusqlite::params![uid, year], |r| r.get(0)
+            ).unwrap_or(0);
+            let withheld: i64 = conn.query_row(
+                "SELECT COALESCE(SUM(amount_cents), 0) FROM tax_income WHERE user_id = ? AND tax_year = ? AND category = 'Federal Withholding'",
                 rusqlite::params![uid, year], |r| r.get(0)
             ).unwrap_or(0);
 
             if rows.is_empty() { return Ok(format!("No income records for {}.", year)); }
-            Ok(format!("Income for {}:\n{}\n\nTotal gross income: {}", year, rows.join("\n"), crate::tax::cents_to_display(total)))
+            let mut result = format!("Income for {}:\n{}\n\nGross income: {}", year, rows.join("\n"), crate::tax::cents_to_display(gross));
+            if withheld > 0 {
+                result += &format!("\nFederal tax withheld: {}", crate::tax::cents_to_display(withheld));
+            }
+            Ok(result)
         }).await.map_err(|e| e.to_string())?.map_err(|e| e)?;
 
         Ok(RichToolResult::text(result))
@@ -1949,9 +1957,9 @@ impl Tool for EstimateTaxTool {
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
             let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
 
-            // Get income
+            // Get income (exclude withholding — that's a payment, not income)
             let gross_income: i64 = conn.query_row(
-                "SELECT COALESCE(SUM(amount_cents), 0) FROM tax_income WHERE user_id = ? AND tax_year = ?",
+                "SELECT COALESCE(SUM(amount_cents), 0) FROM tax_income WHERE user_id = ? AND tax_year = ? AND category != 'Federal Withholding'",
                 rusqlite::params![uid, year], |r| r.get(0)
             ).unwrap_or(0);
 

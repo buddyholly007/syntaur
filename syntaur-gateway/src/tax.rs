@@ -376,7 +376,26 @@ Respond ONLY with valid JSON: {"vendor":"...","amount":"45.99","date":"2025-12-1
         Ok(())
     }).await.map_err(|e| e.to_string())??;
 
-    // Validate extracted amount
+    // Validate: skip auto-expense for non-receipt documents (W-2, 1099, etc.)
+    let vendor_lower = vendor_log.to_lowercase();
+    let is_tax_form = vendor_lower.contains("w-2") || vendor_lower.contains("w2") ||
+        vendor_lower.contains("1099") || vendor_lower.contains("1098") ||
+        vendor_lower.contains("1095") || vendor_lower.contains("irs") ||
+        vendor_lower.contains("internal revenue") || vendor_lower.contains("tax form") ||
+        category_name == "Other" && amount_cents > 50_000_00;
+
+    if is_tax_form {
+        log::info!("[tax] Receipt #{} looks like a tax form, not a receipt — skipping expense creation", receipt_id);
+        // Update receipt status but don't create an expense
+        let db_skip = db.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Ok(conn) = rusqlite::Connection::open(&db_skip) {
+                let _ = conn.execute("UPDATE receipts SET status = 'tax_form' WHERE id = ?", rusqlite::params![receipt_id]);
+            }
+        }).await.ok();
+        return Ok(());
+    }
+
     if amount_cents > 100_000_00 {
         log::warn!("[tax] Receipt #{} has unusually large amount: {} — may need verification", receipt_id, cents_to_display(amount_cents));
     }
@@ -1189,15 +1208,21 @@ pub async fn handle_income_list(
             }))
         }).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
 
-        let total: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(amount_cents), 0) FROM tax_income WHERE user_id = ? AND tax_year = ?",
+        let gross: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(amount_cents), 0) FROM tax_income WHERE user_id = ? AND tax_year = ? AND category != 'Federal Withholding'",
+            rusqlite::params![uid, year], |r| r.get(0)
+        ).unwrap_or(0);
+        let withheld: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(amount_cents), 0) FROM tax_income WHERE user_id = ? AND tax_year = ? AND category = 'Federal Withholding'",
             rusqlite::params![uid, year], |r| r.get(0)
         ).unwrap_or(0);
 
         Ok(serde_json::json!({
             "income": rows,
-            "total_cents": total,
-            "total_display": cents_to_display(total),
+            "total_cents": gross,
+            "total_display": cents_to_display(gross),
+            "withheld_cents": withheld,
+            "withheld_display": cents_to_display(withheld),
         }))
     }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
