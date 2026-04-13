@@ -600,6 +600,59 @@ pub async fn handle_category_list(
     Ok(Json(serde_json::json!({ "categories": categories })))
 }
 
+// ── Income ───────────────────────────────────────────────────────────────────
+
+pub async fn handle_income_list(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let year: i64 = params.get("year").and_then(|y| y.parse().ok()).unwrap_or(2025);
+
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+
+        // Check if tax_income table exists
+        let has_table: bool = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tax_income'",
+            [], |r| r.get::<_, i64>(0)
+        ).unwrap_or(0) > 0;
+
+        if !has_table {
+            return Ok(serde_json::json!({ "income": [], "total_cents": 0, "total_display": "$0.00" }));
+        }
+
+        let mut stmt = conn.prepare(
+            "SELECT source, amount_cents, category, description FROM tax_income WHERE user_id = ? AND tax_year = ? ORDER BY amount_cents DESC"
+        ).map_err(|e| e.to_string())?;
+        let rows: Vec<serde_json::Value> = stmt.query_map(rusqlite::params![uid, year], |r| {
+            Ok(serde_json::json!({
+                "source": r.get::<_, String>(0)?,
+                "amount_cents": r.get::<_, i64>(1)?,
+                "category": r.get::<_, Option<String>>(2)?,
+                "description": r.get::<_, Option<String>>(3)?,
+            }))
+        }).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
+
+        let total: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(amount_cents), 0) FROM tax_income WHERE user_id = ? AND tax_year = ?",
+            rusqlite::params![uid, year], |r| r.get(0)
+        ).unwrap_or(0);
+
+        Ok(serde_json::json!({
+            "income": rows,
+            "total_cents": total,
+            "total_display": cents_to_display(total),
+        }))
+    }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(result))
+}
+
 // ── CSV Export ───────────────────────────────────────────────────────────────
 
 pub async fn handle_expense_export(

@@ -3337,6 +3337,7 @@ async fn main() {
         .route("/api/tax/expenses", get(tax::handle_expense_list))
         .route("/api/tax/summary", get(tax::handle_expense_summary))
         .route("/api/tax/categories", get(tax::handle_category_list))
+        .route("/api/tax/income", get(tax::handle_income_list))
         .route("/api/tax/export", get(tax::handle_expense_export))
         .route("/api/todos", get(handle_todo_list))
         .route("/api/todos", post(handle_todo_create))

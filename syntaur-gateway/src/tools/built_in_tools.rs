@@ -1882,6 +1882,211 @@ impl Tool for ExpenseSummaryTool {
     }
 }
 
+pub struct GetIncomeTool;
+
+#[async_trait]
+impl Tool for GetIncomeTool {
+    fn name(&self) -> &str { "get_income" }
+    fn description(&self) -> &str { "Get the user's income records for a tax year. Returns W-2 wages, capital gains, dividends, interest, and totals." }
+    fn parameters(&self) -> Value {
+        json!({ "type": "object", "properties": {
+            "year": { "type": "integer", "description": "Tax year (e.g. 2025)" }
+        }, "required": ["year"] })
+    }
+    async fn execute(&self, args: Value, ctx: &ToolContext<'_>) -> Result<RichToolResult, String> {
+        let year = args.get("year").and_then(|v| v.as_i64()).unwrap_or(2025);
+        let db = ctx.db_path.ok_or("database not available")?.to_path_buf();
+        let uid = ctx.user_id;
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+            let has_table: bool = conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tax_income'",
+                [], |r| r.get::<_, i64>(0)
+            ).unwrap_or(0) > 0;
+            if !has_table { return Ok("No income data available.".into()); }
+
+            let mut stmt = conn.prepare(
+                "SELECT source, amount_cents, category, description FROM tax_income WHERE user_id = ? AND tax_year = ? ORDER BY amount_cents DESC"
+            ).map_err(|e| e.to_string())?;
+            let rows: Vec<String> = stmt.query_map(rusqlite::params![uid, year], |r| {
+                let cents: i64 = r.get(1)?;
+                Ok(format!("{}: {} ({})", r.get::<_, String>(0)?, crate::tax::cents_to_display(cents), r.get::<_, Option<String>>(3)?.unwrap_or_default()))
+            }).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
+
+            let total: i64 = conn.query_row(
+                "SELECT COALESCE(SUM(amount_cents), 0) FROM tax_income WHERE user_id = ? AND tax_year = ?",
+                rusqlite::params![uid, year], |r| r.get(0)
+            ).unwrap_or(0);
+
+            if rows.is_empty() { return Ok(format!("No income records for {}.", year)); }
+            Ok(format!("Income for {}:\n{}\n\nTotal gross income: {}", year, rows.join("\n"), crate::tax::cents_to_display(total)))
+        }).await.map_err(|e| e.to_string())?.map_err(|e| e)?;
+
+        Ok(RichToolResult::text(result))
+    }
+}
+
+pub struct EstimateTaxTool;
+
+#[async_trait]
+impl Tool for EstimateTaxTool {
+    fn name(&self) -> &str { "estimate_tax" }
+    fn description(&self) -> &str { "Estimate federal tax liability for a given year based on income, deductions, and filing status. Uses the actual income and expense data from the tax module." }
+    fn parameters(&self) -> Value {
+        json!({ "type": "object", "properties": {
+            "year": { "type": "integer", "description": "Tax year (e.g. 2025)" },
+            "filing_status": { "type": "string", "description": "Filing status: single, married_jointly, married_separately, head_of_household. Default: married_jointly" }
+        }, "required": ["year"] })
+    }
+    async fn execute(&self, args: Value, ctx: &ToolContext<'_>) -> Result<RichToolResult, String> {
+        let year = args.get("year").and_then(|v| v.as_i64()).unwrap_or(2025);
+        let status = arg_str_or(&args, "filing_status", "married_jointly");
+        let db = ctx.db_path.ok_or("database not available")?.to_path_buf();
+        let uid = ctx.user_id;
+        let status_owned = status.to_string();
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+
+            // Get income
+            let gross_income: i64 = conn.query_row(
+                "SELECT COALESCE(SUM(amount_cents), 0) FROM tax_income WHERE user_id = ? AND tax_year = ?",
+                rusqlite::params![uid, year], |r| r.get(0)
+            ).unwrap_or(0);
+
+            let start = format!("{}-01-01", year);
+            let end = format!("{}-12-31", year);
+
+            // Get business deductions (Schedule C)
+            let biz_deductions: i64 = conn.query_row(
+                "SELECT COALESCE(SUM(e.amount_cents), 0) FROM expenses e \
+                 JOIN expense_categories c ON e.category_id = c.id \
+                 WHERE e.user_id = ? AND e.entity = 'business' AND e.expense_date >= ? AND e.expense_date <= ?",
+                rusqlite::params![uid, &start, &end], |r| r.get(0)
+            ).unwrap_or(0);
+
+            // Get itemized deductions
+            let itemized: i64 = conn.query_row(
+                "SELECT COALESCE(SUM(e.amount_cents), 0) FROM expenses e \
+                 JOIN expense_categories c ON e.category_id = c.id \
+                 WHERE e.user_id = ? AND c.tax_deductible = 1 AND e.entity = 'personal' AND e.expense_date >= ? AND e.expense_date <= ?",
+                rusqlite::params![uid, &start, &end], |r| r.get(0)
+            ).unwrap_or(0);
+
+            // FICA already paid
+            let fica_paid: i64 = conn.query_row(
+                "SELECT COALESCE(SUM(e.amount_cents), 0) FROM expenses e \
+                 JOIN expense_categories c ON e.category_id = c.id \
+                 WHERE e.user_id = ? AND (c.name LIKE 'FICA%') AND e.expense_date >= ? AND e.expense_date <= ?",
+                rusqlite::params![uid, &start, &end], |r| r.get(0)
+            ).unwrap_or(0);
+
+            // Federal tax already paid
+            let fed_paid: i64 = conn.query_row(
+                "SELECT COALESCE(SUM(e.amount_cents), 0) FROM expenses e \
+                 JOIN expense_categories c ON e.category_id = c.id \
+                 WHERE e.user_id = ? AND c.name LIKE 'Federal Income Tax%' AND e.expense_date >= ? AND e.expense_date <= ?",
+                rusqlite::params![uid, &start, &end], |r| r.get(0)
+            ).unwrap_or(0);
+
+            // Standard deduction (2025)
+            let standard_deduction: i64 = match status_owned.as_str() {
+                "married_jointly" => 3000000, // $30,000
+                "head_of_household" => 2250000,
+                _ => 1500000, // single / married_separately
+            };
+
+            let deduction = std::cmp::max(standard_deduction, itemized);
+            let deduction_type = if itemized > standard_deduction { "Itemized" } else { "Standard" };
+
+            // Adjusted gross income
+            let agi = gross_income - biz_deductions;
+            let taxable = std::cmp::max(agi - deduction, 0);
+
+            // 2025 tax brackets (married filing jointly)
+            let tax = if status_owned == "married_jointly" {
+                calculate_tax_mfj(taxable)
+            } else {
+                calculate_tax_single(taxable)
+            };
+
+            let owed = tax - fed_paid;
+
+            let d = |c: i64| crate::tax::cents_to_display(c);
+            Ok(format!(
+                "Tax Estimate for {} ({}):\n\n\
+                 Gross Income:           {}\n\
+                 Business Deductions:   -{}\n\
+                 Adjusted Gross Income:  {}\n\
+                 {} Deduction:     -{}\n\
+                 Taxable Income:         {}\n\n\
+                 Federal Tax:            {}\n\
+                 FICA Paid:             -{}\n\
+                 Fed Tax Already Paid:  -{}\n\
+                 ────────────────────────\n\
+                 Estimated Owed/Refund:  {}\n\n\
+                 {}",
+                year, status_owned.replace('_', " "),
+                d(gross_income), d(biz_deductions), d(agi),
+                deduction_type, d(deduction), d(taxable),
+                d(tax), d(fica_paid), d(fed_paid),
+                if owed > 0 { format!("OWE {}", d(owed)) } else { format!("REFUND {}", d(-owed)) },
+                if itemized > standard_deduction {
+                    format!("Note: Itemizing saves you {} over the standard deduction.", d(itemized - standard_deduction))
+                } else {
+                    format!("Note: Standard deduction is better by {}. Itemized would be {}.", d(standard_deduction - itemized), d(itemized))
+                }
+            ))
+        }).await.map_err(|e| e.to_string())?.map_err(|e| e)?;
+
+        Ok(RichToolResult::text(result))
+    }
+}
+
+fn calculate_tax_mfj(taxable_cents: i64) -> i64 {
+    // 2025 MFJ brackets (cents)
+    let brackets: &[(i64, i64)] = &[
+        (2350000, 1000),   // 10% up to $23,500
+        (9555000, 1200),   // 12% up to $95,550
+        (20160000, 2200),  // 22% up to $201,600
+        (38350000, 2400),  // 24% up to $383,500
+        (48700000, 3200),  // 32% up to $487,000
+        (73160000, 3500),  // 35% up to $731,600
+        (i64::MAX, 3700),  // 37% above
+    ];
+    let mut tax: i64 = 0;
+    let mut prev = 0i64;
+    for &(limit, rate_bps) in brackets {
+        let bracket_income = std::cmp::min(taxable_cents, limit) - prev;
+        if bracket_income <= 0 { break; }
+        tax += bracket_income * rate_bps / 10000;
+        prev = limit;
+    }
+    tax
+}
+
+fn calculate_tax_single(taxable_cents: i64) -> i64 {
+    let brackets: &[(i64, i64)] = &[
+        (1175000, 1000),
+        (4782500, 1200),
+        (10080000, 2200),
+        (19175000, 2400),
+        (24350000, 3200),
+        (60950000, 3500),
+        (i64::MAX, 3700),
+    ];
+    let mut tax: i64 = 0;
+    let mut prev = 0i64;
+    for &(limit, rate_bps) in brackets {
+        let bracket_income = std::cmp::min(taxable_cents, limit) - prev;
+        if bracket_income <= 0 { break; }
+        tax += bracket_income * rate_bps / 10000;
+        prev = limit;
+    }
+    tax
+}
+
 pub struct ScanReceiptTool;
 
 #[async_trait]

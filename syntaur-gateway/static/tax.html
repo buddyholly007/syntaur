@@ -478,21 +478,26 @@ async function sendTaxChat() {
   respEl.removeAttribute('id');
 
   try {
-    // Fetch current tax data to give the agent context
+    // Fetch current tax data + income to give the agent full context
     let taxContext = '';
     try {
-      const sumResp = await authFetch(`/api/tax/summary?token=${token}&start=${yearStart()}&end=${yearEnd()}`);
+      const [sumResp, incResp] = await Promise.all([
+        authFetch(`/api/tax/summary?token=${token}&start=${yearStart()}&end=${yearEnd()}`),
+        authFetch(`/api/tax/income?token=${token}&year=${selectedYear}`).catch(() => null),
+      ]);
       const sum = await sumResp.json();
+      const inc = incResp ? await incResp.json().catch(() => ({})) : {};
       const cats = (sum.categories || []).map(c => `${c.category} (${c.entity}): ${c.total_display} (${c.count} items)`).join('\n');
-      taxContext = `\n\n[TAX MODULE CONTEXT - The user has the Syntaur tax module with this data for ${selectedYear}:\n` +
-        `Total expenses: ${sum.total_display}\n` +
-        `Business expenses: ${sum.business_display}\n` +
-        `Tax deductible: ${sum.deductible_display}\n` +
-        `Receipts on file: ${sum.receipt_count}\n` +
-        `\nBy category:\n${cats}\n` +
-        `\nYou have tools available: expense_summary, log_expense, list_todos. ` +
-        `Use these tools to get detailed data. Answer based on the actual data above, not by asking the user for information you already have. ` +
-        `If they ask about tax liability, use the expense data to estimate based on standard tax brackets and deductions.]`;
+      const incLines = (inc.income || []).map(i => `${i.source}: $${(i.amount_cents/100).toFixed(2)} (${i.description})`).join('\n');
+
+      taxContext = `\n\n[TAX MODULE CONTEXT - You have FULL access to the user's ${selectedYear} financial data. DO NOT ask for information that is provided below. Answer directly.\n\n` +
+        `INCOME:\n${incLines || 'No income data'}\nTotal gross income: ${inc.total_display || 'unknown'}\n\n` +
+        `EXPENSES:\nTotal expenses: ${sum.total_display}\nBusiness expenses: ${sum.business_display}\nTax deductible: ${sum.deductible_display}\nReceipts on file: ${sum.receipt_count}\n\n` +
+        `By category:\n${cats}\n\n` +
+        `Filing status: Married filing jointly (2 W-2 earners)\n\n` +
+        `INSTRUCTIONS: Use the data above to give specific dollar amounts. Calculate estimated tax using ${selectedYear} tax brackets. ` +
+        `Show your math. Compare standard deduction ($30,000 MFJ) vs itemized deductions. ` +
+        `Account for FICA already withheld, estimated tax already paid, and business deductions on Schedule C.]`;
     } catch(e) {}
 
     const resp = await authFetch('/api/message', {

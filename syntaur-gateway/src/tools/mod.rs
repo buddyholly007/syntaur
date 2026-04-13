@@ -304,6 +304,8 @@ impl ToolRegistry {
         reg!(built_in_tools::AddCalendarEventTool);
         reg!(built_in_tools::LogExpenseTool);
         reg!(built_in_tools::ExpenseSummaryTool);
+        reg!(built_in_tools::GetIncomeTool);
+        reg!(built_in_tools::EstimateTaxTool);
         reg!(built_in_tools::ScanReceiptTool);
         reg!(built_in_tools::BrowserScreenshotTool);
         reg!(built_in_tools::BrowserExecuteJsTool);
