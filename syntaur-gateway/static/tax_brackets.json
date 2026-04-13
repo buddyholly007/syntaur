@@ -1,0 +1,54 @@
+{
+  "source": "IRS Rev. Proc. 2024-40",
+  "last_updated": "2026-04-13",
+  "brackets": {
+    "2025": {
+      "married_jointly": {
+        "brackets": [
+          [2385000, 1000],
+          [9695000, 1200],
+          [20670000, 2200],
+          [39460000, 2400],
+          [50105000, 3200],
+          [75160000, 3500]
+        ],
+        "top_rate": 3700,
+        "standard_deduction": 3020000
+      },
+      "single": {
+        "brackets": [
+          [1192500, 1000],
+          [4847500, 1200],
+          [10335000, 2200],
+          [19730000, 2400],
+          [25052500, 3200],
+          [62660000, 3500]
+        ],
+        "top_rate": 3700,
+        "standard_deduction": 1510000
+      },
+      "head_of_household": {
+        "brackets": [
+          [1700000, 1000],
+          [6475000, 1200],
+          [10335000, 2200],
+          [19730000, 2400],
+          [25052500, 3200],
+          [62660000, 3500]
+        ],
+        "top_rate": 3700,
+        "standard_deduction": 2265000
+      },
+      "ss_wage_base": 17610000,
+      "ss_rate_bps": 620,
+      "medicare_rate_bps": 145,
+      "additional_medicare_threshold_mfj": 25000000,
+      "additional_medicare_rate_bps": 90,
+      "salt_cap": 1000000,
+      "ltcg_rate_0_threshold_mfj": 9685000,
+      "ltcg_rate_15_threshold_mfj": 60180000,
+      "ltcg_rate_20_above": true
+    }
+  },
+  "notes": "Brackets are in cents. Rate is in basis points (1000 = 10%). Update this file each November when the IRS publishes Rev. Proc. for the next tax year."
+}
