@@ -105,6 +105,7 @@
 const token = sessionStorage.getItem('syntaur_token') || '';
 if (!token) { window.location.href = '/'; }
 let sending = false;
+let voiceInitiated = false;
 let pendingFiles = [];
 let currentAgent = 'main';
 let agents = [];
@@ -488,6 +489,7 @@ async function send(msg) {
               <div class="flex items-center gap-3 mt-2"><span class="text-xs text-gray-600">${secs}s${rounds}${tools}</span>
               <button onclick="copy(this)" class="text-xs text-gray-600 hover:text-gray-400" data-t="${escAttr(ev.response)}">Copy</button></div>`;
             scroll.scrollTop = scroll.scrollHeight;
+            if (voiceInitiated) { playTts(ev.response); voiceInitiated = false; }
             sending = false; btn.disabled = false;
             document.getElementById('input').focus();
             return;
@@ -782,6 +784,21 @@ sendFromInput = function() {
 };
 
 document.getElementById('input').focus();
+// TTS playback for voice-initiated responses
+async function playTts(text) {
+  try {
+    const resp = await fetch('/api/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: text.substring(0, 500) })
+    });
+    const data = await resp.json();
+    if (data.audio_url) {
+      const audio = new Audio(data.audio_url);
+      audio.play().catch(e => console.log('audio play blocked:', e));
+    }
+  } catch(e) { console.log('TTS error:', e); }
+}
 </script>
 <script>
 // Bug Report UI — injected on all authenticated pages (schema v10)

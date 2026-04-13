@@ -24,6 +24,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
 const STT_HOST: &str = "127.0.0.1:10300";
+pub const TTS_HOST: &str = "192.168.1.69:10400";
 
 /// Axum handler for WebSocket upgrade.
 pub async fn ws_stt_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
@@ -33,6 +34,7 @@ pub async fn ws_stt_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
 async fn handle_stt_session(mut socket: WebSocket) {
     let mut pcm_buffer: Vec<i16> = Vec::new();
     let mut active = false;
+    let mut tts_enabled = false;
 
     while let Some(msg) = socket.recv().await {
         let msg = match msg {
@@ -51,7 +53,10 @@ async fn handle_stt_session(mut socket: WebSocket) {
                         Some("start") => {
                             pcm_buffer.clear();
                             active = true;
-                            debug!("[ws/stt] session started");
+                            tts_enabled = cmd.get("tts")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            debug!("[ws/stt] session started (tts={})", tts_enabled);
                         }
                         Some("stop") => {
                             if !active || pcm_buffer.len() < 1600 {

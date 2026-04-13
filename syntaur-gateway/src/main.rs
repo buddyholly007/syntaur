@@ -3313,6 +3313,7 @@ async fn main() {
         .route("/api/journal/dates", get(voice_api::get_journal_dates))
         .route("/api/journal/search", get(voice_api::search_journal))
         .route("/api/journal/sessions", get(voice_api::get_sessions))
+        .route("/api/tts", post(voice_api::synthesize_speech))
         // Setup wizard endpoints (installer + dashboard)
         .route("/", get(setup::handle_dashboard))
         .route("/icon.svg", get(setup::handle_icon))

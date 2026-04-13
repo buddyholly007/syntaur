@@ -7,10 +7,12 @@
 
 use axum::extract::Query;
 use axum::response::Json;
+use log::info;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::tools::voice_journal;
+use crate::voice::satellite_client;
 
 #[derive(Deserialize)]
 pub struct JournalQuery {
@@ -124,4 +126,33 @@ pub async fn get_sessions(Query(q): Query<SessionsQuery>) -> Json<Value> {
         "total_duration_hours": total_duration / 3600.0,
         "total_training_clips": total_clips,
     }))
+}
+
+// ── TTS endpoint ─────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct TtsRequest {
+    pub text: String,
+}
+
+/// POST /api/tts — synthesize text to speech, return audio URL.
+pub async fn synthesize_speech(Json(req): Json<TtsRequest>) -> Json<Value> {
+    let text = req.text.trim();
+    if text.is_empty() {
+        return Json(json!({ "error": "empty text" }));
+    }
+
+    info!("[tts-api] synthesizing: {}", &text[..text.len().min(60)]);
+
+    match satellite_client::run_tts(crate::voice_ws::TTS_HOST, text).await {
+        Ok((audio, rate, ch, bits)) => {
+            let url = satellite_client::cache_tts_audio(audio, 18789, rate, ch, bits).await;
+            Json(json!({
+                "audio_url": url,
+            }))
+        }
+        Err(e) => {
+            Json(json!({ "error": format!("TTS failed: {}", e) }))
+        }
+    }
 }

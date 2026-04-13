@@ -42,7 +42,7 @@ fn tts_cache() -> &'static Mutex<HashMap<String, Vec<u8>>> {
 
 /// Store TTS audio and return the URL the satellite can fetch it from.
 /// Wraps raw PCM in a WAV header if needed.
-async fn cache_tts_audio(audio: Vec<u8>, gateway_port: u16, sample_rate: u32, channels: u16, bits: u16) -> String {
+pub async fn cache_tts_audio(audio: Vec<u8>, gateway_port: u16, sample_rate: u32, channels: u16, bits: u16) -> String {
     let id = format!("{:016x}", rand::random::<u64>());
     let url = format!("http://192.168.1.35:{}/voice/tts/{}.wav", gateway_port, id);
 
@@ -775,7 +775,7 @@ async fn call_gateway(
 
 /// Send text to the Wyoming TTS server and get audio back.
 /// Returns (audio_pcm, sample_rate, channels, bits_per_sample).
-async fn run_tts(tts_host: &str, text: &str) -> Result<(Vec<u8>, u32, u16, u16), String> {
+pub async fn run_tts(tts_host: &str, text: &str) -> Result<(Vec<u8>, u32, u16, u16), String> {
     let stream = TcpStream::connect(tts_host)
         .await
         .map_err(|e| format!("tts connect: {}", e))?;
