@@ -22,6 +22,8 @@ mod tool_hooks;
 mod tools;
 mod voice;
 mod voice_chat;
+mod voice_ws;
+mod voice_api;
 mod modules;
 mod setup;
 mod license;
@@ -741,11 +743,13 @@ async fn handle_api_message(
     }
 
     // Call LLM with tools
-    let mut tool_registry = crate::tools::ToolRegistry::with_extensions(
+    let allowlist = state.config.agent_script_allowlist(&agent_id);
+    let mut tool_registry = crate::tools::ToolRegistry::with_extensions_and_allowlist(
         workspace.clone(),
         agent_id.clone(),
         Some(state.mcp.clone()),
         state.indexer.clone(),
+        &allowlist,
     );
     tool_registry.set_infra(
         Arc::clone(&state.tool_rate_limiter),
@@ -849,11 +853,13 @@ async fn handle_research(
     // Build a tool registry for the research session. Same wiring as the
     // /api/message handler — the research subtasks will filter to a
     // restricted tool set inside their own loop.
-    let mut tr = crate::tools::ToolRegistry::with_extensions(
+    let allowlist = state.config.agent_script_allowlist(&agent_id);
+    let mut tr = crate::tools::ToolRegistry::with_extensions_and_allowlist(
         workspace,
         agent_id.clone(),
         Some(state.mcp.clone()),
         state.indexer.clone(),
+        &allowlist,
     );
     tr.add_extension_tools(&state.openapi_tools);
     tr.set_infra(
@@ -1057,11 +1063,13 @@ async fn handle_message_start(
             }
         }
 
-        let mut tr = crate::tools::ToolRegistry::with_extensions(
+        let allowlist = state_clone.config.agent_script_allowlist(&agent_for_task);
+        let mut tr = crate::tools::ToolRegistry::with_extensions_and_allowlist(
             workspace,
             agent_for_task.clone(),
             Some(state_clone.mcp.clone()),
             state_clone.indexer.clone(),
+            &allowlist,
         );
         tr.add_extension_tools(&state_clone.openapi_tools);
         tr.set_infra(
@@ -1251,11 +1259,13 @@ async fn handle_research_start(
 
     // Snapshot what the background task needs
     let tool_registry = {
-        let mut tr = crate::tools::ToolRegistry::with_extensions(
+        let allowlist = state.config.agent_script_allowlist(&agent_id);
+        let mut tr = crate::tools::ToolRegistry::with_extensions_and_allowlist(
             workspace,
             agent_id.clone(),
             Some(state.mcp.clone()),
             state.indexer.clone(),
+            &allowlist,
         );
         tr.set_infra(
             Arc::clone(&state.tool_rate_limiter),
@@ -2681,6 +2691,16 @@ async fn main() {
 
     // Log module status
     crate::modules::log_module_status(&config.modules);
+
+    // Initialize Voice Journal module config (if enabled)
+    if let Some(entry) = config.modules.entries.get("mod-voice-journal") {
+        if entry.enabled {
+            let vj_config = crate::tools::voice_journal::VoiceJournalConfig::from_value(&entry.config);
+            log::info!("[voice-journal] storage: {}, wake_word: {:?}, consent: {}",
+                vj_config.storage_path, vj_config.wake_word, vj_config.consent_mode);
+            crate::tools::voice_journal::init_config(vj_config);
+        }
+    }
     // Load OpenAPI tools from config.openapi.specs. Each spec generates one
     // Tool per allowlisted endpoint. Failures are logged and skipped.
     let openapi_http = reqwest::Client::builder()
@@ -3287,6 +3307,12 @@ async fn main() {
         .route("/api/slash", post(handle_dispatch_slash))
         .route("/external-callbacks", get(handle_external_callbacks))
         .route("/v1/chat/completions", post(voice_chat::handle_chat_completions))
+        // Voice Journal module routes
+        .route("/ws/stt", get(voice_ws::ws_stt_handler))
+        .route("/api/journal", get(voice_api::get_journal))
+        .route("/api/journal/dates", get(voice_api::get_journal_dates))
+        .route("/api/journal/search", get(voice_api::search_journal))
+        .route("/api/journal/sessions", get(voice_api::get_sessions))
         // Setup wizard endpoints (installer + dashboard)
         .route("/", get(setup::handle_dashboard))
         .route("/icon.svg", get(setup::handle_icon))
@@ -3306,6 +3332,8 @@ async fn main() {
         .route("/fonts/{filename}", get(setup::handle_font_file))
         .route("/setup", get(setup::handle_setup_page))
         .route("/modules", get(setup::handle_modules_page))
+        .route("/journal", get(setup::handle_journal_page))
+        .route("/voice-setup", get(setup::handle_voice_setup_page))
         .route("/settings", get(setup::handle_settings_page))
         .route("/tax", get(setup::handle_tax_page))
         .route("/chat", get(setup::handle_chat_page))

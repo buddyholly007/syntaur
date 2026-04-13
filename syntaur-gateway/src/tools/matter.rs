@@ -41,9 +41,33 @@ const CLUSTER_LEVEL_CONTROL: u32 = 8;
 const CLUSTER_COLOR_CONTROL: u32 = 768; // 0x300
 
 /// Load the room mapping from disk.
+/// Looks in ~/.syntaur first (persistent config), falls back to /tmp/syntaur.
 fn load_room_mapping() -> Option<HashMap<String, Value>> {
-    let content = std::fs::read_to_string("/tmp/syntaur/matter_rooms.json").ok()?;
-    serde_json::from_str(&content).ok()
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/sean".to_string());
+    let primary = format!("{}/.syntaur/matter_rooms.json", home);
+    let fallback = "/tmp/syntaur/matter_rooms.json";
+
+    let content = match std::fs::read_to_string(&primary) {
+        Ok(c) => c,
+        Err(_) => match std::fs::read_to_string(fallback) {
+            Ok(c) => {
+                warn!("[matter] loaded rooms from fallback {}", fallback);
+                c
+            }
+            Err(_) => {
+                warn!("[matter] room mapping not found at {} or {}", primary, fallback);
+                return None;
+            }
+        },
+    };
+
+    match serde_json::from_str(&content) {
+        Ok(m) => Some(m),
+        Err(e) => {
+            warn!("[matter] failed to parse room mapping: {}", e);
+            None
+        }
+    }
 }
 
 /// Get the friendly device label for a node ID from the room mapping.

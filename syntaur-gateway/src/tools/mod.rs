@@ -39,6 +39,8 @@ pub mod matter;
 pub mod camera;
 // Sub-agent delegation: search, coder, researcher specialists.
 pub mod subagent;
+// Phase 6: Voice journal — record, transcribe, search.
+pub mod voice_journal;
 
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
@@ -206,7 +208,18 @@ impl ToolRegistry {
         mcp: Option<Arc<McpRegistry>>,
         indexer: Option<Arc<Indexer>>,
     ) -> Self {
-        // Build allowed script paths
+        Self::with_extensions_and_allowlist(workspace_root, agent_id, mcp, indexer, &[])
+    }
+
+    /// Full constructor with explicit script allowlist from agent config.
+    pub fn with_extensions_and_allowlist(
+        workspace_root: PathBuf,
+        agent_id: String,
+        mcp: Option<Arc<McpRegistry>>,
+        indexer: Option<Arc<Indexer>>,
+        config_allowlist: &[String],
+    ) -> Self {
+        // Build allowed script paths from workspace skills directory
         let mut allowed = Vec::new();
         if let Ok(entries) = std::fs::read_dir(workspace_root.join("skills")) {
             for entry in entries.flatten() {
@@ -220,6 +233,13 @@ impl ToolRegistry {
                         }
                     }
                 }
+            }
+        }
+        // Merge agent-specific allowlist from config
+        for entry in config_allowlist {
+            let expanded = entry.replace("~", &std::env::var("HOME").unwrap_or_default());
+            if !allowed.contains(&expanded) {
+                allowed.push(expanded);
             }
         }
 
@@ -317,6 +337,10 @@ impl ToolRegistry {
         reg!(built_in_tools::BrowserClickAtTool);
         reg!(built_in_tools::BrowserHoldAtTool);
         reg!(built_in_tools::BrowserWaitTool);
+        // Voice Journal module
+        reg!(voice_journal::SearchJournalTool);
+        reg!(voice_journal::JournalSummaryTool);
+        reg!(voice_journal::ListRecordingsTool);
 
         // OpenAPI tools registered via add_openapi_tools() after construction
 

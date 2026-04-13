@@ -24,7 +24,8 @@ pub const FREE_MODULES: &[&str] = &[
 pub const PRO_MODULES: &[&str] = &[
     "mod-comms", "mod-captcha", "mod-office", "mod-accounts", "mod-browser",
     "social-manager", "office", "filesystem", "search",
-    // Future premium: voice, home, camera, finance
+    // Future premium: home, camera, finance
+    "mod-voice-journal",
 ];
 
 /// License status for the current installation.

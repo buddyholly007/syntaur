@@ -549,6 +549,14 @@ pub async fn handle_modules_page() -> axum::response::Html<&'static str> {
     axum::response::Html(include_str!("../static/modules.html"))
 }
 
+pub async fn handle_journal_page() -> axum::response::Html<&'static str> {
+    axum::response::Html(include_str!("../static/journal.html"))
+}
+
+pub async fn handle_voice_setup_page() -> axum::response::Html<&'static str> {
+    axum::response::Html(include_str!("../static/voice-setup.html"))
+}
+
 /// GET /settings
 pub async fn handle_settings_page() -> axum::response::Html<&'static str> {
     axum::response::Html(include_str!("../static/settings.html"))

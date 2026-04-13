@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0284c7">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<title>Voice Journal — Syntaur</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>tailwind.config={darkMode:'class',theme:{extend:{colors:{oc:{500:'#0ea5e9',600:'#0284c7',700:'#0369a1'}}}}}</script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+  body { font-family: 'Inter', sans-serif; }
+</style>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen">
+
+<!-- Top bar -->
+<div class="border-b border-gray-800 bg-gray-900/80 backdrop-blur">
+  <div class="max-w-4xl mx-auto px-4 py-2.5 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <a href="/" class="flex items-center gap-2 hover:opacity-80">
+        <img src="/icon.svg" class="w-5 h-5" alt="">
+        <span class="font-semibold hidden sm:inline">Syntaur</span>
+      </a>
+      <span class="text-gray-300 text-sm font-medium">Voice Journal</span>
+    </div>
+    <div class="flex items-center gap-3 text-sm">
+      <a href="/chat" class="text-gray-500 hover:text-gray-300">Chat</a>
+      <a href="/" class="text-gray-500 hover:text-gray-300">Home</a>
+    </div>
+  </div>
+</div>
+
+<div class="max-w-4xl mx-auto px-4 py-6">
+
+  <!-- Stats bar -->
+  <div class="grid grid-cols-3 gap-3 mb-6">
+    <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 text-center">
+      <div class="text-2xl font-semibold text-white" id="stat-entries">-</div>
+      <div class="text-xs text-gray-500 mt-1">Today's entries</div>
+    </div>
+    <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 text-center">
+      <div class="text-2xl font-semibold text-white" id="stat-hours">-</div>
+      <div class="text-xs text-gray-500 mt-1">Hours recorded</div>
+    </div>
+    <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 text-center">
+      <div class="text-2xl font-semibold text-white" id="stat-clips">-</div>
+      <div class="text-xs text-gray-500 mt-1">Training clips</div>
+    </div>
+  </div>
+
+  <!-- Search + date picker -->
+  <div class="flex gap-3 mb-6">
+    <div class="flex-1 relative">
+      <input type="text" id="search-input" placeholder="Search transcripts..."
+        class="w-full bg-gray-900 border border-gray-800 hover:border-gray-700 focus:border-oc-500 focus:ring-1 focus:ring-oc-500 rounded-xl px-4 py-2.5 text-sm text-white placeholder-gray-500 outline-none"
+        onkeydown="if(event.key==='Enter')doSearch()">
+      <button onclick="doSearch()" class="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-oc-500 p-1">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      </button>
+    </div>
+    <input type="date" id="date-picker"
+      class="bg-gray-900 border border-gray-800 hover:border-gray-700 focus:border-oc-500 rounded-xl px-4 py-2.5 text-sm text-white outline-none"
+      onchange="loadDate(this.value)">
+  </div>
+
+  <!-- Date navigation -->
+  <div class="flex items-center justify-between mb-4">
+    <button onclick="navDate(-1)" class="text-gray-500 hover:text-white text-sm">&larr; Previous day</button>
+    <h2 class="text-lg font-semibold text-white" id="current-date"></h2>
+    <button onclick="navDate(1)" class="text-gray-500 hover:text-white text-sm">Next day &rarr;</button>
+  </div>
+
+  <!-- Journal content -->
+  <div id="journal-content" class="space-y-3">
+    <div class="text-gray-500 text-sm text-center py-8">Loading...</div>
+  </div>
+
+  <!-- Search results (hidden by default) -->
+  <div id="search-results" class="hidden space-y-4">
+  </div>
+
+  <!-- Available dates -->
+  <div class="mt-8 border-t border-gray-800 pt-6">
+    <h3 class="text-sm font-medium text-gray-400 mb-3">Recent journal dates</h3>
+    <div class="flex flex-wrap gap-2" id="date-list"></div>
+  </div>
+</div>
+
+<script>
+const token = sessionStorage.getItem('syntaur_token') || '';
+let currentDate = new Date().toISOString().split('T')[0];
+
+async function api(path) {
+  const resp = await fetch(path);
+  return await resp.json();
+}
+
+async function loadDate(date) {
+  currentDate = date;
+  document.getElementById('date-picker').value = date;
+  document.getElementById('current-date').textContent = formatDate(date);
+  document.getElementById('search-results').classList.add('hidden');
+  document.getElementById('journal-content').classList.remove('hidden');
+
+  const data = await api(`/api/journal?date=${date}`);
+  const container = document.getElementById('journal-content');
+
+  if (!data.content) {
+    container.innerHTML = `<div class="text-gray-500 text-sm text-center py-8">No journal entries for ${formatDate(date)}</div>`;
+    document.getElementById('stat-entries').textContent = '0';
+    return;
+  }
+
+  document.getElementById('stat-entries').textContent = data.entries;
+
+  // Parse markdown into entries
+  const lines = data.content.split('\n');
+  let html = '';
+  for (const line of lines) {
+    if (line.startsWith('# ')) continue; // Skip title
+    if (!line.trim()) continue;
+    if (line.startsWith('**')) {
+      // Timestamp entry
+      const match = line.match(/^\*\*(\d+:\d+)\*\*\s*(\[.*?\])?\s*(.*)/);
+      if (match) {
+        const time = match[1];
+        const source = match[2] || '';
+        const text = match[3];
+        const sourceClass = source.includes('phone') ? 'bg-blue-900/30 text-blue-400' :
+                           source.includes('wearable') ? 'bg-purple-900/30 text-purple-400' :
+                           source ? 'bg-gray-800 text-gray-400' : '';
+        const sourceBadge = source ? `<span class="text-xs px-2 py-0.5 rounded-full ${sourceClass}">${source.replace(/[\[\]]/g,'')}</span>` : '';
+        html += `<div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+          <div class="flex items-center gap-2 mb-2">
+            <span class="text-xs text-gray-500 font-mono">${time}</span>
+            ${sourceBadge}
+          </div>
+          <p class="text-gray-300 text-sm leading-relaxed">${esc(text)}</p>
+        </div>`;
+      }
+    }
+  }
+
+  container.innerHTML = html || '<div class="text-gray-500 text-sm text-center py-8">No entries found</div>';
+}
+
+async function doSearch() {
+  const q = document.getElementById('search-input').value.trim();
+  if (!q) { loadDate(currentDate); return; }
+
+  document.getElementById('journal-content').classList.add('hidden');
+  const results = document.getElementById('search-results');
+  results.classList.remove('hidden');
+  results.innerHTML = '<div class="text-gray-500 text-sm text-center py-4">Searching...</div>';
+
+  const data = await api(`/api/journal/search?q=${encodeURIComponent(q)}&max=10`);
+
+  if (!data.results || data.results.length === 0) {
+    results.innerHTML = `<div class="text-gray-500 text-sm text-center py-8">No results for "${esc(q)}"</div>`;
+    return;
+  }
+
+  let html = `<div class="text-sm text-gray-400 mb-3">Found "${esc(q)}" in ${data.total_days} day(s)</div>`;
+  for (const r of data.results) {
+    html += `<div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+      <button onclick="loadDate('${r.date}')" class="text-oc-500 hover:text-oc-400 text-sm font-medium mb-2 block">${formatDate(r.date)}</button>`;
+    for (const m of r.matches.slice(0, 3)) {
+      const highlighted = esc(m).replace(new RegExp(esc(q), 'gi'), '<mark class="bg-oc-900/50 text-oc-400 px-0.5 rounded">$&</mark>');
+      html += `<p class="text-gray-400 text-sm leading-relaxed mb-1">${highlighted}</p>`;
+    }
+    if (r.count > 3) html += `<p class="text-gray-600 text-xs">...and ${r.count - 3} more</p>`;
+    html += '</div>';
+  }
+  results.innerHTML = html;
+}
+
+function navDate(delta) {
+  const d = new Date(currentDate + 'T12:00:00');
+  d.setDate(d.getDate() + delta);
+  loadDate(d.toISOString().split('T')[0]);
+}
+
+function formatDate(dateStr) {
+  const d = new Date(dateStr + 'T12:00:00');
+  return d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+}
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// Load stats
+async function loadStats() {
+  const data = await api('/api/journal/sessions?limit=1');
+  document.getElementById('stat-hours').textContent = (data.total_duration_hours || 0).toFixed(1);
+  document.getElementById('stat-clips').textContent = data.total_training_clips || 0;
+}
+
+// Load date list
+async function loadDates() {
+  const data = await api('/api/journal/dates');
+  const container = document.getElementById('date-list');
+  if (data.dates && data.dates.length) {
+    container.innerHTML = data.dates.slice(0, 14).map(d =>
+      `<button onclick="loadDate('${d}')" class="text-xs bg-gray-900 border border-gray-800 hover:border-gray-700 rounded-lg px-3 py-1.5 text-gray-400 hover:text-white transition-colors">${d}</button>`
+    ).join('');
+  } else {
+    container.innerHTML = '<span class="text-xs text-gray-600">No journal entries yet</span>';
+  }
+}
+
+// Init
+loadDate(currentDate);
+loadStats();
+loadDates();
+</script>
+</body>
+</html>

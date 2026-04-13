@@ -99,6 +99,14 @@ pub static CORE_MODULES: &[CoreModule] = &[
                   "browser_wait"],
         default_enabled: true,
     },
+    CoreModule {
+        id: "mod-voice-journal",
+        name: "Voice Journal",
+        description: "Record, transcribe, and search spoken conversations from wearables, phone, or desktop mic. \
+                      Includes wake word training, daily transcripts, and voice training data collection.",
+        tools: &["search_journal", "journal_summary", "list_recordings"],
+        default_enabled: false,
+    },
 ];
 
 /// Module configuration from syntaur.json.
