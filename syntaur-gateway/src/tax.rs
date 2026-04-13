@@ -257,15 +257,14 @@ async fn scan_receipt_vision(state: &AppState, receipt_id: i64) -> Result<(), St
 
     let (provider_name, provider_config) = provider.ok_or("No LLM provider configured")?;
 
-    // Force a vision-capable model regardless of what's configured
+    // Force a vision-capable model optimized for document OCR
     let model = if provider_config.base_url.contains("openrouter") {
-        "google/gemini-2.0-flash-001" // Free, vision-capable on OpenRouter
+        "nvidia/nemotron-nano-12b-v2-vl:free" // #1 on OCRBench, free, purpose-built for documents
     } else if provider_config.base_url.contains("anthropic") {
         "claude-sonnet-4-6"
     } else if provider_config.base_url.contains("openai") {
         "gpt-4o-mini"
     } else {
-        // Local models rarely support vision — try anyway with configured model
         provider_config.models.first()
             .map(|m| m.id.as_str())
             .or_else(|| provider_config.extra.get("model").and_then(|v| v.as_str()))
