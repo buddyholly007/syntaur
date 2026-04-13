@@ -83,6 +83,26 @@ pub fn parse_cents(s: &str) -> Option<i64> {
     }
 }
 
+/// Convert a PDF to a high-resolution PNG using pdftoppm (poppler-utils).
+/// Returns the PNG bytes of the first page at 300 DPI.
+fn convert_pdf_to_png(pdf_path: &str) -> Result<Vec<u8>, String> {
+    let output_prefix = format!("{}.render", pdf_path);
+    let result = std::process::Command::new("pdftoppm")
+        .args(["-png", "-r", "300", "-singlefile", pdf_path, &output_prefix])
+        .output()
+        .map_err(|e| format!("pdftoppm not available: {}", e))?;
+
+    if !result.status.success() {
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        return Err(format!("pdftoppm failed: {}", stderr.chars().take(200).collect::<String>()));
+    }
+
+    let png_path = format!("{}.png", output_prefix);
+    let data = std::fs::read(&png_path).map_err(|e| format!("Read rendered PNG: {}", e))?;
+    let _ = std::fs::remove_file(&png_path); // Clean up
+    Ok(data)
+}
+
 fn receipts_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
     let dir = PathBuf::from(format!("{}/.syntaur/receipts", home));
@@ -181,16 +201,22 @@ async fn scan_receipt_vision(state: &AppState, receipt_id: i64) -> Result<(), St
         }).await.map_err(|e| e.to_string())??
     };
 
-    let image_bytes = std::fs::read(&image_path).map_err(|e| e.to_string())?;
+    // Convert PDF to PNG for better vision accuracy
+    let (image_bytes, mime) = if image_path.ends_with(".pdf") {
+        match convert_pdf_to_png(&image_path) {
+            Ok(png) => (png, "image/png"),
+            Err(e) => {
+                log::warn!("[tax] PDF→PNG failed for receipt ({}), using raw", e);
+                (std::fs::read(&image_path).map_err(|e| e.to_string())?, "application/pdf")
+            }
+        }
+    } else {
+        let ext = image_path.rsplit('.').next().unwrap_or("jpg");
+        let m = match ext { "png" => "image/png", _ => "image/jpeg" };
+        (std::fs::read(&image_path).map_err(|e| e.to_string())?, m)
+    };
     use base64::Engine;
     let base64_image = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
-
-    let ext = image_path.rsplit('.').next().unwrap_or("jpg");
-    let mime = match ext {
-        "png" => "image/png",
-        "pdf" => "application/pdf",
-        _ => "image/jpeg",
-    };
 
     // Call LLM with vision
     let client = &state.client;
@@ -308,6 +334,11 @@ Respond ONLY with JSON: {"vendor":"...","amount":"...","date":"...","category":"
         Ok(())
     }).await.map_err(|e| e.to_string())??;
 
+    // Validate extracted amount
+    if amount_cents > 100_000_00 {
+        log::warn!("[tax] Receipt #{} has unusually large amount: {} — may need verification", receipt_id, cents_to_display(amount_cents));
+    }
+
     info!("[tax] Receipt #{} scanned: {} {}", receipt_id, vendor_log, cents_to_display(amount_cents));
     Ok(())
 }
@@ -417,11 +448,22 @@ async fn classify_and_extract(state: &AppState, doc_id: i64) -> Result<(), Strin
         }).await.map_err(|e| e.to_string())??
     };
 
-    let image_bytes = std::fs::read(&image_path).map_err(|e| e.to_string())?;
+    // Convert PDF to high-resolution PNG for better vision accuracy
+    let (image_bytes, mime) = if image_path.ends_with(".pdf") {
+        match convert_pdf_to_png(&image_path) {
+            Ok(png) => (png, "image/png"),
+            Err(e) => {
+                log::warn!("[tax] PDF conversion failed ({}), sending raw PDF", e);
+                (std::fs::read(&image_path).map_err(|e| e.to_string())?, "application/pdf")
+            }
+        }
+    } else {
+        let ext = image_path.rsplit('.').next().unwrap_or("jpg");
+        let m = match ext { "png" => "image/png", _ => "image/jpeg" };
+        (std::fs::read(&image_path).map_err(|e| e.to_string())?, m)
+    };
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
-    let ext = image_path.rsplit('.').next().unwrap_or("pdf");
-    let mime = match ext { "png" => "image/png", "pdf" => "application/pdf", _ => "image/jpeg" };
 
     let config = &state.config;
     let provider = config.models.providers.iter()
