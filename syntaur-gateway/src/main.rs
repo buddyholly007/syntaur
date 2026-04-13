@@ -3343,6 +3343,8 @@ async fn main() {
         .route("/api/tax/documents/{id}/field", axum::routing::put(tax::handle_tax_doc_update_field))
         .route("/api/tax/documents/{id}/status", axum::routing::put(tax::handle_tax_doc_update_status))
         .route("/api/tax/income", get(tax::handle_income_list))
+        .route("/api/tax/brackets/status", get(tax::handle_bracket_status))
+        .route("/api/updates/check", get(tax::handle_update_check))
         .route("/api/tax/export", get(tax::handle_expense_export))
         .route("/api/todos", get(handle_todo_list))
         .route("/api/todos", post(handle_todo_create))
@@ -3366,6 +3368,22 @@ async fn main() {
     info!("HTTP server on {}", bind_addr);
     info!("Dashboard: http://127.0.0.1:{}", config.gateway.port);
     info!("Open 'Syntaur' from your app launcher, or visit the URL above.");
+
+    // Install default tax brackets config if not present
+    {
+        let brackets_path = format!("{}/tax_brackets.json", data_dir_str);
+        if !std::path::Path::new(&brackets_path).exists() {
+            let default = include_str!("../static/tax_brackets.json");
+            if let Err(e) = std::fs::write(&brackets_path, default) {
+                warn!("Could not write default tax brackets: {}", e);
+            } else {
+                info!("Installed default tax brackets config");
+            }
+        }
+        if let Some(warning) = tax::brackets_stale() {
+            warn!("Tax brackets: {}", warning);
+        }
+    }
 
     // Auto-open browser on first start (only if interactive terminal)
     if std::env::var("DISPLAY").is_ok() || std::env::var("WAYLAND_DISPLAY").is_ok() || cfg!(target_os = "macos") || cfg!(target_os = "windows") {

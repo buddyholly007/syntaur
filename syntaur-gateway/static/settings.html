@@ -212,6 +212,25 @@
       </div>
 
       <div class="card">
+        <h3 class="font-medium mb-4">Updates</h3>
+        <div class="space-y-3 text-sm mb-6">
+          <div class="flex items-center justify-between">
+            <div>
+              <p class="text-gray-300" id="update-version-text">Checking for updates...</p>
+              <p class="text-xs text-gray-500" id="update-status-text"></p>
+            </div>
+            <button onclick="checkForUpdates()" class="px-4 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm transition-colors" id="btn-check-update">Check Now</button>
+          </div>
+          <div id="update-available" class="hidden p-3 rounded-lg bg-oc-900/30 border border-oc-800/30">
+            <p class="text-sm text-oc-400 font-medium">Update available!</p>
+            <p class="text-xs text-gray-400 mt-1" id="update-notes"></p>
+            <a href="" id="update-download-link" target="_blank" class="text-xs text-oc-500 hover:text-oc-400 mt-2 inline-block">View release &rarr;</a>
+          </div>
+          <div id="tax-bracket-status" class="p-3 rounded-lg bg-gray-900">
+            <p class="text-xs text-gray-500">Tax brackets: <span id="bracket-status-text">checking...</span></p>
+          </div>
+        </div>
+
         <h3 class="font-medium mb-4">Desktop Shortcut</h3>
         <div class="space-y-3 text-sm mb-6">
           <p class="text-gray-400">Create or update the Syntaur shortcut in your app launcher, Start Menu, or desktop so you can always find it.</p>
@@ -428,6 +447,44 @@ async function activateLicense() {
     result.textContent = 'Network error';
   }
 }
+
+async function checkForUpdates() {
+  const btn = document.getElementById('btn-check-update');
+  btn.textContent = 'Checking...';
+  try {
+    const resp = await fetch(`/api/updates/check?token=${token}`, { headers: { 'Authorization': 'Bearer ' + token } });
+    const data = await resp.json();
+    document.getElementById('update-version-text').textContent = `Current: v${data.current_version}${data.latest_version ? ' | Latest: v' + data.latest_version : ''}`;
+    if (data.update_available) {
+      document.getElementById('update-available').classList.remove('hidden');
+      document.getElementById('update-notes').textContent = data.release_notes || '';
+      document.getElementById('update-download-link').href = data.download_url || '#';
+      document.getElementById('update-status-text').textContent = 'A newer version is available.';
+    } else if (data.error) {
+      document.getElementById('update-status-text').textContent = data.error;
+    } else {
+      document.getElementById('update-status-text').textContent = 'You are up to date.';
+    }
+  } catch(e) {
+    document.getElementById('update-status-text').textContent = 'Could not check for updates.';
+  }
+  btn.textContent = 'Check Now';
+
+  // Also check tax brackets
+  try {
+    const resp = await fetch(`/api/tax/brackets/status?token=${token}`, { headers: { 'Authorization': 'Bearer ' + token } });
+    const data = await resp.json();
+    const el = document.getElementById('bracket-status-text');
+    if (data.stale) {
+      el.innerHTML = `<span class="text-yellow-400">${data.warning}</span>`;
+    } else {
+      el.textContent = `Up to date (last updated ${data.last_updated || 'unknown'}, years: ${(data.available_years || []).join(', ')})`;
+    }
+  } catch(e) {}
+}
+
+// Auto-check on page load
+setTimeout(checkForUpdates, 1000);
 
 async function uploadAvatar(agentId, input) {
   const file = input.files[0];

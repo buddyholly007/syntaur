@@ -1999,11 +1999,8 @@ impl Tool for EstimateTaxTool {
             ).unwrap_or(0);
 
             // Standard deduction (2025, IRS Rev. Proc. 2024-40)
-            let standard_deduction: i64 = match status_owned.as_str() {
-                "married_jointly" => 3020000,   // $30,200
-                "head_of_household" => 2265000, // $22,650
-                _ => 1510000,                    // $15,100 single / married_separately
-            };
+            // Load brackets from config (auto-updated from IRS yearly)
+            let (brackets, top_rate, standard_deduction) = crate::tax::load_brackets(year, &status_owned);
 
             let deduction = std::cmp::max(standard_deduction, itemized);
             let deduction_type = if itemized > standard_deduction { "Itemized" } else { "Standard" };
@@ -2012,12 +2009,19 @@ impl Tool for EstimateTaxTool {
             let agi = gross_income - biz_deductions;
             let taxable = std::cmp::max(agi - deduction, 0);
 
-            // 2025 tax brackets (married filing jointly)
-            let tax = if status_owned == "married_jointly" {
-                calculate_tax_mfj(taxable)
-            } else {
-                calculate_tax_single(taxable)
-            };
+            // Calculate tax using loaded brackets
+            let mut tax: i64 = 0;
+            let mut prev = 0i64;
+            for &(limit, rate_bps) in &brackets {
+                let bracket_income = std::cmp::min(taxable, limit) - prev;
+                if bracket_income <= 0 { break; }
+                tax += bracket_income * rate_bps / 10000;
+                prev = limit;
+            }
+            // Top bracket for income above last bracket
+            if taxable > prev {
+                tax += (taxable - prev) * top_rate / 10000;
+            }
 
             // W-2 withholding (box 2) - check if we have it
             let w2_withheld: i64 = conn.query_row(
@@ -2072,6 +2076,11 @@ impl Tool for EstimateTaxTool {
             let effective_rate = if gross_income > 0 { (tax as f64 / gross_income as f64) * 100.0 } else { 0.0 };
             result += &format!("\nEffective federal tax rate: {:.1}%", effective_rate);
 
+            // Staleness warning
+            if let Some(warning) = crate::tax::brackets_stale() {
+                result += &format!("\n\n⚠ {}", warning);
+            }
+
             Ok(result)
         }).await.map_err(|e| e.to_string())?.map_err(|e| e)?;
 
@@ -2079,48 +2088,59 @@ impl Tool for EstimateTaxTool {
     }
 }
 
-fn calculate_tax_mfj(taxable_cents: i64) -> i64 {
-    // 2025 MFJ brackets (IRS Rev. Proc. 2024-40)
-    let brackets: &[(i64, i64)] = &[
-        (2385000, 1000),    // 10% up to $23,850
-        (9695000, 1200),    // 12% up to $96,950
-        (20670000, 2200),   // 22% up to $206,700
-        (39460000, 2400),   // 24% up to $394,600
-        (50105000, 3200),   // 32% up to $501,050
-        (75160000, 3500),   // 35% up to $751,600
-        (i64::MAX, 3700),   // 37% above
-    ];
-    let mut tax: i64 = 0;
-    let mut prev = 0i64;
-    for &(limit, rate_bps) in brackets {
-        let bracket_income = std::cmp::min(taxable_cents, limit) - prev;
-        if bracket_income <= 0 { break; }
-        tax += bracket_income * rate_bps / 10000;
-        prev = limit;
-    }
-    tax
-}
+pub struct UpdateTaxBracketsTool;
 
-fn calculate_tax_single(taxable_cents: i64) -> i64 {
-    // 2025 Single brackets (IRS Rev. Proc. 2024-40)
-    let brackets: &[(i64, i64)] = &[
-        (1192500, 1000),    // 10% up to $11,925
-        (4847500, 1200),    // 12% up to $48,475
-        (10335000, 2200),   // 22% up to $103,350
-        (19730000, 2400),   // 24% up to $197,300
-        (25052500, 3200),   // 32% up to $250,525
-        (62660000, 3500),   // 35% up to $626,600
-        (i64::MAX, 3700),   // 37% above
-    ];
-    let mut tax: i64 = 0;
-    let mut prev = 0i64;
-    for &(limit, rate_bps) in brackets {
-        let bracket_income = std::cmp::min(taxable_cents, limit) - prev;
-        if bracket_income <= 0 { break; }
-        tax += bracket_income * rate_bps / 10000;
-        prev = limit;
+#[async_trait]
+impl Tool for UpdateTaxBracketsTool {
+    fn name(&self) -> &str { "update_tax_brackets" }
+    fn description(&self) -> &str { "Update the tax brackets configuration file with new data. Use this when brackets are stale or a new tax year's brackets are needed. You can search the web for the latest IRS Rev. Proc. and then call this tool with the data." }
+    fn parameters(&self) -> Value {
+        json!({ "type": "object", "properties": {
+            "year": { "type": "integer", "description": "Tax year (e.g. 2026)" },
+            "filing_status": { "type": "string", "description": "Filing status: married_jointly, single, or head_of_household" },
+            "brackets": { "type": "array", "description": "Array of [limit_cents, rate_bps] pairs. e.g. [[2385000, 1000], [9695000, 1200]]", "items": {"type": "array"} },
+            "top_rate": { "type": "integer", "description": "Top bracket rate in basis points (e.g. 3700 for 37%)" },
+            "standard_deduction": { "type": "integer", "description": "Standard deduction in cents (e.g. 3020000 for $30,200)" }
+        }, "required": ["year", "filing_status", "brackets", "top_rate", "standard_deduction"] })
     }
-    tax
+    fn capabilities(&self) -> ToolCapabilities { ToolCapabilities { read_only: false, ..Default::default() } }
+    async fn execute(&self, args: Value, _ctx: &ToolContext<'_>) -> Result<RichToolResult, String> {
+        let year = args.get("year").and_then(|v| v.as_i64()).ok_or("year required")?;
+        let status = arg_str(&args, "filing_status");
+        let brackets_raw = args.get("brackets").and_then(|v| v.as_array()).ok_or("brackets required")?;
+        let top_rate = args.get("top_rate").and_then(|v| v.as_i64()).ok_or("top_rate required")?;
+        let std_ded = args.get("standard_deduction").and_then(|v| v.as_i64()).ok_or("standard_deduction required")?;
+
+        let brackets: Vec<Vec<i64>> = brackets_raw.iter().filter_map(|v| {
+            v.as_array().map(|a| a.iter().filter_map(|n| n.as_i64()).collect())
+        }).collect();
+
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
+        let path = format!("{}/.syntaur/tax_brackets.json", home);
+
+        let mut config: serde_json::Value = std::fs::read_to_string(&path).ok()
+            .and_then(|d| serde_json::from_str(&d).ok())
+            .unwrap_or(serde_json::json!({"brackets": {}, "source": "agent-updated", "notes": ""}));
+
+        let year_str = year.to_string();
+        if config["brackets"].get(&year_str).is_none() {
+            config["brackets"][&year_str] = serde_json::json!({});
+        }
+        config["brackets"][&year_str][status] = serde_json::json!({
+            "brackets": brackets,
+            "top_rate": top_rate,
+            "standard_deduction": std_ded,
+        });
+        config["last_updated"] = serde_json::json!(chrono::Utc::now().format("%Y-%m-%d").to_string());
+        config["source"] = serde_json::json!(format!("Agent-updated for {}", year));
+
+        crate::tax::save_brackets(&config)?;
+
+        Ok(RichToolResult::text(format!(
+            "Updated {} tax brackets for {} {}. Standard deduction: {}. {} bracket levels.",
+            year, status, year, crate::tax::cents_to_display(std_ded), brackets.len()
+        )))
+    }
 }
 
 pub struct ScanReceiptTool;

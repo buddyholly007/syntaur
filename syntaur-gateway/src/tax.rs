@@ -12,6 +12,92 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 
+// ── Tax Bracket Loading ─────────────────────────────────────────────────────
+
+/// Load tax brackets from ~/.syntaur/tax_brackets.json or fall back to embedded defaults.
+pub fn load_brackets(year: i64, filing_status: &str) -> (Vec<(i64, i64)>, i64, i64) {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
+    let path = format!("{}/.syntaur/tax_brackets.json", home);
+
+    if let Ok(data) = std::fs::read_to_string(&path) {
+        if let Ok(config) = serde_json::from_str::<serde_json::Value>(&data) {
+            let year_str = year.to_string();
+            if let Some(year_data) = config.get("brackets").and_then(|b| b.get(&year_str)) {
+                if let Some(status_data) = year_data.get(filing_status) {
+                    let brackets: Vec<(i64, i64)> = status_data.get("brackets")
+                        .and_then(|b| b.as_array())
+                        .map(|arr| arr.iter().filter_map(|v| {
+                            let a = v.as_array()?;
+                            Some((a.get(0)?.as_i64()?, a.get(1)?.as_i64()?))
+                        }).collect())
+                        .unwrap_or_default();
+                    let top_rate = status_data.get("top_rate").and_then(|v| v.as_i64()).unwrap_or(3700);
+                    let std_ded = status_data.get("standard_deduction").and_then(|v| v.as_i64()).unwrap_or(3020000);
+
+                    if !brackets.is_empty() {
+                        return (brackets, top_rate, std_ded);
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: hardcoded 2025 brackets
+    log::warn!("[tax] Could not load brackets for {} {} from config, using hardcoded 2025 defaults", year, filing_status);
+    match filing_status {
+        "married_jointly" => (
+            vec![(2385000,1000),(9695000,1200),(20670000,2200),(39460000,2400),(50105000,3200),(75160000,3500)],
+            3700, 3020000
+        ),
+        "head_of_household" => (
+            vec![(1700000,1000),(6475000,1200),(10335000,2200),(19730000,2400),(25052500,3200),(62660000,3500)],
+            3700, 2265000
+        ),
+        _ => (
+            vec![(1192500,1000),(4847500,1200),(10335000,2200),(19730000,2400),(25052500,3200),(62660000,3500)],
+            3700, 1510000
+        ),
+    }
+}
+
+/// Check if brackets are stale (config file older than 14 months)
+pub fn brackets_stale() -> Option<String> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
+    let path = format!("{}/.syntaur/tax_brackets.json", home);
+
+    if let Ok(data) = std::fs::read_to_string(&path) {
+        if let Ok(config) = serde_json::from_str::<serde_json::Value>(&data) {
+            if let Some(updated) = config.get("last_updated").and_then(|v| v.as_str()) {
+                if let Ok(date) = chrono::NaiveDate::parse_from_str(updated, "%Y-%m-%d") {
+                    let age = chrono::Utc::now().date_naive() - date;
+                    if age.num_days() > 425 { // ~14 months
+                        return Some(format!("Tax brackets were last updated {}. They may be outdated for the current tax year.", updated));
+                    }
+                }
+            }
+            // Check if current year's brackets exist
+            let current_year = chrono::Utc::now().format("%Y").to_string();
+            if config.get("brackets").and_then(|b| b.get(&current_year)).is_none() {
+                let prev_year: i64 = current_year.parse::<i64>().unwrap_or(2026) - 1;
+                return Some(format!("Tax brackets for {} are not yet available. Using {} brackets. The IRS typically publishes new brackets each November.", current_year, prev_year));
+            }
+        }
+    } else {
+        return Some("Tax brackets config not found. Using built-in 2025 defaults.".to_string());
+    }
+    None
+}
+
+/// Write updated brackets to config file
+pub fn save_brackets(config: &serde_json::Value) -> Result<(), String> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
+    let path = format!("{}/.syntaur/tax_brackets.json", home);
+    let json = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
+    std::fs::write(&path, &json).map_err(|e| format!("Write brackets: {}", e))?;
+    log::info!("[tax] Updated tax brackets config at {}", path);
+    Ok(())
+}
+
 // ── Types ───────────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -1228,6 +1314,80 @@ pub async fn handle_income_list(
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(result))
+}
+
+// ── App Update Check ─────────────────────────────────────────────────────────
+
+pub async fn handle_update_check(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let _principal = crate::resolve_principal(&state, token).await?;
+
+    let current = env!("CARGO_PKG_VERSION");
+    let client = &state.client;
+
+    // Check GitHub releases
+    match client.get("https://api.github.com/repos/buddyholly007/syntaur/releases/latest")
+        .header("User-Agent", "syntaur-gateway")
+        .timeout(std::time::Duration::from_secs(10))
+        .send().await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            if let Ok(data) = resp.json::<serde_json::Value>().await {
+                let latest = data["tag_name"].as_str().unwrap_or("").trim_start_matches('v');
+                let update_available = latest != current && !latest.is_empty();
+                let notes = data["body"].as_str().unwrap_or("");
+                let download_url = data["html_url"].as_str().unwrap_or("");
+
+                return Ok(Json(serde_json::json!({
+                    "current_version": current,
+                    "latest_version": latest,
+                    "update_available": update_available,
+                    "release_notes": &notes[..notes.len().min(500)],
+                    "download_url": download_url,
+                })));
+            }
+        }
+        _ => {}
+    }
+
+    Ok(Json(serde_json::json!({
+        "current_version": current,
+        "latest_version": null,
+        "update_available": false,
+        "error": "Could not check for updates. Check your internet connection.",
+    })))
+}
+
+// ── Tax Bracket Status + Update ──────────────────────────────────────────────
+
+pub async fn handle_bracket_status(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let _principal = crate::resolve_principal(&state, token).await?;
+
+    let warning = brackets_stale();
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
+    let path = format!("{}/.syntaur/tax_brackets.json", home);
+    let last_updated = std::fs::read_to_string(&path).ok()
+        .and_then(|d| serde_json::from_str::<serde_json::Value>(&d).ok())
+        .and_then(|c| c.get("last_updated").and_then(|v| v.as_str()).map(String::from));
+    let available_years: Vec<String> = std::fs::read_to_string(&path).ok()
+        .and_then(|d| serde_json::from_str::<serde_json::Value>(&d).ok())
+        .and_then(|c| c.get("brackets").and_then(|b| b.as_object()).map(|o| o.keys().cloned().collect()))
+        .unwrap_or_default();
+
+    Ok(Json(serde_json::json!({
+        "last_updated": last_updated,
+        "available_years": available_years,
+        "stale": warning.is_some(),
+        "warning": warning,
+        "config_path": path,
+    })))
 }
 
 // ── CSV Export ───────────────────────────────────────────────────────────────
