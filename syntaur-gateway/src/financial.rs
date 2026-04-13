@@ -1386,7 +1386,7 @@ pub async fn handle_alpaca_sync(
 
             conn.execute(
                 "INSERT OR IGNORE INTO investment_transactions \
-                 (user_id, provider, external_id, symbol, side, qty, price_cents, total_cents, tx_type, tx_date, created_at) \
+                 (user_id, broker, external_id, symbol, side, qty, price_cents, amount_cents, activity_type, transaction_date, created_at) \
                  VALUES (?, 'alpaca', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 rusqlite::params![
                     uid, ext_id, symbol, side, qty, price_cents, total_cents, tx_type, date_only, now
@@ -1787,7 +1787,7 @@ pub async fn handle_coinbase_sync(
 
                 conn.execute(
                     "INSERT OR IGNORE INTO investment_transactions \
-                     (user_id, provider, external_id, symbol, side, qty, total_cents, tx_type, tx_date, description, created_at) \
+                     (user_id, broker, external_id, symbol, side, qty, amount_cents, activity_type, transaction_date, description, created_at) \
                      VALUES (?, 'coinbase', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     rusqlite::params![
                         uid, ext_id, symbol, side, amount.abs(), total_cents, tx_type, tx_date, description, now
@@ -2228,14 +2228,14 @@ pub async fn handle_investment_transactions(
         let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
         ensure_financial_tables(&conn)?;
 
-        let mut sql = "SELECT id, provider, external_id, symbol, side, qty, price_cents, total_cents, \
-                       fee_cents, tx_type, tx_date, description, created_at \
+        let mut sql = "SELECT id, broker, external_id, symbol, side, qty, price_cents, amount_cents, \
+                       COALESCE(realized_pl_cents, 0), activity_type, transaction_date, description, created_at \
                        FROM investment_transactions WHERE user_id = ?"
             .to_string();
         let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(uid)];
 
         if let Some(ref prov) = provider_filter {
-            sql.push_str(" AND provider = ?");
+            sql.push_str(" AND broker = ?");
             params_vec.push(Box::new(prov.clone()));
         }
         if let Some(ref sym) = symbol_filter {
@@ -2243,14 +2243,14 @@ pub async fn handle_investment_transactions(
             params_vec.push(Box::new(sym.clone()));
         }
         if let Some(ref s) = start {
-            sql.push_str(" AND tx_date >= ?");
+            sql.push_str(" AND transaction_date >= ?");
             params_vec.push(Box::new(s.clone()));
         }
         if let Some(ref e) = end {
-            sql.push_str(" AND tx_date <= ?");
+            sql.push_str(" AND transaction_date <= ?");
             params_vec.push(Box::new(e.clone()));
         }
-        sql.push_str(" ORDER BY tx_date DESC LIMIT ?");
+        sql.push_str(" ORDER BY transaction_date DESC LIMIT ?");
         params_vec.push(Box::new(limit));
 
         let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
@@ -2263,19 +2263,18 @@ pub async fn handle_investment_transactions(
                 let fee: i64 = r.get(8)?;
                 Ok(serde_json::json!({
                     "id": r.get::<_, i64>(0)?,
-                    "provider": r.get::<_, String>(1)?,
+                    "broker": r.get::<_, String>(1)?,
                     "external_id": r.get::<_, Option<String>>(2)?,
                     "symbol": r.get::<_, Option<String>>(3)?,
                     "side": r.get::<_, Option<String>>(4)?,
                     "qty": r.get::<_, Option<f64>>(5)?,
                     "price_cents": price,
                     "price_display": price.map(cents_to_display),
-                    "total_cents": total,
-                    "total_display": total.map(cents_to_display),
-                    "fee_cents": fee,
-                    "fee_display": cents_to_display(fee),
-                    "tx_type": r.get::<_, String>(9)?,
-                    "tx_date": r.get::<_, String>(10)?,
+                    "amount_cents": total,
+                    "amount_display": total.map(cents_to_display),
+                    "realized_pl_cents": fee,
+                    "activity_type": r.get::<_, String>(9)?,
+                    "transaction_date": r.get::<_, String>(10)?,
                     "description": r.get::<_, Option<String>>(11)?,
                     "created_at": r.get::<_, i64>(12)?,
                 }))
