@@ -159,6 +159,40 @@
       <div class="grid grid-cols-7 gap-0.5 text-center text-xs" id="cal-grid">
         <!-- Populated by JS -->
       </div>
+
+      <!-- Day detail panel (shown when a date is clicked) -->
+      <div id="cal-day-panel" class="hidden mt-3 border-t border-gray-700 pt-3">
+        <div class="flex items-center justify-between mb-2">
+          <h4 class="text-sm font-medium text-gray-300" id="cal-day-title">April 13</h4>
+          <div class="flex gap-1">
+            <button onclick="showAddEvent()" class="text-xs bg-oc-600 hover:bg-oc-700 px-2 py-1 rounded transition-colors text-white">+ Add</button>
+            <button onclick="closeDayPanel()" class="text-xs text-gray-500 hover:text-gray-300 px-1">&times;</button>
+          </div>
+        </div>
+        <div id="cal-day-events" class="space-y-1.5 max-h-40 overflow-y-auto">
+          <p class="text-xs text-gray-500 italic">No events</p>
+        </div>
+      </div>
+
+      <!-- Add event form (hidden until + Add clicked) -->
+      <div id="cal-add-form" class="hidden mt-3 border-t border-gray-700 pt-3 space-y-2">
+        <h4 class="text-sm font-medium text-gray-300">New Event</h4>
+        <input type="text" id="cal-ev-title" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-white placeholder-gray-500 outline-none focus:border-oc-500" placeholder="Event title">
+        <div class="flex gap-2">
+          <input type="date" id="cal-ev-date" class="flex-1 bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-white outline-none focus:border-oc-500">
+          <input type="time" id="cal-ev-time" class="w-24 bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-white outline-none focus:border-oc-500">
+        </div>
+        <div class="flex gap-2">
+          <label class="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer">
+            <input type="checkbox" id="cal-ev-allday" class="accent-oc-500" onchange="document.getElementById('cal-ev-time').disabled=this.checked"> All day
+          </label>
+        </div>
+        <textarea id="cal-ev-desc" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-white placeholder-gray-500 outline-none focus:border-oc-500 resize-none" rows="2" placeholder="Description (optional)"></textarea>
+        <div class="flex gap-2 justify-end">
+          <button onclick="cancelAddEvent()" class="text-xs text-gray-500 hover:text-gray-300 px-3 py-1.5">Cancel</button>
+          <button onclick="saveEvent()" id="cal-save-btn" class="text-xs bg-oc-600 hover:bg-oc-700 px-3 py-1.5 rounded-lg transition-colors text-white">Save</button>
+        </div>
+      </div>
     </div>
 
     <!-- Quick Actions + Modules -->
@@ -436,6 +470,7 @@ async function deleteTodo(id) {
 // ── Mini Calendar ──
 let calDate = new Date();
 let calEvents = [];
+let calSelectedDay = null;
 
 async function loadCalendarEvents() {
   const year = calDate.getFullYear();
@@ -449,6 +484,7 @@ async function loadCalendarEvents() {
     calEvents = data.events || [];
   } catch(e) { calEvents = []; }
   renderCalendar();
+  if (calSelectedDay) showDayEvents(calSelectedDay);
 }
 
 function renderCalendar() {
@@ -464,26 +500,159 @@ function renderCalendar() {
   const today = new Date();
   const isCurrentMonth = today.getFullYear() === year && today.getMonth() === month;
 
-  // Build set of days with events
-  const eventDays = new Set();
+  // Build map of days to event counts
+  const eventDays = new Map();
   for (const ev of calEvents) {
     const d = parseInt(ev.start_time.split('-')[2]);
-    if (!isNaN(d)) eventDays.add(d);
+    if (!isNaN(d)) eventDays.set(d, (eventDays.get(d) || 0) + 1);
   }
 
   let html = '';
   for (let i = 0; i < firstDay; i++) html += '<span class="py-1"></span>';
   for (let d = 1; d <= daysInMonth; d++) {
     const isToday = isCurrentMonth && d === today.getDate();
-    const hasEvent = eventDays.has(d);
-    const dot = hasEvent ? '<span class="block w-1 h-1 rounded-full bg-oc-500 mx-auto -mt-0.5"></span>' : '';
-    html += `<span class="py-1 rounded relative ${isToday ? 'bg-oc-600 text-white font-bold' : 'text-gray-400 hover:bg-gray-700 cursor-pointer'}">${d}${dot}</span>`;
+    const isSelected = calSelectedDay === d;
+    const evCount = eventDays.get(d) || 0;
+    const dot = evCount > 0 ? `<span class="block w-1 h-1 rounded-full bg-oc-500 mx-auto -mt-0.5"></span>` : '';
+    let cls = 'py-1 rounded relative cursor-pointer transition-colors ';
+    if (isSelected) cls += 'bg-oc-700 text-white ring-1 ring-oc-400 font-bold';
+    else if (isToday) cls += 'bg-oc-600 text-white font-bold hover:bg-oc-500';
+    else cls += 'text-gray-400 hover:bg-gray-700';
+    html += `<span class="${cls}" onclick="selectCalDay(${d})">${d}${dot}</span>`;
   }
   grid.innerHTML = html;
 }
 
-function calPrev() { calDate.setMonth(calDate.getMonth() - 1); loadCalendarEvents(); }
-function calNext() { calDate.setMonth(calDate.getMonth() + 1); loadCalendarEvents(); }
+function selectCalDay(day) {
+  calSelectedDay = day;
+  renderCalendar();
+  showDayEvents(day);
+}
+
+function showDayEvents(day) {
+  const panel = document.getElementById('cal-day-panel');
+  const evList = document.getElementById('cal-day-events');
+  const titleEl = document.getElementById('cal-day-title');
+  const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const year = calDate.getFullYear();
+  const month = calDate.getMonth();
+  const dateStr = `${year}-${String(month+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+  titleEl.textContent = `${months[month]} ${day}, ${year}`;
+
+  // Filter events for this day
+  const dayEvents = calEvents.filter(ev => ev.start_time && ev.start_time.startsWith(dateStr));
+
+  if (dayEvents.length === 0) {
+    evList.innerHTML = '<p class="text-xs text-gray-500 italic">No events scheduled</p>';
+  } else {
+    evList.innerHTML = dayEvents.map(ev => {
+      const time = ev.all_day ? '<span class="text-oc-500">All day</span>' :
+        `<span class="text-gray-500">${formatEventTime(ev.start_time)}</span>`;
+      const desc = ev.description ? `<p class="text-xs text-gray-500 mt-0.5">${escapeHtml(ev.description)}</p>` : '';
+      return `<div class="bg-gray-900 rounded-lg p-2 group relative">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-2 text-xs">
+            ${time}
+            <span class="text-gray-200">${escapeHtml(ev.title)}</span>
+          </div>
+          <button onclick="deleteEvent(${ev.id})" class="hidden group-hover:block text-gray-600 hover:text-red-400 text-xs px-1" title="Delete">&times;</button>
+        </div>
+        ${desc}
+        ${ev.source && ev.source !== 'manual' ? '<span class="text-[10px] text-gray-600">' + escapeHtml(ev.source) + '</span>' : ''}
+      </div>`;
+    }).join('');
+  }
+
+  panel.classList.remove('hidden');
+  document.getElementById('cal-add-form').classList.add('hidden');
+
+  // Pre-fill the date for add form
+  document.getElementById('cal-ev-date').value = dateStr;
+}
+
+function formatEventTime(startTime) {
+  // start_time could be "2026-04-13" (all day) or "2026-04-13T14:30:00" or "2026-04-13 14:30"
+  const tIdx = startTime.indexOf('T');
+  const spIdx = startTime.indexOf(' ', 11);
+  const timeStr = tIdx > 0 ? startTime.substring(tIdx+1, tIdx+6) : (spIdx > 0 ? startTime.substring(spIdx+1, spIdx+6) : '');
+  if (!timeStr) return '';
+  const [h, m] = timeStr.split(':').map(Number);
+  const ampm = h >= 12 ? 'pm' : 'am';
+  const h12 = h % 12 || 12;
+  return `${h12}:${String(m).padStart(2,'0')}${ampm}`;
+}
+
+function closeDayPanel() {
+  calSelectedDay = null;
+  document.getElementById('cal-day-panel').classList.add('hidden');
+  document.getElementById('cal-add-form').classList.add('hidden');
+  renderCalendar();
+}
+
+function showAddEvent() {
+  const form = document.getElementById('cal-add-form');
+  form.classList.remove('hidden');
+  document.getElementById('cal-ev-title').value = '';
+  document.getElementById('cal-ev-desc').value = '';
+  document.getElementById('cal-ev-time').value = '';
+  document.getElementById('cal-ev-allday').checked = false;
+  document.getElementById('cal-ev-time').disabled = false;
+  // Date is pre-filled from selectCalDay
+  document.getElementById('cal-ev-title').focus();
+}
+
+function cancelAddEvent() {
+  document.getElementById('cal-add-form').classList.add('hidden');
+}
+
+async function saveEvent() {
+  const title = document.getElementById('cal-ev-title').value.trim();
+  if (!title) { document.getElementById('cal-ev-title').classList.add('border-red-500'); return; }
+  document.getElementById('cal-ev-title').classList.remove('border-red-500');
+
+  const date = document.getElementById('cal-ev-date').value;
+  const time = document.getElementById('cal-ev-time').value;
+  const allDay = document.getElementById('cal-ev-allday').checked;
+  const desc = document.getElementById('cal-ev-desc').value.trim();
+
+  const startTime = allDay || !time ? date : `${date}T${time}:00`;
+
+  const btn = document.getElementById('cal-save-btn');
+  btn.textContent = 'Saving...';
+  btn.disabled = true;
+
+  try {
+    const resp = await authFetch('/api/calendar', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        token: authToken,
+        title: title,
+        description: desc || null,
+        start_time: startTime,
+        end_time: null,
+        all_day: allDay
+      })
+    });
+    if (resp.ok) {
+      cancelAddEvent();
+      await loadCalendarEvents();
+    }
+  } catch(e) { console.log('save event:', e); }
+  btn.textContent = 'Save';
+  btn.disabled = false;
+}
+
+async function deleteEvent(id) {
+  if (!confirm('Delete this event?')) return;
+  try {
+    await authFetch(`/api/calendar/${id}?token=${authToken}`, { method: 'DELETE' });
+    await loadCalendarEvents();
+  } catch(e) { console.log('delete event:', e); }
+}
+
+function calPrev() { calDate.setMonth(calDate.getMonth() - 1); calSelectedDay = null; closeDayPanel(); loadCalendarEvents(); }
+function calNext() { calDate.setMonth(calDate.getMonth() + 1); calSelectedDay = null; closeDayPanel(); loadCalendarEvents(); }
 
 // ── Dashboard Agent Switcher ──
 let dashAgents = [];

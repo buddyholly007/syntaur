@@ -685,6 +685,31 @@ async fn handle_calendar_create(
     Ok(Json(serde_json::json!({ "id": id, "title": req.title })))
 }
 
+async fn handle_calendar_delete(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(event_id): axum::extract::Path<i64>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let deleted = tokio::task::spawn_blocking(move || -> Result<bool, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let count = conn.execute(
+            "DELETE FROM calendar_events WHERE id = ? AND user_id = ?",
+            rusqlite::params![event_id, uid],
+        ).map_err(|e| e.to_string())?;
+        Ok(count > 0)
+    }).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    if deleted {
+        Ok(Json(serde_json::json!({ "deleted": true })))
+    } else {
+        Err(axum::http::StatusCode::NOT_FOUND)
+    }
+}
+
 // ── Chat ────────────────────────────────────────────────────────────────────
 
 async fn handle_api_message(
@@ -3414,6 +3439,7 @@ async fn main() {
         .route("/api/todos/{id}", axum::routing::delete(handle_todo_delete))
         .route("/api/calendar", get(handle_calendar_list))
         .route("/api/calendar", post(handle_calendar_create))
+        .route("/api/calendar/{id}", axum::routing::delete(handle_calendar_delete))
         .with_state(Arc::clone(&state))
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),
