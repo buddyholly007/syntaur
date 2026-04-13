@@ -610,6 +610,88 @@ pub async fn handle_tax_doc_image(
     Ok((headers, data))
 }
 
+// ── Update Document Field ────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct UpdateFieldRequest {
+    pub token: String,
+    pub field: String,
+    pub value: String,
+}
+
+pub async fn handle_tax_doc_update_field(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    Json(req): Json<UpdateFieldRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &req.token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let field = req.field.clone();
+    let value = req.value.clone();
+
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+
+        // Get current fields
+        let current: String = conn.query_row(
+            "SELECT COALESCE(extracted_fields, '{}') FROM tax_documents WHERE id = ? AND user_id = ?",
+            rusqlite::params![id, uid], |r| r.get(0)
+        ).map_err(|e| format!("Not found: {}", e))?;
+
+        let mut fields: serde_json::Value = serde_json::from_str(&current).unwrap_or(serde_json::json!({}));
+
+        // Try to parse as number, otherwise store as string
+        if let Ok(num) = value.parse::<f64>() {
+            fields[&field] = serde_json::json!(num);
+        } else {
+            fields[&field] = serde_json::json!(value);
+        }
+
+        let updated = serde_json::to_string(&fields).unwrap_or("{}".to_string());
+        conn.execute(
+            "UPDATE tax_documents SET extracted_fields = ? WHERE id = ? AND user_id = ?",
+            rusqlite::params![&updated, id, uid],
+        ).map_err(|e| e.to_string())?;
+
+        // If this is a W-2 field, also update income records
+        let doc_type: String = conn.query_row(
+            "SELECT doc_type FROM tax_documents WHERE id = ?", rusqlite::params![id], |r| r.get(0)
+        ).unwrap_or_default();
+
+        if doc_type == "w2" {
+            let year: i64 = conn.query_row(
+                "SELECT COALESCE(tax_year, 2025) FROM tax_documents WHERE id = ?", rusqlite::params![id], |r| r.get(0)
+            ).unwrap_or(2025);
+            let issuer: String = conn.query_row(
+                "SELECT COALESCE(issuer, '') FROM tax_documents WHERE id = ?", rusqlite::params![id], |r| r.get(0)
+            ).unwrap_or_default();
+
+            if field == "box1_wages" {
+                if let Ok(cents) = value.parse::<f64>().map(|f| (f * 100.0) as i64) {
+                    conn.execute(
+                        "UPDATE tax_income SET amount_cents = ? WHERE user_id = ? AND tax_year = ? AND source = 'W-2 Wages' AND description LIKE ?",
+                        rusqlite::params![cents, uid, year, format!("%{}%", issuer)],
+                    ).ok();
+                }
+            } else if field == "box2_fed_withheld" {
+                if let Ok(cents) = value.parse::<f64>().map(|f| (f * 100.0) as i64) {
+                    conn.execute(
+                        "UPDATE tax_income SET amount_cents = ? WHERE user_id = ? AND tax_year = ? AND source = 'W-2 Withholding' AND description LIKE ?",
+                        rusqlite::params![cents, uid, year, format!("%{}%", issuer)],
+                    ).ok();
+                }
+            }
+        }
+
+        Ok(())
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(serde_json::json!({ "success": true })))
+}
+
 // ── Receipt Image ───────────────────────────────────────────────────────────
 
 pub async fn handle_receipt_image(

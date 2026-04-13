@@ -156,6 +156,12 @@
 
   <!-- Receipts tab -->
   <div id="tab-receipts" class="hidden">
+    <div class="p-3 rounded-lg bg-yellow-900/20 border border-yellow-800/50 mb-4">
+      <div class="flex items-start gap-2">
+        <span class="text-yellow-400 mt-0.5">&#9888;</span>
+        <p class="text-xs text-yellow-300/80"><strong>Always verify</strong> AI-extracted amounts against your original receipts before using for tax filing.</p>
+      </div>
+    </div>
     <!-- Upload -->
     <div class="card mb-6">
       <h3 class="font-medium mb-3">Upload Receipt</h3>
@@ -189,6 +195,13 @@
           <input type="file" class="hidden" accept="image/*,.pdf" onchange="uploadTaxDoc(this)" id="doc-input">
         </label>
         <span id="doc-upload-status" class="text-xs text-gray-500"></span>
+      </div>
+    </div>
+
+    <div class="p-3 rounded-lg bg-yellow-900/20 border border-yellow-800/50 mb-4">
+      <div class="flex items-start gap-2">
+        <span class="text-yellow-400 mt-0.5">&#9888;</span>
+        <p class="text-xs text-yellow-300/80">AI-extracted values may contain errors. <strong>Always verify amounts against your original documents</strong> before filing. Click any value to correct it.</p>
       </div>
     </div>
 
@@ -502,7 +515,7 @@ async function sendTaxChat() {
   respEl.removeAttribute('id');
 
   try {
-    // Fetch current tax data + income to give the agent full context
+    // Fetch tax context
     let taxContext = '';
     try {
       const [sumResp, incResp] = await Promise.all([
@@ -513,32 +526,86 @@ async function sendTaxChat() {
       const inc = incResp ? await incResp.json().catch(() => ({})) : {};
       const cats = (sum.categories || []).map(c => `${c.category} (${c.entity}): ${c.total_display} (${c.count} items)`).join('\n');
       const incLines = (inc.income || []).map(i => `${i.source}: $${(i.amount_cents/100).toFixed(2)} (${i.description})`).join('\n');
-
-      taxContext = `\n\n[TAX MODULE CONTEXT - You have FULL access to the user's ${selectedYear} financial data. DO NOT ask for information that is provided below. Answer directly.\n\n` +
+      taxContext = `\n\n[TAX MODULE CONTEXT - You have FULL access to the user's ${selectedYear} financial data. DO NOT ask for information. Answer directly.\n\n` +
         `INCOME:\n${incLines || 'No income data'}\nTotal gross income: ${inc.total_display || 'unknown'}\n\n` +
-        `EXPENSES:\nTotal expenses: ${sum.total_display}\nBusiness expenses: ${sum.business_display}\nTax deductible: ${sum.deductible_display}\nReceipts on file: ${sum.receipt_count}\n\n` +
-        `By category:\n${cats}\n\n` +
-        `Filing status: Married filing jointly (2 W-2 earners)\n\n` +
-        `INSTRUCTIONS: Use the data above to give specific dollar amounts. Calculate estimated tax using ${selectedYear} tax brackets. ` +
-        `Show your math. Compare standard deduction ($30,000 MFJ) vs itemized deductions. ` +
-        `Account for FICA already withheld, estimated tax already paid, and business deductions on Schedule C.]`;
+        `EXPENSES:\nTotal expenses: ${sum.total_display}\nBusiness expenses: ${sum.business_display}\nTax deductible: ${sum.deductible_display}\nReceipts on file: ${sum.receipt_count}\n\nBy category:\n${cats}\n\n` +
+        `Filing status: Married filing jointly (2 W-2 earners)\n` +
+        `INSTRUCTIONS: Use tools (estimate_tax, expense_summary, get_income) to get data. Show your math. FICA is NOT a credit against income tax.]`;
     } catch(e) {}
 
-    const resp = await authFetch('/api/message', {
+    // Use streaming endpoint for tool visibility
+    const startResp = await authFetch('/api/message/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: msg + taxContext, agent: 'main', token })
     });
-    const data = await resp.json();
-    if (data.response) {
-      respEl.innerHTML = `<div class="text-gray-300 leading-relaxed text-sm">${esc(data.response).replace(/\n/g,'<br>')}</div>`;
-      // Refresh data if the agent modified expenses
-      if (msg.toLowerCase().includes('log') || msg.toLowerCase().includes('add') || msg.toLowerCase().includes('expense')) {
-        loadOverview();
-        loadExpenses();
-      }
+    const startData = await startResp.json();
+    const turnId = startData.turn_id;
+
+    if (!turnId) {
+      // Fallback to non-streaming
+      const resp = await authFetch('/api/message', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: msg + taxContext, agent: 'main', token })
+      });
+      const data = await resp.json();
+      respEl.innerHTML = data.response
+        ? `<div class="text-gray-300 leading-relaxed text-sm">${esc(data.response).replace(/\n/g,'<br>')}</div>`
+        : `<p class="text-red-400 text-sm">${esc(data.error || 'No response')}</p>`;
     } else {
-      respEl.innerHTML = `<p class="text-red-400 text-sm">${esc(data.error || 'No response')}</p>`;
+      // Stream with tool visibility
+      let toolsUsed = [];
+      const evtSource = new EventSource(`/api/message/${turnId}/stream?token=${token}`);
+      evtSource.onmessage = (event) => {
+        const ev = JSON.parse(event.data);
+        switch (ev.event) {
+          case 'started':
+            respEl.innerHTML = '<p class="text-xs text-gray-500">Analyzing your tax data...</p>';
+            break;
+          case 'llm_call_started':
+            respEl.innerHTML = `<p class="text-xs text-gray-500">${ev.round > 0 ? 'Processing results...' : 'Thinking about your question...'}</p>`;
+            break;
+          case 'tool_call_started':
+            toolsUsed.push(ev.tool_name);
+            const toolLabels = {
+              'estimate_tax': 'Calculating tax liability...',
+              'expense_summary': 'Reviewing expenses...',
+              'get_income': 'Looking up income records...',
+              'log_expense': 'Logging expense...',
+              'list_todos': 'Checking tasks...',
+              'web_search': 'Searching...',
+            };
+            const label = toolLabels[ev.tool_name] || `Using ${ev.tool_name}...`;
+            respEl.innerHTML = `<div class="space-y-1">${toolsUsed.map(t => {
+              const l = toolLabels[t] || `Using ${t}`;
+              return `<div class="flex items-center gap-2 text-xs text-gray-500"><span class="w-1 h-1 rounded-full bg-oc-500 ${t === ev.tool_name ? 'animate-pulse' : ''}"></span>${l}</div>`;
+            }).join('')}</div>`;
+            break;
+          case 'tool_call_completed':
+            // Update dot color
+            break;
+          case 'complete':
+            evtSource.close();
+            respEl.innerHTML = `<div class="text-gray-300 leading-relaxed text-sm">${esc(ev.response).replace(/\n/g,'<br>')}</div>`;
+            messages.scrollTop = messages.scrollHeight;
+            taxChatSending = false; btn.disabled = false; input.focus();
+            if (msg.toLowerCase().match(/log|add|expense/)) { loadOverview(); loadExpenses(); }
+            return;
+          case 'error':
+            evtSource.close();
+            respEl.innerHTML = `<p class="text-red-400 text-sm">${esc(ev.message)}</p>`;
+            taxChatSending = false; btn.disabled = false;
+            return;
+        }
+        messages.scrollTop = messages.scrollHeight;
+      };
+      evtSource.onerror = () => {
+        evtSource.close();
+        if (respEl.querySelector('.animate-pulse')) respEl.innerHTML = '<p class="text-red-400 text-sm">Connection lost</p>';
+        taxChatSending = false; btn.disabled = false;
+      };
+      return;
     }
   } catch(e) {
     respEl.innerHTML = `<p class="text-red-400 text-sm">Error: ${e.message}</p>`;
@@ -634,36 +701,65 @@ async function loadDocuments() {
         <div class="space-y-2">
           ${items.map(d => {
             const fields = d.fields || {};
-            let detail = '';
+            let fieldsHtml = '';
             if (type === 'w2') {
-              detail = `Wages: $${(fields.box1_wages || 0).toLocaleString()} | Fed Withheld: $${(fields.box2_fed_withheld || 0).toLocaleString()}`;
+              fieldsHtml = `
+                <div class="grid grid-cols-2 gap-x-4 gap-y-1 mt-2 text-xs">
+                  <div class="flex justify-between"><span class="text-gray-500">Box 1 Wages:</span>
+                    <input type="text" value="${fields.box1_wages || ''}" class="bg-transparent text-right text-gray-300 w-24 border-b border-transparent hover:border-gray-600 focus:border-oc-500 outline-none" onchange="updateDocField(${d.id},'box1_wages',this.value)"></div>
+                  <div class="flex justify-between"><span class="text-gray-500">Box 2 Fed Withheld:</span>
+                    <input type="text" value="${fields.box2_fed_withheld || ''}" class="bg-transparent text-right text-gray-300 w-24 border-b border-transparent hover:border-gray-600 focus:border-oc-500 outline-none" onchange="updateDocField(${d.id},'box2_fed_withheld',this.value)"></div>
+                  <div class="flex justify-between"><span class="text-gray-500">Box 3 SS Wages:</span>
+                    <input type="text" value="${fields.box3_ss_wages || ''}" class="bg-transparent text-right text-gray-300 w-24 border-b border-transparent hover:border-gray-600 focus:border-oc-500 outline-none" onchange="updateDocField(${d.id},'box3_ss_wages',this.value)"></div>
+                  <div class="flex justify-between"><span class="text-gray-500">Box 4 SS Withheld:</span>
+                    <input type="text" value="${fields.box4_ss_withheld || ''}" class="bg-transparent text-right text-gray-300 w-24 border-b border-transparent hover:border-gray-600 focus:border-oc-500 outline-none" onchange="updateDocField(${d.id},'box4_ss_withheld',this.value)"></div>
+                  <div class="flex justify-between"><span class="text-gray-500">Box 5 Medicare Wages:</span>
+                    <input type="text" value="${fields.box5_medicare_wages || ''}" class="bg-transparent text-right text-gray-300 w-24 border-b border-transparent hover:border-gray-600 focus:border-oc-500 outline-none" onchange="updateDocField(${d.id},'box5_medicare_wages',this.value)"></div>
+                  <div class="flex justify-between"><span class="text-gray-500">Box 6 Medicare Withheld:</span>
+                    <input type="text" value="${fields.box6_medicare_withheld || ''}" class="bg-transparent text-right text-gray-300 w-24 border-b border-transparent hover:border-gray-600 focus:border-oc-500 outline-none" onchange="updateDocField(${d.id},'box6_medicare_withheld',this.value)"></div>
+                  <div class="flex justify-between"><span class="text-gray-500">State:</span>
+                    <input type="text" value="${fields.state || ''}" class="bg-transparent text-right text-gray-300 w-24 border-b border-transparent hover:border-gray-600 focus:border-oc-500 outline-none" onchange="updateDocField(${d.id},'state',this.value)"></div>
+                  <div class="flex justify-between"><span class="text-gray-500">Box 17 State Withheld:</span>
+                    <input type="text" value="${fields.box17_state_withheld || ''}" class="bg-transparent text-right text-gray-300 w-24 border-b border-transparent hover:border-gray-600 focus:border-oc-500 outline-none" onchange="updateDocField(${d.id},'box17_state_withheld',this.value)"></div>
+                </div>
+                <p class="text-xs text-gray-600 mt-1">Employee: ${esc(fields.employee_name || '?')}</p>`;
             } else if (type.startsWith('1099')) {
               const amt = fields.box1_interest || fields.box1a_ordinary || fields.box1_nonemployee_comp || fields.total_proceeds || 0;
-              detail = `Amount: $${parseFloat(amt || 0).toLocaleString()}`;
+              fieldsHtml = `<p class="text-xs text-gray-400 mt-1">Amount: <input type="text" value="${amt}" class="bg-transparent text-gray-300 w-20 border-b border-transparent hover:border-gray-600 focus:border-oc-500 outline-none" onchange="updateDocField(${d.id},'amount',this.value)"></p>`;
             } else if (type === 'mortgage_statement') {
-              detail = `Interest: $${(fields.box1_interest_paid || 0).toLocaleString()}`;
+              fieldsHtml = `<p class="text-xs text-gray-400 mt-1">Interest Paid: <input type="text" value="${fields.box1_interest_paid || ''}" class="bg-transparent text-gray-300 w-20 border-b border-transparent hover:border-gray-600 focus:border-oc-500 outline-none" onchange="updateDocField(${d.id},'box1_interest_paid',this.value)"></p>`;
             } else if (type === 'property_tax_statement') {
-              detail = `Amount: $${(fields.amount || 0).toLocaleString()}`;
+              fieldsHtml = `<p class="text-xs text-gray-400 mt-1">Amount: <input type="text" value="${fields.amount || ''}" class="bg-transparent text-gray-300 w-20 border-b border-transparent hover:border-gray-600 focus:border-oc-500 outline-none" onchange="updateDocField(${d.id},'amount',this.value)"></p>`;
             }
             return `
-            <a href="${d.image_url}?token=${token}" target="_blank" class="block p-3 rounded-lg bg-gray-900 hover:bg-gray-800 border border-gray-700/50 transition-colors">
+            <div class="p-3 rounded-lg bg-gray-900 border border-gray-700/50">
               <div class="flex items-center justify-between">
-                <div>
+                <div class="flex-1">
                   <p class="text-sm text-gray-300">${esc(d.issuer || 'Unknown')}</p>
-                  ${detail ? '<p class="text-xs text-gray-400 mt-0.5">' + detail + '</p>' : ''}
-                  <p class="text-xs text-gray-600 mt-0.5">Year: ${d.tax_year || '?'}</p>
+                  <p class="text-xs text-gray-600">Year: ${d.tax_year || '?'}</p>
                 </div>
                 <div class="flex items-center gap-2">
                   <span class="text-xs px-2 py-0.5 rounded ${d.status === 'scanned' ? 'bg-green-900/50 text-green-400' : 'bg-yellow-900/50 text-yellow-400'}">${d.status}</span>
-                  <span class="text-xs text-oc-500">View</span>
+                  <a href="${d.image_url}?token=${token}" target="_blank" class="text-xs text-oc-500 hover:text-oc-400">View Original</a>
                 </div>
               </div>
-            </a>`;
+              ${fieldsHtml}
+            </div>`;
           }).join('')}
         </div>
       </div>
     `).join('');
   } catch(e) { console.log('docs:', e); }
+}
+
+async function updateDocField(docId, field, value) {
+  try {
+    await authFetch(`/api/tax/documents/${docId}/field`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, field, value })
+    });
+  } catch(e) { console.log('update field:', e); }
 }
 
 initYearSelector();

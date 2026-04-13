@@ -3340,6 +3340,7 @@ async fn main() {
         .route("/api/tax/documents", post(tax::handle_tax_doc_upload))
         .route("/api/tax/documents", get(tax::handle_tax_doc_list))
         .route("/api/tax/documents/{id}/image", get(tax::handle_tax_doc_image))
+        .route("/api/tax/documents/{id}/field", axum::routing::put(tax::handle_tax_doc_update_field))
         .route("/api/tax/income", get(tax::handle_income_list))
         .route("/api/tax/export", get(tax::handle_expense_export))
         .route("/api/todos", get(handle_todo_list))
