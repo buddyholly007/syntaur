@@ -478,10 +478,27 @@ async function sendTaxChat() {
   respEl.removeAttribute('id');
 
   try {
+    // Fetch current tax data to give the agent context
+    let taxContext = '';
+    try {
+      const sumResp = await authFetch(`/api/tax/summary?token=${token}&start=${yearStart()}&end=${yearEnd()}`);
+      const sum = await sumResp.json();
+      const cats = (sum.categories || []).map(c => `${c.category} (${c.entity}): ${c.total_display} (${c.count} items)`).join('\n');
+      taxContext = `\n\n[TAX MODULE CONTEXT - The user has the Syntaur tax module with this data for ${selectedYear}:\n` +
+        `Total expenses: ${sum.total_display}\n` +
+        `Business expenses: ${sum.business_display}\n` +
+        `Tax deductible: ${sum.deductible_display}\n` +
+        `Receipts on file: ${sum.receipt_count}\n` +
+        `\nBy category:\n${cats}\n` +
+        `\nYou have tools available: expense_summary, log_expense, list_todos. ` +
+        `Use these tools to get detailed data. Answer based on the actual data above, not by asking the user for information you already have. ` +
+        `If they ask about tax liability, use the expense data to estimate based on standard tax brackets and deductions.]`;
+    } catch(e) {}
+
     const resp = await authFetch('/api/message', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: msg, agent: 'main', token })
+      body: JSON.stringify({ message: msg + taxContext, agent: 'main', token })
     });
     const data = await resp.json();
     if (data.response) {
