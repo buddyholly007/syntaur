@@ -580,17 +580,21 @@ function handleFileSelect(event) {
 }
 
 async function addPendingFile(file) {
-  // Detect receipt images — auto-upload to tax module
+  // Check if this might be a financial document (image or PDF under 10MB)
   const isImage = file.type.startsWith('image/') || file.type === 'application/pdf';
-  const isLikelyReceipt = isImage && file.size < 10 * 1024 * 1024;
+  const couldBeFinancial = isImage && file.size < 10 * 1024 * 1024;
 
-  if (isLikelyReceipt) {
-    // Show receipt scanning UI
-    showReceiptScan(file);
+  if (couldBeFinancial) {
+    // Show detection prompt — let user decide what to do
+    showDocumentDetection(file);
     return;
   }
 
   // Regular file attachment
+  attachFileToChat(file);
+}
+
+async function attachFileToChat(file) {
   const container = document.getElementById('pending-files');
   container.classList.remove('hidden');
   const sizeStr = file.size > 1048576 ? `${(file.size/1048576).toFixed(1)}MB` : `${(file.size/1024).toFixed(0)}KB`;
@@ -620,27 +624,28 @@ async function addPendingFile(file) {
   }
 }
 
-// Receipt scanning overlay
-async function showReceiptScan(file) {
-  // Show scanning indicator in chat
+// Smart document detection — classify then prompt user
+async function showDocumentDetection(file) {
   const container = document.getElementById('messages');
   const scroll = document.getElementById('messages-scroll');
-  const scanEl = document.createElement('div');
-  scanEl.className = 'flex gap-4';
-  scanEl.id = 'receipt-scan-msg';
+  const msgEl = document.createElement('div');
+  msgEl.className = 'flex gap-4';
 
   const previewUrl = URL.createObjectURL(file);
-  scanEl.innerHTML = `
+  const isPdf = file.type === 'application/pdf';
+
+  msgEl.innerHTML = `
     <img src="/agent-avatar/main" class="w-8 h-8 rounded-lg flex-shrink-0" alt="">
     <div class="flex-1 min-w-0">
       <div class="p-3 rounded-lg bg-gray-800 border border-gray-700">
         <div class="flex items-start gap-3">
-          <img src="${previewUrl}" class="w-20 h-20 object-cover rounded-lg flex-shrink-0">
-          <div class="flex-1">
-            <p class="text-sm text-gray-300 font-medium">Scanning receipt...</p>
-            <p class="text-xs text-gray-500 mt-1">AI is extracting vendor, amount, date, and category.</p>
+          ${isPdf
+            ? '<div class="w-20 h-20 rounded-lg bg-gray-900 flex items-center justify-center flex-shrink-0"><span class="text-2xl">&#128196;</span></div>'
+            : `<img src="${previewUrl}" class="w-20 h-20 object-cover rounded-lg flex-shrink-0">`}
+          <div class="flex-1" id="doc-detect-content">
+            <p class="text-sm text-gray-300">Identifying document...</p>
             <div class="flex gap-1 mt-2">
-              <span class="w-1.5 h-1.5 rounded-full bg-oc-500 animate-bounce" style="animation-delay:0ms"></span>
+              <span class="w-1.5 h-1.5 rounded-full bg-oc-500 animate-bounce"></span>
               <span class="w-1.5 h-1.5 rounded-full bg-oc-500 animate-bounce" style="animation-delay:150ms"></span>
               <span class="w-1.5 h-1.5 rounded-full bg-oc-500 animate-bounce" style="animation-delay:300ms"></span>
             </div>
@@ -648,57 +653,110 @@ async function showReceiptScan(file) {
         </div>
       </div>
     </div>`;
-  container.appendChild(scanEl);
+  container.appendChild(msgEl);
   scroll.scrollTop = scroll.scrollHeight;
 
-  // Upload to tax receipt API
+  const contentEl = msgEl.querySelector('#doc-detect-content');
+  contentEl.removeAttribute('id');
+
+  // Use smart upload to classify
   try {
-    const resp = await fetch(`/api/tax/receipts?token=${token}`, {
+    const resp = await fetch(`/api/tax/upload?token=${token}`, {
       method: 'POST',
       headers: { 'Content-Type': file.type },
       body: file
     });
     const data = await resp.json();
-    const receiptId = data.id;
+    const docType = data.doc_type || 'unknown';
+    const routedTo = data.routed_to || 'unknown';
+    const docId = data.id;
 
-    // Poll for scan results
-    pollReceiptResult(receiptId, scanEl, previewUrl);
+    const typeLabels = {
+      'receipt': 'Receipt', 'invoice': 'Invoice',
+      'w2': 'W-2 Tax Form', '1099_int': '1099-INT', '1099_div': '1099-DIV',
+      '1099_b': '1099-B', '1099_misc': '1099-MISC', '1099_nec': '1099-NEC',
+      '1095_c': '1095-C Health Coverage',
+      'mortgage_statement': 'Mortgage Statement (1098)',
+      'property_tax_statement': 'Property Tax Statement',
+      'bank_statement': 'Bank Statement', 'credit_card_statement': 'Credit Card Statement',
+      'insurance_policy': 'Insurance Document', 'settlement_statement': 'Settlement Statement',
+      'other': 'Document',
+    };
+    const label = typeLabels[docType] || docType;
+
+    const isFinancial = docType !== 'other' && docType !== 'unknown';
+
+    if (isFinancial) {
+      // Financial document detected — show prompt with options
+      const isStatement = routedTo === 'statement';
+      const isReceipt = routedTo === 'receipt';
+      const processingMsg = isReceipt ? 'Scanning for vendor, amount, and category...'
+        : isStatement ? 'Extracting transactions...'
+        : 'Extracting fields...';
+
+      contentEl.innerHTML = `
+        <p class="text-sm text-gray-300">I noticed this looks like a <strong class="text-white">${esc(label)}</strong>.</p>
+        <p class="text-xs text-gray-500 mt-1">${processingMsg}</p>
+        <div class="flex flex-wrap gap-2 mt-3">
+          <a href="/tax" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-3 py-1.5 rounded-lg transition-colors inline-flex items-center gap-1">
+            Open Tax Module &#8594;
+          </a>
+          <button onclick="this.closest('.flex.gap-4').querySelector('.doc-dismiss')?.classList.remove('hidden');this.parentElement.remove()" class="text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 px-3 py-1.5 rounded-lg transition-colors">
+            Got it, thanks
+          </button>
+        </div>
+        <div class="doc-dismiss hidden mt-2">
+          <p class="text-xs text-green-500">Saved to Tax Module. You can review it anytime.</p>
+        </div>`;
+
+      // If it's a receipt, poll for scan results and update inline
+      if (isReceipt && docId) {
+        pollReceiptInline(docId, contentEl, previewUrl);
+      }
+    } else {
+      // Not a financial document — attach as regular file instead
+      contentEl.innerHTML = `
+        <p class="text-sm text-gray-400">This doesn't look like a financial document. Attaching to chat instead.</p>`;
+      // Remove the smart-upload copy and attach normally
+      setTimeout(() => msgEl.remove(), 3000);
+      attachFileToChat(file);
+    }
   } catch(e) {
-    scanEl.querySelector('.flex-1 > div').innerHTML = `
-      <p class="text-sm text-red-400">Receipt upload failed: ${e.message}</p>`;
+    // Classification failed — fall back to regular attachment
+    contentEl.innerHTML = `<p class="text-sm text-gray-400">Attaching file to chat.</p>`;
+    setTimeout(() => msgEl.remove(), 2000);
+    attachFileToChat(file);
   }
 }
 
-async function pollReceiptResult(receiptId, el, previewUrl) {
+async function pollReceiptInline(receiptId, el, previewUrl) {
   const poll = async () => {
     try {
       const resp = await fetch(`/api/tax/receipts?token=${token}`);
       const data = await resp.json();
       const receipt = (data.receipts || []).find(r => r.id === receiptId);
       if (receipt && receipt.status === 'scanned') {
-        // Show results with edit options
-        el.querySelector('.flex-1 > div').innerHTML = `
-          <div class="flex items-start gap-3">
-            <img src="${previewUrl}" class="w-20 h-20 object-cover rounded-lg flex-shrink-0">
-            <div class="flex-1 space-y-2">
-              <p class="text-sm text-green-400 font-medium">Receipt scanned</p>
-              <div class="grid grid-cols-2 gap-2 text-xs">
-                <div><span class="text-gray-500">Vendor:</span> <span class="text-gray-300">${esc(receipt.vendor || '?')}</span></div>
-                <div><span class="text-gray-500">Amount:</span> <span class="text-white font-medium">${receipt.amount_display || '?'}</span></div>
-                <div><span class="text-gray-500">Date:</span> <span class="text-gray-300">${receipt.receipt_date || '?'}</span></div>
-                <div><span class="text-gray-500">Category:</span> <span class="text-gray-300">${receipt.category || '?'}</span></div>
-              </div>
-              <p class="text-xs text-gray-500">${esc(receipt.description || '')}</p>
-              <div class="flex gap-2 mt-1">
-                <span class="text-xs text-green-500">Expense auto-saved</span>
-                <a href="/tax" class="text-xs text-oc-500 hover:text-oc-400">View in Tax Module</a>
-              </div>
-            </div>
-          </div>`;
+        // Update the prompt with extracted data
+        const existingButtons = el.querySelector('.flex.flex-wrap.gap-2');
+        const resultsHtml = `
+          <div class="grid grid-cols-2 gap-x-4 gap-y-1 mt-2 text-xs border-t border-gray-700 pt-2">
+            <div><span class="text-gray-500">Vendor:</span> <span class="text-gray-300">${esc(receipt.vendor || '?')}</span></div>
+            <div><span class="text-gray-500">Amount:</span> <span class="text-white font-medium">${receipt.amount_display || '?'}</span></div>
+            <div><span class="text-gray-500">Date:</span> <span class="text-gray-300">${receipt.receipt_date || '?'}</span></div>
+            <div><span class="text-gray-500">Category:</span> <span class="text-gray-300">${receipt.category || '?'}</span></div>
+          </div>
+          <p class="text-xs text-green-500 mt-1">&#10004; Expense saved</p>`;
+        if (existingButtons) existingButtons.insertAdjacentHTML('beforebegin', resultsHtml);
+        else el.insertAdjacentHTML('beforeend', resultsHtml);
+        return;
+      }
+      if (receipt && receipt.status === 'tax_form') {
+        el.querySelector('.text-gray-500')?.remove();
+        el.insertAdjacentHTML('beforeend', '<p class="text-xs text-yellow-400 mt-1">This looks like a tax form, not a receipt. Saved as a tax document instead.</p>');
         return;
       }
     } catch(e) {}
-    setTimeout(poll, 2000);
+    setTimeout(poll, 2500);
   };
   setTimeout(poll, 3000);
 }
