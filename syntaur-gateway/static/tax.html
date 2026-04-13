@@ -886,6 +886,89 @@ async function updateDocField(docId, field, value) {
   } catch(e) { console.log('update field:', e); }
 }
 
+// ── Deduction Calculators ──
+
+function recalcHomeOffice() {
+  const sqft = parseFloat(document.getElementById('ho-sqft')?.value || 0);
+  const total = parseFloat(document.getElementById('ho-total-sqft')?.value || 1);
+  const pct = sqft / total;
+  const pctEl = document.getElementById('ho-pct');
+  if (pctEl) pctEl.textContent = (pct * 100).toFixed(2) + '%';
+
+  const mortgage = parseFloat(document.getElementById('ho-mortgage')?.value || 0);
+  const proptax = parseFloat(document.getElementById('ho-proptax')?.value || 0);
+  const insurance = parseFloat(document.getElementById('ho-insurance')?.value || 0);
+  const utilities = parseFloat(document.getElementById('ho-utilities')?.value || 0);
+  const total_expenses = mortgage + proptax + insurance + utilities;
+  const deduction = total_expenses * pct;
+
+  const el = document.getElementById('ho-actual');
+  if (el) el.textContent = '$' + deduction.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+async function saveHomeOfficeDeduction() {
+  const sqft = parseFloat(document.getElementById('ho-sqft')?.value || 0);
+  const total = parseFloat(document.getElementById('ho-total-sqft')?.value || 1);
+  const pct = sqft / total;
+  const mortgage = parseFloat(document.getElementById('ho-mortgage')?.value || 0);
+  const proptax = parseFloat(document.getElementById('ho-proptax')?.value || 0);
+  const insurance = parseFloat(document.getElementById('ho-insurance')?.value || 0);
+  const utilities = parseFloat(document.getElementById('ho-utilities')?.value || 0);
+  const deduction = (mortgage + proptax + insurance + utilities) * pct;
+
+  if (deduction <= 0) { return; }
+
+  try {
+    await authFetch('/api/tax/expenses', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        token, vendor: 'Home Office / Workshop Deduction',
+        amount: deduction.toFixed(2), category: 'Home Office',
+        date: `${selectedYear}-12-31`,
+        description: `${sqft} sqft workshop in ${total} sqft home (${(pct*100).toFixed(1)}% business use). Actual method.`,
+        entity: 'business'
+      })
+    });
+    document.getElementById('ho-result').classList.remove('hidden');
+    document.getElementById('ho-result').className = 'text-xs text-green-400';
+    document.getElementById('ho-result').textContent = `Saved $${deduction.toFixed(2)} home office deduction!`;
+    loadOverview();
+  } catch(e) {
+    document.getElementById('ho-result').className = 'text-xs text-red-400';
+    document.getElementById('ho-result').textContent = 'Error saving';
+  }
+}
+
+function recalcMileage() {
+  const miles = parseFloat(document.getElementById('mi-miles')?.value || 0);
+  const deduction = miles * 0.67;
+  const el = document.getElementById('mi-result');
+  if (el) el.textContent = '$' + deduction.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+async function saveMileageDeduction() {
+  const miles = parseFloat(document.getElementById('mi-miles')?.value || 0);
+  if (miles <= 0) return;
+  const deduction = miles * 0.67;
+
+  try {
+    await authFetch('/api/tax/expenses', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        token, vendor: 'Business Mileage Deduction',
+        amount: deduction.toFixed(2), category: 'Vehicle & Mileage',
+        date: `${selectedYear}-12-31`,
+        description: `${miles} business miles @ $0.67/mile (IRS standard rate ${selectedYear})`,
+        entity: 'business'
+      })
+    });
+    loadOverview();
+  } catch(e) {}
+}
+
+// Auto-calculate home office on load
+setTimeout(recalcHomeOffice, 500);
+
 initYearSelector();
 
 // ── Deduction Suggestions ──
@@ -896,8 +979,40 @@ function analyzeDeductions(summaryData) {
 
   // Common deductions people miss
   const checks = [
-    { cat: 'Vehicle & Mileage', msg: 'Track business mileage', detail: 'If you drive for business, you can deduct $0.67/mile (2025). Use a mileage tracking app and log trips.', condition: () => !catNames.has('Vehicle & Mileage') },
-    { cat: 'Home Office', msg: 'Home office deduction', detail: 'If you use part of your home exclusively for business, deduct a portion of rent/mortgage, utilities, internet. Simplified method: $5/sq ft up to 300 sq ft = $1,500.', condition: () => !catNames.has('Home Office') && cats.some(c => c.entity === 'business') },
+    { cat: 'Vehicle & Mileage', msg: 'Track business mileage', detail: 'If you drive for business (supply runs, client visits, deliveries), you can deduct $0.67/mile (2025).', condition: () => !catNames.has('Vehicle & Mileage'),
+      form: `
+        <div class="mt-3 p-3 rounded-lg bg-gray-800 space-y-2" id="mileage-form">
+          <div class="grid grid-cols-2 gap-2 text-xs">
+            <div><span class="text-gray-500">Business miles in ${selectedYear}:</span> <input type="number" id="mi-miles" class="w-20 bg-gray-900 border border-gray-700 rounded px-1 py-0.5 text-white outline-none focus:border-oc-500" placeholder="e.g. 3000" onchange="recalcMileage()"></div>
+            <div><span class="text-gray-500">Deduction:</span> <strong class="text-green-400" id="mi-result">$0.00</strong> <span class="text-gray-600">@ $0.67/mile</span></div>
+          </div>
+          <button onclick="saveMileageDeduction()" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-3 py-1.5 rounded transition-colors">Save deduction</button>
+        </div>` },
+    { cat: 'Home Office', msg: 'Home office / workshop deduction', detail: 'Your 488 sq ft workshop in a 5,206 sq ft home = 9.37% business use. Two calculation methods available.', condition: () => !catNames.has('Home Office') && !catNames.has('Workshop Space') && cats.some(c => c.entity === 'business'),
+      form: `
+        <div class="mt-3 p-3 rounded-lg bg-gray-800 space-y-3" id="home-office-form">
+          <p class="text-xs font-medium text-gray-300">Calculate your workshop deduction:</p>
+          <div class="grid grid-cols-2 gap-2 text-xs">
+            <div><span class="text-gray-500">Workshop:</span> <input type="number" id="ho-sqft" value="488" class="w-16 bg-gray-900 border border-gray-700 rounded px-1 py-0.5 text-white outline-none focus:border-oc-500"> sq ft</div>
+            <div><span class="text-gray-500">Total home:</span> <input type="number" id="ho-total-sqft" value="5206" class="w-16 bg-gray-900 border border-gray-700 rounded px-1 py-0.5 text-white outline-none focus:border-oc-500"> sq ft</div>
+          </div>
+          <div class="p-2 rounded bg-gray-900 text-xs space-y-1">
+            <p class="text-gray-400">Business use: <strong class="text-white" id="ho-pct">9.37%</strong></p>
+            <p class="text-gray-400">Simplified method: <strong class="text-white">$1,500</strong> <span class="text-gray-600">(capped at 300 sqft × $5)</span></p>
+            <p class="text-gray-400">Actual method: <strong class="text-green-400" id="ho-actual">calculating...</strong></p>
+          </div>
+          <div class="grid grid-cols-2 gap-2 text-xs">
+            <div><span class="text-gray-500">Mortgage interest:</span> <input type="text" id="ho-mortgage" value="72696.17" class="w-20 bg-gray-900 border border-gray-700 rounded px-1 py-0.5 text-white outline-none focus:border-oc-500" onchange="recalcHomeOffice()"></div>
+            <div><span class="text-gray-500">Property tax:</span> <input type="text" id="ho-proptax" value="571.60" class="w-20 bg-gray-900 border border-gray-700 rounded px-1 py-0.5 text-white outline-none focus:border-oc-500" onchange="recalcHomeOffice()"></div>
+            <div><span class="text-gray-500">Insurance:</span> <input type="text" id="ho-insurance" value="" class="w-20 bg-gray-900 border border-gray-700 rounded px-1 py-0.5 text-white outline-none focus:border-oc-500" placeholder="annual" onchange="recalcHomeOffice()"></div>
+            <div><span class="text-gray-500">Utilities:</span> <input type="text" id="ho-utilities" value="" class="w-20 bg-gray-900 border border-gray-700 rounded px-1 py-0.5 text-white outline-none focus:border-oc-500" placeholder="annual" onchange="recalcHomeOffice()"></div>
+          </div>
+          <div class="flex gap-2">
+            <button onclick="saveHomeOfficeDeduction()" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-3 py-1.5 rounded transition-colors">Save deduction</button>
+            <button onclick="taxChat('Help me calculate my workshop deduction for 488 sqft in a 5206 sqft home')" class="text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 px-3 py-1.5 rounded transition-colors">Ask assistant</button>
+          </div>
+          <div id="ho-result" class="hidden text-xs"></div>
+        </div>` },
     { cat: 'Internet & Phone', msg: 'Internet and phone bills', detail: 'The business-use percentage of your internet and phone bills is deductible. Estimate the % used for work.', condition: () => !catNames.has('Internet & Phone') && !catNames.has('Utilities') && cats.some(c => c.entity === 'business') },
     { cat: 'Health Insurance', msg: 'Self-employed health insurance', detail: 'If self-employed, you can deduct 100% of health insurance premiums for yourself, spouse, and dependents.', condition: () => !catNames.has('Health Insurance') && cats.some(c => c.entity === 'business') },
     { cat: 'Education & Training', msg: 'Professional development', detail: 'Courses, books, conferences, and certifications related to your business are deductible.', condition: () => !catNames.has('Education & Training') },
@@ -928,9 +1043,10 @@ function analyzeDeductions(summaryData) {
         <div>
           <p class="text-sm font-medium text-gray-300">${s.msg}</p>
           <p class="text-xs text-gray-500 mt-1">${s.detail}</p>
-          <button onclick="taxChat('Help me figure out if I can deduct ${s.cat.toLowerCase()} expenses')" class="text-xs text-oc-500 hover:text-oc-400 mt-2">Ask the tax assistant about this &rarr;</button>
+          ${s.form ? '' : '<button onclick="taxChat(\'Help me figure out if I can deduct ' + s.cat.toLowerCase() + ' expenses\')" class="text-xs text-oc-500 hover:text-oc-400 mt-2">Ask the tax assistant about this &rarr;</button>'}
         </div>
       </div>
+    ${s.form || ''}
     </div>
   `).join('');
 }

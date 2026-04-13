@@ -462,6 +462,18 @@ Respond ONLY with valid JSON: {"vendor":"...","amount":"45.99","date":"2025-12-1
         Ok(())
     }).await.map_err(|e| e.to_string())??;
 
+    // Validate: flag suspicious category/amount combinations
+    let suspicious = match category_name.as_str() {
+        "Homeowner's Insurance Premium" | "Insurance" if amount_cents > 1_000_000 =>
+            Some("Insurance amount over $10,000 — verify this isn't a closing cost or escrow payment"),
+        _ if amount_cents > 5_000_000 =>
+            Some("Amount over $50,000 — verify this is a single expense and not a statement total"),
+        _ => None,
+    };
+    if let Some(warning) = suspicious {
+        log::warn!("[tax] Receipt #{} flagged: {} ({})", receipt_id, warning, cents_to_display(amount_cents));
+    }
+
     // Validate: skip auto-expense for non-receipt documents (W-2, 1099, etc.)
     let vendor_lower = vendor_log.to_lowercase();
     let is_tax_form = vendor_lower.contains("w-2") || vendor_lower.contains("w2") ||
