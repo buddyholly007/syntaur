@@ -67,11 +67,25 @@
       </div>
     </div>
 
+    <!-- Potential Deductions -->
+    <details class="card mb-6 cursor-pointer group" id="deductions-section">
+      <summary class="flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <span class="text-green-400">&#128161;</span>
+          <h3 class="font-medium">Potential Deductions You Might Be Missing</h3>
+        </div>
+        <span class="text-xs text-gray-500 group-open:hidden">Click to expand</span>
+      </summary>
+      <div class="mt-4 space-y-3" id="deductions-list">
+        <p class="text-xs text-gray-500">Analyzing your expenses...</p>
+      </div>
+    </details>
+
     <!-- Category breakdown -->
     <div class="card">
       <div class="flex items-center justify-between mb-4">
         <h3 class="font-medium">By Category</h3>
-        <a href="/api/tax/export?token=" id="export-link" class="text-xs text-oc-500 hover:text-oc-400">Export CSV</a>
+        <a href="/api/tax/export?token=" id="export-link" class="btn-primary text-xs">Export CSV</a>
       </div>
       <div id="category-list" class="space-y-2">
         <p class="text-xs text-gray-600">Loading...</p>
@@ -235,21 +249,54 @@ async function loadOverview() {
     if (cats.length === 0) {
       list.innerHTML = '<p class="text-sm text-gray-600">No expenses yet. Start by logging an expense or uploading a receipt.</p>';
     } else {
-      list.innerHTML = cats.map(c => `
-        <div class="flex items-center justify-between py-2 border-b border-gray-700/50 last:border-0">
-          <div class="flex items-center gap-2">
-            <span class="text-sm text-gray-300">${c.category}</span>
-            <span class="text-xs px-1.5 py-0.5 rounded ${c.entity === 'business' ? 'bg-oc-900/50 text-oc-400' : 'bg-gray-700 text-gray-400'}">${c.entity}</span>
-            ${c.tax_deductible ? '<span class="text-xs text-green-500">deductible</span>' : ''}
-          </div>
-          <div class="text-right">
-            <span class="text-sm font-medium text-gray-200">${c.total_display}</span>
-            <span class="text-xs text-gray-600 ml-2">${c.count} items</span>
-          </div>
-        </div>
-      `).join('');
+      const biz = cats.filter(c => c.entity === 'business');
+      const pers = cats.filter(c => c.entity === 'personal');
+      const bizTotal = biz.reduce((s,c) => s + c.total_cents, 0);
+      const persTotal = pers.reduce((s,c) => s + c.total_cents, 0);
+      const maxCents = Math.max(...cats.map(c => c.total_cents), 1);
+
+      function renderGroup(title, items, subtotal, color) {
+        if (items.length === 0) return '';
+        const subtotalDisplay = '$' + (Math.abs(subtotal)/100).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+        return `
+          <div class="mb-4">
+            <div class="flex items-center justify-between mb-2">
+              <h4 class="text-xs font-semibold uppercase tracking-wider ${color}">${title}</h4>
+              <span class="text-sm font-medium text-gray-300">${subtotalDisplay}</span>
+            </div>
+            ${items.map(c => {
+              const pct = Math.max((c.total_cents / maxCents) * 100, 2);
+              const notDed = !c.tax_deductible ? '<span class="text-xs text-yellow-500/60 ml-1">non-deductible</span>' : '';
+              return `
+              <button onclick="filterByCategory('${c.category}')" class="w-full text-left py-1.5 hover:bg-gray-800/50 rounded px-1 -mx-1 transition-colors">
+                <div class="flex items-center justify-between">
+                  <span class="text-sm text-gray-300">${c.category}${notDed}</span>
+                  <div class="text-right">
+                    <span class="text-sm font-medium text-gray-200">${c.total_display}</span>
+                    <span class="text-xs text-gray-600 ml-1">${c.count}</span>
+                  </div>
+                </div>
+                <div class="mt-1 h-1 rounded-full bg-gray-700 overflow-hidden">
+                  <div class="h-full rounded-full ${c.entity === 'business' ? 'bg-oc-500' : 'bg-purple-500'}" style="width:${pct}%"></div>
+                </div>
+              </button>`;
+            }).join('')}
+          </div>`;
+      }
+
+      list.innerHTML = renderGroup('Business Expenses', biz, bizTotal, 'text-oc-400') +
+                        renderGroup('Personal', pers, persTotal, 'text-purple-400');
     }
+
+    analyzeDeductions(data);
   } catch(e) { console.log('overview:', e); }
+}
+
+function filterByCategory(cat) {
+  showTab('expenses');
+  // Set a global filter and reload
+  window._catFilter = cat;
+  loadExpenses();
 }
 
 // Expenses
@@ -261,18 +308,29 @@ async function loadExpenses() {
     const resp = await authFetch(url);
     const data = await resp.json();
     const list = document.getElementById('expense-list');
-    const expenses = data.expenses || [];
+    let expenses = data.expenses || [];
+    // Apply category filter if set
+    if (window._catFilter) {
+      expenses = expenses.filter(e => e.category === window._catFilter);
+    }
+    const filterLabel = window._catFilter
+      ? `<div class="flex items-center gap-2 mb-3"><span class="text-sm text-gray-400">Filtered: <strong class="text-gray-200">${esc(window._catFilter)}</strong></span><button onclick="window._catFilter=null;loadExpenses()" class="text-xs text-oc-500 hover:text-oc-400">Clear</button></div>`
+      : '';
+
     if (expenses.length === 0) {
-      list.innerHTML = '<p class="text-sm text-gray-600">No expenses yet.</p>';
+      list.innerHTML = filterLabel + '<p class="text-sm text-gray-600">No expenses found.</p>';
     } else {
-      list.innerHTML = expenses.map(e => `
+      list.innerHTML = filterLabel + expenses.map(e => `
         <div class="flex items-center justify-between py-2 border-b border-gray-700/50 last:border-0">
-          <div>
-            <p class="text-sm text-gray-300">${esc(e.vendor)}</p>
-            <p class="text-xs text-gray-500">${e.expense_date} &middot; ${e.category || 'Uncategorized'} &middot; ${e.entity}</p>
-            ${e.description ? '<p class="text-xs text-gray-600">' + esc(e.description) + '</p>' : ''}
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2">
+              <p class="text-sm text-gray-300 truncate">${esc(e.vendor)}</p>
+              ${e.receipt_id ? `<a href="/api/tax/receipts/${e.receipt_id}/image?token=${token}" target="_blank" class="text-xs text-oc-500 hover:text-oc-400 flex-shrink-0" title="View receipt">&#128206;</a>` : ''}
+            </div>
+            <p class="text-xs text-gray-500">${e.expense_date} &middot; ${e.category || 'Uncategorized'} &middot; <span class="${e.entity === 'business' ? 'text-oc-400' : 'text-purple-400'}">${e.entity}</span></p>
+            ${e.description ? '<p class="text-xs text-gray-600 truncate">' + esc(e.description) + '</p>' : ''}
           </div>
-          <span class="text-sm font-medium text-gray-200">${e.amount_display}</span>
+          <span class="text-sm font-medium text-gray-200 flex-shrink-0 ml-3">${e.amount_display}</span>
         </div>
       `).join('');
     }
@@ -480,6 +538,53 @@ function yearStart() { return `${selectedYear}-01-01`; }
 function yearEnd() { return `${selectedYear}-12-31`; }
 
 initYearSelector();
+
+// ── Deduction Suggestions ──
+function analyzeDeductions(summaryData) {
+  const cats = summaryData.categories || [];
+  const catNames = new Set(cats.map(c => c.category));
+  const suggestions = [];
+
+  // Common deductions people miss
+  const checks = [
+    { cat: 'Vehicle & Mileage', msg: 'Track business mileage', detail: 'If you drive for business, you can deduct $0.67/mile (2025). Use a mileage tracking app and log trips.', condition: () => !catNames.has('Vehicle & Mileage') },
+    { cat: 'Home Office', msg: 'Home office deduction', detail: 'If you use part of your home exclusively for business, deduct a portion of rent/mortgage, utilities, internet. Simplified method: $5/sq ft up to 300 sq ft = $1,500.', condition: () => !catNames.has('Home Office') && cats.some(c => c.entity === 'business') },
+    { cat: 'Internet & Phone', msg: 'Internet and phone bills', detail: 'The business-use percentage of your internet and phone bills is deductible. Estimate the % used for work.', condition: () => !catNames.has('Internet & Phone') && !catNames.has('Utilities') && cats.some(c => c.entity === 'business') },
+    { cat: 'Health Insurance', msg: 'Self-employed health insurance', detail: 'If self-employed, you can deduct 100% of health insurance premiums for yourself, spouse, and dependents.', condition: () => !catNames.has('Health Insurance') && cats.some(c => c.entity === 'business') },
+    { cat: 'Education & Training', msg: 'Professional development', detail: 'Courses, books, conferences, and certifications related to your business are deductible.', condition: () => !catNames.has('Education & Training') },
+    { cat: 'Advertising & Marketing', msg: 'Marketing expenses', detail: 'Website hosting, domain names, business cards, social media ads, and promotional materials.', condition: () => !catNames.has('Advertising & Marketing') && cats.some(c => c.entity === 'business') },
+    { cat: 'Professional Services', msg: 'Professional services', detail: 'Accountant, lawyer, bookkeeper, business consulting fees. Also tax preparation fees for business returns.', condition: () => !catNames.has('Professional Services') && cats.some(c => c.entity === 'business') },
+    { cat: 'Retirement', msg: 'Retirement contributions', detail: 'SEP-IRA (up to 25% of net self-employment income), Solo 401(k), or traditional IRA contributions reduce taxable income.', condition: () => !catNames.has('Retirement') },
+    { cat: 'Charitable', msg: 'Charitable donations', detail: 'Cash donations, donated goods (at fair market value), and mileage driven for charity ($0.14/mile).', condition: () => !catNames.has('Donations') && !catNames.has('Charitable') },
+    { cat: 'State Taxes', msg: 'State and local tax deduction (SALT)', detail: 'State income tax or sales tax, plus property tax — deductible up to $10,000 combined on Schedule A.', condition: () => true },
+    { cat: 'Student Loans', msg: 'Student loan interest', detail: 'Deduct up to $2,500 of student loan interest paid, even if you don\'t itemize. Income limits apply.', condition: () => !catNames.has('Student Loan Interest') },
+  ];
+
+  for (const c of checks) {
+    if (c.condition()) {
+      suggestions.push(c);
+    }
+  }
+
+  const el = document.getElementById('deductions-list');
+  if (suggestions.length === 0) {
+    el.innerHTML = '<p class="text-sm text-green-400">Looking good! You seem to be tracking all common deduction categories.</p>';
+    return;
+  }
+
+  el.innerHTML = suggestions.map(s => `
+    <div class="p-3 rounded-lg bg-gray-900 border border-gray-700/50">
+      <div class="flex items-start gap-2">
+        <span class="text-green-400 mt-0.5 flex-shrink-0">&#10004;</span>
+        <div>
+          <p class="text-sm font-medium text-gray-300">${s.msg}</p>
+          <p class="text-xs text-gray-500 mt-1">${s.detail}</p>
+          <button onclick="taxChat('Help me figure out if I can deduct ${s.cat.toLowerCase()} expenses')" class="text-xs text-oc-500 hover:text-oc-400 mt-2">Ask the tax assistant about this &rarr;</button>
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
 
 // Init
 loadOverview();
