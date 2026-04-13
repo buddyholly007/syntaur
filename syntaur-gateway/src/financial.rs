@@ -1269,7 +1269,7 @@ pub async fn handle_alpaca_sync(
     let activities_resp = state
         .client
         .get(format!(
-            "{}/v2/account/activities?activity_types=FILL,DIV&direction=desc&page_size=200",
+            "{}/v2/account/activities?activity_types=FILL,DIV&direction=desc&page_size=100",
             base_url
         ))
         .header("APCA-API-KEY-ID", &api_key)
