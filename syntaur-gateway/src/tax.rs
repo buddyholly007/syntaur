@@ -83,12 +83,17 @@ pub fn parse_cents(s: &str) -> Option<i64> {
     }
 }
 
-/// Convert a PDF to a high-resolution PNG using pdftoppm (poppler-utils).
-/// Returns the PNG bytes of the first page at 300 DPI.
+/// Convert a PDF to high-resolution PNGs using pdftoppm (poppler-utils).
+/// Returns PNG bytes for each page at 300 DPI. For multi-page docs, all
+/// pages are rendered and concatenated into the vision request.
 fn convert_pdf_to_png(pdf_path: &str) -> Result<Vec<u8>, String> {
+    convert_pdf_to_pngs(pdf_path).map(|pages| pages.into_iter().next().unwrap_or_default())
+}
+
+fn convert_pdf_to_pngs(pdf_path: &str) -> Result<Vec<Vec<u8>>, String> {
     let output_prefix = format!("{}.render", pdf_path);
     let result = std::process::Command::new("pdftoppm")
-        .args(["-png", "-r", "300", "-singlefile", pdf_path, &output_prefix])
+        .args(["-png", "-r", "300", pdf_path, &output_prefix])
         .output()
         .map_err(|e| format!("pdftoppm not available: {}", e))?;
 
@@ -97,10 +102,31 @@ fn convert_pdf_to_png(pdf_path: &str) -> Result<Vec<u8>, String> {
         return Err(format!("pdftoppm failed: {}", stderr.chars().take(200).collect::<String>()));
     }
 
-    let png_path = format!("{}.png", output_prefix);
-    let data = std::fs::read(&png_path).map_err(|e| format!("Read rendered PNG: {}", e))?;
-    let _ = std::fs::remove_file(&png_path); // Clean up
-    Ok(data)
+    // Collect all rendered pages (output-prefix-01.png, -02.png, etc.)
+    let mut pages = Vec::new();
+    for i in 1..=20 {
+        let path = format!("{}-{:02}.png", output_prefix, i);
+        if let Ok(data) = std::fs::read(&path) {
+            pages.push(data);
+            let _ = std::fs::remove_file(&path);
+        } else {
+            // Also try single-page format (no number suffix)
+            if i == 1 {
+                let path = format!("{}.png", output_prefix);
+                if let Ok(data) = std::fs::read(&path) {
+                    pages.push(data);
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+            break;
+        }
+    }
+
+    if pages.is_empty() {
+        return Err("pdftoppm produced no output".to_string());
+    }
+
+    Ok(pages)
 }
 
 fn receipts_dir() -> PathBuf {
@@ -248,14 +274,20 @@ async fn scan_receipt_vision(state: &AppState, receipt_id: i64) -> Result<(), St
 
     let url = format!("{}/chat/completions", provider_config.base_url.trim_end_matches('/'));
 
-    let prompt = r#"Analyze this receipt image. Extract:
-1. Vendor/Store name
-2. Total amount (in dollars, e.g. "45.99")
-3. Date (YYYY-MM-DD format)
-4. Category (one of: Advertising & Marketing, Equipment & Tools, Hardware & Supplies, Lumber & Raw Materials, Office Supplies, Professional Services, Rent & Utilities, Insurance, Software & Subscriptions, Shipping & Packaging, Vehicle & Mileage, Education & Training, Meals & Entertainment, Travel, Tools - Consumables, Safety Gear, Medical, Mortgage, Vehicle, Donations, Education, Home Improvement, Utilities, Groceries, Dining, Entertainment, Other)
-5. Brief description of items
+    let prompt = r#"Analyze this receipt/invoice image carefully. Read ALL text on the document.
 
-Respond ONLY with JSON: {"vendor":"...","amount":"...","date":"...","category":"...","description":"..."}"#;
+Extract these fields:
+1. Vendor/Store name (the business that issued this receipt, NOT a payment processor or card network)
+2. Total amount paid (in dollars, e.g. "45.99" — look for "Total", "Grand Total", "Amount Due", or the final amount)
+3. Date of transaction (YYYY-MM-DD format — look for purchase date, transaction date, or order date)
+4. Category — choose the BEST match:
+   Business: Advertising & Marketing, Equipment & Tools, Hardware & Supplies, Lumber & Raw Materials, Office Supplies, Professional Services, Rent & Utilities, Insurance, Software & Subscriptions, Shipping & Packaging, Vehicle & Mileage, Education & Training, Meals & Entertainment, Travel, Tools - Consumables, Safety Gear, Power Tools, Shop Maintenance, Dust Collection, Fuel Equipment, Furniture and Equipment, Backup Power Equipment, Supplies
+   Personal: Medical, Mortgage, Vehicle, Donations, Education, Home Improvement, Utilities, Groceries, Dining, Entertainment, Other
+5. Brief description of what was purchased (list main items)
+
+IMPORTANT: Read numbers carefully. Double-check the total amount. If the receipt shows tax separately, use the grand total including tax.
+
+Respond ONLY with valid JSON: {"vendor":"...","amount":"45.99","date":"2025-12-15","category":"...","description":"..."}"#;
 
     let payload = serde_json::json!({
         "model": model,
@@ -448,22 +480,23 @@ async fn classify_and_extract(state: &AppState, doc_id: i64) -> Result<(), Strin
         }).await.map_err(|e| e.to_string())??
     };
 
-    // Convert PDF to high-resolution PNG for better vision accuracy
-    let (image_bytes, mime) = if image_path.ends_with(".pdf") {
-        match convert_pdf_to_png(&image_path) {
-            Ok(png) => (png, "image/png"),
+    // Convert PDF to high-resolution PNGs (all pages) for better accuracy
+    use base64::Engine;
+    let image_parts: Vec<(String, &str)> = if image_path.ends_with(".pdf") {
+        match convert_pdf_to_pngs(&image_path) {
+            Ok(pages) => pages.into_iter().map(|p| (base64::engine::general_purpose::STANDARD.encode(&p), "image/png")).collect(),
             Err(e) => {
                 log::warn!("[tax] PDF conversion failed ({}), sending raw PDF", e);
-                (std::fs::read(&image_path).map_err(|e| e.to_string())?, "application/pdf")
+                let data = std::fs::read(&image_path).map_err(|e| e.to_string())?;
+                vec![(base64::engine::general_purpose::STANDARD.encode(&data), "application/pdf")]
             }
         }
     } else {
+        let data = std::fs::read(&image_path).map_err(|e| e.to_string())?;
         let ext = image_path.rsplit('.').next().unwrap_or("jpg");
         let m = match ext { "png" => "image/png", _ => "image/jpeg" };
-        (std::fs::read(&image_path).map_err(|e| e.to_string())?, m)
+        vec![(base64::engine::general_purpose::STANDARD.encode(&data), m)]
     };
-    use base64::Engine;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
 
     let config = &state.config;
     let provider = config.models.providers.iter()
@@ -492,12 +525,15 @@ For receipts: vendor, amount, date, category, items
 
 Respond ONLY with JSON: {"doc_type":"...","tax_year":2025,"issuer":"...","fields":{...all extracted fields...}}"#;
 
+    // Build content with all pages
+    let mut content_parts: Vec<serde_json::Value> = vec![serde_json::json!({"type": "text", "text": prompt})];
+    for (b64, mime) in &image_parts {
+        content_parts.push(serde_json::json!({"type": "image_url", "image_url": {"url": format!("data:{};base64,{}", mime, b64)}}));
+    }
+
     let payload = serde_json::json!({
         "model": model,
-        "messages": [{"role": "user", "content": [
-            {"type": "text", "text": prompt},
-            {"type": "image_url", "image_url": {"url": format!("data:{};base64,{}", mime, b64)}}
-        ]}],
+        "messages": [{"role": "user", "content": content_parts}],
         "max_tokens": 1500,
         "temperature": 0.1
     });
@@ -580,6 +616,34 @@ Respond ONLY with JSON: {"doc_type":"...","tax_year":2025,"issuer":"...","fields
 
             Ok(())
         }).await.map_err(|e| e.to_string())??;
+    }
+
+    // Validate extracted fields
+    if doc_type == "w2" {
+        let wages = fields["box1_wages"].as_f64().unwrap_or(0.0);
+        let ss_wages = fields["box3_ss_wages"].as_f64().unwrap_or(0.0);
+        let ss_withheld = fields["box4_ss_withheld"].as_f64().unwrap_or(0.0);
+        let medicare_wages = fields["box5_medicare_wages"].as_f64().unwrap_or(0.0);
+        let medicare_withheld = fields["box6_medicare_withheld"].as_f64().unwrap_or(0.0);
+
+        // SS withholding should be ~6.2% of SS wages (capped at $176,100 for 2025)
+        if ss_wages > 0.0 && ss_withheld > 0.0 {
+            let expected_rate = ss_withheld / ss_wages;
+            if expected_rate < 0.05 || expected_rate > 0.07 {
+                log::warn!("[tax] W-2 #{}: SS withholding rate {:.2}% is outside expected 6.2% range — may need verification", doc_id, expected_rate * 100.0);
+            }
+        }
+        // Medicare should be ~1.45% of Medicare wages
+        if medicare_wages > 0.0 && medicare_withheld > 0.0 {
+            let expected_rate = medicare_withheld / medicare_wages;
+            if expected_rate < 0.01 || expected_rate > 0.025 {
+                log::warn!("[tax] W-2 #{}: Medicare withholding rate {:.2}% is outside expected 1.45% range", doc_id, expected_rate * 100.0);
+            }
+        }
+        // Box 5 Medicare wages should be >= Box 1 wages (Medicare has no cap)
+        if medicare_wages > 0.0 && wages > 0.0 && medicare_wages < wages * 0.95 {
+            log::warn!("[tax] W-2 #{}: Medicare wages ({}) less than Box 1 wages ({}) — unusual", doc_id, medicare_wages, wages);
+        }
     }
 
     info!("[tax] Document #{} classified as {} from {} (year {:?})", doc_id, doc_type, issuer, tax_year);

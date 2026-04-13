@@ -189,6 +189,20 @@
     <div class="card mb-6">
       <h3 class="font-medium mb-3">Upload Tax Document</h3>
       <p class="text-xs text-gray-500 mb-3">Upload W-2s, 1099s, mortgage statements, property tax bills, or any tax document. AI will identify the document type and extract all relevant fields automatically.</p>
+      <details class="mb-3">
+        <summary class="text-xs text-gray-600 cursor-pointer hover:text-gray-400">Accuracy tips</summary>
+        <div class="mt-2 p-2 rounded bg-gray-900 text-xs text-gray-500 space-y-1">
+          <p>The scanner uses AI vision to read your documents. For best results:</p>
+          <p>&bull; Upload clear, high-resolution scans (photos of paper documents work too)</p>
+          <p>&bull; PDFs are automatically converted to high-res images for better reading</p>
+          <p>&bull; <strong class="text-gray-400">If you see frequent errors</strong>, switching to a more capable model in Settings can significantly improve accuracy. Recommended models for document scanning:</p>
+          <p class="pl-3">&bull; <strong class="text-gray-300">Anthropic Claude Sonnet</strong> — best accuracy for tax documents</p>
+          <p class="pl-3">&bull; <strong class="text-gray-300">OpenAI GPT-4o</strong> — excellent OCR accuracy</p>
+          <p class="pl-3">&bull; <strong class="text-gray-300">Google Gemini 2.0 Flash</strong> — good accuracy, free on OpenRouter</p>
+          <p class="pl-3">&bull; <strong class="text-gray-300">Qwen2 VL 72B (free on OpenRouter)</strong> — strong vision, zero cost</p>
+          <p>&bull; Always verify extracted values against your original documents</p>
+        </div>
+      </details>
       <div class="flex items-center gap-3">
         <label class="btn-primary cursor-pointer">
           Upload Document
