@@ -628,16 +628,6 @@ impl Config {
         PathBuf::from(expanded)
     }
 
-    /// Get the script allowlist for an agent (from tools.scriptAllowlist).
-    pub fn agent_script_allowlist(&self, agent_id: &str) -> Vec<String> {
-        self.agents.list.iter()
-            .find(|a| a.id == agent_id)
-            .and_then(|a| a.tools.as_ref())
-            .and_then(|t| t.extra.get("scriptAllowlist"))
-            .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
-            .unwrap_or_default()
-    }
-
     /// Get the model config for an agent (agent-specific or default)
     pub fn agent_model(&self, agent_id: &str) -> &ModelSelection {
         self.agents.list.iter()

@@ -90,8 +90,22 @@
       <div class="flex-1 relative">
         <textarea id="input" rows="1" class="w-full bg-gray-800 border border-gray-700 hover:border-gray-600 focus:border-oc-500 focus:ring-1 focus:ring-oc-500 rounded-2xl px-4 sm:px-5 py-2.5 sm:py-3 pr-20 text-white placeholder-gray-400 outline-none resize-none text-sm leading-relaxed" placeholder="Message Syntaur... (drop files here)" onkeydown="handleKey(event)" oninput="autoGrow(this)" style="max-height:200px"></textarea>
         <div class="absolute right-10 bottom-1 flex items-center">
-          <select id="mic-select" class="hidden bg-gray-900 border border-gray-700 rounded-lg text-xs text-gray-400 py-1 px-1 outline-none max-w-[120px]" onchange="saveMicChoice()"></select>
-          <button onmousedown="startVoice(event)" onmouseup="stopVoice(event)" ontouchstart="startVoice(event)" ontouchend="stopVoice(event)" onclick="toggleMicSelect(event)" class="text-gray-500 hover:text-oc-500 rounded-lg p-1.5 transition-colors" id="mic-btn" title="Hold to speak, click to change mic">
+          <div id="mic-menu" class="hidden absolute bottom-10 right-0 bg-gray-900 border border-gray-700 rounded-xl shadow-xl p-3 w-56 z-50">
+            <div class="text-xs text-gray-500 font-medium mb-2">Audio source</div>
+            <div id="mic-devices" class="space-y-1 mb-2"></div>
+            <div class="border-t border-gray-800 pt-2 mt-1">
+              <button onclick="showPhoneQr()" class="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs text-gray-400 hover:bg-gray-800 hover:text-white transition-colors">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="18" x2="12" y2="18.01"/></svg>
+                Use phone as mic
+              </button>
+            </div>
+            <div id="phone-qr-area" class="hidden mt-3 text-center border-t border-gray-800 pt-3">
+              <img src="" id="phone-qr-img" class="inline-block w-32 h-32 bg-white p-2 rounded-lg">
+              <p class="text-xs text-gray-500 mt-2">Scan to open Syntaur Voice</p>
+              <a href="" id="phone-qr-link" target="_blank" class="text-xs text-oc-500 hover:text-oc-400">or tap to open</a>
+            </div>
+          </div>
+          <button onmousedown="startVoice(event)" onmouseup="stopVoice(event)" ontouchstart="startVoice(event)" ontouchend="stopVoice(event)" onclick="toggleMicMenu(event)" class="text-gray-500 hover:text-oc-500 rounded-lg p-1.5 transition-colors" id="mic-btn" title="Hold to speak, click to change mic">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
           </button>
         </div>
@@ -876,46 +890,56 @@ function connectVoiceWs() {
   };
 }
 
-// Enumerate mic devices and populate dropdown
+// Enumerate mic devices and populate menu
 async function loadMicDevices() {
   try {
-    // Need permission first to get labels
     const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true });
     tempStream.getTracks().forEach(t => t.stop());
 
     const devices = await navigator.mediaDevices.enumerateDevices();
     const mics = devices.filter(d => d.kind === 'audioinput');
-    const select = document.getElementById('mic-select');
-    select.innerHTML = '';
+    const container = document.getElementById('mic-devices');
+    container.innerHTML = '';
     mics.forEach((mic, i) => {
-      const opt = document.createElement('option');
-      opt.value = mic.deviceId;
-      opt.textContent = mic.label || `Microphone ${i + 1}`;
-      if (mic.deviceId === selectedMicId) opt.selected = true;
-      select.appendChild(opt);
+      const isActive = mic.deviceId === selectedMicId || (!selectedMicId && i === 0);
+      const btn = document.createElement('button');
+      btn.className = `w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs transition-colors ${isActive ? 'bg-oc-900/50 text-oc-400' : 'text-gray-400 hover:bg-gray-800 hover:text-white'}`;
+      btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/></svg>
+        <span class="truncate">${mic.label || 'Microphone ' + (i+1)}</span>
+        ${isActive ? '<span class="ml-auto text-oc-500">&#10003;</span>' : ''}`;
+      btn.onclick = () => { selectedMicId = mic.deviceId; localStorage.setItem('syntaur_mic_id', selectedMicId); loadMicDevices(); };
+      container.appendChild(btn);
     });
-    if (mics.length > 1) {
-      select.classList.remove('hidden');
-    }
   } catch {}
 }
 
-function saveMicChoice() {
-  const select = document.getElementById('mic-select');
-  selectedMicId = select.value;
-  localStorage.setItem('syntaur_mic_id', selectedMicId);
+function showPhoneQr() {
+  const area = document.getElementById('phone-qr-area');
+  const img = document.getElementById('phone-qr-img');
+  const link = document.getElementById('phone-qr-link');
+  const setupUrl = `http://${location.hostname}:18803`;
+  img.src = `http://${location.hostname}:18803/qr.svg`;
+  link.href = setupUrl;
+  link.textContent = setupUrl;
+  area.classList.toggle('hidden');
 }
 
-// Short click toggles mic selector, long press records
-function toggleMicSelect(e) {
+function toggleMicMenu(e) {
   const elapsed = Date.now() - micClickTime;
   if (elapsed < 300) {
-    // Short click — toggle device dropdown
-    const select = document.getElementById('mic-select');
-    select.classList.toggle('hidden');
-    loadMicDevices();
+    const menu = document.getElementById('mic-menu');
+    menu.classList.toggle('hidden');
+    if (!menu.classList.contains('hidden')) loadMicDevices();
   }
 }
+
+// Close mic menu when clicking outside
+document.addEventListener('click', (e) => {
+  const menu = document.getElementById('mic-menu');
+  if (menu && !menu.contains(e.target) && e.target.id !== 'mic-btn' && !e.target.closest('#mic-btn')) {
+    menu.classList.add('hidden');
+  }
+});
 
 async function startVoice(e) {
   e.preventDefault();
@@ -969,8 +993,8 @@ async function startVoice(e) {
   const btn = document.getElementById('mic-btn');
   btn.classList.add('text-red-500');
   btn.classList.remove('text-gray-500');
-  // Hide mic selector while recording
-  document.getElementById('mic-select').classList.add('hidden');
+  // Hide mic menu while recording
+  document.getElementById('mic-menu').classList.add('hidden');
 }
 
 function stopVoice(e) {
