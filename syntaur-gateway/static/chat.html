@@ -89,9 +89,12 @@
 
       <div class="flex-1 relative">
         <textarea id="input" rows="1" class="w-full bg-gray-800 border border-gray-700 hover:border-gray-600 focus:border-oc-500 focus:ring-1 focus:ring-oc-500 rounded-2xl px-4 sm:px-5 py-2.5 sm:py-3 pr-20 text-white placeholder-gray-400 outline-none resize-none text-sm leading-relaxed" placeholder="Message Syntaur... (drop files here)" onkeydown="handleKey(event)" oninput="autoGrow(this)" style="max-height:200px"></textarea>
-        <button onmousedown="startVoice(event)" onmouseup="stopVoice(event)" ontouchstart="startVoice(event)" ontouchend="stopVoice(event)" class="absolute right-10 bottom-2 text-gray-500 hover:text-oc-500 rounded-lg p-1.5 transition-colors" id="mic-btn" title="Hold to speak">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
-        </button>
+        <div class="absolute right-10 bottom-1 flex items-center">
+          <select id="mic-select" class="hidden bg-gray-900 border border-gray-700 rounded-lg text-xs text-gray-400 py-1 px-1 outline-none max-w-[120px]" onchange="saveMicChoice()"></select>
+          <button onmousedown="startVoice(event)" onmouseup="stopVoice(event)" ontouchstart="startVoice(event)" ontouchend="stopVoice(event)" onclick="toggleMicSelect(event)" class="text-gray-500 hover:text-oc-500 rounded-lg p-1.5 transition-colors" id="mic-btn" title="Hold to speak, click to change mic">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+          </button>
+        </div>
         <button onclick="sendFromInput()" class="absolute right-2 bottom-2 bg-oc-600 hover:bg-oc-700 disabled:opacity-40 text-white rounded-lg p-1.5 transition-colors" id="send-btn">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
         </button>
@@ -827,6 +830,150 @@ sendFromInput = function() {
 };
 
 document.getElementById('input').focus();
+
+
+// ── Voice input (mic button) ─────────────────────────────────────
+let voiceWs = null;
+let voiceRecording = false;
+let voiceAudioCtx = null;
+let voiceStream = null;
+let micClickTime = 0;
+let selectedMicId = localStorage.getItem('syntaur_mic_id') || '';
+
+function connectVoiceWs() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  voiceWs = new WebSocket(`${proto}//${location.host}/ws/stt`);
+  voiceWs.binaryType = 'arraybuffer';
+  voiceWs.onclose = () => { voiceWs = null; };
+  voiceWs.onerror = () => { if (voiceWs) voiceWs.close(); };
+  voiceWs.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'transcript' && msg.text && msg.text.trim()) {
+        voiceInitiated = true;
+        const input = document.getElementById('input');
+        input.value = msg.text.trim();
+        autoGrow(input);
+        // Auto-send voice messages
+        sendFromInput();
+      }
+    } catch {}
+  };
+}
+
+// Enumerate mic devices and populate dropdown
+async function loadMicDevices() {
+  try {
+    // Need permission first to get labels
+    const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    tempStream.getTracks().forEach(t => t.stop());
+
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const mics = devices.filter(d => d.kind === 'audioinput');
+    const select = document.getElementById('mic-select');
+    select.innerHTML = '';
+    mics.forEach((mic, i) => {
+      const opt = document.createElement('option');
+      opt.value = mic.deviceId;
+      opt.textContent = mic.label || `Microphone ${i + 1}`;
+      if (mic.deviceId === selectedMicId) opt.selected = true;
+      select.appendChild(opt);
+    });
+    if (mics.length > 1) {
+      select.classList.remove('hidden');
+    }
+  } catch {}
+}
+
+function saveMicChoice() {
+  const select = document.getElementById('mic-select');
+  selectedMicId = select.value;
+  localStorage.setItem('syntaur_mic_id', selectedMicId);
+}
+
+// Short click toggles mic selector, long press records
+function toggleMicSelect(e) {
+  const elapsed = Date.now() - micClickTime;
+  if (elapsed < 300) {
+    // Short click — toggle device dropdown
+    const select = document.getElementById('mic-select');
+    select.classList.toggle('hidden');
+    loadMicDevices();
+  }
+}
+
+async function startVoice(e) {
+  e.preventDefault();
+  micClickTime = Date.now();
+  if (voiceRecording) return;
+
+  if (!voiceWs || voiceWs.readyState !== 1) {
+    connectVoiceWs();
+    await new Promise(r => {
+      const check = setInterval(() => {
+        if (voiceWs && voiceWs.readyState === 1) { clearInterval(check); r(); }
+      }, 50);
+      setTimeout(() => { clearInterval(check); r(); }, 2000);
+    });
+  }
+  if (!voiceWs || voiceWs.readyState !== 1) return;
+
+  const audioConstraints = {
+    sampleRate: 16000, channelCount: 1,
+    echoCancellation: true, noiseSuppression: true, autoGainControl: true
+  };
+  if (selectedMicId) audioConstraints.deviceId = { exact: selectedMicId };
+
+  try {
+    voiceStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+  } catch {
+    // If exact device fails, try default
+    try {
+      delete audioConstraints.deviceId;
+      voiceStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+    } catch { return; }
+  }
+
+  voiceAudioCtx = new AudioContext({ sampleRate: 16000 });
+  const source = voiceAudioCtx.createMediaStreamSource(voiceStream);
+  const processor = voiceAudioCtx.createScriptProcessor(4096, 1, 1);
+  processor.onaudioprocess = (ev) => {
+    if (!voiceRecording || !voiceWs || voiceWs.readyState !== 1) return;
+    const f = ev.inputBuffer.getChannelData(0);
+    const pcm = new Int16Array(f.length);
+    for (let i = 0; i < f.length; i++)
+      pcm[i] = Math.max(-32768, Math.min(32767, Math.round(f[i] * 32767)));
+    voiceWs.send(pcm.buffer);
+  };
+  source.connect(processor);
+  processor.connect(voiceAudioCtx.destination);
+
+  voiceWs.send(JSON.stringify({ type: 'start' }));
+  voiceRecording = true;
+
+  const btn = document.getElementById('mic-btn');
+  btn.classList.add('text-red-500');
+  btn.classList.remove('text-gray-500');
+  // Hide mic selector while recording
+  document.getElementById('mic-select').classList.add('hidden');
+}
+
+function stopVoice(e) {
+  e.preventDefault();
+  if (!voiceRecording) return;
+  voiceRecording = false;
+
+  if (voiceWs && voiceWs.readyState === 1) {
+    voiceWs.send(JSON.stringify({ type: 'stop' }));
+  }
+  if (voiceStream) { voiceStream.getTracks().forEach(t => t.stop()); voiceStream = null; }
+  if (voiceAudioCtx) { voiceAudioCtx.close(); voiceAudioCtx = null; }
+
+  const btn = document.getElementById('mic-btn');
+  btn.classList.remove('text-red-500');
+  btn.classList.add('text-gray-500');
+}
+
 // TTS playback for voice-initiated responses
 async function playTts(text) {
   try {
