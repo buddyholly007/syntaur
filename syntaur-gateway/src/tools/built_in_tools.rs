@@ -2011,33 +2011,60 @@ impl Tool for EstimateTaxTool {
                 calculate_tax_single(taxable)
             };
 
-            let owed = tax - fed_paid;
+            // W-2 withholding (box 2) - check if we have it
+            let w2_withheld: i64 = conn.query_row(
+                "SELECT COALESCE(SUM(amount_cents), 0) FROM tax_income WHERE user_id = ? AND tax_year = ? AND category LIKE '%Withholding%'",
+                rusqlite::params![uid, year], |r| r.get(0)
+            ).unwrap_or(0);
+
+            // Credits against tax: W-2 withholding + estimated payments (NOT FICA — that's separate)
+            let total_payments = w2_withheld + fed_paid;
+            let owed = tax - total_payments;
 
             let d = |c: i64| crate::tax::cents_to_display(c);
-            Ok(format!(
+            let mut result = format!(
                 "Tax Estimate for {} ({}):\n\n\
-                 Gross Income:           {}\n\
-                 Business Deductions:   -{}\n\
-                 Adjusted Gross Income:  {}\n\
-                 {} Deduction:     -{}\n\
-                 Taxable Income:         {}\n\n\
-                 Federal Tax:            {}\n\
-                 FICA Paid:             -{}\n\
-                 Fed Tax Already Paid:  -{}\n\
-                 ────────────────────────\n\
-                 Estimated Owed/Refund:  {}\n\n\
-                 {}",
+                 Gross Income:              {}\n\
+                 Business Deductions:      -{}\n\
+                 Adjusted Gross Income:     {}\n\
+                 {} Deduction:        -{}\n\
+                 Taxable Income:            {}\n\n\
+                 Federal Income Tax:        {}\n\n\
+                 Credits / Payments:\n",
                 year, status_owned.replace('_', " "),
                 d(gross_income), d(biz_deductions), d(agi),
-                deduction_type, d(deduction), d(taxable),
-                d(tax), d(fica_paid), d(fed_paid),
-                if owed > 0 { format!("OWE {}", d(owed)) } else { format!("REFUND {}", d(-owed)) },
-                if itemized > standard_deduction {
-                    format!("Note: Itemizing saves you {} over the standard deduction.", d(itemized - standard_deduction))
-                } else {
-                    format!("Note: Standard deduction is better by {}. Itemized would be {}.", d(standard_deduction - itemized), d(itemized))
-                }
-            ))
+                deduction_type, d(deduction), d(taxable), d(tax));
+
+            if w2_withheld > 0 {
+                result += &format!("   W-2 Withholding:       -{}\n", d(w2_withheld));
+            }
+            if fed_paid > 0 {
+                result += &format!("   Estimated Tax Paid:    -{}\n", d(fed_paid));
+            }
+            result += &format!("   Total Payments:        -{}\n", d(total_payments));
+            result += &format!(" ────────────────────────────\n");
+            result += &format!("   {}\n", if owed > 0 { format!("ESTIMATED TAX DUE: {}", d(owed)) } else { format!("ESTIMATED REFUND: {}", d(-owed)) });
+
+            // Separate note about FICA
+            if fica_paid > 0 {
+                result += &format!("\nNote: FICA/payroll taxes ({}) are separate from federal income tax and are NOT credited against your income tax bill.\n", d(fica_paid));
+            }
+
+            if w2_withheld == 0 {
+                result += &format!("\n⚠ IMPORTANT: This estimate does NOT include federal income tax withheld from your W-2 paychecks (Box 2 on your W-2 forms). \
+                    This is typically the largest credit. Check your W-2s for the actual withholding amount — it will significantly reduce the amount owed.\n");
+            }
+
+            result += &format!("\n{}", if itemized > standard_deduction {
+                format!("Itemizing saves {} over the standard deduction.", d(itemized - standard_deduction))
+            } else {
+                format!("Standard deduction saves {}. Itemized total: {}.", d(standard_deduction - itemized), d(itemized))
+            });
+
+            let effective_rate = if gross_income > 0 { (tax as f64 / gross_income as f64) * 100.0 } else { 0.0 };
+            result += &format!("\nEffective federal tax rate: {:.1}%", effective_rate);
+
+            Ok(result)
         }).await.map_err(|e| e.to_string())?.map_err(|e| e)?;
 
         Ok(RichToolResult::text(result))
