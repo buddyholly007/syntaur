@@ -200,7 +200,10 @@
           <p class="pl-3">&bull; <strong class="text-green-400">NVIDIA Nemotron Nano VL</strong> — #1 on OCR benchmarks, purpose-built for documents (current default)</p>
           <p class="pl-3">&bull; <strong class="text-gray-300">Google Gemma 4 31B</strong> — strong vision with 262K context for large documents</p>
           <p class="pl-3">&bull; <strong class="text-gray-300">Google Gemma 4 26B</strong> — lighter alternative, nearly as accurate</p>
-          <p class="mt-1"><strong class="text-gray-400">Paid models (highest accuracy):</strong></p>
+          <p class="mt-1"><strong class="text-gray-400">Self-hosted (free, private, offline):</strong></p>
+          <p class="pl-3">&bull; <strong class="text-green-400">NVIDIA Nemotron Nano 12B VL</strong> — same model as cloud default, runs locally on any GPU with 10+ GB VRAM. Q4_K_M quantization needs ~9 GB. Download GGUF from HuggingFace, run via llama.cpp. Cannot run alongside a large chat model — swap models when scanning.</p>
+          <p class="pl-3 text-gray-600">Setup: <code class="text-xs bg-gray-800 px-1 rounded">llama-server -m Nemotron-Nano-12B-v2-VL-Q4_K_M.gguf --mmproj mmproj-BF16.gguf --port 1237 -ngl 99</code></p>
+          <p class="mt-1"><strong class="text-gray-400">Paid cloud (highest accuracy):</strong></p>
           <p class="pl-3">&bull; <strong class="text-gray-300">Anthropic Claude Sonnet</strong> — best overall accuracy for complex tax documents</p>
           <p class="pl-3">&bull; <strong class="text-gray-300">OpenAI GPT-4o</strong> — excellent OCR, especially for handwritten notes</p>
           <p class="pl-3">&bull; <strong class="text-gray-300">Qwen3 VL 235B</strong> — top-tier vision, best value at scale</p>
