@@ -1730,9 +1730,6 @@ pub async fn handle_smart_upload(
     let principal = crate::resolve_principal(&state, &params.token).await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
 
-    // Module gate: smart upload requires tax module access
-    require_tax_module(&state, principal.user_id()).await?;
-
     if body.is_empty() { return Err((StatusCode::BAD_REQUEST, "No file data".to_string())); }
     if body.len() > 10 * 1024 * 1024 { return Err((StatusCode::BAD_REQUEST, "File too large (max 10MB)".to_string())); }
 
@@ -1746,7 +1743,7 @@ pub async fn handle_smart_upload(
     let uid = principal.user_id();
     info!("[tax] Smart upload: {} ({} bytes) from user {}", filename, body.len(), uid);
 
-    // Quick classification via LLM vision
+    // Classification is always free — file is saved regardless of module access
     let path_str = path.to_string_lossy().to_string();
     let state2 = Arc::clone(&state);
     let classify_result = classify_document_type(&state2, &path_str).await;
@@ -1760,6 +1757,31 @@ pub async fn handle_smart_upload(
     };
 
     info!("[tax] Smart upload classified as: {}", doc_class);
+
+    // Check module access — scanning/extraction requires the tax module,
+    // but classification + file save is always free
+    let has_module = {
+        let db_check = state.db_path.clone();
+        let uid_check = uid;
+        tokio::task::spawn_blocking(move || -> bool {
+            if let Ok(conn) = rusqlite::Connection::open(&db_check) {
+                check_module_access(&conn, uid_check, "tax").map(|a| a.granted).unwrap_or(true)
+            } else { true }
+        }).await.unwrap_or(true)
+    };
+
+    if !has_module {
+        // File saved but NOT scanned — user sees the classification and can
+        // start a trial to unlock scanning
+        return Ok(Json(serde_json::json!({
+            "routed_to": "saved",
+            "doc_type": doc_class,
+            "status": "saved_unscanned",
+            "file_path": path_str,
+            "module_locked": true,
+            "message": format!("This looks like a {}. File saved — start a free trial to scan and track it.", doc_class),
+        })));
+    }
 
     match doc_class.as_str() {
         "receipt" | "invoice" => {

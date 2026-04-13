@@ -687,9 +687,26 @@ async function showDocumentDetection(file) {
     const label = typeLabels[docType] || docType;
 
     const isFinancial = docType !== 'other' && docType !== 'unknown';
+    const moduleLocked = data.module_locked === true;
 
-    if (isFinancial) {
-      // Financial document detected — show prompt with options
+    if (isFinancial && moduleLocked) {
+      // Financial doc detected but module is locked — show classification + trial prompt
+      contentEl.innerHTML = `
+        <p class="text-sm text-gray-300">I noticed this looks like a <strong class="text-white">${esc(label)}</strong>.</p>
+        <p class="text-xs text-gray-500 mt-1">File saved. Unlock the Tax Module to scan and track it automatically.</p>
+        <div class="flex flex-wrap gap-2 mt-3">
+          <button onclick="startTrialFromChat(this)" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-3 py-1.5 rounded-lg transition-colors">
+            Start Free 3-Day Trial
+          </button>
+          <button onclick="this.closest('.flex.gap-4').querySelector('.doc-dismiss')?.classList.remove('hidden');this.parentElement.remove()" class="text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 px-3 py-1.5 rounded-lg transition-colors">
+            Not now
+          </button>
+        </div>
+        <div class="doc-dismiss hidden mt-2">
+          <p class="text-xs text-gray-500">File saved to your uploads.</p>
+        </div>`;
+    } else if (isFinancial) {
+      // Financial document detected + module unlocked — show prompt with options
       const isStatement = routedTo === 'statement';
       const isReceipt = routedTo === 'receipt';
       const processingMsg = isReceipt ? 'Scanning for vendor, amount, and category...'
@@ -761,6 +778,32 @@ async function pollReceiptInline(receiptId, el, previewUrl) {
     setTimeout(poll, 2500);
   };
   setTimeout(poll, 3000);
+}
+
+async function startTrialFromChat(btn) {
+  btn.textContent = 'Starting trial...';
+  btn.disabled = true;
+  try {
+    const resp = await fetch('/api/modules/trial', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token},
+      body: JSON.stringify({ token, module: 'tax' })
+    });
+    const data = await resp.json();
+    if (data.granted) {
+      const parent = btn.closest('.flex-1');
+      if (parent) {
+        parent.innerHTML = `
+          <p class="text-sm text-green-400">Tax Module trial started! ${data.trial_days_left} days remaining.</p>
+          <p class="text-xs text-gray-500 mt-1">Drop your document again to scan it, or <a href="/tax" class="text-oc-500 hover:text-oc-400">open the Tax Module</a>.</p>`;
+      }
+    } else {
+      btn.textContent = 'Trial already used';
+    }
+  } catch(e) {
+    btn.textContent = 'Error — try again';
+    btn.disabled = false;
+  }
 }
 
 // Override send to include file context
