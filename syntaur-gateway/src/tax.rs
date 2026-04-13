@@ -102,16 +102,27 @@ fn convert_pdf_to_pngs(pdf_path: &str) -> Result<Vec<Vec<u8>>, String> {
         return Err(format!("pdftoppm failed: {}", stderr.chars().take(200).collect::<String>()));
     }
 
-    // Collect all rendered pages (output-prefix-01.png, -02.png, etc.)
+    // Collect all rendered pages — pdftoppm uses various naming patterns:
+    // prefix-1.png, prefix-01.png, prefix.png (single page)
     let mut pages = Vec::new();
     for i in 1..=20 {
-        let path = format!("{}-{:02}.png", output_prefix, i);
-        if let Ok(data) = std::fs::read(&path) {
-            pages.push(data);
-            let _ = std::fs::remove_file(&path);
-        } else {
-            // Also try single-page format (no number suffix)
+        // Try zero-padded first, then unpadded
+        let candidates = [
+            format!("{}-{:02}.png", output_prefix, i),
+            format!("{}-{}.png", output_prefix, i),
+        ];
+        let mut found = false;
+        for path in &candidates {
+            if let Ok(data) = std::fs::read(path) {
+                pages.push(data);
+                let _ = std::fs::remove_file(path);
+                found = true;
+                break;
+            }
+        }
+        if !found {
             if i == 1 {
+                // Single-page: no number suffix
                 let path = format!("{}.png", output_prefix);
                 if let Ok(data) = std::fs::read(&path) {
                     pages.push(data);
