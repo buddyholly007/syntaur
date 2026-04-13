@@ -487,8 +487,9 @@ function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').repl
 // Set today's date as default
 document.getElementById('exp-date').value = new Date().toISOString().split('T')[0];
 
-// ── Tax Chat ──
+// ── Tax Chat (persistent) ──
 let taxChatSending = false;
+let taxConvId = null;
 
 function taxChat(msg) {
   document.getElementById('tax-chat-input').value = msg;
@@ -496,11 +497,66 @@ function taxChat(msg) {
 }
 
 function clearTaxChat() {
+  taxConvId = null;
   document.getElementById('tax-chat-messages').innerHTML = `
     <div class="flex gap-2">
       <img src="/agent-avatar/main" class="w-6 h-6 rounded-lg flex-shrink-0 mt-0.5" alt="">
-      <p class="text-sm text-gray-400">How can I help with your taxes?</p>
+      <div class="text-sm text-gray-400">
+        <p>New tax conversation started. How can I help?</p>
+        <div class="flex flex-wrap gap-1 mt-2">
+          <button onclick="taxChat('Show my expense summary for ${selectedYear}')" class="text-xs bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-full px-2.5 py-1 transition-colors">${selectedYear} summary</button>
+          <button onclick="taxChat('What are my deductible expenses?')" class="text-xs bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-full px-2.5 py-1 transition-colors">Deductible?</button>
+        </div>
+      </div>
     </div>`;
+}
+
+// Load existing tax conversation on page load
+async function loadTaxConversation() {
+  try {
+    const resp = await authFetch(`/api/conversations?token=${token}&agent=main&limit=5`);
+    const data = await resp.json();
+    const convs = (data.conversations || []).filter(c =>
+      c.title && c.title.toLowerCase().includes('tax')
+    );
+    if (convs.length > 0) {
+      taxConvId = convs[0].id;
+      await loadTaxMessages(taxConvId);
+    }
+  } catch(e) {}
+}
+
+async function loadTaxMessages(convId) {
+  try {
+    const resp = await authFetch(`/api/conversations/${convId}?token=${token}`);
+    const data = await resp.json();
+    const messages = data.messages || [];
+    if (messages.length === 0) return;
+
+    const container = document.getElementById('tax-chat-messages');
+    container.innerHTML = '';
+
+    for (const msg of messages) {
+      if (msg.role === 'user') {
+        // Strip the tax context injection from display
+        let text = msg.content || '';
+        const ctxIdx = text.indexOf('\n\n[TAX MODULE CONTEXT');
+        if (ctxIdx > 0) text = text.substring(0, ctxIdx);
+
+        const el = document.createElement('div');
+        el.className = 'flex gap-2 justify-end';
+        el.innerHTML = `<div class="max-w-[85%] bg-oc-900/40 border border-oc-800/40 rounded-xl rounded-br-sm px-3 py-2 text-sm text-gray-200">${esc(text)}</div>`;
+        container.appendChild(el);
+      } else if (msg.role === 'assistant' && msg.content) {
+        const el = document.createElement('div');
+        el.className = 'flex gap-2';
+        el.innerHTML = `<img src="/agent-avatar/main" class="w-6 h-6 rounded-lg flex-shrink-0 mt-0.5" alt="">
+          <div class="flex-1 text-sm text-gray-300 leading-relaxed">${esc(msg.content).replace(/\n/g,'<br>')}</div>`;
+        container.appendChild(el);
+      }
+    }
+    container.scrollTop = container.scrollHeight;
+  } catch(e) {}
 }
 
 async function sendTaxChat() {
@@ -536,6 +592,18 @@ async function sendTaxChat() {
   respEl.removeAttribute('id');
 
   try {
+    // Create tax conversation if we don't have one
+    if (!taxConvId) {
+      try {
+        const cr = await authFetch('/api/conversations', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ token, agent: 'main', title: `Tax Assistant ${selectedYear}` })
+        });
+        const cd = await cr.json();
+        if (cd.id) taxConvId = cd.id;
+      } catch(e) {}
+    }
+
     // Fetch tax context
     let taxContext = '';
     try {
@@ -558,7 +626,7 @@ async function sendTaxChat() {
     const startResp = await authFetch('/api/message/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: msg + taxContext, agent: 'main', token })
+      body: JSON.stringify({ message: msg + taxContext, agent: 'main', token, conversation_id: taxConvId })
     });
     const startData = await startResp.json();
     const turnId = startData.turn_id;
@@ -568,7 +636,7 @@ async function sendTaxChat() {
       const resp = await authFetch('/api/message', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: msg + taxContext, agent: 'main', token })
+        body: JSON.stringify({ message: msg + taxContext, agent: 'main', token, conversation_id: taxConvId })
       });
       const data = await resp.json();
       respEl.innerHTML = data.response
@@ -867,9 +935,17 @@ function analyzeDeductions(summaryData) {
   `).join('');
 }
 
+// Reload tax chat when returning to page
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState === 'visible' && taxConvId && !taxChatSending) {
+    await loadTaxMessages(taxConvId);
+  }
+});
+
 // Init
 loadOverview();
 loadCategories();
+loadTaxConversation();
 </script>
 </body>
 </html>
