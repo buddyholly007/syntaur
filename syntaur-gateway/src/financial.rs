@@ -147,26 +147,13 @@ async fn require_financial_access(state: &AppState, user_id: i64) -> Result<(), 
 }
 
 /// Ensure the v16 financial tables exist. Called lazily on first use.
+/// Ensure supplementary tables exist. The core tables (connected_accounts,
+/// investment_accounts, investment_transactions, email_connections) are created
+/// by schema v16 in index/schema.rs. This only creates tables the agent module
+/// needs that aren't in the migration (positions cache, financial transactions).
 fn ensure_financial_tables(conn: &rusqlite::Connection) -> Result<(), String> {
     conn.execute_batch(
         r#"
-        CREATE TABLE IF NOT EXISTS connected_accounts (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id         INTEGER NOT NULL DEFAULT 0,
-            provider        TEXT NOT NULL,
-            account_name    TEXT,
-            account_id      TEXT,
-            access_token    TEXT,
-            item_id         TEXT,
-            cursor          TEXT,
-            metadata_json   TEXT NOT NULL DEFAULT '{}',
-            status          TEXT NOT NULL DEFAULT 'active',
-            created_at      INTEGER NOT NULL,
-            updated_at      INTEGER NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_connected_accts_user ON connected_accounts(user_id);
-        CREATE INDEX IF NOT EXISTS idx_connected_accts_provider ON connected_accounts(provider);
-
         CREATE TABLE IF NOT EXISTS investment_positions (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id         INTEGER NOT NULL DEFAULT 0,
@@ -183,31 +170,10 @@ fn ensure_financial_tables(conn: &rusqlite::Connection) -> Result<(), String> {
         CREATE INDEX IF NOT EXISTS idx_invest_pos_user ON investment_positions(user_id);
         CREATE INDEX IF NOT EXISTS idx_invest_pos_symbol ON investment_positions(symbol);
 
-        CREATE TABLE IF NOT EXISTS investment_transactions (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id         INTEGER NOT NULL DEFAULT 0,
-            provider        TEXT NOT NULL,
-            external_id     TEXT,
-            symbol          TEXT,
-            side            TEXT,
-            qty             REAL,
-            price_cents     INTEGER,
-            total_cents     INTEGER,
-            fee_cents       INTEGER DEFAULT 0,
-            tx_type         TEXT NOT NULL,
-            tx_date         TEXT NOT NULL,
-            description     TEXT,
-            created_at      INTEGER NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_invest_tx_user ON investment_transactions(user_id);
-        CREATE INDEX IF NOT EXISTS idx_invest_tx_date ON investment_transactions(tx_date);
-        CREATE INDEX IF NOT EXISTS idx_invest_tx_symbol ON investment_transactions(symbol);
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_invest_tx_ext ON investment_transactions(user_id, provider, external_id) WHERE external_id IS NOT NULL;
-
         CREATE TABLE IF NOT EXISTS financial_transactions (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id         INTEGER NOT NULL DEFAULT 0,
-            account_id      INTEGER REFERENCES connected_accounts(id),
+            account_id      INTEGER,
             provider        TEXT NOT NULL,
             external_id     TEXT,
             name            TEXT NOT NULL,
@@ -1235,20 +1201,15 @@ pub async fn handle_alpaca_connect(
 
         // Upsert: replace existing Alpaca connection for this user
         conn.execute(
-            "DELETE FROM connected_accounts WHERE user_id = ? AND provider = 'alpaca'",
+            "DELETE FROM investment_accounts WHERE user_id = ? AND broker = 'alpaca'",
             rusqlite::params![uid],
         )
         .map_err(|e| e.to_string())?;
 
-        let meta = serde_json::json!({
-            "api_key": key,
-            "api_secret": secret,
-            "environment": env,
-        });
         conn.execute(
-            "INSERT INTO connected_accounts (user_id, provider, account_name, account_id, metadata_json, status, created_at, updated_at) \
-             VALUES (?, 'alpaca', ?, ?, ?, 'active', ?, ?)",
-            rusqlite::params![uid, format!("Alpaca ({})", env), &acct_number, meta.to_string(), now, now],
+            "INSERT INTO investment_accounts (user_id, broker, api_key, api_secret, base_url, nickname, status, created_at) \
+             VALUES (?, 'alpaca', ?, ?, ?, ?, 'active', ?)",
+            rusqlite::params![uid, &key, &secret, &env, format!("Alpaca ({})", env), now],
         )
         .map_err(|e| e.to_string())?;
         Ok(conn.last_insert_rowid())
@@ -1286,35 +1247,23 @@ pub async fn handle_alpaca_sync(
     let db = state.db_path.clone();
 
     // Load Alpaca credentials from DB
-    let (api_key, api_secret, environment) = {
+    let (api_key, api_secret, base_url_str) = {
         let db2 = db.clone();
         tokio::task::spawn_blocking(move || -> Result<(String, String, String), String> {
             let conn = rusqlite::Connection::open(&db2).map_err(|e| e.to_string())?;
             ensure_financial_tables(&conn)?;
-            let meta_json: String = conn
-                .query_row(
-                    "SELECT metadata_json FROM connected_accounts WHERE user_id = ? AND provider = 'alpaca' AND status = 'active'",
-                    rusqlite::params![uid],
-                    |r| r.get(0),
-                )
-                .map_err(|_| "Alpaca not connected. Use /api/financial/alpaca/connect first.".to_string())?;
-            let meta: serde_json::Value =
-                serde_json::from_str(&meta_json).unwrap_or_default();
-            Ok((
-                meta["api_key"].as_str().unwrap_or("").to_string(),
-                meta["api_secret"].as_str().unwrap_or("").to_string(),
-                meta["environment"].as_str().unwrap_or("paper").to_string(),
-            ))
+            conn.query_row(
+                "SELECT api_key, COALESCE(api_secret,''), COALESCE(base_url,'https://paper-api.alpaca.markets') FROM investment_accounts WHERE user_id = ? AND broker = 'alpaca' AND status = 'active'",
+                rusqlite::params![uid],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)),
+            ).map_err(|_| "Alpaca not connected. Use /api/financial/alpaca/connect first.".to_string())
         })
         .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?
     };
 
-    let base_url = match environment.as_str() {
-        "live" => "https://api.alpaca.markets",
-        _ => "https://paper-api.alpaca.markets",
-    };
+    let base_url = base_url_str.as_str();
 
     // 1. Fetch account activities (fills + dividends)
     let activities_resp = state
