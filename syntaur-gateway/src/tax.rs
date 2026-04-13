@@ -352,6 +352,264 @@ pub async fn handle_receipt_list(
     Ok(Json(serde_json::json!({ "receipts": receipts })))
 }
 
+// ── Tax Document Upload (smart classifier) ──────────────────────────────────
+
+pub async fn handle_tax_doc_upload(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<ReceiptUploadQuery>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &params.token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+
+    if body.is_empty() { return Err((StatusCode::BAD_REQUEST, "No file data".to_string())); }
+    if body.len() > 10 * 1024 * 1024 { return Err((StatusCode::BAD_REQUEST, "File too large (max 10MB)".to_string())); }
+
+    let content_type = headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("application/pdf");
+    let ext = if content_type.contains("png") { "png" } else if content_type.contains("pdf") { "pdf" } else { "jpg" };
+
+    let filename = format!("taxdoc-{}.{}", uuid::Uuid::new_v4(), ext);
+    let path = receipts_dir().join(&filename);
+    std::fs::write(&path, &body).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Save failed: {}", e)))?;
+
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let now = chrono::Utc::now().timestamp();
+    let path_str = path.to_string_lossy().to_string();
+
+    let doc_id = tokio::task::spawn_blocking(move || -> Result<i64, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO tax_documents (user_id, doc_type, image_path, status, created_at) VALUES (?, 'unknown', ?, 'pending', ?)",
+            rusqlite::params![uid, &path_str, now],
+        ).map_err(|e| e.to_string())?;
+        Ok(conn.last_insert_rowid())
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    info!("[tax] Document #{} uploaded: {}", doc_id, filename);
+
+    let state2 = Arc::clone(&state);
+    tokio::spawn(async move {
+        if let Err(e) = classify_and_extract(&state2, doc_id).await {
+            error!("[tax] Document classification failed for #{}: {}", doc_id, e);
+        }
+    });
+
+    Ok(Json(serde_json::json!({
+        "id": doc_id,
+        "status": "pending",
+        "message": "Document uploaded. Classifying and extracting data..."
+    })))
+}
+
+/// Two-pass scan: classify document type, then extract type-specific fields
+async fn classify_and_extract(state: &AppState, doc_id: i64) -> Result<(), String> {
+    let db = state.db_path.clone();
+
+    let image_path: String = {
+        let db2 = db.clone();
+        tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let conn = rusqlite::Connection::open(&db2).map_err(|e| e.to_string())?;
+            conn.query_row("SELECT image_path FROM tax_documents WHERE id = ?", rusqlite::params![doc_id], |r| r.get(0))
+                .map_err(|e| e.to_string())
+        }).await.map_err(|e| e.to_string())??
+    };
+
+    let image_bytes = std::fs::read(&image_path).map_err(|e| e.to_string())?;
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
+    let ext = image_path.rsplit('.').next().unwrap_or("pdf");
+    let mime = match ext { "png" => "image/png", "pdf" => "application/pdf", _ => "image/jpeg" };
+
+    let config = &state.config;
+    let provider = config.models.providers.iter()
+        .find(|(_, p)| p.base_url.contains("openrouter") || p.base_url.contains("openai") || p.base_url.contains("anthropic"))
+        .or_else(|| config.models.providers.iter().next());
+    let (_, provider_config) = provider.ok_or("No LLM provider")?;
+    let model = if provider_config.base_url.contains("openrouter") { "google/gemini-2.0-flash-001" }
+        else if provider_config.base_url.contains("anthropic") { "claude-sonnet-4-6" }
+        else { "gpt-4o-mini" };
+    let url = format!("{}/chat/completions", provider_config.base_url.trim_end_matches('/'));
+
+    // Pass 1: Classify + extract in one call with a comprehensive prompt
+    let prompt = r#"Analyze this tax document. First identify what type of document it is, then extract ALL relevant fields.
+
+Document types: w2, 1099_int, 1099_div, 1099_b, 1099_misc, 1099_nec, 1095_c, property_tax_statement, mortgage_statement, bank_statement, credit_card_statement, receipt, invoice, insurance_policy, other
+
+For W-2 forms, extract: employer_name, employer_ein, employee_name, employee_ssn_last4, box1_wages, box2_fed_withheld, box3_ss_wages, box4_ss_withheld, box5_medicare_wages, box6_medicare_withheld, box12_codes, box14_other, state, box16_state_wages, box17_state_withheld
+For 1099-INT: payer, box1_interest, box4_fed_withheld
+For 1099-DIV: payer, box1a_ordinary, box1b_qualified, box2a_capital_gains, box4_fed_withheld
+For 1099-B: broker, total_proceeds, total_cost_basis, total_gain_loss
+For 1099-MISC/NEC: payer, box1_nonemployee_comp, box4_fed_withheld
+For 1095-C: employer, coverage_months
+For mortgage statements: lender, box1_interest_paid, box2_outstanding_principal, box5_mortgage_insurance, property_address
+For property tax: authority, amount, year, property_address
+For receipts: vendor, amount, date, category, items
+
+Respond ONLY with JSON: {"doc_type":"...","tax_year":2025,"issuer":"...","fields":{...all extracted fields...}}"#;
+
+    let payload = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": format!("data:{};base64,{}", mime, b64)}}
+        ]}],
+        "max_tokens": 1500,
+        "temperature": 0.1
+    });
+
+    let resp = state.client.post(&url)
+        .header("Authorization", format!("Bearer {}", provider_config.api_key))
+        .header("Content-Type", "application/json")
+        .json(&payload)
+        .timeout(std::time::Duration::from_secs(60))
+        .send().await.map_err(|e| format!("LLM: {}", e))?;
+
+    if !resp.status().is_success() {
+        let s = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("LLM HTTP {}: {}", s, &body[..body.len().min(200)]));
+    }
+
+    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let content = body["choices"][0]["message"]["content"].as_str().unwrap_or("");
+    let extracted: serde_json::Value = serde_json::from_str(
+        content.trim().trim_start_matches("```json").trim_end_matches("```").trim()
+    ).map_err(|e| format!("Parse: {} — raw: {}", e, &content[..content.len().min(200)]))?;
+
+    let doc_type = extracted["doc_type"].as_str().unwrap_or("other").to_string();
+    let tax_year = extracted["tax_year"].as_i64();
+    let issuer = extracted["issuer"].as_str().unwrap_or("").to_string();
+    let fields = extracted.get("fields").cloned().unwrap_or(serde_json::json!({}));
+    let fields_str = serde_json::to_string(&fields).unwrap_or("{}".to_string());
+
+    // Update document record
+    let db2 = db.clone();
+    let doc_type2 = doc_type.clone();
+    let issuer2 = issuer.clone();
+    let fields_str2 = fields_str.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db2).map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE tax_documents SET doc_type = ?, tax_year = ?, issuer = ?, extracted_fields = ?, status = 'scanned' WHERE id = ?",
+            rusqlite::params![&doc_type2, tax_year, &issuer2, &fields_str2, doc_id],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }).await.map_err(|e| e.to_string())??;
+
+    // Auto-populate income data from W-2s
+    if doc_type == "w2" {
+        let db3 = db.clone();
+        let fields2 = fields.clone();
+        let issuer3 = issuer.clone();
+        let year = tax_year.unwrap_or(2025);
+        tokio::task::spawn_blocking(move || -> Result<(), String> {
+            let conn = rusqlite::Connection::open(&db3).map_err(|e| e.to_string())?;
+            let uid: i64 = conn.query_row("SELECT user_id FROM tax_documents WHERE id = ?", rusqlite::params![doc_id], |r| r.get(0)).unwrap_or(0);
+            let now = chrono::Utc::now().timestamp();
+
+            // Extract W-2 specific fields
+            let wages_str = fields2["box1_wages"].as_str().or(fields2["box1_wages"].as_f64().map(|_| "")).unwrap_or("0");
+            let wages = parse_cents(wages_str).or_else(|| fields2["box1_wages"].as_f64().map(|f| (f * 100.0) as i64)).unwrap_or(0);
+            let withheld_str = fields2["box2_fed_withheld"].as_str().or(fields2["box2_fed_withheld"].as_f64().map(|_| "")).unwrap_or("0");
+            let withheld = parse_cents(withheld_str).or_else(|| fields2["box2_fed_withheld"].as_f64().map(|f| (f * 100.0) as i64)).unwrap_or(0);
+
+            let employee = fields2["employee_name"].as_str().unwrap_or("Employee");
+
+            // Upsert income: wages
+            if wages > 0 {
+                conn.execute(
+                    "INSERT OR REPLACE INTO tax_income (user_id, source, amount_cents, tax_year, category, description, created_at) \
+                     VALUES (?, 'W-2 Wages', ?, ?, 'Wages', ?, ?)",
+                    rusqlite::params![uid, wages, year, format!("{} - {}", issuer3, employee), now],
+                ).map_err(|e| e.to_string())?;
+            }
+
+            // Upsert income: federal withholding (stored as a separate record for the tax estimator)
+            if withheld > 0 {
+                conn.execute(
+                    "INSERT OR REPLACE INTO tax_income (user_id, source, amount_cents, tax_year, category, description, created_at) \
+                     VALUES (?, 'W-2 Withholding', ?, ?, 'Federal Withholding', ?, ?)",
+                    rusqlite::params![uid, withheld, year, format!("{} - {} Box 2", issuer3, employee), now],
+                ).map_err(|e| e.to_string())?;
+            }
+
+            Ok(())
+        }).await.map_err(|e| e.to_string())??;
+    }
+
+    info!("[tax] Document #{} classified as {} from {} (year {:?})", doc_id, doc_type, issuer, tax_year);
+    Ok(())
+}
+
+// ── Tax Document List ───────────────────────────────────────────────────────
+
+pub async fn handle_tax_doc_list(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let year_filter = params.get("year").and_then(|y| y.parse::<i64>().ok());
+
+    let docs = tokio::task::spawn_blocking(move || -> Result<Vec<serde_json::Value>, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let (sql, p): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match year_filter {
+            Some(y) => (
+                "SELECT id, doc_type, tax_year, issuer, extracted_fields, status, created_at, image_path FROM tax_documents WHERE user_id = ? AND tax_year = ? ORDER BY doc_type, created_at DESC".to_string(),
+                vec![Box::new(uid) as Box<dyn rusqlite::types::ToSql>, Box::new(y)],
+            ),
+            None => (
+                "SELECT id, doc_type, tax_year, issuer, extracted_fields, status, created_at, image_path FROM tax_documents WHERE user_id = ? ORDER BY doc_type, created_at DESC".to_string(),
+                vec![Box::new(uid) as Box<dyn rusqlite::types::ToSql>],
+            ),
+        };
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let refs: Vec<&dyn rusqlite::types::ToSql> = p.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(refs.as_slice(), |r| {
+            let fields_str: Option<String> = r.get(4)?;
+            let fields: serde_json::Value = fields_str.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(serde_json::json!({}));
+            Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?,
+                "doc_type": r.get::<_, String>(1)?,
+                "tax_year": r.get::<_, Option<i64>>(2)?,
+                "issuer": r.get::<_, Option<String>>(3)?,
+                "fields": fields,
+                "status": r.get::<_, String>(5)?,
+                "created_at": r.get::<_, i64>(6)?,
+                "image_url": format!("/api/tax/documents/{}/image", r.get::<_, i64>(0)?),
+            }))
+        }).map_err(|e| e.to_string())?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(serde_json::json!({ "documents": docs })))
+}
+
+pub async fn handle_tax_doc_image(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<(axum::http::HeaderMap, Vec<u8>), StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let _principal = crate::resolve_principal(&state, token).await?;
+    let db = state.db_path.clone();
+    let path: String = tokio::task::spawn_blocking(move || -> Result<String, ()> {
+        let conn = rusqlite::Connection::open(&db).map_err(|_| ())?;
+        conn.query_row("SELECT image_path FROM tax_documents WHERE id = ?", rusqlite::params![id], |r| r.get(0)).map_err(|_| ())
+    }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?.map_err(|_| StatusCode::NOT_FOUND)?;
+    let data = std::fs::read(&path).map_err(|_| StatusCode::NOT_FOUND)?;
+    let mut headers = axum::http::HeaderMap::new();
+    let ct = if path.ends_with(".png") { "image/png" } else if path.ends_with(".pdf") { "application/pdf" } else { "image/jpeg" };
+    headers.insert("content-type", ct.parse().unwrap());
+    Ok((headers, data))
+}
+
 // ── Receipt Image ───────────────────────────────────────────────────────────
 
 pub async fn handle_receipt_image(

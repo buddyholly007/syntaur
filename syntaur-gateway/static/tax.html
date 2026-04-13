@@ -34,6 +34,7 @@
       <button onclick="showTab('overview')" class="tab text-white" id="tab-btn-overview">Overview</button>
       <button onclick="showTab('expenses')" class="tab text-gray-400" id="tab-btn-expenses">Expenses</button>
       <button onclick="showTab('receipts')" class="tab text-gray-400" id="tab-btn-receipts">Receipts</button>
+      <button onclick="showTab('documents')" class="tab text-gray-400" id="tab-btn-documents">Documents</button>
       <select id="year-select" class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-sm text-gray-300 outline-none" onchange="changeYear()"></select>
       <a href="/" class="text-gray-500 hover:text-gray-300">Home</a>
     </div>
@@ -177,6 +178,28 @@
     </div>
   </div>
 
+  <!-- Documents tab -->
+  <div id="tab-documents" class="hidden">
+    <div class="card mb-6">
+      <h3 class="font-medium mb-3">Upload Tax Document</h3>
+      <p class="text-xs text-gray-500 mb-3">Upload W-2s, 1099s, mortgage statements, property tax bills, or any tax document. AI will identify the document type and extract all relevant fields automatically.</p>
+      <div class="flex items-center gap-3">
+        <label class="btn-primary cursor-pointer">
+          Upload Document
+          <input type="file" class="hidden" accept="image/*,.pdf" onchange="uploadTaxDoc(this)" id="doc-input">
+        </label>
+        <span id="doc-upload-status" class="text-xs text-gray-500"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 class="font-medium mb-4">Tax Documents</h3>
+      <div id="doc-list" class="space-y-3">
+        <p class="text-xs text-gray-600">Loading...</p>
+      </div>
+    </div>
+  </div>
+
   </div><!-- end left panel -->
 
   <!-- RIGHT: AI Chat -->
@@ -224,13 +247,14 @@ function authFetch(url, opts = {}) {
 }
 
 function showTab(name) {
-  ['overview', 'expenses', 'receipts'].forEach(t => {
+  ['overview', 'expenses', 'receipts', 'documents'].forEach(t => {
     document.getElementById('tab-' + t).classList.toggle('hidden', t !== name);
     const btn = document.getElementById('tab-btn-' + t);
     btn.className = 'tab ' + (t === name ? 'text-white' : 'text-gray-400 hover:text-gray-300');
   });
   if (name === 'expenses') loadExpenses();
   if (name === 'receipts') loadReceipts();
+  if (name === 'documents') loadDocuments();
 }
 
 // Overview
@@ -558,6 +582,89 @@ function changeYear() {
 
 function yearStart() { return `${selectedYear}-01-01`; }
 function yearEnd() { return `${selectedYear}-12-31`; }
+
+// ── Tax Documents ──
+const docTypeLabels = {
+  'w2': 'W-2', '1099_int': '1099-INT', '1099_div': '1099-DIV', '1099_b': '1099-B',
+  '1099_misc': '1099-MISC', '1099_nec': '1099-NEC', '1095_c': '1095-C',
+  'property_tax_statement': 'Property Tax', 'mortgage_statement': 'Mortgage Statement',
+  'receipt': 'Receipt', 'bank_statement': 'Bank Statement', 'credit_card_statement': 'Credit Card Statement',
+  'insurance_policy': 'Insurance', 'invoice': 'Invoice', 'other': 'Other', 'unknown': 'Scanning...'
+};
+
+async function uploadTaxDoc(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const status = document.getElementById('doc-upload-status');
+  status.textContent = 'Uploading & classifying...';
+  try {
+    const resp = await fetch(`/api/tax/documents?token=${token}`, {
+      method: 'POST', headers: { 'Content-Type': file.type }, body: file
+    });
+    const data = await resp.json();
+    status.textContent = data.message || 'Uploaded!';
+    setTimeout(() => loadDocuments(), 5000);
+    loadDocuments();
+  } catch(e) { status.textContent = 'Upload failed'; }
+  input.value = '';
+}
+
+async function loadDocuments() {
+  try {
+    const resp = await authFetch(`/api/tax/documents?token=${token}&year=${selectedYear}`);
+    const data = await resp.json();
+    const docs = data.documents || [];
+    const list = document.getElementById('doc-list');
+    if (docs.length === 0) {
+      list.innerHTML = '<p class="text-sm text-gray-600">No tax documents uploaded yet for ' + selectedYear + '.</p>';
+      return;
+    }
+
+    // Group by type
+    const groups = {};
+    for (const d of docs) {
+      const type = d.doc_type || 'other';
+      if (!groups[type]) groups[type] = [];
+      groups[type].push(d);
+    }
+
+    list.innerHTML = Object.entries(groups).map(([type, items]) => `
+      <div class="mb-4">
+        <h4 class="text-sm font-semibold text-gray-300 mb-2">${docTypeLabels[type] || type} (${items.length})</h4>
+        <div class="space-y-2">
+          ${items.map(d => {
+            const fields = d.fields || {};
+            let detail = '';
+            if (type === 'w2') {
+              detail = `Wages: $${(fields.box1_wages || 0).toLocaleString()} | Fed Withheld: $${(fields.box2_fed_withheld || 0).toLocaleString()}`;
+            } else if (type.startsWith('1099')) {
+              const amt = fields.box1_interest || fields.box1a_ordinary || fields.box1_nonemployee_comp || fields.total_proceeds || 0;
+              detail = `Amount: $${parseFloat(amt || 0).toLocaleString()}`;
+            } else if (type === 'mortgage_statement') {
+              detail = `Interest: $${(fields.box1_interest_paid || 0).toLocaleString()}`;
+            } else if (type === 'property_tax_statement') {
+              detail = `Amount: $${(fields.amount || 0).toLocaleString()}`;
+            }
+            return `
+            <a href="${d.image_url}?token=${token}" target="_blank" class="block p-3 rounded-lg bg-gray-900 hover:bg-gray-800 border border-gray-700/50 transition-colors">
+              <div class="flex items-center justify-between">
+                <div>
+                  <p class="text-sm text-gray-300">${esc(d.issuer || 'Unknown')}</p>
+                  ${detail ? '<p class="text-xs text-gray-400 mt-0.5">' + detail + '</p>' : ''}
+                  <p class="text-xs text-gray-600 mt-0.5">Year: ${d.tax_year || '?'}</p>
+                </div>
+                <div class="flex items-center gap-2">
+                  <span class="text-xs px-2 py-0.5 rounded ${d.status === 'scanned' ? 'bg-green-900/50 text-green-400' : 'bg-yellow-900/50 text-yellow-400'}">${d.status}</span>
+                  <span class="text-xs text-oc-500">View</span>
+                </div>
+              </div>
+            </a>`;
+          }).join('')}
+        </div>
+      </div>
+    `).join('');
+  } catch(e) { console.log('docs:', e); }
+}
 
 initYearSelector();
 

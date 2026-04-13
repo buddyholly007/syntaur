@@ -445,6 +445,36 @@ const MIGRATIONS: &[&str] = &[
         ('Entertainment', 'personal', 0),
         ('Other', 'personal', 0);
     "#,
+    // v13: tax documents — smart classifier for W-2, 1099, statements, etc.
+    // Extracted fields stored as JSON so each doc type can have its own schema.
+    r#"
+    CREATE TABLE IF NOT EXISTS tax_documents (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id         INTEGER NOT NULL DEFAULT 0,
+        doc_type        TEXT NOT NULL,
+        tax_year        INTEGER,
+        issuer          TEXT,
+        extracted_fields TEXT,
+        image_path      TEXT NOT NULL,
+        status          TEXT NOT NULL DEFAULT 'pending',
+        created_at      INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_tax_docs_user ON tax_documents(user_id);
+    CREATE INDEX IF NOT EXISTS idx_tax_docs_type ON tax_documents(doc_type);
+    CREATE INDEX IF NOT EXISTS idx_tax_docs_year ON tax_documents(tax_year);
+
+    -- Also ensure tax_income table exists (may have been created ad-hoc)
+    CREATE TABLE IF NOT EXISTS tax_income (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id     INTEGER NOT NULL DEFAULT 0,
+        source      TEXT NOT NULL,
+        amount_cents INTEGER NOT NULL,
+        tax_year    INTEGER NOT NULL,
+        category    TEXT,
+        description TEXT,
+        created_at  INTEGER NOT NULL
+    );
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
