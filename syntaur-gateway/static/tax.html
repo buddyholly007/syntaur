@@ -39,7 +39,10 @@
   </div>
 </div>
 
-<div class="max-w-6xl mx-auto px-4 py-6">
+<div class="flex h-[calc(100vh-45px)]">
+
+  <!-- LEFT: Tax content -->
+  <div class="flex-1 overflow-y-auto px-4 py-6">
 
   <!-- Overview tab -->
   <div id="tab-overview">
@@ -159,7 +162,41 @@
     </div>
   </div>
 
-</div>
+  </div><!-- end left panel -->
+
+  <!-- RIGHT: AI Chat -->
+  <div class="w-[380px] border-l border-gray-800 flex flex-col flex-shrink-0">
+    <div class="px-4 py-2.5 border-b border-gray-800 flex items-center justify-between">
+      <div class="flex items-center gap-2">
+        <img src="/agent-avatar/main" class="w-6 h-6 rounded-lg" alt="">
+        <span class="text-sm font-medium text-gray-300">Tax Assistant</span>
+      </div>
+      <button onclick="clearTaxChat()" class="text-xs text-gray-500 hover:text-gray-300">Clear</button>
+    </div>
+    <div class="flex-1 overflow-y-auto p-3 space-y-3" id="tax-chat-messages">
+      <div class="flex gap-2">
+        <img src="/agent-avatar/main" class="w-6 h-6 rounded-lg flex-shrink-0 mt-0.5" alt="">
+        <div class="text-sm text-gray-400">
+          <p>I can help with your taxes. Try:</p>
+          <div class="flex flex-wrap gap-1 mt-2">
+            <button onclick="taxChat('Show my expense summary for 2025')" class="text-xs bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-full px-2.5 py-1 transition-colors">2025 summary</button>
+            <button onclick="taxChat('What are my deductible expenses?')" class="text-xs bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-full px-2.5 py-1 transition-colors">Deductible?</button>
+            <button onclick="taxChat('Log a $50 lunch at Chipotle today as business meal')" class="text-xs bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-full px-2.5 py-1 transition-colors">Log expense</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="p-3 border-t border-gray-800">
+      <div class="flex gap-2 items-end">
+        <textarea id="tax-chat-input" rows="1" class="flex-1 bg-gray-800 border border-gray-700 rounded-xl px-3 py-2 text-white placeholder-gray-400 focus:border-oc-500 outline-none resize-none text-sm" placeholder="Ask about taxes..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendTaxChat()}" oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,100)+'px'" style="max-height:100px"></textarea>
+        <button onclick="sendTaxChat()" class="bg-oc-600 hover:bg-oc-700 text-white rounded-xl p-2 transition-colors flex-shrink-0" id="tax-send-btn">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
+</div><!-- end split layout -->
 
 <script>
 const token = sessionStorage.getItem('syntaur_token') || '';
@@ -332,6 +369,81 @@ function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').repl
 
 // Set today's date as default
 document.getElementById('exp-date').value = new Date().toISOString().split('T')[0];
+
+// ── Tax Chat ──
+let taxChatSending = false;
+
+function taxChat(msg) {
+  document.getElementById('tax-chat-input').value = msg;
+  sendTaxChat();
+}
+
+function clearTaxChat() {
+  document.getElementById('tax-chat-messages').innerHTML = `
+    <div class="flex gap-2">
+      <img src="/agent-avatar/main" class="w-6 h-6 rounded-lg flex-shrink-0 mt-0.5" alt="">
+      <p class="text-sm text-gray-400">How can I help with your taxes?</p>
+    </div>`;
+}
+
+async function sendTaxChat() {
+  if (taxChatSending) return;
+  const input = document.getElementById('tax-chat-input');
+  const msg = input.value.trim();
+  if (!msg) return;
+  input.value = '';
+  input.style.height = 'auto';
+  taxChatSending = true;
+
+  const messages = document.getElementById('tax-chat-messages');
+  const btn = document.getElementById('tax-send-btn');
+  btn.disabled = true;
+
+  // User message
+  const userEl = document.createElement('div');
+  userEl.className = 'flex gap-2 justify-end';
+  userEl.innerHTML = `<div class="max-w-[85%] bg-oc-900/40 border border-oc-800/40 rounded-xl rounded-br-sm px-3 py-2 text-sm text-gray-200">${esc(msg)}</div>`;
+  messages.appendChild(userEl);
+
+  // Thinking
+  const aiEl = document.createElement('div');
+  aiEl.className = 'flex gap-2';
+  aiEl.innerHTML = `<img src="/agent-avatar/main" class="w-6 h-6 rounded-lg flex-shrink-0 mt-0.5" alt="">
+    <div class="flex-1 text-sm" id="tax-ai-resp">
+      <div class="flex gap-1 py-1"><span class="w-1.5 h-1.5 rounded-full bg-oc-500 animate-bounce"></span><span class="w-1.5 h-1.5 rounded-full bg-oc-500 animate-bounce" style="animation-delay:150ms"></span><span class="w-1.5 h-1.5 rounded-full bg-oc-500 animate-bounce" style="animation-delay:300ms"></span></div>
+    </div>`;
+  messages.appendChild(aiEl);
+  messages.scrollTop = messages.scrollHeight;
+
+  const respEl = aiEl.querySelector('#tax-ai-resp');
+  respEl.removeAttribute('id');
+
+  try {
+    const resp = await authFetch('/api/message', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: msg, agent: 'main', token })
+    });
+    const data = await resp.json();
+    if (data.response) {
+      respEl.innerHTML = `<div class="text-gray-300 leading-relaxed text-sm">${esc(data.response).replace(/\n/g,'<br>')}</div>`;
+      // Refresh data if the agent modified expenses
+      if (msg.toLowerCase().includes('log') || msg.toLowerCase().includes('add') || msg.toLowerCase().includes('expense')) {
+        loadOverview();
+        loadExpenses();
+      }
+    } else {
+      respEl.innerHTML = `<p class="text-red-400 text-sm">${esc(data.error || 'No response')}</p>`;
+    }
+  } catch(e) {
+    respEl.innerHTML = `<p class="text-red-400 text-sm">Error: ${e.message}</p>`;
+  }
+
+  messages.scrollTop = messages.scrollHeight;
+  btn.disabled = false;
+  taxChatSending = false;
+  input.focus();
+}
 
 // Init
 loadOverview();
