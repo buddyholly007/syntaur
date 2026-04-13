@@ -606,22 +606,43 @@ Respond ONLY with JSON: {"doc_type":"...","tax_year":2025,"issuer":"...","fields
 
             let employee = fields2["employee_name"].as_str().unwrap_or("Employee");
 
-            // Upsert income: wages
+            // Upsert income: check for existing record by employee name to avoid duplicates
             if wages > 0 {
-                conn.execute(
-                    "INSERT OR REPLACE INTO tax_income (user_id, source, amount_cents, tax_year, category, description, created_at) \
-                     VALUES (?, 'W-2 Wages', ?, ?, 'Wages', ?, ?)",
-                    rusqlite::params![uid, wages, year, format!("{} - {}", issuer3, employee), now],
-                ).map_err(|e| e.to_string())?;
+                let desc = format!("{} - {}", issuer3, employee);
+                let existing: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM tax_income WHERE user_id = ? AND tax_year = ? AND source = 'W-2 Wages' AND description LIKE ?",
+                    rusqlite::params![uid, year, format!("%{}%", employee)], |r| r.get(0)
+                ).unwrap_or(0);
+                if existing == 0 {
+                    conn.execute(
+                        "INSERT INTO tax_income (user_id, source, amount_cents, tax_year, category, description, created_at) VALUES (?, 'W-2 Wages', ?, ?, 'Wages', ?, ?)",
+                        rusqlite::params![uid, wages, year, &desc, now],
+                    ).map_err(|e| e.to_string())?;
+                } else {
+                    conn.execute(
+                        "UPDATE tax_income SET amount_cents = ? WHERE user_id = ? AND tax_year = ? AND source = 'W-2 Wages' AND description LIKE ?",
+                        rusqlite::params![wages, uid, year, format!("%{}%", employee)],
+                    ).map_err(|e| e.to_string())?;
+                }
             }
 
-            // Upsert income: federal withholding (stored as a separate record for the tax estimator)
             if withheld > 0 {
-                conn.execute(
-                    "INSERT OR REPLACE INTO tax_income (user_id, source, amount_cents, tax_year, category, description, created_at) \
-                     VALUES (?, 'W-2 Withholding', ?, ?, 'Federal Withholding', ?, ?)",
-                    rusqlite::params![uid, withheld, year, format!("{} - {} Box 2", issuer3, employee), now],
-                ).map_err(|e| e.to_string())?;
+                let desc = format!("{} - {} Box 2", issuer3, employee);
+                let existing: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM tax_income WHERE user_id = ? AND tax_year = ? AND source = 'W-2 Withholding' AND description LIKE ?",
+                    rusqlite::params![uid, year, format!("%{}%", employee)], |r| r.get(0)
+                ).unwrap_or(0);
+                if existing == 0 {
+                    conn.execute(
+                        "INSERT INTO tax_income (user_id, source, amount_cents, tax_year, category, description, created_at) VALUES (?, 'W-2 Withholding', ?, ?, 'Federal Withholding', ?, ?)",
+                        rusqlite::params![uid, withheld, year, &desc, now],
+                    ).map_err(|e| e.to_string())?;
+                } else {
+                    conn.execute(
+                        "UPDATE tax_income SET amount_cents = ? WHERE user_id = ? AND tax_year = ? AND source = 'W-2 Withholding' AND description LIKE ?",
+                        rusqlite::params![withheld, uid, year, format!("%{}%", employee)],
+                    ).map_err(|e| e.to_string())?;
+                }
             }
 
             Ok(())
