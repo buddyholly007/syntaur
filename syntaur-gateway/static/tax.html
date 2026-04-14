@@ -2272,7 +2272,8 @@ async function startExtFiling(method) {
     });
     const data = await resp.json();
     extId = data.extension?.id;
-  } catch(e) { return; }
+    if (!extId) { document.getElementById('ext-result').textContent = 'Error creating extension: ' + JSON.stringify(data); document.getElementById('ext-result').className = 'text-xs mt-2 block text-red-400'; return; }
+  } catch(e) { document.getElementById('ext-result').textContent = 'Error: ' + e.message; document.getElementById('ext-result').className = 'text-xs mt-2 block text-red-400'; return; }
 
   if (method === 'mail') {
     // Download form text and mark as filed
