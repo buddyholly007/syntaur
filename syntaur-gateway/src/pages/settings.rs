@@ -1,18 +1,23 @@
-<!DOCTYPE html>
-<html lang="en" class="dark">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="theme-color" content="#0284c7">
-<link rel="icon" href="/favicon.ico" type="image/x-icon"><link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32"><link rel="apple-touch-icon" href="/icon-192.png">
-<link rel="manifest" href="/manifest.json">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>Syntaur — Settings</title>
-<script src="/tailwind.js"></script>
-<script>tailwind.config={darkMode:'class',theme:{extend:{colors:{oc:{500:'#0ea5e9',600:'#0284c7',700:'#0369a1'}}}}}</script>
-<style>
-  @import url('/fonts.css');
+//! /settings — migrated from static/settings.html. Structural markup and
+//! embedded scripts live as raw-string consts below so their bytes
+//! count as Rust and the file compiles type-checked through maud.
+
+use axum::response::Html;
+use maud::{html, PreEscaped};
+
+use super::shared::{shell, Page};
+
+pub async fn render() -> Html<String> {
+    let page = Page {
+        title: "Settings",
+        authed: true,
+        extra_style: Some(EXTRA_STYLE),
+    };
+    let body = html! { (PreEscaped(BODY_HTML)) };
+    Html(shell(page, body).into_string())
+}
+
+const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   body { font-family: 'Inter', sans-serif; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; }
   .card { @apply bg-gray-800 rounded-xl border border-gray-700 p-5; }
   .input { @apply w-full bg-gray-900 border border-gray-600 rounded-lg px-4 py-2.5 text-white placeholder-gray-400 focus:border-oc-500 focus:ring-1 focus:ring-oc-500 outline-none text-sm; }
@@ -26,12 +31,9 @@
   .badge-red { @apply bg-red-900/50 text-red-400; }
   .tab { @apply px-4 py-2 text-sm font-medium rounded-lg cursor-pointer transition-colors; }
   .tab.active { @apply bg-gray-800 text-white; }
-  .tab:not(.active) { @apply text-gray-400 hover:text-gray-300; }
-</style>
-</head>
-<body class="bg-gray-950 text-gray-100 min-h-screen">
+  .tab:not(.active) { @apply text-gray-400 hover:text-gray-300; }"##;
 
-<!-- Top bar -->
+const BODY_HTML: &str = r##"<!-- Top bar -->
 <div class="border-b border-gray-800 bg-gray-900/50 backdrop-blur sticky top-0 z-40">
   <div class="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
     <div class="flex items-center gap-3">
@@ -998,7 +1000,7 @@ const USE_CASES = [
   {
     id: 'music',
     icon: '🎵',
-    title: 'Play music',
+    title: "Play music",
     tiers: [
       {
         label: 'Simplest',
@@ -1023,7 +1025,7 @@ const USE_CASES = [
   {
     id: 'notifications',
     icon: '🔔',
-    title: 'Get notifications + reminders',
+    title: "Get notifications + reminders",
     tiers: [
       {
         label: 'Simplest',
@@ -1042,7 +1044,7 @@ const USE_CASES = [
   {
     id: 'calendar',
     icon: '📅',
-    title: 'See your calendar',
+    title: "See your calendar",
     tiers: [
       {
         label: 'Simplest',
@@ -1061,7 +1063,7 @@ const USE_CASES = [
   {
     id: 'finance',
     icon: '💰',
-    title: 'Auto-track finances for taxes',
+    title: "Auto-track finances for taxes",
     tiers: [
       {
         label: 'Simplest',
@@ -1092,7 +1094,7 @@ const USE_CASES = [
   {
     id: 'smart_home',
     icon: '🏠',
-    title: 'Voice-control smart home',
+    title: "Voice-control smart home",
     tiers: [
       {
         label: 'If you run Home Assistant',
@@ -1105,7 +1107,7 @@ const USE_CASES = [
   {
     id: 'health',
     icon: '❤️',
-    title: 'Track health and sleep',
+    title: "Track health and sleep",
     tiers: [
       {
         label: 'If you have an Oura Ring',
@@ -2238,6 +2240,4 @@ if (window.location.search.includes('tab=sync')) {
   }, 100);
 }
 
-</script>
-</body>
-</html>
+</script>"##;

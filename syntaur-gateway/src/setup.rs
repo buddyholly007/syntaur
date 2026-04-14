@@ -331,12 +331,6 @@ pub async fn handle_setup_modules(
 }
 
 
-/// GET /setup — serve the setup wizard HTML page.
-pub async fn handle_setup_page() -> axum::response::Html<&'static str> {
-    axum::response::Html(include_str!("../static/setup.html"))
-}
-
-
 /// Check if this is a first-run (no admin users exist and no LLM configured).
 pub fn is_first_run(state: &AppState) -> bool {
     // If the config has no model providers, it's a first run
@@ -538,12 +532,6 @@ pub struct ModuleToggleResponse {
 }
 
 
-
-
-/// GET /settings
-pub async fn handle_settings_page() -> axum::response::Html<&'static str> {
-    axum::response::Html(include_str!("../static/settings.html"))
-}
 
 
 /// GET /api/license/status — check license status.

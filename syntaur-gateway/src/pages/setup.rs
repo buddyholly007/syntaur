@@ -1,18 +1,23 @@
-<!DOCTYPE html>
-<html lang="en" class="dark">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="theme-color" content="#0284c7">
-<link rel="icon" href="/favicon.ico" type="image/x-icon"><link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32"><link rel="apple-touch-icon" href="/icon-192.png">
-<link rel="manifest" href="/manifest.json">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>Syntaur Setup</title>
-<script src="/tailwind.js"></script>
-<script>tailwind.config={darkMode:'class',theme:{extend:{colors:{oc:{50:'#f0f9ff',100:'#e0f2fe',500:'#0ea5e9',600:'#0284c7',700:'#0369a1',800:'#075985',900:'#0c4a6e'}}}}}</script>
-<style>
-  @import url('/fonts.css');
+//! /setup — migrated from static/setup.html. Structural markup and
+//! embedded scripts live as raw-string consts below so their bytes
+//! count as Rust and the file compiles type-checked through maud.
+
+use axum::response::Html;
+use maud::{html, PreEscaped};
+
+use super::shared::{shell, Page};
+
+pub async fn render() -> Html<String> {
+    let page = Page {
+        title: "Setup",
+        authed: false,
+        extra_style: Some(EXTRA_STYLE),
+    };
+    let body = html! { (PreEscaped(BODY_HTML)) };
+    Html(shell(page, body).into_string())
+}
+
+const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   body { font-family: 'Inter', sans-serif; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; }
   .step { display: none; }
   .step.active { display: block; }
@@ -29,12 +34,9 @@
   .badge-red { @apply bg-red-900 text-red-300; }
   .badge-blue { @apply bg-blue-900 text-blue-300; }
   .toggle { @apply relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer; }
-  .toggle-dot { @apply inline-block h-4 w-4 transform rounded-full bg-white transition-transform; }
-</style>
-</head>
-<body class="bg-gray-950 text-gray-100 min-h-screen">
+  .toggle-dot { @apply inline-block h-4 w-4 transform rounded-full bg-white transition-transform; }"##;
 
-<div class="max-w-2xl mx-auto px-4 py-8">
+const BODY_HTML: &str = r##"<div class="max-w-2xl mx-auto px-4 py-8">
 
   <!-- Header -->
   <div class="text-center mb-8">
@@ -1992,7 +1994,4 @@ function buildFallbacks() {
 
 // Init — step 0 shows first, runScan starts when user chooses "server" mode
 selectLlm('cloud');
-</script>
-
-</body>
-</html>
+</script>"##;

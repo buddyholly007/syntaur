@@ -19,8 +19,8 @@
 //!   [done] music.html      → pages::music
 //!   [done] dashboard.html  → pages::dashboard
 //!   [done] chat.html       → pages::chat
-//!   [todo] setup.html
-//!   [todo] settings.html
+//!   [done] setup.html      → pages::setup
+//!   [done] settings.html   → pages::settings
 //!   [HOLD] tax.html — parallel tax-module work, do NOT migrate
 
 pub mod history;
@@ -30,5 +30,7 @@ pub mod modules;
 pub mod chat;
 pub mod dashboard;
 pub mod music;
+pub mod settings;
+pub mod setup;
 pub mod shared;
 pub mod voice_setup;
