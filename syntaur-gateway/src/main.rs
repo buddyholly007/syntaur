@@ -29,6 +29,7 @@ mod setup;
 mod license;
 mod tax;
 mod financial;
+mod calendar_reminder;
 
 /// Brand name constant — used in user-facing messages.
 pub const BRAND: &str = "Syntaur";
@@ -622,6 +623,109 @@ struct CalendarEventCreateRequest {
     start_time: String,
     end_time: Option<String>,
     all_day: Option<bool>,
+    recurrence_rule: Option<String>,
+    recurrence_end_date: Option<String>,
+    reminder_minutes: Option<i64>,
+}
+
+#[derive(serde::Deserialize)]
+struct CalendarEventUpdateRequest {
+    token: String,
+    title: Option<String>,
+    description: Option<String>,
+    start_time: Option<String>,
+    end_time: Option<String>,
+    all_day: Option<bool>,
+    recurrence_rule: Option<String>,
+    recurrence_end_date: Option<String>,
+    reminder_minutes: Option<i64>,
+}
+
+#[derive(serde::Deserialize)]
+struct CalendarIcsImportRequest {
+    token: String,
+    ics_content: String,
+}
+
+/// Expand a base event into virtual instances within [range_start, range_end].
+/// Returns a list of JSON objects with `occurrence_date` set for recurring instances.
+use chrono::Datelike as _CalDatelike;
+
+fn expand_recurrence(
+    base: &serde_json::Value,
+    range_start: &str,
+    range_end: &str,
+) -> Vec<serde_json::Value> {
+    let rule = base.get("recurrence_rule").and_then(|v| v.as_str()).unwrap_or("");
+    let start_time = base.get("start_time").and_then(|v| v.as_str()).unwrap_or("");
+    if rule.is_empty() || start_time.is_empty() {
+        // Not recurring — compare by date prefix so timed events on the end
+        // date still match when range_end is "YYYY-MM-DD".
+        let evt_date = if start_time.len() >= 10 { &start_time[..10] } else { start_time };
+        let rs = if range_start.len() >= 10 { &range_start[..10] } else { range_start };
+        let re = if range_end.len() >= 10 { &range_end[..10] } else { range_end };
+        if evt_date >= rs && evt_date <= re {
+            let mut ev = base.clone();
+            ev["is_recurring_instance"] = serde_json::json!(false);
+            return vec![ev];
+        }
+        return vec![];
+    }
+
+    // Parse base date (first 10 chars: YYYY-MM-DD)
+    if start_time.len() < 10 { return vec![]; }
+    let base_date_str = &start_time[..10];
+    let base_time_part = if start_time.len() > 10 { &start_time[10..] } else { "" };
+
+    let base_date = match chrono::NaiveDate::parse_from_str(base_date_str, "%Y-%m-%d") {
+        Ok(d) => d,
+        Err(_) => return vec![],
+    };
+    let range_start_date = chrono::NaiveDate::parse_from_str(&range_start[..range_start.len().min(10)], "%Y-%m-%d").unwrap_or(base_date);
+    let range_end_date = chrono::NaiveDate::parse_from_str(&range_end[..range_end.len().min(10)], "%Y-%m-%d").unwrap_or(base_date);
+
+    // Respect recurrence_end_date
+    let rec_end = base.get("recurrence_end_date").and_then(|v| v.as_str())
+        .and_then(|s| chrono::NaiveDate::parse_from_str(&s[..s.len().min(10)], "%Y-%m-%d").ok());
+
+    let mut out = Vec::new();
+    let mut cur = base_date;
+    let mut safety = 0;
+    while cur <= range_end_date && safety < 2000 {
+        safety += 1;
+        if let Some(end_d) = rec_end { if cur > end_d { break; } }
+        if cur >= range_start_date && cur >= base_date {
+            let date_str = cur.format("%Y-%m-%d").to_string();
+            let occ_time = format!("{}{}", date_str, base_time_part);
+            let mut ev = base.clone();
+            ev["start_time"] = serde_json::json!(occ_time);
+            ev["occurrence_date"] = serde_json::json!(date_str);
+            ev["is_recurring_instance"] = serde_json::json!(cur != base_date);
+            out.push(ev);
+        }
+        cur = match rule {
+            "daily" => cur.succ_opt().unwrap_or(cur),
+            "weekly" => cur.checked_add_days(chrono::Days::new(7)).unwrap_or(cur),
+            "monthly" => {
+                let m = cur.month();
+                let y = cur.year();
+                let (ny, nm) = if m == 12 { (y+1, 1) } else { (y, m+1) };
+                // Clamp day to last day of target month
+                let target_day = cur.day();
+                let max_day = match nm {
+                    1|3|5|7|8|10|12 => 31,
+                    4|6|9|11 => 30,
+                    2 => if (ny % 4 == 0 && ny % 100 != 0) || ny % 400 == 0 { 29 } else { 28 },
+                    _ => 28,
+                };
+                chrono::NaiveDate::from_ymd_opt(ny, nm, target_day.min(max_day)).unwrap_or(cur)
+            },
+            "yearly" => chrono::NaiveDate::from_ymd_opt(cur.year()+1, cur.month(), cur.day()).unwrap_or(cur),
+            _ => break,
+        };
+        if cur == base_date && safety > 1 { break; } // prevent infinite loop
+    }
+    out
 }
 
 async fn handle_calendar_list(
@@ -636,25 +740,36 @@ async fn handle_calendar_list(
     let end = params.get("end").cloned();
     let events = tokio::task::spawn_blocking(move || -> Result<Vec<serde_json::Value>, String> {
         let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
-        let (sql, p): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match (&start, &end) {
-            (Some(s), Some(e)) => (
-                "SELECT id, title, description, start_time, end_time, all_day, source, created_at FROM calendar_events WHERE user_id = ? AND start_time >= ? AND start_time <= ? ORDER BY start_time".to_string(),
-                vec![Box::new(uid) as Box<dyn rusqlite::types::ToSql>, Box::new(s.clone()), Box::new(e.clone())],
-            ),
-            _ => (
-                "SELECT id, title, description, start_time, end_time, all_day, source, created_at FROM calendar_events WHERE user_id = ? ORDER BY start_time DESC LIMIT 50".to_string(),
-                vec![Box::new(uid) as Box<dyn rusqlite::types::ToSql>],
-            ),
-        };
-        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-        let refs: Vec<&dyn rusqlite::types::ToSql> = p.iter().map(|b| b.as_ref()).collect();
-        let rows = stmt.query_map(refs.as_slice(), |r| Ok(serde_json::json!({
+        // Always fetch all user events (recurring ones may have start_time before range_start)
+        let sql = "SELECT id, title, description, start_time, end_time, all_day, source, created_at,                    recurrence_rule, recurrence_end_date, reminder_minutes, updated_at                    FROM calendar_events WHERE user_id = ? ORDER BY start_time";
+        let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(rusqlite::params![uid], |r| Ok(serde_json::json!({
             "id": r.get::<_, i64>(0)?, "title": r.get::<_, String>(1)?,
             "description": r.get::<_, Option<String>>(2)?, "start_time": r.get::<_, String>(3)?,
             "end_time": r.get::<_, Option<String>>(4)?, "all_day": r.get::<_, i64>(5)? != 0,
             "source": r.get::<_, String>(6)?, "created_at": r.get::<_, i64>(7)?,
+            "recurrence_rule": r.get::<_, Option<String>>(8)?,
+            "recurrence_end_date": r.get::<_, Option<String>>(9)?,
+            "reminder_minutes": r.get::<_, Option<i64>>(10)?,
+            "updated_at": r.get::<_, Option<i64>>(11)?,
         }))).map_err(|e| e.to_string())?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        let base_events: Vec<serde_json::Value> = rows.filter_map(|r| r.ok()).collect();
+
+        // Expand recurring events into the requested range
+        let range_s = start.clone().unwrap_or_else(|| "1900-01-01".to_string());
+        let range_e = end.clone().unwrap_or_else(|| "2099-12-31".to_string());
+        let mut expanded: Vec<serde_json::Value> = Vec::new();
+        for ev in &base_events {
+            let mut instances = expand_recurrence(ev, &range_s, &range_e);
+            expanded.append(&mut instances);
+        }
+        // Sort by start_time
+        expanded.sort_by(|a, b| {
+            let a_t = a.get("start_time").and_then(|v| v.as_str()).unwrap_or("");
+            let b_t = b.get("start_time").and_then(|v| v.as_str()).unwrap_or("");
+            a_t.cmp(b_t)
+        });
+        Ok(expanded)
     }).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
     .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(serde_json::json!({ "events": events })))
@@ -672,17 +787,63 @@ async fn handle_calendar_create(
     let start = req.start_time.clone();
     let end = req.end_time.clone();
     let all_day = req.all_day.unwrap_or(false);
+    let rrule = req.recurrence_rule.clone().filter(|s| !s.is_empty() && s != "none");
+    let rend = req.recurrence_end_date.clone().filter(|s| !s.is_empty());
+    let rmins = req.reminder_minutes;
     let now = chrono::Utc::now().timestamp();
     let id = tokio::task::spawn_blocking(move || -> Result<i64, String> {
         let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
         conn.execute(
-            "INSERT INTO calendar_events (user_id, title, description, start_time, end_time, all_day, source, created_at) VALUES (?, ?, ?, ?, ?, ?, 'manual', ?)",
-            rusqlite::params![uid, &title, &desc, &start, &end, all_day as i64, now],
+            "INSERT INTO calendar_events (user_id, title, description, start_time, end_time, all_day, source, created_at, recurrence_rule, recurrence_end_date, reminder_minutes, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?)",
+            rusqlite::params![uid, &title, &desc, &start, &end, all_day as i64, now, &rrule, &rend, &rmins, now],
         ).map_err(|e| e.to_string())?;
         Ok(conn.last_insert_rowid())
     }).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
     .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(serde_json::json!({ "id": id, "title": req.title })))
+}
+
+async fn handle_calendar_update(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(event_id): axum::extract::Path<i64>,
+    Json(req): Json<CalendarEventUpdateRequest>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let principal = resolve_principal(&state, &req.token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let now = chrono::Utc::now().timestamp();
+    let updated = tokio::task::spawn_blocking(move || -> Result<bool, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        // Load current row, apply partial updates
+        let row: Option<(String, Option<String>, String, Option<String>, i64, Option<String>, Option<String>, Option<i64>)> =
+            conn.query_row(
+                "SELECT title, description, start_time, end_time, all_day, recurrence_rule, recurrence_end_date, reminder_minutes FROM calendar_events WHERE id = ? AND user_id = ?",
+                rusqlite::params![event_id, uid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?))
+            ).ok();
+        let Some((cur_title, cur_desc, cur_start, cur_end, cur_all_day, cur_rrule, cur_rend, cur_rmins)) = row else {
+            return Ok(false);
+        };
+        let new_title = req.title.unwrap_or(cur_title);
+        let new_desc = req.description.or(cur_desc);
+        let new_start = req.start_time.unwrap_or(cur_start);
+        let new_end = req.end_time.or(cur_end);
+        let new_all_day = req.all_day.map(|b| b as i64).unwrap_or(cur_all_day);
+        let new_rrule = req.recurrence_rule.map(|s| if s == "none" || s.is_empty() { None } else { Some(s) }).unwrap_or(cur_rrule);
+        let new_rend = req.recurrence_end_date.map(|s| if s.is_empty() { None } else { Some(s) }).unwrap_or(cur_rend);
+        let new_rmins = req.reminder_minutes.or(cur_rmins);
+        let count = conn.execute(
+            "UPDATE calendar_events SET title=?, description=?, start_time=?, end_time=?, all_day=?, recurrence_rule=?, recurrence_end_date=?, reminder_minutes=?, updated_at=? WHERE id=? AND user_id=?",
+            rusqlite::params![new_title, new_desc, new_start, new_end, new_all_day, new_rrule, new_rend, new_rmins, now, event_id, uid],
+        ).map_err(|e| e.to_string())?;
+        Ok(count > 0)
+    }).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    if updated {
+        Ok(Json(serde_json::json!({ "updated": true })))
+    } else {
+        Err(axum::http::StatusCode::NOT_FOUND)
+    }
 }
 
 async fn handle_calendar_delete(
@@ -700,6 +861,8 @@ async fn handle_calendar_delete(
             "DELETE FROM calendar_events WHERE id = ? AND user_id = ?",
             rusqlite::params![event_id, uid],
         ).map_err(|e| e.to_string())?;
+        // Clean up reminder tracking
+        let _ = conn.execute("DELETE FROM calendar_reminders_sent WHERE event_id = ?", rusqlite::params![event_id]);
         Ok(count > 0)
     }).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
     .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -708,6 +871,135 @@ async fn handle_calendar_delete(
     } else {
         Err(axum::http::StatusCode::NOT_FOUND)
     }
+}
+
+/// Parse ICS date (20260415T103000Z, 20260415T103000, 20260415) to start_time string
+fn parse_ics_date(s: &str) -> Option<(String, bool)> {
+    let s = s.trim().trim_end_matches('Z');
+    // All-day date only: 20260415 or 2026-04-15
+    let digits: String = s.chars().filter(|c| c.is_ascii_digit() || *c == 'T').collect();
+    if digits.len() == 8 {
+        // YYYYMMDD
+        let y = &digits[..4]; let m = &digits[4..6]; let d = &digits[6..8];
+        return Some((format!("{}-{}-{}", y, m, d), true));
+    }
+    if digits.len() >= 15 && digits.contains('T') {
+        // YYYYMMDDTHHMMSS
+        let parts: Vec<&str> = digits.split('T').collect();
+        if parts.len() == 2 && parts[0].len() == 8 && parts[1].len() >= 6 {
+            let y = &parts[0][..4]; let m = &parts[0][4..6]; let d = &parts[0][6..8];
+            let hh = &parts[1][..2]; let mm = &parts[1][2..4]; let ss = &parts[1][4..6];
+            return Some((format!("{}-{}-{}T{}:{}:{}", y, m, d, hh, mm, ss), false));
+        }
+    }
+    None
+}
+
+/// Unescape ICS text (\n → newline, \, → comma, etc.)
+fn ics_unescape(s: &str) -> String {
+    s.replace(r"\n", "\n").replace(r"\N", "\n")
+     .replace(r"\,", ",").replace(r"\;", ";").replace(r"\\", r"\")
+}
+
+async fn handle_calendar_ics_import(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CalendarIcsImportRequest>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let principal = resolve_principal(&state, &req.token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let content = req.ics_content.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<(usize, usize), String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        // Unfold lines (continuation lines start with space or tab)
+        let mut lines: Vec<String> = Vec::new();
+        for raw in content.lines() {
+            let raw = raw.trim_end_matches('\r');
+            if (raw.starts_with(' ') || raw.starts_with('\t')) && !lines.is_empty() {
+                let last = lines.last_mut().unwrap();
+                last.push_str(&raw[1..]);
+            } else {
+                lines.push(raw.to_string());
+            }
+        }
+        let now = chrono::Utc::now().timestamp();
+        let mut imported = 0;
+        let mut skipped = 0;
+        let mut in_event = false;
+        let mut title = String::new();
+        let mut desc: Option<String> = None;
+        let mut start_time = String::new();
+        let mut end_time: Option<String> = None;
+        let mut all_day = false;
+        let mut rrule_freq: Option<String> = None;
+        let mut rrule_until: Option<String> = None;
+        for line in &lines {
+            if line == "BEGIN:VEVENT" {
+                in_event = true;
+                title.clear(); desc = None; start_time.clear(); end_time = None;
+                all_day = false; rrule_freq = None; rrule_until = None;
+            } else if line == "END:VEVENT" {
+                if in_event && !title.is_empty() && !start_time.is_empty() {
+                    let res = conn.execute(
+                        "INSERT INTO calendar_events (user_id, title, description, start_time, end_time, all_day, source, created_at, recurrence_rule, recurrence_end_date, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'ics', ?, ?, ?, ?)",
+                        rusqlite::params![uid, &title, &desc, &start_time, &end_time, all_day as i64, now, &rrule_freq, &rrule_until, now],
+                    );
+                    match res {
+                        Ok(_) => imported += 1,
+                        Err(_) => skipped += 1,
+                    }
+                } else {
+                    skipped += 1;
+                }
+                in_event = false;
+            } else if in_event {
+                // Split on first colon, but keep parameters before (e.g. DTSTART;VALUE=DATE:20260415)
+                if let Some(colon_idx) = line.find(':') {
+                    let (key_part, val) = line.split_at(colon_idx);
+                    let val = &val[1..];
+                    let key = key_part.split(';').next().unwrap_or(key_part);
+                    match key {
+                        "SUMMARY" => title = ics_unescape(val),
+                        "DESCRIPTION" => desc = Some(ics_unescape(val)),
+                        "DTSTART" => {
+                            if let Some((t, ad)) = parse_ics_date(val) {
+                                start_time = t; all_day = ad;
+                            }
+                        }
+                        "DTEND" => {
+                            if let Some((t, _)) = parse_ics_date(val) {
+                                end_time = Some(t);
+                            }
+                        }
+                        "RRULE" => {
+                            // Parse FREQ=DAILY;UNTIL=20261231T235959Z;...
+                            for part in val.split(';') {
+                                let mut kv = part.splitn(2, '=');
+                                let k = kv.next().unwrap_or("");
+                                let v = kv.next().unwrap_or("");
+                                match k {
+                                    "FREQ" => rrule_freq = Some(v.to_ascii_lowercase()),
+                                    "UNTIL" => {
+                                        if let Some((t, _)) = parse_ics_date(v) {
+                                            rrule_until = Some(t.chars().take(10).collect());
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Ok((imported, skipped))
+    }).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({
+        "imported": result.0,
+        "skipped": result.1,
+    })))
 }
 
 // ── Chat ────────────────────────────────────────────────────────────────────
@@ -3224,6 +3516,13 @@ async fn main() {
         external_callbacks: Arc::new(Mutex::new(Vec::new())),
     });
 
+    // Calendar reminder background task: checks for upcoming events every 60s.
+    // Silently no-ops if no Telegram bot token is configured.
+    if "calendar_reminder::spawn_reminder_task" != "disabled" {
+        crate::calendar_reminder::spawn_reminder_task(Arc::clone(&state));
+        info!("[calendar-reminder] spawned background reminder task");
+    }
+
     // Initialize the global Home Assistant REST client used by the
     // voice chat tools (control_light, set_thermostat, query_state,
     // call_ha_service). Skipped silently when no connector is configured.
@@ -3440,6 +3739,8 @@ async fn main() {
         .route("/api/calendar", get(handle_calendar_list))
         .route("/api/calendar", post(handle_calendar_create))
         .route("/api/calendar/{id}", axum::routing::delete(handle_calendar_delete))
+        .route("/api/calendar/{id}", axum::routing::put(handle_calendar_update))
+        .route("/api/calendar/import", post(handle_calendar_ics_import))
         .with_state(Arc::clone(&state))
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),

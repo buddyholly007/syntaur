@@ -149,14 +149,35 @@
     <!-- Mini Calendar -->
     <div class="card">
       <div class="flex items-center justify-between mb-3">
-        <button onclick="calPrev()" class="text-gray-500 hover:text-gray-300 text-sm">&larr;</button>
-        <h3 class="font-medium text-sm text-gray-300" id="cal-title">April 2026</h3>
-        <button onclick="calNext()" class="text-gray-500 hover:text-gray-300 text-sm">&rarr;</button>
+        <div class="flex items-center gap-2">
+          <button onclick="calPrev()" class="text-gray-500 hover:text-gray-300 text-sm">&larr;</button>
+          <h3 class="font-medium text-sm text-gray-300" id="cal-title">April 2026</h3>
+          <button onclick="calNext()" class="text-gray-500 hover:text-gray-300 text-sm">&rarr;</button>
+        </div>
+        <div class="flex items-center gap-1">
+          <div class="inline-flex rounded-md overflow-hidden border border-gray-700">
+            <button onclick="setCalView('month')" id="view-month-btn" class="text-[10px] px-2 py-1 bg-oc-700 text-white">Month</button>
+            <button onclick="setCalView('agenda')" id="view-agenda-btn" class="text-[10px] px-2 py-1 text-gray-400 hover:bg-gray-700">Agenda</button>
+          </div>
+          <label class="text-gray-500 hover:text-oc-500 text-xs px-1 cursor-pointer" title="Import .ics file">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
+            <input type="file" accept=".ics,text/calendar" class="hidden" onchange="importIcs(event)">
+          </label>
+        </div>
       </div>
-      <div class="grid grid-cols-7 gap-0.5 text-center text-xs">
-        <span class="text-gray-600 py-1">Su</span><span class="text-gray-600 py-1">Mo</span><span class="text-gray-600 py-1">Tu</span><span class="text-gray-600 py-1">We</span><span class="text-gray-600 py-1">Th</span><span class="text-gray-600 py-1">Fr</span><span class="text-gray-600 py-1">Sa</span>
+
+      <!-- Month grid (hidden when in agenda view) -->
+      <div id="view-month">
+        <div class="grid grid-cols-7 gap-0.5 text-center text-xs">
+          <span class="text-gray-600 py-1">Su</span><span class="text-gray-600 py-1">Mo</span><span class="text-gray-600 py-1">Tu</span><span class="text-gray-600 py-1">We</span><span class="text-gray-600 py-1">Th</span><span class="text-gray-600 py-1">Fr</span><span class="text-gray-600 py-1">Sa</span>
+        </div>
+        <div class="grid grid-cols-7 gap-0.5 text-center text-xs" id="cal-grid">
+          <!-- Populated by JS -->
+        </div>
       </div>
-      <div class="grid grid-cols-7 gap-0.5 text-center text-xs" id="cal-grid">
+
+      <!-- Agenda list (hidden unless in agenda view) -->
+      <div id="view-agenda" class="hidden max-h-80 overflow-y-auto space-y-1.5">
         <!-- Populated by JS -->
       </div>
 
@@ -174,19 +195,28 @@
         </div>
       </div>
 
-      <!-- Add event form (hidden until + Add clicked) -->
+      <!-- Add/edit event form -->
       <div id="cal-add-form" class="hidden mt-3 border-t border-gray-700 pt-3 space-y-2">
-        <h4 class="text-sm font-medium text-gray-300">New Event</h4>
+        <h4 class="text-sm font-medium text-gray-300" id="cal-form-title">New Event</h4>
         <input type="text" id="cal-ev-title" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-white placeholder-gray-500 outline-none focus:border-oc-500" placeholder="Event title">
         <div class="flex gap-2">
           <input type="date" id="cal-ev-date" class="flex-1 bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-white outline-none focus:border-oc-500">
           <input type="time" id="cal-ev-time" class="w-24 bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-white outline-none focus:border-oc-500">
         </div>
-        <div class="flex gap-2">
+        <div class="flex gap-2 items-center flex-wrap">
           <label class="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer">
             <input type="checkbox" id="cal-ev-allday" class="accent-oc-500" onchange="document.getElementById('cal-ev-time').disabled=this.checked"> All day
           </label>
+          <select id="cal-ev-recur" class="bg-gray-900 border border-gray-700 rounded-lg text-xs text-gray-300 py-1 px-1 outline-none" title="Recurrence">
+            <option value="">Doesn't repeat</option>
+            <option value="daily">Daily</option>
+            <option value="weekly">Weekly</option>
+            <option value="monthly">Monthly</option>
+            <option value="yearly">Yearly</option>
+          </select>
+          <input type="number" id="cal-ev-remind" min="0" max="10080" class="w-20 bg-gray-900 border border-gray-700 rounded-lg text-xs text-white py-1 px-1 outline-none focus:border-oc-500" placeholder="Remind (min)" title="Remind me N minutes before (0 = off)">
         </div>
+        <input type="date" id="cal-ev-recur-end" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-xs text-gray-400 outline-none focus:border-oc-500 hidden" placeholder="Repeat until">
         <textarea id="cal-ev-desc" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-white placeholder-gray-500 outline-none focus:border-oc-500 resize-none" rows="2" placeholder="Description (optional)"></textarea>
         <div class="flex gap-2 justify-end">
           <button onclick="cancelAddEvent()" class="text-xs text-gray-500 hover:text-gray-300 px-3 py-1.5">Cancel</button>
@@ -480,6 +510,8 @@ async function deleteTodo(id) {
 let calDate = new Date();
 let calEvents = [];
 let calSelectedDay = null;
+let calView = 'month';  // 'month' or 'agenda'
+let calEditingId = null;  // event id being edited, or null for new
 
 async function loadCalendarEvents() {
   const year = calDate.getFullYear();
@@ -493,7 +525,52 @@ async function loadCalendarEvents() {
     calEvents = data.events || [];
   } catch(e) { calEvents = []; }
   renderCalendar();
+  renderAgenda();
   if (calSelectedDay) showDayEvents(calSelectedDay);
+}
+
+function setCalView(v) {
+  calView = v;
+  document.getElementById('view-month').classList.toggle('hidden', v !== 'month');
+  document.getElementById('view-agenda').classList.toggle('hidden', v !== 'agenda');
+  document.getElementById('view-month-btn').classList.toggle('bg-oc-700', v === 'month');
+  document.getElementById('view-month-btn').classList.toggle('text-white', v === 'month');
+  document.getElementById('view-month-btn').classList.toggle('text-gray-400', v !== 'month');
+  document.getElementById('view-agenda-btn').classList.toggle('bg-oc-700', v === 'agenda');
+  document.getElementById('view-agenda-btn').classList.toggle('text-white', v === 'agenda');
+  document.getElementById('view-agenda-btn').classList.toggle('text-gray-400', v !== 'agenda');
+  if (v === 'agenda') renderAgenda();
+}
+
+function renderAgenda() {
+  const container = document.getElementById('view-agenda');
+  if (!container) return;
+  const sorted = [...calEvents].sort((a,b) => (a.start_time||'').localeCompare(b.start_time||''));
+  if (sorted.length === 0) {
+    container.innerHTML = '<p class="text-xs text-gray-500 italic text-center py-4">No events this month</p>';
+    return;
+  }
+  container.innerHTML = sorted.map(ev => {
+    const date = (ev.start_time||'').substring(0, 10);
+    const time = ev.all_day ? 'All day' : formatEventTime(ev.start_time);
+    const desc = ev.description ? `<p class="text-xs text-gray-500 mt-0.5 truncate">${escapeHtml(ev.description)}</p>` : '';
+    const recur = ev.recurrence_rule ? `<span class="text-[10px] text-oc-500">&#x21bb; ${ev.recurrence_rule}</span>` : '';
+    const remind = ev.reminder_minutes ? `<span class="text-[10px] text-gray-500">&#x1f514; ${ev.reminder_minutes}m</span>` : '';
+    const evId = ev.id;
+    return `<div class="bg-gray-900 rounded-lg p-2 hover:bg-gray-700 cursor-pointer" onclick="editEvent(${evId})">
+      <div class="flex items-center justify-between gap-2">
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center gap-2 text-xs">
+            <span class="text-oc-500">${date}</span>
+            <span class="text-gray-500">${time}</span>
+            ${recur} ${remind}
+          </div>
+          <div class="text-sm text-gray-200 truncate">${escapeHtml(ev.title)}</div>
+          ${desc}
+        </div>
+      </div>
+    </div>`;
+  }).join('');
 }
 
 function renderCalendar() {
@@ -509,11 +586,12 @@ function renderCalendar() {
   const today = new Date();
   const isCurrentMonth = today.getFullYear() === year && today.getMonth() === month;
 
-  // Build map of days to event counts
   const eventDays = new Map();
   for (const ev of calEvents) {
-    const d = parseInt(ev.start_time.split('-')[2]);
-    if (!isNaN(d)) eventDays.set(d, (eventDays.get(d) || 0) + 1);
+    if (!ev.start_time) continue;
+    const parts = ev.start_time.substring(0,10).split('-');
+    const evY = parseInt(parts[0]), evM = parseInt(parts[1])-1, evD = parseInt(parts[2]);
+    if (evY === year && evM === month) eventDays.set(evD, (eventDays.get(evD) || 0) + 1);
   }
 
   let html = '';
@@ -527,7 +605,7 @@ function renderCalendar() {
     if (isSelected) cls += 'bg-oc-700 text-white ring-1 ring-oc-400 font-bold';
     else if (isToday) cls += 'bg-oc-600 text-white font-bold hover:bg-oc-500';
     else cls += 'text-gray-400 hover:bg-gray-700';
-    html += `<span class="${cls}" onclick="selectCalDay(${d})">${d}${dot}</span>`;
+    html += `<span class="${cls}" data-day="${d}" onclick="selectCalDay(${d})" ondragover="event.preventDefault(); this.classList.add('ring-1','ring-oc-500')" ondragleave="this.classList.remove('ring-1','ring-oc-500')" ondrop="handleDropOnDay(event, ${d})">${d}${dot}</span>`;
   }
   grid.innerHTML = html;
 }
@@ -548,7 +626,6 @@ function showDayEvents(day) {
   const dateStr = `${year}-${String(month+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
   titleEl.textContent = `${months[month]} ${day}, ${year}`;
 
-  // Filter events for this day
   const dayEvents = calEvents.filter(ev => ev.start_time && ev.start_time.startsWith(dateStr));
 
   if (dayEvents.length === 0) {
@@ -558,13 +635,17 @@ function showDayEvents(day) {
       const time = ev.all_day ? '<span class="text-oc-500">All day</span>' :
         `<span class="text-gray-500">${formatEventTime(ev.start_time)}</span>`;
       const desc = ev.description ? `<p class="text-xs text-gray-500 mt-0.5">${escapeHtml(ev.description)}</p>` : '';
-      return `<div class="bg-gray-900 rounded-lg p-2 group relative">
+      const recur = ev.recurrence_rule ? `<span class="text-[10px] text-oc-500" title="Recurring ${ev.recurrence_rule}">&#x21bb;</span>` : '';
+      const remind = ev.reminder_minutes ? `<span class="text-[10px] text-gray-500" title="Remind ${ev.reminder_minutes}min before">&#x1f514;</span>` : '';
+      const isInstance = ev.is_recurring_instance ? ' opacity-75' : '';
+      return `<div class="bg-gray-900 rounded-lg p-2 group relative cursor-pointer${isInstance}" draggable="true" ondragstart="handleDragStart(event, ${ev.id}, '${ev.start_time}')" onclick="editEvent(${ev.id})">
         <div class="flex items-center justify-between">
-          <div class="flex items-center gap-2 text-xs">
+          <div class="flex items-center gap-2 text-xs flex-1 min-w-0">
             ${time}
-            <span class="text-gray-200">${escapeHtml(ev.title)}</span>
+            <span class="text-gray-200 truncate">${escapeHtml(ev.title)}</span>
+            ${recur} ${remind}
           </div>
-          <button onclick="deleteEvent(${ev.id})" class="hidden group-hover:block text-gray-600 hover:text-red-400 text-xs px-1" title="Delete">&times;</button>
+          <button onclick="event.stopPropagation(); deleteEvent(${ev.id})" class="hidden group-hover:block text-gray-600 hover:text-red-400 text-xs px-1 flex-shrink-0" title="Delete">&times;</button>
         </div>
         ${desc}
         ${ev.source && ev.source !== 'manual' ? '<span class="text-[10px] text-gray-600">' + escapeHtml(ev.source) + '</span>' : ''}
@@ -574,8 +655,6 @@ function showDayEvents(day) {
 
   panel.classList.remove('hidden');
   document.getElementById('cal-add-form').classList.add('hidden');
-
-  // Pre-fill the date for add form
   document.getElementById('cal-ev-date').value = dateStr;
 }
 
@@ -599,20 +678,66 @@ function closeDayPanel() {
 }
 
 function showAddEvent() {
+  calEditingId = null;
   const form = document.getElementById('cal-add-form');
   form.classList.remove('hidden');
+  document.getElementById('cal-form-title').textContent = 'New Event';
   document.getElementById('cal-ev-title').value = '';
   document.getElementById('cal-ev-desc').value = '';
   document.getElementById('cal-ev-time').value = '';
   document.getElementById('cal-ev-allday').checked = false;
   document.getElementById('cal-ev-time').disabled = false;
-  // Date is pre-filled from selectCalDay
+  document.getElementById('cal-ev-recur').value = '';
+  document.getElementById('cal-ev-recur-end').value = '';
+  document.getElementById('cal-ev-recur-end').classList.add('hidden');
+  document.getElementById('cal-ev-remind').value = '';
+  document.getElementById('cal-ev-title').focus();
+}
+
+function editEvent(id) {
+  // Find the base event (may be a recurring instance, find by id)
+  const ev = calEvents.find(e => e.id === id);
+  if (!ev) return;
+  calEditingId = id;
+  const form = document.getElementById('cal-add-form');
+  form.classList.remove('hidden');
+  document.getElementById('cal-form-title').textContent = 'Edit Event';
+  document.getElementById('cal-ev-title').value = ev.title || '';
+  document.getElementById('cal-ev-desc').value = ev.description || '';
+  const st = ev.start_time || '';
+  const dateStr = st.substring(0, 10);
+  document.getElementById('cal-ev-date').value = dateStr;
+  if (ev.all_day) {
+    document.getElementById('cal-ev-allday').checked = true;
+    document.getElementById('cal-ev-time').value = '';
+    document.getElementById('cal-ev-time').disabled = true;
+  } else {
+    document.getElementById('cal-ev-allday').checked = false;
+    const timePart = st.length > 10 ? st.substring(11, 16) : '';
+    document.getElementById('cal-ev-time').value = timePart;
+    document.getElementById('cal-ev-time').disabled = false;
+  }
+  document.getElementById('cal-ev-recur').value = ev.recurrence_rule || '';
+  document.getElementById('cal-ev-recur-end').value = ev.recurrence_end_date || '';
+  document.getElementById('cal-ev-recur-end').classList.toggle('hidden', !ev.recurrence_rule);
+  document.getElementById('cal-ev-remind').value = ev.reminder_minutes || '';
   document.getElementById('cal-ev-title').focus();
 }
 
 function cancelAddEvent() {
   document.getElementById('cal-add-form').classList.add('hidden');
+  calEditingId = null;
 }
+
+// Toggle recur end visibility when recurrence changes
+document.addEventListener('DOMContentLoaded', () => {
+  const recurSel = document.getElementById('cal-ev-recur');
+  if (recurSel) {
+    recurSel.addEventListener('change', () => {
+      document.getElementById('cal-ev-recur-end').classList.toggle('hidden', !recurSel.value);
+    });
+  }
+});
 
 async function saveEvent() {
   const title = document.getElementById('cal-ev-title').value.trim();
@@ -623,25 +748,36 @@ async function saveEvent() {
   const time = document.getElementById('cal-ev-time').value;
   const allDay = document.getElementById('cal-ev-allday').checked;
   const desc = document.getElementById('cal-ev-desc').value.trim();
+  const recur = document.getElementById('cal-ev-recur').value;
+  const recurEnd = document.getElementById('cal-ev-recur-end').value;
+  const remindStr = document.getElementById('cal-ev-remind').value;
+  const remindMin = remindStr ? parseInt(remindStr) : null;
 
   const startTime = allDay || !time ? date : `${date}T${time}:00`;
+
+  const payload = {
+    token: authToken,
+    title: title,
+    description: desc || null,
+    start_time: startTime,
+    end_time: null,
+    all_day: allDay,
+    recurrence_rule: recur || null,
+    recurrence_end_date: recurEnd || null,
+    reminder_minutes: remindMin,
+  };
 
   const btn = document.getElementById('cal-save-btn');
   btn.textContent = 'Saving...';
   btn.disabled = true;
 
   try {
-    const resp = await authFetch('/api/calendar', {
-      method: 'POST',
+    const url = calEditingId ? `/api/calendar/${calEditingId}` : '/api/calendar';
+    const method = calEditingId ? 'PUT' : 'POST';
+    const resp = await authFetch(url, {
+      method: method,
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        token: authToken,
-        title: title,
-        description: desc || null,
-        start_time: startTime,
-        end_time: null,
-        all_day: allDay
-      })
+      body: JSON.stringify(payload)
     });
     if (resp.ok) {
       cancelAddEvent();
@@ -650,6 +786,63 @@ async function saveEvent() {
   } catch(e) { console.log('save event:', e); }
   btn.textContent = 'Save';
   btn.disabled = false;
+}
+
+// Drag and drop handlers
+let dragEventId = null;
+let dragEventTime = null;
+
+function handleDragStart(ev, id, startTime) {
+  dragEventId = id;
+  dragEventTime = startTime;
+  try { ev.dataTransfer.effectAllowed = 'move'; } catch(e) {}
+}
+
+async function handleDropOnDay(ev, day) {
+  ev.preventDefault();
+  ev.currentTarget.classList.remove('ring-1', 'ring-oc-500');
+  if (!dragEventId) return;
+  const year = calDate.getFullYear();
+  const month = calDate.getMonth();
+  const newDate = `${year}-${String(month+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+  // Preserve time of day if event was timed
+  let newStart = newDate;
+  if (dragEventTime && dragEventTime.length > 10) {
+    newStart = newDate + dragEventTime.substring(10);
+  }
+  try {
+    await authFetch(`/api/calendar/${dragEventId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: authToken, start_time: newStart })
+    });
+    await loadCalendarEvents();
+  } catch(e) { console.log('drag reschedule:', e); }
+  dragEventId = null;
+  dragEventTime = null;
+}
+
+async function importIcs(ev) {
+  const file = ev.target.files[0];
+  if (!file) return;
+  const text = await file.text();
+  try {
+    const resp = await authFetch('/api/calendar/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: authToken, ics_content: text })
+    });
+    if (resp.ok) {
+      const data = await resp.json();
+      alert(`Imported ${data.imported} events (${data.skipped} skipped)`);
+      await loadCalendarEvents();
+    } else {
+      alert('Import failed');
+    }
+  } catch(e) {
+    alert('Import error: ' + e.message);
+  }
+  ev.target.value = '';
 }
 
 async function deleteEvent(id) {

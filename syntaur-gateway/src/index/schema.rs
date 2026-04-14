@@ -661,6 +661,22 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX IF NOT EXISTS idx_email_conn_user ON email_connections(user_id);
     "#,
+    // v17: calendar extensions — recurrence, reminders, edit tracking.
+    r#"
+    ALTER TABLE calendar_events ADD COLUMN recurrence_rule TEXT;
+    ALTER TABLE calendar_events ADD COLUMN recurrence_end_date TEXT;
+    ALTER TABLE calendar_events ADD COLUMN reminder_minutes INTEGER;
+    ALTER TABLE calendar_events ADD COLUMN updated_at INTEGER;
+
+    CREATE TABLE IF NOT EXISTS calendar_reminders_sent (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_id        INTEGER NOT NULL,
+        occurrence_date TEXT NOT NULL,
+        sent_at         INTEGER NOT NULL,
+        UNIQUE(event_id, occurrence_date)
+    );
+    CREATE INDEX IF NOT EXISTS idx_cal_rem_event ON calendar_reminders_sent(event_id);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
