@@ -712,19 +712,19 @@ const USE_CASES = [
       {
         label: 'Simplest',
         providers: ['phone_music_pwa'],
-        unlocks: 'Music plays on your phone (speakers, AirPods, AirPlay HomePod). Requires the PWA paired above.',
+        unlocks: 'Music plays on your phone (speakers, AirPods, AirPlay HomePod from iOS Control Center). That\'s it — nothing else needed.',
         cost: '0 min — already done if phone is paired',
       },
       {
         label: 'Better',
         providers: ['apple_music'],
-        unlocks: '+ Peter can search your library and pick songs by name/mood. Drag-bookmarklet on desktop, then Peter knows what to play.',
+        unlocks: '+ Peter can search your library and pick songs by name/mood. Bookmarklet flow on desktop, one-time setup.',
         cost: '~3 min on desktop',
       },
       {
-        label: 'Best (whole-home)',
+        label: 'If you already run Home Assistant',
         providers: ['home_assistant'],
-        unlocks: '+ Music plays on HomePod / Apple TV / Sonos in any room. Requires Home Assistant + paired speaker (one-time HA setup).',
+        unlocks: '+ Whole-home: Peter controls HomePod, Apple TV, Sonos directly. Also unlocks speaker grouping and EQ. Optional — skip if you don\'t use HA.',
         cost: '~10 min if HA already running',
       },
     ],
@@ -804,9 +804,9 @@ const USE_CASES = [
     title: 'Voice-control smart home',
     tiers: [
       {
-        label: 'Simplest',
+        label: 'If you run Home Assistant',
         providers: ['home_assistant'],
-        unlocks: 'One connection unlocks every device paired in Home Assistant — lights, locks, thermostats, speakers.',
+        unlocks: 'Connect HA once, Peter controls every device already paired there — lights, locks, thermostats. No HA? Skip this whole row.',
         cost: '~5 min if HA already running',
       },
     ],

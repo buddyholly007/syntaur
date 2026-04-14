@@ -553,6 +553,10 @@ pub async fn handle_journal_page() -> axum::response::Html<&'static str> {
     axum::response::Html(include_str!("../static/journal.html"))
 }
 
+pub async fn handle_music_page() -> axum::response::Html<&'static str> {
+    axum::response::Html(include_str!("../static/music.html"))
+}
+
 pub async fn handle_voice_setup_page() -> axum::response::Html<&'static str> {
     axum::response::Html(include_str!("../static/voice-setup.html"))
 }

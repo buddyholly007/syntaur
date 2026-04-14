@@ -72,6 +72,34 @@
       <a href="/settings" class="text-gray-400 hover:text-gray-300">Settings</a>
     </div>
   </div>
+  <!-- Mini Player (hidden when nothing playing) -->
+  <div id="mini-player" class="hidden border-t border-gray-800/50 px-4 py-1.5 flex items-center gap-3 text-xs bg-gray-950/60">
+    <a href="/music" class="flex-shrink-0 text-gray-500 hover:text-oc-500" title="Open Music">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+    </a>
+    <div class="flex-1 min-w-0 overflow-hidden">
+      <div class="flex items-center gap-2">
+        <span id="mp-source-icon" class="flex-shrink-0"></span>
+        <div class="flex-1 min-w-0 overflow-hidden whitespace-nowrap">
+          <span id="mp-song" class="text-gray-200 font-medium">—</span>
+          <span class="text-gray-600"> · </span>
+          <span id="mp-artist" class="text-gray-500">—</span>
+        </div>
+      </div>
+    </div>
+    <div class="flex-shrink-0 flex items-center gap-1">
+      <button onclick="mpControl('prev')" class="text-gray-500 hover:text-gray-200 px-1" title="Previous">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="19,20 9,12 19,4"/><rect x="5" y="4" width="2" height="16"/></svg>
+      </button>
+      <button onclick="mpControl('play_pause')" id="mp-play" class="text-gray-300 hover:text-white px-1" title="Play/Pause">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
+      </button>
+      <button onclick="mpControl('next')" class="text-gray-500 hover:text-gray-200 px-1" title="Next">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,4 15,12 5,20"/><rect x="17" y="4" width="2" height="16"/></svg>
+      </button>
+      <a href="/music" class="text-gray-600 hover:text-gray-300 px-1 text-xs" title="Expand">⤢</a>
+    </div>
+  </div>
 </div>
 
 <!-- Main panel: Chat + Widgets -->
@@ -1328,6 +1356,66 @@ function showPhoneAccess() {
     } catch(e) { fb.className='text-sm text-red-400'; fb.textContent='Network error: '+e.message; fb.classList.remove('hidden'); btn.disabled=false; btn.textContent='Submit'; }
   };
 })();
+
+
+// ── Mini player ─────────────────────────────────────────────────────────────
+let mpLastEntityId = null;
+
+async function mpPoll() {
+  if (typeof authToken === 'undefined' || !authToken) return;
+  try {
+    const resp = await fetch(`/api/music/now_playing?token=${authToken}`, { headers: { 'Authorization': 'Bearer ' + authToken } });
+    const data = await resp.json();
+    const mp = document.getElementById('mini-player');
+    if (!mp) return;
+    const state = data.state || 'off';
+    const song = data.song || '';
+    const artist = data.artist || '';
+    mpLastEntityId = data.entity_id || null;
+    if (state === 'off' || !song) { mp.classList.add('hidden'); return; }
+    mp.classList.remove('hidden');
+    document.getElementById('mp-song').textContent = song;
+    document.getElementById('mp-artist').textContent = artist || '—';
+    const source = data.source || '';
+    let icon;
+    if (source === 'phone') icon = '\u{1F4F1}';
+    else if (source === 'homepod') icon = '\u{1F3E0}';
+    else if (source === 'appletv') icon = '\u{1F4FA}';
+    else if (source === 'sonos') icon = '\u{1F50A}';
+    else if (source === 'apple_music_recent') icon = '\u{1F570}';
+    else icon = '\u{1F3B5}';
+    const srcEl = document.getElementById('mp-source-icon');
+    if (srcEl) { srcEl.textContent = icon; srcEl.title = data.device || source; }
+    const pb = document.getElementById('mp-play');
+    if (pb) {
+      if (state === 'playing') pb.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
+      else pb.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>';
+    }
+  } catch(e) { /* silent */ }
+}
+
+async function mpControl(action) {
+  if (typeof authToken === 'undefined' || !authToken) return;
+  try {
+    await fetch('/api/music/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: authToken, action, entity_id: mpLastEntityId }),
+    });
+    setTimeout(mpPoll, 500);
+  } catch(e) { console.log('mp-control:', e); }
+}
+
+(function startMpPolling(){
+  const tick = () => { mpPoll(); };
+  if (typeof authToken !== 'undefined' && authToken) { tick(); setInterval(tick, 5000); }
+  else {
+    const w = setInterval(() => {
+      if (typeof authToken !== 'undefined' && authToken) { clearInterval(w); tick(); setInterval(tick, 5000); }
+    }, 1000);
+  }
+})();
+
 </script>
 </body>
 </html>

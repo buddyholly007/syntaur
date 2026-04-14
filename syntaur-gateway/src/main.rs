@@ -3665,6 +3665,7 @@ async fn main() {
         .route("/setup", get(setup::handle_setup_page))
         .route("/modules", get(setup::handle_modules_page))
         .route("/journal", get(setup::handle_journal_page))
+        .route("/music", get(setup::handle_music_page))
         .route("/voice-setup", get(setup::handle_voice_setup_page))
         .route("/settings", get(setup::handle_settings_page))
         .route("/tax", get(setup::handle_tax_page))
