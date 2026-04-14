@@ -83,6 +83,7 @@
         <div class="flex-1 min-w-0">
           <p class="text-xs text-gray-500">Music provider</p>
           <p class="text-sm font-medium truncate" id="provider-name">—</p>
+          <p id="spotify-web-player-badge" class="hidden text-[10px] text-green-400 mt-0.5">✓ Spotify Web Player active on this tab</p>
         </div>
       </div>
       <a href="/settings?tab=sync" class="text-xs text-gray-500 hover:text-gray-200">Change →</a>
@@ -456,6 +457,100 @@ async function setEq(entity_id, sound_mode) {
   } catch(e) { /* ignore */ }
 }
 
+// Spotify Web Playback SDK state
+let spotifyPlayer = null;
+let spotifyDeviceId = null;
+let spotifyReady = false;
+
+function loadSpotifySDK() {
+  if (window.Spotify || document.getElementById('spotify-sdk-script')) return;
+  const s = document.createElement('script');
+  s.id = 'spotify-sdk-script';
+  s.src = 'https://sdk.scdn.co/spotify-player.js';
+  document.head.appendChild(s);
+}
+
+window.onSpotifyWebPlaybackSDKReady = function() {
+  // Fetch our access token from the gateway (same-origin)
+  fetch('/api/music/spotify_token?token=' + token, { headers: { 'Authorization': 'Bearer ' + token } })
+    .then(r => r.json())
+    .then(data => {
+      if (!data.access_token) {
+        console.warn('Spotify token unavailable:', data);
+        return;
+      }
+      spotifyPlayer = new Spotify.Player({
+        name: 'Syntaur Web Player',
+        getOAuthToken: cb => cb(data.access_token),
+        volume: 0.7,
+      });
+      spotifyPlayer.addListener('ready', ({ device_id }) => {
+        console.log('[spotify-sdk] ready device', device_id);
+        spotifyDeviceId = device_id;
+        spotifyReady = true;
+        const indicator = document.getElementById('spotify-web-player-badge');
+        if (indicator) indicator.classList.remove('hidden');
+      });
+      spotifyPlayer.addListener('not_ready', ({ device_id }) => {
+        console.warn('[spotify-sdk] not ready', device_id);
+        spotifyReady = false;
+      });
+      spotifyPlayer.addListener('initialization_error', ({ message }) => {
+        console.warn('[spotify-sdk] init error', message);
+      });
+      spotifyPlayer.addListener('authentication_error', ({ message }) => {
+        console.warn('[spotify-sdk] auth error', message);
+        showMusicNotice('Spotify authentication expired. Reconnect in Sync settings.', true);
+      });
+      spotifyPlayer.addListener('account_error', ({ message }) => {
+        console.warn('[spotify-sdk] account error', message, '— needs Premium for web playback');
+      });
+      spotifyPlayer.connect();
+    })
+    .catch(e => console.warn('Spotify token fetch failed:', e));
+};
+
+function showMusicNotice(msg, persist) {
+  let toast = document.getElementById('sync-toast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.id = 'sync-toast';
+    toast.className = 'fixed bottom-4 right-4 bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-sm text-gray-200 shadow-lg z-50';
+    document.body.appendChild(toast);
+  }
+  toast.textContent = msg;
+  toast.style.opacity = '1';
+  clearTimeout(toast._timer);
+  if (!persist) toast._timer = setTimeout(() => { toast.style.opacity = '0'; }, 3500);
+}
+
+async function playSpotifyTrack(trackId) {
+  const uri = 'spotify:track:' + trackId;
+  try {
+    const resp = await fetch('/api/music/spotify_play', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        token: token,
+        uri: uri,
+        device_id: spotifyReady ? spotifyDeviceId : null,
+      }),
+    });
+    const data = await resp.json();
+    if (data.error) {
+      // Fallback: try to open spotify: URL directly
+      if (data.error.includes('No active Spotify device')) {
+        showMusicNotice('Opening Spotify app — install Spotify on your phone/desktop for best playback.');
+        window.location.href = uri;
+      } else {
+        showMusicNotice(data.error);
+      }
+    } else {
+      showMusicNotice('Playing on Spotify ✓');
+    }
+  } catch (e) { showMusicNotice('Play failed: ' + e.message); }
+}
+
 async function checkMusicProvider() {
   try {
     const resp = await authFetch(`/api/sync/providers?token=${token}`);
@@ -483,6 +578,7 @@ async function checkMusicProvider() {
       const label = active.display_name ? `${active.name} (${active.display_name})` : active.name;
       document.getElementById('provider-name').textContent = label;
       window._activeMusicProvider = active.id;
+      if (active.id === 'spotify' && !window.Spotify) loadSpotifySDK();
     }
   } catch(e) { /* ignore */ }
 }
@@ -537,12 +633,22 @@ function renderDjTrack(t) {
   const id = t.id || '';
   const liked = djLikes.has(id);
   const disliked = djDislikes.has(id);
+  const provider = t.provider || window._activeMusicProvider || '';
+  let playBtn = '';
+  if (provider === 'spotify' && id) {
+    playBtn = `<button onclick="playSpotifyTrack('${escapeHtml(id)}')" class="text-xs text-green-400 hover:text-green-300 px-1" title="Play via Spotify Connect">▶</button>`;
+  } else if (provider === 'youtube_music' && id) {
+    playBtn = `<a href="https://music.youtube.com/watch?v=${escapeHtml(id)}" target="_blank" class="text-xs text-red-400 hover:text-red-300 px-1" title="Open in YouTube Music">▶</a>`;
+  } else if (provider === 'apple_music' && id) {
+    playBtn = `<a href="music://music.apple.com/us/song/${escapeHtml(id)}" class="text-xs text-pink-400 hover:text-pink-300 px-1" title="Play in Apple Music">▶</a>`;
+  }
   return `<div class="flex items-center gap-3 py-2 border-b border-gray-800" data-track-id="${escapeHtml(id)}">
     ${art ? `<img src="${art}" class="w-10 h-10 rounded flex-shrink-0" onerror="this.style.display='none'">` : '<div class="w-10 h-10 bg-gray-800 rounded flex-shrink-0"></div>'}
     <div class="flex-1 min-w-0">
       <p class="text-sm truncate">${escapeHtml(t.name || t.query || '')}</p>
       <p class="text-xs text-gray-500 truncate">${escapeHtml(t.artist || '')}</p>
     </div>
+    ${playBtn}
     <button onclick="toggleLike('${escapeHtml(id)}')" class="text-xs ${liked ? 'text-green-400' : 'text-gray-600 hover:text-green-400'} px-1" title="More like this">👍</button>
     <button onclick="toggleDislike('${escapeHtml(id)}')" class="text-xs ${disliked ? 'text-red-400' : 'text-gray-600 hover:text-red-400'} px-1" title="Drop tracks like this">👎</button>
     ${t.url ? `<a href="${escapeHtml(t.url)}" target="_blank" class="text-xs text-oc-500 hover:text-oc-400">Open ↗</a>` : ''}

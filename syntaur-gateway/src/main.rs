@@ -3803,6 +3803,8 @@ async fn main() {
         .route("/api/admin/oauth_config", post(sync::handle_oauth_config_save))
         .route("/api/admin/oauth_config", get(sync::handle_oauth_config_list))
         .route("/api/admin/oauth_config/{identity_provider}", axum::routing::delete(sync::handle_oauth_config_delete))
+        .route("/api/music/spotify_play", post(music::handle_spotify_play))
+        .route("/api/music/spotify_token", get(music::handle_spotify_token))
         .route("/apple_music_capture", get(sync::handle_apple_music_capture_page))
         .with_state(Arc::clone(&state))
         .layer(axum::middleware::from_fn_with_state(
