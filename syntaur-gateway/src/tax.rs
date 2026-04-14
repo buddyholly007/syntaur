@@ -1968,6 +1968,279 @@ pub async fn handle_expense_export(
     Ok((headers, csv))
 }
 
+// ── TXF Export (TurboTax / H&R Block Desktop) ──────────────────────────────
+
+/// Map expense category names to TXF reference numbers (Schedule C lines).
+fn category_to_txf_refnum(category: &str) -> Option<(i32, &'static str)> {
+    match category {
+        "Advertising & Marketing" => Some((304, "Advertising")),
+        "Vehicle & Mileage" => Some((306, "Car and truck expenses")),
+        "Professional Services" => Some((327, "Legal and professional services")),
+        "Office Supplies" => Some((328, "Office expense")),
+        "Rent & Utilities" => Some((337, "Utilities")),
+        "Insurance" => Some((324, "Insurance (other than health)")),
+        "Meals & Entertainment" => Some((294, "Meals & entertainment")),
+        "Travel" => Some((335, "Travel")),
+        "Education & Training" => Some((339, "Other expenses")),
+        "Software & Subscriptions" => Some((339, "Other expenses")),
+        "Equipment & Tools" => Some((313, "Depreciation and section 179")),
+        "Hardware & Supplies" => Some((333, "Supplies")),
+        "Lumber & Raw Materials" => Some((333, "Supplies")),
+        "Tools - Consumables" => Some((333, "Supplies")),
+        "Safety Gear" => Some((333, "Supplies")),
+        "Shipping & Packaging" => Some((339, "Other expenses")),
+        "Miscellaneous Business" => Some((339, "Other expenses")),
+        // Personal deductions (Schedule A)
+        "Medical" => Some((273, "Medicine and drugs")),
+        "Mortgage" => Some((283, "Home mortgage interest")),
+        "Donations" => Some((280, "Cash charitable contributions")),
+        _ => None,
+    }
+}
+
+pub async fn handle_txf_export(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<(axum::http::HeaderMap, String), (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    require_tax_module(&state, principal.user_id()).await?;
+
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let year: i64 = params.get("year").and_then(|y| y.parse().ok()).unwrap_or_else(|| default_tax_year());
+    let start = format!("{}-01-01", year);
+    let end = format!("{}-12-31", year);
+
+    let txf = tokio::task::spawn_blocking(move || -> Result<String, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let now = chrono::Utc::now();
+        let date_str = now.format("%m/%d/%Y").to_string();
+        let mut out = format!("V042\nASyntaur Tax Module\nD{}\n^\n", date_str);
+
+        // ── W-2 Income ──
+        let mut w2_stmt = conn.prepare(
+            "SELECT category, amount_cents, COALESCE(source, '') FROM tax_income WHERE user_id = ? AND tax_year = ?"
+        ).map_err(|e| e.to_string())?;
+        let w2_rows = w2_stmt.query_map(rusqlite::params![uid, year], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?))
+        }).map_err(|e| e.to_string())?;
+
+        for row in w2_rows {
+            let (cat, cents, source) = row.map_err(|e| e.to_string())?;
+            let dollars = cents as f64 / 100.0;
+            match cat.as_str() {
+                c if c.contains("Wage") || c.contains("Salary") => {
+                    out += &format!("TD\nN460\nC1\nL1\n${:.2}\n", dollars);
+                    if !source.is_empty() { out += &format!("X{}\n", source); }
+                    out += "^\n";
+                }
+                c if c.contains("Withholding") => {
+                    out += &format!("TD\nN461\nC1\nL1\n${:.2}\n^\n", -dollars);
+                }
+                c if c.contains("Social Security") && c.contains("Tax") => {
+                    out += &format!("TD\nN462\nC1\nL1\n${:.2}\n^\n", -dollars);
+                }
+                _ => {}
+            }
+        }
+
+        // ── Schedule C Expenses ──
+        let mut exp_stmt = conn.prepare(
+            "SELECT c.name, SUM(e.amount_cents) FROM expenses e \
+             JOIN expense_categories c ON e.category_id = c.id \
+             WHERE e.user_id = ? AND e.entity = 'business' AND e.expense_date >= ? AND e.expense_date <= ? \
+             GROUP BY c.name ORDER BY c.name"
+        ).map_err(|e| e.to_string())?;
+        let exp_rows = exp_stmt.query_map(rusqlite::params![uid, &start, &end], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        }).map_err(|e| e.to_string())?;
+
+        for row in exp_rows {
+            let (cat_name, total_cents) = row.map_err(|e| e.to_string())?;
+            if let Some((refnum, _desc)) = category_to_txf_refnum(&cat_name) {
+                let dollars = total_cents as f64 / 100.0;
+                // Meals at 50%
+                let amount = if cat_name == "Meals & Entertainment" { dollars * 0.5 } else { dollars };
+                out += &format!("TS\nN{}\nC1\nL1\n${:.2}\n^\n", refnum, -amount);
+            }
+        }
+
+        // ── Personal Deductions (Schedule A) ──
+        let mut ded_stmt = conn.prepare(
+            "SELECT c.name, SUM(e.amount_cents) FROM expenses e \
+             JOIN expense_categories c ON e.category_id = c.id \
+             WHERE e.user_id = ? AND e.entity = 'personal' AND c.tax_deductible = 1 \
+             AND e.expense_date >= ? AND e.expense_date <= ? \
+             GROUP BY c.name ORDER BY c.name"
+        ).map_err(|e| e.to_string())?;
+        let ded_rows = ded_stmt.query_map(rusqlite::params![uid, &start, &end], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        }).map_err(|e| e.to_string())?;
+
+        for row in ded_rows {
+            let (cat_name, total_cents) = row.map_err(|e| e.to_string())?;
+            if let Some((refnum, _desc)) = category_to_txf_refnum(&cat_name) {
+                let dollars = total_cents as f64 / 100.0;
+                out += &format!("TS\nN{}\nC1\nL1\n${:.2}\n^\n", refnum, -dollars);
+            }
+        }
+
+        // ── Capital Gains (Form 8949 / Schedule D) ──
+        let mut inv_stmt = conn.prepare(
+            "SELECT symbol, side, qty, price_cents, amount_cents, activity_type, transaction_date, external_id \
+             FROM investment_transactions WHERE user_id = ? AND transaction_date >= ? AND transaction_date <= ? \
+             ORDER BY transaction_date"
+        ).map_err(|e| e.to_string())?;
+        let inv_rows = inv_stmt.query_map(rusqlite::params![uid, &start, &end], |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<f64>>(2)?, r.get::<_, Option<i64>>(3)?,
+                r.get::<_, i64>(4)?, r.get::<_, String>(5)?,
+                r.get::<_, String>(6)?, r.get::<_, Option<String>>(7)?,
+            ))
+        }).map_err(|e| e.to_string())?;
+
+        for row in inv_rows {
+            let (symbol, side, qty, price_cents, amount_cents, activity_type, date, _ext_id) = row.map_err(|e| e.to_string())?;
+            if activity_type == "dividend" || side.as_deref() == Some("dividend") { continue; }
+            let is_long = activity_type == "long_term";
+            let refnum = if is_long { 323 } else { 321 }; // 321=short-term, 323=long-term
+            let symbol_str = symbol.as_deref().unwrap_or("Unknown");
+            let qty_val = qty.unwrap_or(0.0);
+            let desc = format!("{:.4} {}", qty_val, symbol_str);
+            let cost = price_cents.unwrap_or(0) as f64 * qty_val / 100.0;
+            let proceeds = amount_cents as f64 / 100.0;
+            // Format date MM/DD/YYYY
+            let txf_date = if date.len() >= 10 {
+                format!("{}/{}/{}", &date[5..7], &date[8..10], &date[..4])
+            } else { date.clone() };
+            out += &format!("TD\nN{}\nC1\nL1\nP{}\nDVARIOUS\nD{}\n${:.2}\n${:.2}\n^\n",
+                refnum, desc, txf_date, cost.abs(), proceeds.abs());
+        }
+
+        Ok(out)
+    }).await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("content-type", "application/x-txf".parse().unwrap());
+    headers.insert("content-disposition", format!("attachment; filename=\"syntaur-tax-{}.txf\"", year).parse().unwrap());
+    Ok((headers, txf))
+}
+
+// ── CSV Export with IRS Categories ─────────────────────────────────────────
+
+pub async fn handle_csv_irs_export(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<(axum::http::HeaderMap, String), (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    require_tax_module(&state, principal.user_id()).await?;
+
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let year: i64 = params.get("year").and_then(|y| y.parse().ok()).unwrap_or_else(|| default_tax_year());
+
+    let csv = tokio::task::spawn_blocking(move || -> Result<String, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let est = compute_tax_estimate(&conn, uid, year, "married_jointly")?;
+        let d = |c: i64| cents_to_display(c);
+        let start = format!("{}-01-01", year);
+        let end = format!("{}-12-31", year);
+
+        let mut lines: Vec<String> = vec![
+            "Section,IRS Form/Line,Description,Amount".to_string(),
+            format!("Income,1040 Line 1,Gross Income,{}", d(est.gross_income)),
+        ];
+
+        if est.se_income > 0 {
+            lines.push(format!("Income,1040 / Sched 1,W-2 Wages,{}", d(est.w2_income)));
+            lines.push(format!("Income,1040 / Sched 1,Self-Employment Income (1099),{}", d(est.se_income)));
+        }
+
+        // Schedule C expenses by category
+        let mut exp_stmt = conn.prepare(
+            "SELECT c.name, SUM(e.amount_cents) FROM expenses e \
+             JOIN expense_categories c ON e.category_id = c.id \
+             WHERE e.user_id = ? AND e.entity = 'business' AND e.expense_date >= ? AND e.expense_date <= ? \
+             GROUP BY c.name ORDER BY c.name"
+        ).map_err(|e| e.to_string())?;
+        let exp_rows = exp_stmt.query_map(rusqlite::params![uid, &start, &end], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        }).map_err(|e| e.to_string())?;
+        for row in exp_rows {
+            let (cat, cents) = row.map_err(|e| e.to_string())?;
+            let sched_c_line = match cat.as_str() {
+                "Advertising & Marketing" => "Sched C Line 8",
+                "Vehicle & Mileage" => "Sched C Line 9",
+                "Professional Services" => "Sched C Line 17",
+                "Office Supplies" => "Sched C Line 18",
+                "Insurance" => "Sched C Line 15",
+                "Meals & Entertainment" => "Sched C Line 24b",
+                "Travel" => "Sched C Line 24a",
+                "Rent & Utilities" => "Sched C Line 25",
+                "Hardware & Supplies" | "Lumber & Raw Materials" | "Tools - Consumables" | "Safety Gear" => "Sched C Line 22",
+                "Equipment & Tools" => "Sched C Line 13",
+                "Software & Subscriptions" => "Sched C Line 27",
+                _ => "Sched C Line 27",
+            };
+            lines.push(format!("Business Expense,{},{},{}", sched_c_line, cat.replace(',', ";"), d(cents)));
+        }
+
+        // Summary
+        lines.push(format!("Calculation,Schedule C Line 28,Total Business Deductions,{}", d(est.biz_deductions)));
+        if est.meals_adjustment > 0 {
+            lines.push(format!("Calculation,Sched C Line 24b,Meals 50% Disallowed,{}", d(est.meals_adjustment)));
+        }
+        if est.se_tax > 0 {
+            lines.push(format!("Calculation,Schedule SE,Self-Employment Tax,{}", d(est.se_tax)));
+            lines.push(format!("Calculation,Schedule 1 Line 15,Deductible Half SE Tax,{}", d(est.half_se_tax)));
+        }
+        if est.se_health_deduction > 0 {
+            lines.push(format!("Calculation,Schedule 1 Line 17,SE Health Insurance Deduction,{}", d(est.se_health_deduction)));
+        }
+        lines.push(format!("Calculation,1040 Line 11,Adjusted Gross Income,{}", d(est.agi)));
+        lines.push(format!("Calculation,1040 Line 12,{} Deduction,{}", est.deduction_type, d(est.deduction_used)));
+        if est.qbi_deduction > 0 {
+            lines.push(format!("Calculation,1040 Line 13,QBI Deduction (Section 199A),{}", d(est.qbi_deduction)));
+        }
+        lines.push(format!("Calculation,1040 Line 15,Taxable Income,{}", d(est.taxable_income)));
+        lines.push(format!("Tax,1040 Line 16,Federal Income Tax,{}", d(est.ordinary_tax)));
+        if est.ltcg_tax > 0 {
+            lines.push(format!("Tax,Schedule D,Long-Term Capital Gains Tax,{}", d(est.ltcg_tax)));
+        }
+        if est.se_tax > 0 {
+            lines.push(format!("Tax,Schedule SE,Self-Employment Tax,{}", d(est.se_tax)));
+        }
+        lines.push(format!("Tax,,Total Tax,{}", d(est.total_tax)));
+        if est.w2_withheld > 0 {
+            lines.push(format!("Payment,W-2 Box 2,Federal Withholding,{}", d(est.w2_withheld)));
+        }
+        if est.fed_paid > 0 {
+            lines.push(format!("Payment,1040-ES,Estimated Tax Payments,{}", d(est.fed_paid)));
+        }
+        if est.child_credit > 0 {
+            lines.push(format!("Credit,1040 Line 19,Child Tax Credit,{}", d(est.child_credit)));
+        }
+        lines.push(format!("Result,,{},{}", if est.owed > 0 { "Tax Due" } else { "Refund" }, d(est.owed.abs())));
+        lines.push(format!("Rate,,Effective Tax Rate,{:.1}%", est.effective_rate));
+
+        Ok(lines.join("\n"))
+    }).await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("content-type", "text/csv".parse().unwrap());
+    headers.insert("content-disposition", format!("attachment; filename=\"syntaur-tax-summary-{}.csv\"", year).parse().unwrap());
+    Ok((headers, csv))
+}
+
 // ── Item 10: Smart Document Routing ─────────────────────────────────────────
 
 /// Unified upload: accept any file, auto-classify it, route to the right handler.

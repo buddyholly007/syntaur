@@ -124,11 +124,45 @@
       </div>
     </details>
 
+    <!-- Export to Tax Software -->
+    <div class="card mb-4">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-medium text-sm">Export to Tax Software</h3>
+        <span id="export-year-label" class="text-xs text-gray-500"></span>
+      </div>
+      <div class="grid grid-cols-3 gap-3 mb-3">
+        <a href="#" id="export-txf" class="flex flex-col items-center gap-1.5 p-3 bg-gray-900 rounded-lg hover:bg-gray-800 border border-gray-700 transition-colors text-center">
+          <span class="text-lg">&#128190;</span>
+          <span class="text-xs text-white font-medium">TXF File</span>
+          <span class="text-[10px] text-gray-500">TurboTax / H&amp;R Block Desktop</span>
+        </a>
+        <a href="#" id="export-csv-irs" class="flex flex-col items-center gap-1.5 p-3 bg-gray-900 rounded-lg hover:bg-gray-800 border border-gray-700 transition-colors text-center">
+          <span class="text-lg">&#128200;</span>
+          <span class="text-xs text-white font-medium">IRS Summary CSV</span>
+          <span class="text-[10px] text-gray-500">CPA / Any software</span>
+        </a>
+        <a href="#" id="export-csv-raw" class="flex flex-col items-center gap-1.5 p-3 bg-gray-900 rounded-lg hover:bg-gray-800 border border-gray-700 transition-colors text-center">
+          <span class="text-lg">&#128196;</span>
+          <span class="text-xs text-white font-medium">Expense CSV</span>
+          <span class="text-[10px] text-gray-500">All transactions</span>
+        </a>
+      </div>
+      <details class="text-xs text-gray-500">
+        <summary class="cursor-pointer hover:text-gray-300">Import instructions</summary>
+        <div class="mt-2 space-y-1.5 pl-2 border-l border-gray-700">
+          <p><strong class="text-gray-300">TurboTax Desktop:</strong> File &rarr; Import &rarr; From Accounting Software &rarr; select the .txf file</p>
+          <p><strong class="text-gray-300">H&amp;R Block Desktop:</strong> File &rarr; Import Financial Information &rarr; browse for .txf file</p>
+          <p><strong class="text-gray-300">TaxAct:</strong> Use the IRS Summary CSV as reference for manual entry</p>
+          <p><strong class="text-gray-300">CPA / Tax preparer:</strong> Send the IRS Summary CSV — it maps every line to the correct IRS form</p>
+          <p class="text-gray-600 mt-1">Note: TurboTax Online and H&amp;R Block Online do not accept file imports. Desktop versions are required for TXF import.</p>
+        </div>
+      </details>
+    </div>
+
     <!-- Category breakdown -->
     <div class="card">
       <div class="flex items-center justify-between mb-4">
         <h3 class="font-medium">By Category</h3>
-        <a href="/api/tax/export?token=" id="export-link" class="btn-primary text-xs">Export CSV</a>
       </div>
       <div id="category-list" class="space-y-2">
         <p class="text-xs text-gray-600">Loading...</p>
@@ -795,7 +829,11 @@ async function loadOverview() {
     document.getElementById('sum-business').textContent = data.business_display || '$0.00';
     document.getElementById('sum-deductible').textContent = data.deductible_display || '$0.00';
     document.getElementById('sum-receipts').textContent = data.receipt_count || '0';
-    document.getElementById('export-link').href = `/api/tax/export?token=${token}&start=${yearStart()}&end=${yearEnd()}`;
+    const yr = selectedYear || yearStart().slice(0,4);
+    document.getElementById('export-txf').href = `/api/tax/export/txf?token=${token}&year=${yr}`;
+    document.getElementById('export-csv-irs').href = `/api/tax/export/csv-irs?token=${token}&year=${yr}`;
+    document.getElementById('export-csv-raw').href = `/api/tax/export?token=${token}&start=${yearStart()}&end=${yearEnd()}`;
+    document.getElementById('export-year-label').textContent = `Tax Year ${yr}`;
 
     const cats = data.categories || [];
     const list = document.getElementById('category-list');
