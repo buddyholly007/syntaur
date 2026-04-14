@@ -152,7 +152,22 @@
                   <input class="input flex-1 text-xs" id="setup-or-key" placeholder="sk-or-v1-...">
                   <button onclick="saveProvider('openrouter','https://openrouter.ai/api/v1',document.getElementById('setup-or-key').value,'openai-completions','nvidia/nemotron-3-super-120b-a12b:free')" class="btn-primary text-xs">Save</button>
                 </div>
-                <p class="text-[10px] text-gray-600 mt-1">Free model: nvidia/nemotron-3-super-120b-a12b:free (262K context). $10 credit unlocks 1000 req/day.</p>
+                <div class="mt-2 p-2 bg-gray-800/50 rounded-lg text-[11px] space-y-1">
+                  <p class="text-gray-400">Free model: <span class="text-gray-300">nvidia/nemotron-3-super-120b-a12b:free</span> (262K context)</p>
+                  <div class="flex gap-4 text-gray-500">
+                    <div>
+                      <p class="text-gray-500 font-medium">Without credits</p>
+                      <p>50 requests/day</p>
+                      <p>20 requests/min</p>
+                    </div>
+                    <div>
+                      <p class="text-green-500 font-medium">With $10+ credits</p>
+                      <p>1,000 requests/day</p>
+                      <p>Dynamic rate limit</p>
+                    </div>
+                  </div>
+                  <p class="text-gray-600">Adding just $10 in credits unlocks 20x more daily requests &mdash; free models still cost $0, the balance just proves you're a real user. <a href="https://openrouter.ai/credits" target="_blank" class="text-oc-500 hover:text-oc-400">Add credits &rarr;</a></p>
+                </div>
               </div>
               <div class="p-3 bg-gray-900/50 rounded-lg border border-gray-800">
                 <p class="text-gray-300 font-medium mb-2">Anthropic (Claude)</p>
