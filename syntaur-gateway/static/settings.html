@@ -247,6 +247,36 @@
               <p class="text-xs text-gray-400 p-3 bg-gray-900/50 rounded-lg border border-gray-800">Set up a cloud provider above as primary, then add a local model as fallback. Syntaur tries the primary first and falls back automatically if it fails or is unreachable.</p>
             </div>
           </details>
+          <details class="group">
+            <summary class="flex items-center gap-3 p-3 rounded-lg bg-gray-900 hover:bg-gray-800 cursor-pointer transition-colors">
+              <span class="text-lg">&#128247;</span>
+              <div class="flex-1">
+                <p class="text-sm font-medium text-white">Vision Model (Receipt/Document Scanning)</p>
+                <p class="text-xs text-gray-500">Local GPU or cloud model for scanning receipts and tax documents</p>
+              </div>
+              <span class="text-xs text-gray-600 group-open:rotate-90 transition-transform">&#9654;</span>
+            </summary>
+            <div class="mt-2 ml-9 space-y-3 text-sm">
+              <div class="p-3 bg-gray-900/50 rounded-lg border border-gray-800">
+                <p class="text-gray-300 font-medium mb-2">Local GPU (fastest, private)</p>
+                <p class="text-xs text-gray-400 mb-2">If you have an NVIDIA GPU, Syntaur can scan receipts locally. Your documents never leave your machine.</p>
+                <ol class="text-xs text-gray-400 space-y-1 list-decimal ml-4">
+                  <li>Install <a href="https://ollama.ai" target="_blank" class="text-oc-500">Ollama</a> or <a href="https://github.com/ggml-org/llama.cpp" target="_blank" class="text-oc-500">llama.cpp</a></li>
+                  <li>Download a vision model: <code class="bg-gray-800 px-1 rounded">ollama pull qwen2.5-vl:7b</code></li>
+                  <li>Enter the endpoint below</li>
+                </ol>
+                <div class="flex gap-2 mt-2">
+                  <input class="input flex-1 text-xs" id="setup-vision-url" placeholder="http://localhost:11434/v1" value="">
+                  <button onclick="saveVisionModel(document.getElementById('setup-vision-url').value)" class="btn-primary text-xs">Save</button>
+                </div>
+                <p class="text-[10px] text-gray-600 mt-1">Recommended: Qwen2.5-VL-7B (4.7GB, needs 8GB+ VRAM). Also works: MiniCPM-V, LLaVA.</p>
+              </div>
+              <div class="p-3 bg-gray-900/50 rounded-lg border border-gray-800">
+                <p class="text-gray-300 font-medium mb-2">Cloud (no GPU needed)</p>
+                <p class="text-xs text-gray-400">If no vision model is configured, Syntaur uses your cloud provider for scanning. OpenRouter's free Nemotron Nano VL model works well. No additional setup needed.</p>
+              </div>
+            </div>
+          </details>
         </div>
         <span id="setup-result" class="text-sm mt-2 block"></span>
       </div>
@@ -2063,6 +2093,28 @@ async function saveProvider(name, baseUrl, apiKey, apiType, modelId) {
       result.className = 'text-sm mt-2 block text-red-400';
       result.textContent = data.error || 'Failed to save provider.';
     }
+  } catch(e) {
+    result.className = 'text-sm mt-2 block text-red-400';
+    result.textContent = 'Error: ' + e.message;
+  }
+}
+
+// Save vision model config
+async function saveVisionModel(visionUrl) {
+  const result = document.getElementById('setup-result');
+  if (!visionUrl) { result.textContent = 'Enter a vision model URL'; result.className = 'text-sm mt-2 block text-red-400'; return; }
+  result.className = 'text-sm mt-2 block text-gray-400';
+  result.textContent = 'Saving vision model...';
+  try {
+    // Save as a provider named "vision" and also set models.vision
+    await saveProvider('vision', visionUrl, '', 'openai-completions', 'qwen2.5-vl');
+    // Also update the models.vision field
+    const resp = await fetch('/api/settings/provider', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ token, name: '__vision_config__', base_url: visionUrl, api_key: '', api: 'openai-completions', model_id: 'qwen2.5-vl' })
+    });
+    result.className = 'text-sm mt-2 block text-green-400';
+    result.textContent = 'Vision model saved! Receipts will be scanned locally.';
   } catch(e) {
     result.className = 'text-sm mt-2 block text-red-400';
     result.textContent = 'Error: ' + e.message;

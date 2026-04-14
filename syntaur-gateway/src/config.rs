@@ -218,6 +218,10 @@ pub struct ModelSelection {
     /// (research planning, report synthesis, internal naming).
     /// Falls back to `primary` when unset.
     pub fast: Option<String>,
+    /// Optional vision-capable model for image analysis (receipt scanning,
+    /// document OCR). Falls back to cloud vision model when unset.
+    /// Format: "provider/model" e.g. "local-gpu/qwen2.5-vl-7b"
+    pub vision: Option<String>,
     #[serde(flatten)]
     pub extra: HashMap<String, serde_json::Value>,
 }
