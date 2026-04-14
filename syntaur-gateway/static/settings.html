@@ -655,6 +655,31 @@ function renderSyncProviders() {
   }).join('');
 }
 
+function renderInstructions(text) {
+  if (!text) return '';
+  // If the text contains "1. ..." pattern, render as numbered list
+  const stepRegex = /\s*(\d+)\.\s+/g;
+  const matches = [...text.matchAll(stepRegex)];
+  if (matches.length < 2) {
+    // Not a numbered list — return as paragraph
+    return `<p class="text-sm text-gray-300 mb-3">${escapeHtml(text)}</p>`;
+  }
+  // Split on step numbers and build <ol>
+  const parts = text.split(/\s*\d+\.\s+/).filter(p => p.trim());
+  // If there's a prefix before the first "1.", keep it as lead-in
+  const firstMatchIdx = text.search(/\d+\.\s+/);
+  const lead = firstMatchIdx > 0 ? text.substring(0, firstMatchIdx).trim() : '';
+  const items = lead ? parts : parts;
+  let html = '';
+  if (lead) html += `<p class="text-sm text-gray-300 mb-2">${escapeHtml(lead)}</p>`;
+  html += '<ol class="text-sm text-gray-300 space-y-1.5 mb-3 list-decimal list-inside ml-1">';
+  for (const item of items) {
+    html += `<li class="leading-relaxed">${escapeHtml(item.trim())}</li>`;
+  }
+  html += '</ol>';
+  return html;
+}
+
 function renderProviderCard(p) {
   const icons = {
     gmail: '&#9993;', google_calendar: '&#128197;', ics_subscription: '&#128197;',
@@ -707,13 +732,16 @@ function openSyncModal(providerId) {
   if (!p) return;
   document.getElementById('sync-modal-title').textContent = 'Connect ' + p.name;
   const body = document.getElementById('sync-modal-body');
-  const helpLink = p.help_url ? `<a href="${p.help_url}" target="_blank" class="text-oc-500 hover:text-oc-400 text-xs underline">Get your ${p.name} credentials →</a>` : '';
+  const helpLink = p.help_url ? `<a href="${p.help_url}" target="_blank" class="inline-flex items-center gap-1.5 bg-gray-900 border border-gray-700 hover:border-oc-500 rounded-lg px-3 py-2 text-sm text-oc-500 hover:text-oc-400 my-2">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3"/></svg>
+      Open ${escapeHtml(p.name)}
+    </a>` : '';
   let flowHtml = '';
   if (p.flow === 'oauth') {
-    flowHtml = `<p class="text-sm text-gray-300 mb-3">${escapeHtml(p.instructions)}</p>
+    flowHtml = `${renderInstructions(p.instructions)}
       <button onclick="startOAuth('${p.id}')" class="w-full bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Continue with ${escapeHtml(p.name)}</button>`;
   } else if (p.flow === 'url') {
-    flowHtml = `<p class="text-sm text-gray-300 mb-3">${escapeHtml(p.instructions)}</p>
+    flowHtml = `${renderInstructions(p.instructions)}
       ${helpLink}
       <input type="url" id="sync-url-field" class="w-full mt-3 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="https://...ics or webcal://...">
       <button onclick="submitUrl('${p.id}')" id="sync-submit-btn" class="w-full mt-3 bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Test & Save</button>
@@ -739,8 +767,10 @@ function openSyncModal(providerId) {
     } else if (p.id === 'simplefin') {
       fields = `<input id="sync-field-setup_token" type="password" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="Setup token">`;
     } else if (p.id === 'home_assistant') {
-      fields = `<input id="sync-field-url" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="http://homeassistant.local:8123" value="http://homeassistant.local:8123">
+      fields = `<div id="sync-ha-discover-status" class="text-xs text-gray-500 italic mb-1">Searching for Home Assistant on your network…</div>
+        <input id="sync-field-url" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="http://homeassistant.local:8123" value="">
         <input id="sync-field-token" type="password" class="w-full mt-2 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="Long-lived access token">`;
+      setTimeout(() => discoverHA(), 100);
     } else if (p.id === 'plex') {
       fields = `<input id="sync-field-token" type="password" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="X-Plex-Token">`;
     } else if (p.id === 'github' || p.id === 'oura' || p.id === 'anthropic_usage' || p.id === 'openrouter_usage') {
@@ -748,30 +778,29 @@ function openSyncModal(providerId) {
     } else {
       fields = `<input id="sync-field-api_key" type="password" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="API key">`;
     }
-    flowHtml = `<p class="text-sm text-gray-300 mb-3">${escapeHtml(p.instructions)}</p>
+    flowHtml = `${renderInstructions(p.instructions)}
       ${helpLink}
       <div class="mt-3 space-y-2">${fields}</div>
       <button onclick="submitApiKey('${p.id}')" id="sync-submit-btn" class="w-full mt-3 bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Test & Save</button>
       <p id="sync-error" class="text-xs text-red-400 mt-2 hidden"></p>`;
   } else if (p.flow === 'pairing') {
-    flowHtml = `<p class="text-sm text-gray-300 mb-3">${escapeHtml(p.instructions)}</p>
+    flowHtml = `${renderInstructions(p.instructions)}
       <div id="sync-qr-container" class="text-center py-4"><p class="text-xs text-gray-500">Generating code…</p></div>`;
     setTimeout(() => startPairing(p.id), 100);
   } else if (p.flow === 'link_sdk') {
-    flowHtml = `<p class="text-sm text-gray-300 mb-3">${escapeHtml(p.instructions)}</p>
+    flowHtml = `${renderInstructions(p.instructions)}
       <p class="text-xs text-gray-500 italic">Plaid Link requires the financial tab's setup flow. Coming soon to this panel.</p>`;
   } else if (p.flow === 'caldav') {
-    flowHtml = `<p class="text-sm text-gray-300 mb-3">${escapeHtml(p.instructions)}</p>
+    flowHtml = `${renderInstructions(p.instructions)}
       ${helpLink}
       <div class="mt-3 space-y-2">
         <input id="sync-field-username" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="iCloud email (e.g. you@icloud.com)">
-        <input id="sync-field-password" type="password" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="App-specific password">
-        <input id="sync-field-url" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="CalDAV URL (leave blank for iCloud auto-discovery)" value="https://caldav.icloud.com/">
+        <input id="sync-field-password" type="password" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="App-specific password (xxxx-xxxx-xxxx-xxxx)">
       </div>
-      <button onclick="submitApiKey('${p.id}')" id="sync-submit-btn" class="w-full mt-3 bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Test & Save</button>
+      <button onclick="submitApiKey('${p.id}')" id="sync-submit-btn" class="w-full mt-3 bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Connect</button>
       <p id="sync-error" class="text-xs text-red-400 mt-2 hidden"></p>`;
   } else if (p.flow === 'crypto') {
-    flowHtml = `<p class="text-sm text-gray-300 mb-3">${escapeHtml(p.instructions)}</p>
+    flowHtml = `${renderInstructions(p.instructions)}
       <div class="mt-3 space-y-2">
         <select id="sync-field-chain" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm">
           <option value="btc">Bitcoin (BTC)</option>
@@ -783,7 +812,7 @@ function openSyncModal(providerId) {
       <button onclick="submitApiKey('${p.id}')" id="sync-submit-btn" class="w-full mt-3 bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Test & Save</button>
       <p id="sync-error" class="text-xs text-red-400 mt-2 hidden"></p>`;
   } else if (p.flow === 'file_upload') {
-    flowHtml = `<p class="text-sm text-gray-300 mb-3">${escapeHtml(p.instructions)}</p>
+    flowHtml = `${renderInstructions(p.instructions)}
       ${helpLink}
       <div class="mt-3">
         <label class="block w-full border-2 border-dashed border-gray-700 hover:border-oc-500 rounded-lg p-6 text-center cursor-pointer transition-colors">
@@ -796,9 +825,15 @@ function openSyncModal(providerId) {
       <button onclick="submitFileUpload('${p.id}')" id="sync-submit-btn" class="w-full mt-3 bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Upload</button>
       <p id="sync-error" class="text-xs text-red-400 mt-2 hidden"></p>`;
   } else if (p.flow === 'status') {
-    flowHtml = `<p class="text-sm text-gray-300 mb-3">${escapeHtml(p.instructions)}</p>
+    flowHtml = `${renderInstructions(p.instructions)}
       <div id="sync-status-container" class="mt-3"><p class="text-xs text-gray-500">Checking status…</p></div>`;
     setTimeout(() => loadStatusCard(p.id), 100);
+  } else if (p.flow === 'plex_pin') {
+    flowHtml = `${renderInstructions(p.instructions)}
+      <div id="sync-plex-pin-container" class="text-center py-4">
+        <p class="text-xs text-gray-500">Generating code…</p>
+      </div>`;
+    setTimeout(() => startPlexPin(), 100);
   }
   body.innerHTML = flowHtml;
   document.getElementById('sync-modal').classList.remove('hidden');
@@ -807,6 +842,7 @@ function openSyncModal(providerId) {
 function closeSyncModal() {
   document.getElementById('sync-modal').classList.add('hidden');
   if (syncPairPollTimer) { clearInterval(syncPairPollTimer); syncPairPollTimer = null; }
+  if (typeof plexPinPollTimer !== 'undefined' && plexPinPollTimer) { clearInterval(plexPinPollTimer); plexPinPollTimer = null; }
 }
 
 async function startOAuth(providerId) {
@@ -905,6 +941,67 @@ async function startPairing(providerId) {
     }, 2000);
   } catch(e) {
     container.innerHTML = '<p class="text-xs text-red-400">Failed to generate code: ' + e.message + '</p>';
+  }
+}
+
+async function discoverHA() {
+  const statusEl = document.getElementById('sync-ha-discover-status');
+  const urlField = document.getElementById('sync-field-url');
+  if (!statusEl || !urlField) return;
+  try {
+    const resp = await fetch(`/api/sync/homeassistant/discover?token=${token}`, { headers: { 'Authorization': 'Bearer ' + token } });
+    const data = await resp.json();
+    if (data.suggested_url) {
+      urlField.value = data.suggested_url;
+      statusEl.innerHTML = `<span class="text-green-400">✓ Found at <code>${escapeHtml(data.suggested_url)}</code></span> — just paste your token below`;
+    } else {
+      statusEl.innerHTML = `<span class="text-yellow-400">Couldn\'t auto-detect. Enter your HA URL manually.</span>`;
+      urlField.placeholder = 'http://homeassistant.local:8123';
+    }
+  } catch(e) {
+    statusEl.innerHTML = `<span class="text-gray-500">Auto-detect failed — enter URL manually.</span>`;
+  }
+}
+
+let plexPinPollTimer = null;
+async function startPlexPin() {
+  const container = document.getElementById('sync-plex-pin-container');
+  try {
+    const resp = await fetch('/api/sync/plex/pin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: token })
+    });
+    if (!resp.ok) throw new Error('PIN creation failed');
+    const data = await resp.json();
+    container.innerHTML = `
+      <div class="bg-gray-900 rounded-lg p-4 mb-3">
+        <p class="text-xs text-gray-500 mb-1">Your code:</p>
+        <p class="text-3xl font-mono tracking-widest text-oc-500">${data.code}</p>
+      </div>
+      <p class="text-sm text-gray-300">Go to <a href="${data.link_url}" target="_blank" class="text-oc-500 underline">plex.tv/link</a> on any device and enter this code.</p>
+      <p id="plex-pin-status" class="text-xs text-gray-400 mt-3">Waiting for you to sign in…</p>
+    `;
+    // Poll every 2 seconds
+    plexPinPollTimer = setInterval(async () => {
+      try {
+        const r = await fetch('/api/sync/plex/poll', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: token, pin_id: data.pin_id, client_id: data.client_id })
+        });
+        if (!r.ok) return;
+        const status = await r.json();
+        if (status.success) {
+          clearInterval(plexPinPollTimer);
+          plexPinPollTimer = null;
+          document.getElementById('plex-pin-status').innerHTML = `<span class="text-green-400">Signed in as ${escapeHtml(status.username)}</span>`;
+          setTimeout(() => { closeSyncModal(); loadSyncProviders(); }, 1200);
+        }
+      } catch(e) {}
+    }, 2000);
+  } catch(e) {
+    container.innerHTML = `<p class="text-xs text-red-400">Failed to generate PIN: ${e.message}</p>`;
   }
 }
 

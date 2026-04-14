@@ -3766,6 +3766,9 @@ async fn main() {
         .route("/api/sync/health/upload", post(sync::handle_health_upload))
         .route("/api/sync/notebooklm/status", get(sync::handle_notebooklm_status))
         .route("/api/sync/vault/status", get(sync::handle_vault_status))
+        .route("/api/sync/homeassistant/discover", get(sync::handle_ha_discover))
+        .route("/api/sync/plex/pin", post(sync::handle_plex_pin_create))
+        .route("/api/sync/plex/poll", post(sync::handle_plex_pin_poll))
         .with_state(Arc::clone(&state))
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),

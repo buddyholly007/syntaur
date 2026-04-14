@@ -28,10 +28,11 @@ pub enum FlowKind {
     UrlOnly,      // Just a URL (ICS subscription)
     Pairing,      // Short code + QR (Telegram)
     LinkSdk,      // External SDK handles it (Plaid Link)
-    CalDav,       // URL + username + app-specific password (Apple/Nextcloud)
+    CalDav,       // Username + app-specific password (iCloud auto-discovery)
     Crypto,       // Wallet address + chain (public read-only)
     FileUpload,   // File drop (Apple Health export)
     StatusOnly,   // Read-only info card (NotebookLM auth, Vault health)
+    PlexPin,      // Plex device-auth PIN (no copy-paste)
 }
 
 pub struct ProviderDef {
@@ -77,14 +78,14 @@ pub fn catalog() -> Vec<ProviderDef> {
         ProviderDef {
             id: "stripe", name: "Stripe", category: "Finance",
             flow: FlowKind::ApiKey,
-            instructions: "Paste a restricted (read-only) secret key. Used to pull receipts and payout data for taxes.",
+            instructions: "1. Click the button below.  2. On Stripe, click \"+ Create restricted key\".  3. Name it Syntaur, set Charges/Customers/Invoices to Read.  4. Copy the rk_live_... key and paste it here.",
             help_url: "https://dashboard.stripe.com/apikeys",
             scopes: &[],
         },
         ProviderDef {
             id: "bluesky", name: "Bluesky", category: "Social",
             flow: FlowKind::ApiKey,
-            instructions: "Enter your handle and an app password (not your main password).",
+            instructions: "Bluesky uses app passwords for third-party apps:  1. Click the button below — Bluesky app password settings.  2. Tap + Add App Password → name it Syntaur → Create.  3. Copy the generated password and paste below with your handle.",
             help_url: "https://bsky.app/settings/app-passwords",
             scopes: &[],
         },
@@ -105,7 +106,7 @@ pub fn catalog() -> Vec<ProviderDef> {
         ProviderDef {
             id: "alpaca", name: "Alpaca (Broker)", category: "Finance",
             flow: FlowKind::ApiKey,
-            instructions: "Paste your Alpaca API key and secret. Tracks portfolio holdings and trade activity.",
+            instructions: "1. Click the button below — opens your Alpaca dashboard.  2. Scroll to the right sidebar → \"Your API Keys\" → click View → Generate New Key.  3. Copy both the Key ID and Secret Key into the fields below.  Default is Paper (safe). Switch to Live only if you want real trading.",
             help_url: "https://app.alpaca.markets/paper/dashboard/overview",
             scopes: &[],
         },
@@ -120,30 +121,30 @@ pub fn catalog() -> Vec<ProviderDef> {
         ProviderDef {
             id: "github", name: "GitHub", category: "Developer",
             flow: FlowKind::ApiKey,
-            instructions: "Paste a fine-grained Personal Access Token (classic PATs also work). Used to surface failing CI runs, open PRs, and unread notifications on your dashboard.",
-            help_url: "https://github.com/settings/tokens?type=beta",
-            scopes: &[("read", "Read repo status + notifications"), ("write", "Read + comment/close issues")],
+            instructions: "1. Click the button below — GitHub opens with the right scopes pre-selected.  2. Name it \"Syntaur\" (already filled).  3. Click Generate token at the bottom.  4. Copy the token (starts with ghp_) and paste it here.",
+            help_url: "https://github.com/settings/tokens/new?description=Syntaur&scopes=repo,notifications,read:user",
+            scopes: &[],
         },
         ProviderDef {
             id: "home_assistant", name: "Home Assistant", category: "Smart Home",
             flow: FlowKind::ApiKey,
-            instructions: "Paste your HA URL (e.g. http://homeassistant.local:8123) and a long-lived access token. Syntaur learns your devices and gives Peter voice full HA control.",
+            instructions: "Syntaur auto-discovers your Home Assistant on the network. You just need a token:  1. Open your HA dashboard, click your profile (bottom-left).  2. Security tab → scroll to \"Long-Lived Access Tokens\" → Create Token.  3. Name it Syntaur, copy the token, paste it below.",
             help_url: "https://www.home-assistant.io/docs/authentication/#your-account-profile",
             scopes: &[],
         },
         ProviderDef {
             id: "plex", name: "Plex", category: "Media",
-            flow: FlowKind::ApiKey,
-            instructions: "Paste your plex.tv auth token and server URL. Peter can query 'what were we watching last night' and control playback.",
-            help_url: "https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/",
+            flow: FlowKind::PlexPin,
+            instructions: "1. Click Connect — we generate a 4-character code.  2. On any device, go to plex.tv/link and enter the code.  3. Syntaur detects when you\'re signed in (usually 5-10 seconds). No token to copy.",
+            help_url: "",
             scopes: &[],
         },
         ProviderDef {
             id: "apple_calendar", name: "Apple Calendar (iCloud)", category: "Calendar",
             flow: FlowKind::CalDav,
-            instructions: "Enter your iCloud account and an app-specific password (generate one at appleid.apple.com). Syntaur syncs your iCloud calendars alongside Google Calendar.",
-            help_url: "https://support.apple.com/en-us/HT204397",
-            scopes: &[("readonly", "Read-only"), ("events", "Read + write events")],
+            instructions: "iCloud requires an app-specific password (not your normal Apple ID password):  1. Click the button below — opens appleid.apple.com.  2. Sign in, then Sign-in Security → App-Specific Passwords → + → name it Syntaur.  3. Copy the password (xxxx-xxxx-xxxx-xxxx) and paste below with your iCloud email.",
+            help_url: "https://account.apple.com/account/manage",
+            scopes: &[],
         },
         ProviderDef {
             id: "crypto_wallet", name: "Crypto Wallet (public)", category: "Finance",
@@ -176,7 +177,7 @@ pub fn catalog() -> Vec<ProviderDef> {
         ProviderDef {
             id: "oura", name: "Oura Ring", category: "Health",
             flow: FlowKind::ApiKey,
-            instructions: "Paste a Personal Access Token from cloud.ouraring.com. Syncs sleep, readiness, and activity data.",
+            instructions: "1. Click the button below — opens Oura Cloud.  2. Sign in, then click + Create New Personal Access Token.  3. Name it Syntaur → Create.  4. Copy the token and paste it here.",
             help_url: "https://cloud.ouraring.com/personal-access-tokens",
             scopes: &[],
         },
@@ -372,6 +373,7 @@ pub async fn handle_sync_providers(
             FlowKind::Crypto => "crypto",
             FlowKind::FileUpload => "file_upload",
             FlowKind::StatusOnly => "status",
+            FlowKind::PlexPin => "plex_pin",
         };
         let mut entry = serde_json::json!({
             "id": p.id,
@@ -618,13 +620,13 @@ async fn test_credential(
             Ok(format!("Verified: {}", uname))
         }
         "apple_calendar" => {
-            let url = credential.get("url").and_then(|v| v.as_str()).unwrap_or("");
             let user = credential.get("username").and_then(|v| v.as_str()).unwrap_or("");
             let pw = credential.get("password").and_then(|v| v.as_str()).unwrap_or("");
-            if url.is_empty() || user.is_empty() || pw.is_empty() {
-                return Err("URL, username, and app-specific password required".to_string());
+            if user.is_empty() || pw.is_empty() {
+                return Err("iCloud email and app-specific password required".to_string());
             }
-            // iCloud CalDAV: PROPFIND against principal URL
+            // iCloud CalDAV auto-discovery via well-known URL
+            let url = credential.get("url").and_then(|v| v.as_str()).unwrap_or("");
             let effective = if url.is_empty() || url == "auto" {
                 "https://caldav.icloud.com/.well-known/caldav".to_string()
             } else { url.to_string() };
@@ -1182,5 +1184,179 @@ pub async fn handle_vault_status(
         "write_latency_ms": write_latency_ms,
         "check_took_ms": check_start.elapsed().as_millis() as u64,
     })))
+}
+
+
+// ── Home Assistant auto-discovery ───────────────────────────────────────────
+
+pub async fn handle_ha_discover(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let _ = crate::resolve_principal(&state, token).await?;
+    let client = &state.client;
+
+    // Try common HA addresses: homeassistant.local, homeassistant, hassio.local, + common LAN IPs
+    let candidates = [
+        "http://homeassistant.local:8123",
+        "http://homeassistant:8123",
+        "http://hassio.local:8123",
+        "http://192.168.1.2:8123",
+        "http://192.168.1.4:8123",
+        "http://192.168.1.8:8123",
+        "http://192.168.1.10:8123",
+        "http://192.168.1.100:8123",
+    ];
+
+    let mut found: Vec<serde_json::Value> = Vec::new();
+    for url in candidates {
+        let probe_url = format!("{}/api/", url);
+        let res = client.get(&probe_url)
+            .timeout(Duration::from_millis(1500))
+            .send().await;
+        match res {
+            Ok(r) => {
+                // HA returns 401 (auth required) for unauthenticated requests to /api/ —
+                // that's the signal we found a real HA instance
+                let status = r.status();
+                if status == reqwest::StatusCode::UNAUTHORIZED || status.is_success() {
+                    found.push(serde_json::json!({
+                        "url": url,
+                        "status": status.as_u16(),
+                        "requires_auth": status == reqwest::StatusCode::UNAUTHORIZED,
+                    }));
+                }
+            }
+            Err(_) => {}
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "found": found,
+        "suggested_url": found.first().map(|f| f.get("url").cloned().unwrap_or_default()),
+    })))
+}
+
+// ── Plex PIN flow ───────────────────────────────────────────────────────────
+// Device-auth flow: POST to plex.tv/api/v2/pins, user enters PIN at plex.tv/link,
+// we poll for completion to get the auth token. Zero copy-paste.
+
+#[derive(serde::Deserialize)]
+pub struct PlexPinRequest {
+    pub token: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct PlexPinPollRequest {
+    pub token: String,
+    pub pin_id: i64,
+    pub client_id: String,
+}
+
+pub async fn handle_plex_pin_create(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PlexPinRequest>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let _ = crate::resolve_principal(&state, &req.token).await?;
+    // Generate a stable client identifier for this browser session
+    let client_id: String = (0..24).map(|_| {
+        let c = (rand::random::<u8>() % 36) as u8;
+        if c < 10 { (b'0' + c) as char } else { (b'a' + c - 10) as char }
+    }).collect();
+    let form = [
+        ("strong", "false"),
+        ("X-Plex-Client-Identifier", &client_id),
+        ("X-Plex-Product", "Syntaur"),
+    ];
+    let resp = state.client.post("https://plex.tv/api/v2/pins")
+        .header("Accept", "application/json")
+        .form(&form)
+        .timeout(Duration::from_secs(15))
+        .send().await
+        .map_err(|_| axum::http::StatusCode::BAD_GATEWAY)?;
+    if !resp.status().is_success() {
+        warn!("[plex-pin] create failed: {}", resp.status());
+        return Err(axum::http::StatusCode::BAD_GATEWAY);
+    }
+    let j: serde_json::Value = resp.json().await.map_err(|_| axum::http::StatusCode::BAD_GATEWAY)?;
+    let pin_id = j.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+    let code = j.get("code").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let expires_in = j.get("expiresIn").and_then(|v| v.as_i64()).unwrap_or(1800);
+
+    Ok(Json(serde_json::json!({
+        "pin_id": pin_id,
+        "code": code,
+        "client_id": client_id,
+        "link_url": "https://plex.tv/link",
+        "expires_in": expires_in,
+    })))
+}
+
+pub async fn handle_plex_pin_poll(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PlexPinPollRequest>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let principal = crate::resolve_principal(&state, &req.token).await?;
+    let uid = principal.user_id();
+    let url = format!("https://plex.tv/api/v2/pins/{}", req.pin_id);
+    let resp = state.client.get(&url)
+        .header("Accept", "application/json")
+        .header("X-Plex-Client-Identifier", &req.client_id)
+        .timeout(Duration::from_secs(15))
+        .send().await
+        .map_err(|_| axum::http::StatusCode::BAD_GATEWAY)?;
+    if !resp.status().is_success() {
+        return Err(axum::http::StatusCode::BAD_GATEWAY);
+    }
+    let j: serde_json::Value = resp.json().await.map_err(|_| axum::http::StatusCode::BAD_GATEWAY)?;
+    let auth_token = j.get("authToken").and_then(|v| v.as_str());
+    match auth_token {
+        None => Ok(Json(serde_json::json!({ "pending": true }))),
+        Some(t) => {
+            // Verify token against plex.tv/api/v2/user and save
+            let u_resp = state.client.get("https://plex.tv/api/v2/user")
+                .header("X-Plex-Token", t)
+                .header("Accept", "application/json")
+                .header("X-Plex-Client-Identifier", &req.client_id)
+                .timeout(Duration::from_secs(15))
+                .send().await
+                .map_err(|_| axum::http::StatusCode::BAD_GATEWAY)?;
+            if !u_resp.status().is_success() {
+                return Err(axum::http::StatusCode::BAD_GATEWAY);
+            }
+            let u_json: serde_json::Value = u_resp.json().await.unwrap_or_default();
+            let username = u_json.get("username").and_then(|v| v.as_str()).unwrap_or("account").to_string();
+
+            let token_s = t.to_string();
+            let username_c = username.clone();
+            let client_id_c = req.client_id.clone();
+            let db = state.db_path.clone();
+            let now = chrono::Utc::now().timestamp();
+            let credential = serde_json::json!({ "token": token_s, "client_id": client_id_c });
+            let credential_json = serde_json::to_string(&credential).unwrap_or_default();
+
+            tokio::task::spawn_blocking(move || -> Result<(), String> {
+                let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+                conn.execute(
+                    "INSERT INTO sync_connections (user_id, provider, display_name, credential, status, created_at, updated_at, last_check_at)
+                     VALUES (?, 'plex', ?, ?, 'active', ?, ?, ?)
+                     ON CONFLICT(user_id, provider) DO UPDATE SET
+                       display_name = excluded.display_name,
+                       credential = excluded.credential,
+                       status = 'active',
+                       last_error = NULL,
+                       updated_at = excluded.updated_at,
+                       last_check_at = excluded.last_check_at",
+                    rusqlite::params![uid, username_c, credential_json, now, now, now],
+                ).map_err(|e| e.to_string())?;
+                Ok(())
+            }).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+            info!("[plex-pin] linked account for user {} ({})", uid, username);
+            Ok(Json(serde_json::json!({ "success": true, "username": username })))
+        }
+    }
 }
 
