@@ -2333,11 +2333,13 @@ function renderExtFile(method) {
     const steps = document.createElement('div');
     steps.className = 'mb-3 text-xs text-gray-400 space-y-1';
     steps.innerHTML = '<p class="text-gray-300 font-medium mb-1">IRS Direct Pay steps:</p>' +
-      '<p>1. Click "Open IRS Website" below &rarr; click <strong class="text-white">Make a Payment</strong></p>' +
-      '<p>2. Select reason: <strong class="text-white">Extension</strong> &rarr; Apply Payment To: <strong class="text-white">4868 (Extension)</strong></p>' +
-      '<p>3. Tax Period: <strong class="text-white">' + yr + '</strong></p>' +
-      '<p>4. Verify identity (SSN, DOB, address, filing status)</p>' +
-      '<p>5. Enter payment amount &rarr; confirm &rarr; save your <strong class="text-green-400">confirmation number</strong></p>';
+      '<p>1. Click "Open IRS Website" below &rarr; click <strong class="text-white">Pay individual tax</strong></p>' +
+      '<p>2. Reason for Payment: select <strong class="text-white">Extension</strong></p>' +
+      '<p>3. Apply Payment To: select <strong class="text-white">4868 (for filing extension)</strong></p>' +
+      '<p>4. Tax Period for Payment: select <strong class="text-white">' + yr + '</strong> &rarr; click Continue</p>' +
+      '<p>5. Verify your identity (SSN, date of birth, address, filing status)</p>' +
+      '<p>6. Enter payment amount &rarr; review &rarr; submit</p>' +
+      '<p>7. Save your <strong class="text-green-400">confirmation number</strong> &rarr; enter it below</p>';
     copyFieldsEl.appendChild(steps);
   } else if (method === 'free_file') {
     const steps = document.createElement('div');
