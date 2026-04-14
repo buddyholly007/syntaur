@@ -1,94 +1,105 @@
-<!DOCTYPE html>
-<html lang="en" class="dark">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="theme-color" content="#0284c7">
-<link rel="icon" href="/icon.svg" type="image/svg+xml">
-<title>Voice Journal — Syntaur</title>
-<script src="/tailwind.js"></script>
-<script>tailwind.config={darkMode:'class',theme:{extend:{colors:{oc:{500:'#0ea5e9',600:'#0284c7',700:'#0369a1'}}}}}</script>
-<style>
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-  body { font-family: 'Inter', sans-serif; }
-</style>
-</head>
-<body class="bg-gray-950 text-gray-100 min-h-screen">
+//! /journal — voice journal browser. Custom top bar ("Voice Journal"
+//! as a breadcrumb-style label, different logo size, two right-side
+//! links).
 
-<!-- Top bar -->
-<div class="border-b border-gray-800 bg-gray-900/80 backdrop-blur">
-  <div class="max-w-4xl mx-auto px-4 py-2.5 flex items-center justify-between">
-    <div class="flex items-center gap-3">
-      <a href="/" class="flex items-center gap-2 hover:opacity-80">
-        <img src="/icon.svg" class="w-5 h-5" alt="">
-        <span class="font-semibold hidden sm:inline">Syntaur</span>
-      </a>
-      <span class="text-gray-300 text-sm font-medium">Voice Journal</span>
-    </div>
-    <div class="flex items-center gap-3 text-sm">
-      <a href="/chat" class="text-gray-500 hover:text-gray-300">Chat</a>
-      <a href="/" class="text-gray-500 hover:text-gray-300">Home</a>
-    </div>
-  </div>
-</div>
+use axum::response::Html;
+use maud::{html, Markup, PreEscaped};
 
-<div class="max-w-4xl mx-auto px-4 py-6">
+use super::shared::{shell, Page};
 
-  <!-- Stats bar -->
-  <div class="grid grid-cols-3 gap-3 mb-6">
-    <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 text-center">
-      <div class="text-2xl font-semibold text-white" id="stat-entries">-</div>
-      <div class="text-xs text-gray-500 mt-1">Today's entries</div>
-    </div>
-    <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 text-center">
-      <div class="text-2xl font-semibold text-white" id="stat-hours">-</div>
-      <div class="text-xs text-gray-500 mt-1">Hours recorded</div>
-    </div>
-    <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 text-center">
-      <div class="text-2xl font-semibold text-white" id="stat-clips">-</div>
-      <div class="text-xs text-gray-500 mt-1">Training clips</div>
-    </div>
-  </div>
+pub async fn render() -> Html<String> {
+    let page = Page {
+        title: "Voice Journal",
+        authed: true,
+        extra_style: None,
+    };
+    let body = html! {
+        (top_bar())
+        (page_body())
+        script { (PreEscaped(PAGE_JS)) }
+    };
+    Html(shell(page, body).into_string())
+}
 
-  <!-- Search + date picker -->
-  <div class="flex gap-3 mb-6">
-    <div class="flex-1 relative">
-      <input type="text" id="search-input" placeholder="Search transcripts..."
-        class="w-full bg-gray-900 border border-gray-800 hover:border-gray-700 focus:border-oc-500 focus:ring-1 focus:ring-oc-500 rounded-xl px-4 py-2.5 text-sm text-white placeholder-gray-500 outline-none"
-        onkeydown="if(event.key==='Enter')doSearch()">
-      <button onclick="doSearch()" class="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-oc-500 p-1">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-      </button>
-    </div>
-    <input type="date" id="date-picker"
-      class="bg-gray-900 border border-gray-800 hover:border-gray-700 focus:border-oc-500 rounded-xl px-4 py-2.5 text-sm text-white outline-none"
-      onchange="loadDate(this.value)">
-  </div>
+fn top_bar() -> Markup {
+    html! {
+        div class="border-b border-gray-800 bg-gray-900/50 backdrop-blur sticky top-0 z-40" {
+            div class="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between" {
+                div class="flex items-center gap-3" {
+                    a href="/" class="flex items-center gap-2 hover:opacity-80" {
+                        img src="/icon.svg" class="w-5 h-5" alt="";
+                        span class="font-semibold hidden sm:inline" { "Syntaur" }
+                    }
+                    span class="text-gray-300 text-sm font-medium" { "Voice Journal" }
+                }
+                div class="flex items-center gap-3 text-sm" {
+                    a href="/chat" class="text-gray-500 hover:text-gray-300" { "Chat" }
+                    a href="/" class="text-gray-500 hover:text-gray-300" { "Home" }
+                }
+            }
+        }
+    }
+}
 
-  <!-- Date navigation -->
-  <div class="flex items-center justify-between mb-4">
-    <button onclick="navDate(-1)" class="text-gray-500 hover:text-white text-sm">&larr; Previous day</button>
-    <h2 class="text-lg font-semibold text-white" id="current-date"></h2>
-    <button onclick="navDate(1)" class="text-gray-500 hover:text-white text-sm">Next day &rarr;</button>
-  </div>
+fn page_body() -> Markup {
+    html! {
+        div class="max-w-4xl mx-auto px-4 py-6" {
+            // Stats bar
+            div class="grid grid-cols-3 gap-3 mb-6" {
+                div class="bg-gray-900 border border-gray-800 rounded-xl p-4 text-center" {
+                    div class="text-2xl font-semibold text-white" id="stat-entries" { "-" }
+                    div class="text-xs text-gray-500 mt-1" { "Today's entries" }
+                }
+                div class="bg-gray-900 border border-gray-800 rounded-xl p-4 text-center" {
+                    div class="text-2xl font-semibold text-white" id="stat-hours" { "-" }
+                    div class="text-xs text-gray-500 mt-1" { "Hours recorded" }
+                }
+                div class="bg-gray-900 border border-gray-800 rounded-xl p-4 text-center" {
+                    div class="text-2xl font-semibold text-white" id="stat-clips" { "-" }
+                    div class="text-xs text-gray-500 mt-1" { "Training clips" }
+                }
+            }
 
-  <!-- Journal content -->
-  <div id="journal-content" class="space-y-3">
-    <div class="text-gray-500 text-sm text-center py-8">Loading...</div>
-  </div>
+            // Search + date picker
+            div class="flex gap-3 mb-6" {
+                div class="flex-1 relative" {
+                    input type="text" id="search-input" placeholder="Search transcripts..."
+                        class="w-full bg-gray-900 border border-gray-800 hover:border-gray-700 focus:border-oc-500 focus:ring-1 focus:ring-oc-500 rounded-xl px-4 py-2.5 text-sm text-white placeholder-gray-500 outline-none"
+                        onkeydown="if(event.key==='Enter')doSearch()";
+                    button onclick="doSearch()" class="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-oc-500 p-1" {
+                        (PreEscaped(r#"<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>"#))
+                    }
+                }
+                input type="date" id="date-picker"
+                    class="bg-gray-900 border border-gray-800 hover:border-gray-700 focus:border-oc-500 rounded-xl px-4 py-2.5 text-sm text-white outline-none"
+                    onchange="loadDate(this.value)";
+            }
 
-  <!-- Search results (hidden by default) -->
-  <div id="search-results" class="hidden space-y-4">
-  </div>
+            // Date navigation
+            div class="flex items-center justify-between mb-4" {
+                button onclick="navDate(-1)" class="text-gray-500 hover:text-white text-sm" { "← Previous day" }
+                h2 class="text-lg font-semibold text-white" id="current-date" {}
+                button onclick="navDate(1)" class="text-gray-500 hover:text-white text-sm" { "Next day →" }
+            }
 
-  <!-- Available dates -->
-  <div class="mt-8 border-t border-gray-800 pt-6">
-    <h3 class="text-sm font-medium text-gray-400 mb-3">Recent journal dates</h3>
-    <div class="flex flex-wrap gap-2" id="date-list"></div>
-  </div>
-</div>
+            // Journal content
+            div id="journal-content" class="space-y-3" {
+                div class="text-gray-500 text-sm text-center py-8" { "Loading..." }
+            }
 
-<script>
+            // Search results (hidden)
+            div id="search-results" class="hidden space-y-4" {}
+
+            // Available dates
+            div class="mt-8 border-t border-gray-800 pt-6" {
+                h3 class="text-sm font-medium text-gray-400 mb-3" { "Recent journal dates" }
+                div class="flex flex-wrap gap-2" id="date-list" {}
+            }
+        }
+    }
+}
+
+const PAGE_JS: &str = r#"
 const token = sessionStorage.getItem('syntaur_token') || '';
 let currentDate = new Date().toISOString().split('T')[0];
 
@@ -103,26 +114,20 @@ async function loadDate(date) {
   document.getElementById('current-date').textContent = formatDate(date);
   document.getElementById('search-results').classList.add('hidden');
   document.getElementById('journal-content').classList.remove('hidden');
-
   const data = await api(`/api/journal?date=${date}`);
   const container = document.getElementById('journal-content');
-
   if (!data.content) {
     container.innerHTML = `<div class="text-gray-500 text-sm text-center py-8">No journal entries for ${formatDate(date)}</div>`;
     document.getElementById('stat-entries').textContent = '0';
     return;
   }
-
   document.getElementById('stat-entries').textContent = data.entries;
-
-  // Parse markdown into entries
   const lines = data.content.split('\n');
   let html = '';
   for (const line of lines) {
-    if (line.startsWith('# ')) continue; // Skip title
+    if (line.startsWith('# ')) continue;
     if (!line.trim()) continue;
     if (line.startsWith('**')) {
-      // Timestamp entry
       const match = line.match(/^\*\*(\d+:\d+)\*\*\s*(\[.*?\])?\s*(.*)/);
       if (match) {
         const time = match[1];
@@ -142,26 +147,21 @@ async function loadDate(date) {
       }
     }
   }
-
   container.innerHTML = html || '<div class="text-gray-500 text-sm text-center py-8">No entries found</div>';
 }
 
 async function doSearch() {
   const q = document.getElementById('search-input').value.trim();
   if (!q) { loadDate(currentDate); return; }
-
   document.getElementById('journal-content').classList.add('hidden');
   const results = document.getElementById('search-results');
   results.classList.remove('hidden');
   results.innerHTML = '<div class="text-gray-500 text-sm text-center py-4">Searching...</div>';
-
   const data = await api(`/api/journal/search?q=${encodeURIComponent(q)}&max=10`);
-
   if (!data.results || data.results.length === 0) {
     results.innerHTML = `<div class="text-gray-500 text-sm text-center py-8">No results for "${esc(q)}"</div>`;
     return;
   }
-
   let html = `<div class="text-sm text-gray-400 mb-3">Found "${esc(q)}" in ${data.total_days} day(s)</div>`;
   for (const r of data.results) {
     html += `<div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
@@ -191,14 +191,12 @@ function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
-// Load stats
 async function loadStats() {
   const data = await api('/api/journal/sessions?limit=1');
   document.getElementById('stat-hours').textContent = (data.total_duration_hours || 0).toFixed(1);
   document.getElementById('stat-clips').textContent = data.total_training_clips || 0;
 }
 
-// Load date list
 async function loadDates() {
   const data = await api('/api/journal/dates');
   const container = document.getElementById('date-list');
@@ -211,10 +209,7 @@ async function loadDates() {
   }
 }
 
-// Init
 loadDate(currentDate);
 loadStats();
 loadDates();
-</script>
-</body>
-</html>
+"#;

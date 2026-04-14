@@ -10,25 +10,29 @@
 //! `pages/<name>.rs`.
 //!
 //! ## DO NOT migrate a page that's under active parallel work.
-//! Before touching any page, run `git log --oneline -20 -- syntaur-gateway/static/<page>.html`
+//! Before touching any page, run
+//! `git log --oneline -20 -- syntaur-gateway/static/<page>.html`
 //! and check the daily vault note for a mention. If the file was
-//! modified in the last few hours, wait.
+//! modified in the last few hours, wait. See
+//! `feedback/check_before_deleting.md`.
 //!
-//! Migration state (update as you go):
-//!   [done] modules.html    → pages::modules
-//!   [ok]   history.html    — safe, stable
-//!   [ok]   journal.html    — safe, stable
-//!   [ok]   voice-setup.html — safe, stable
-//!   [ok]   landing.html    — safe, stable
-//!   [ok]   music.html      — recent but stable (media bridge commits)
-//!   [ok]   dashboard.html  — watch for widget changes
-//!   [ok]   chat.html       — core, watch for voice-mode changes
-//!   [ok]   setup.html      — watch for onboarding changes
-//!   [ok]   settings.html   — watch for new tabs being added
-//!   [HOLD] tax.html        — ACTIVELY being worked on by parallel sessions
-//!                             (extension filing, deduction scanner,
-//!                             AI Deep Scan, copy-assist). Do NOT migrate
-//!                             until tax.html is untouched for a full day.
+//! Migration state:
+//!   [done] modules.html     → pages::modules
+//!   [done] history.html     → pages::history
+//!   [done] journal.html     → pages::journal
+//!   [ok]   voice-setup.html  — safe, stable
+//!   [ok]   landing.html      — safe, stable
+//!   [ok]   music.html        — recent but stable (media bridge commits)
+//!   [ok]   dashboard.html    — watch for widget changes
+//!   [ok]   chat.html         — core, watch for voice-mode changes
+//!   [ok]   setup.html        — watch for onboarding changes
+//!   [ok]   settings.html     — watch for new tabs being added
+//!   [HOLD] tax.html          — ACTIVELY being worked on by parallel sessions
+//!                              (extension filing, deduction scanner,
+//!                              AI Deep Scan, copy-assist). Do NOT migrate
+//!                              until tax.html is untouched for a full day.
 
+pub mod history;
+pub mod journal;
 pub mod modules;
 pub mod shared;

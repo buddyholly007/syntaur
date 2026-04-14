@@ -545,9 +545,6 @@ pub struct ModuleToggleResponse {
 
 
 
-pub async fn handle_journal_page() -> axum::response::Html<&'static str> {
-    axum::response::Html(include_str!("../static/journal.html"))
-}
 
 pub async fn handle_music_page() -> axum::response::Html<&'static str> {
     axum::response::Html(include_str!("../static/music.html"))
@@ -1579,11 +1576,6 @@ pub struct TailscaleStatus {
     pub ip: Option<String>,
     pub hostname: Option<String>,
     pub url: Option<String>,
-}
-
-/// GET /history
-pub async fn handle_history_page() -> axum::response::Html<&'static str> {
-    axum::response::Html(include_str!("../static/history.html"))
 }
 
 /// GET /landing

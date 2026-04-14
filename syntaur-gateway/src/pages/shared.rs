@@ -1,28 +1,23 @@
-//! Shared page shell — `<head>`, top bar, bug-report overlay. Every
-//! gateway page renders via maud; common markup lives here so each page
-//! module only owns its unique body.
-//!
-//! Pages call `shell(Page { … }, body)` where `body` is a `Markup`
-//! returned from the page's own function. Everything — metadata,
-//! styles, the Tailwind config, the common JS — comes out as Rust, so
-//! all bytes count toward the Rust language share and are compile-time
-//! type-checked.
+//! Shared page shell — `<head>`, `<body>` wrapper, and the bug-report
+//! overlay. Each page builds its own top bar (pages have meaningfully
+//! different top-bar content: crumbs vs voice-journal title, one right
+//! link vs many, different logo treatments) so the shell stays
+//! opinion-free about that.
 
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 
-/// Descriptor passed to `shell()` — what this page wants in its head
-/// and top bar.
+/// Describes a page for the shell — everything that goes in `<head>` or
+/// decides whether to inject the bug-report overlay.
 pub struct Page {
     pub title: &'static str,
-    pub crumb: &'static str,
-    /// If true, injects the bug-report overlay + JS (authenticated
-    /// pages). Landing/setup pre-auth pages set this false.
+    /// Authenticated pages get the bug-report overlay + button injected.
     pub authed: bool,
-    /// Optional extra <style> blob specific to this page.
+    /// Optional page-specific `<style>` block (after the shared styles).
     pub extra_style: Option<&'static str>,
 }
 
-/// Render a complete HTML document around `body_content`.
+/// Render a full HTML document. The page's `body_content` is wrapped in
+/// `<body>` and followed by the bug-report overlay if `authed`.
 pub fn shell(page: Page, body_content: Markup) -> Markup {
     html! {
         (DOCTYPE)
@@ -46,7 +41,6 @@ pub fn shell(page: Page, body_content: Markup) -> Markup {
                 }
             }
             body class="bg-gray-950 text-gray-100 min-h-screen" {
-                (top_bar(page.crumb))
                 (body_content)
                 @if page.authed {
                     (bug_report_overlay())
@@ -56,8 +50,10 @@ pub fn shell(page: Page, body_content: Markup) -> Markup {
     }
 }
 
-/// Common top bar with brand + breadcrumb + back-to-dashboard link.
-fn top_bar(crumb: &str) -> Markup {
+/// Standard top bar with brand + breadcrumb + "← Dashboard" right link.
+/// Used by `/modules`, `/settings`, etc. Pages with non-standard right
+/// nav (e.g. `/history` which has two links) should inline their own.
+pub fn top_bar_standard(crumb: &str) -> Markup {
     html! {
         div class="border-b border-gray-800 bg-gray-900/50 backdrop-blur sticky top-0 z-40" {
             div class="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between" {
@@ -83,8 +79,8 @@ fn bug_report_overlay() -> Markup {
 }
 
 // ── Embedded styles / scripts ──────────────────────────────────────────
-// These strings live inside a .rs file so linguist counts them toward
-// Rust. They're also trivially searchable with `grep` across src/.
+// These live in .rs files so linguist counts them toward Rust. They're
+// also trivially searchable with `grep` across src/.
 
 const TAILWIND_CONFIG: &str = r#"
 tailwind.config = {
@@ -110,7 +106,7 @@ body { font-family: 'Inter', sans-serif; -webkit-font-smoothing: antialiased; -m
 "#;
 
 /// Bug-report overlay + submit flow. Pure vanilla JS — could be
-/// generated from a typed struct later, but for the first migration we
+/// generated from a typed struct later, but for the first migrations we
 /// preserve behavior exactly.
 const BUG_REPORT_JS: &str = r#"
 (function() {

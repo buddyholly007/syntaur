@@ -1,23 +1,26 @@
 //! /modules — module management page. Lists core + extension modules
-//! and lets the user toggle them. First page migrated to maud as part
-//! of the Rust-first UI push.
+//! and lets the user toggle them.
 
 use axum::response::Html;
 use maud::{html, Markup, PreEscaped};
 
-use super::shared::{shell, Page};
+use super::shared::{shell, top_bar_standard, Page};
 
 pub async fn render() -> Html<String> {
     let page = Page {
         title: "Modules",
-        crumb: "Modules",
         authed: true,
         extra_style: None,
     };
-    Html(shell(page, body()).into_string())
+    let body = html! {
+        (top_bar_standard("Modules"))
+        (page_body())
+        script { (PreEscaped(PAGE_JS)) }
+    };
+    Html(shell(page, body).into_string())
 }
 
-fn body() -> Markup {
+fn page_body() -> Markup {
     html! {
         div class="max-w-5xl mx-auto px-4 py-6" {
             div class="flex items-center justify-between mb-6" {
@@ -27,7 +30,6 @@ fn body() -> Markup {
                 }
             }
 
-            // Restart banner — hidden until a toggle triggers it.
             div id="restart-banner"
                 class="hidden mb-4 p-4 rounded-xl bg-yellow-900/20 border border-yellow-800 flex items-center justify-between" {
                 div class="flex items-center gap-2" {
@@ -61,13 +63,9 @@ fn body() -> Markup {
                 div class="space-y-2" id="ext-list" {}
             }
         }
-
-        script { (PreEscaped(PAGE_JS)) }
     }
 }
 
-/// Page-specific JS: load modules, render list, toggle, restart banner.
-/// Lives as a string literal here so linguist counts it as Rust.
 const PAGE_JS: &str = r#"
 const token = sessionStorage.getItem('syntaur_token') || '';
 if (!token) { window.location.href = '/'; }
