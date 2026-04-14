@@ -25,6 +25,7 @@ mod voice_chat;
 mod voice_ws;
 mod voice_api;
 mod modules;
+mod pages;
 mod setup;
 mod license;
 mod tax;
@@ -432,6 +433,30 @@ struct BugReportRequest {
     description: String,
     system_info: Option<serde_json::Value>,
     page_url: Option<String>,
+}
+
+async fn handle_open_url(
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    let url = params.get("url").cloned().unwrap_or_default();
+    // Validate URL starts with https:// to prevent command injection
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Json(serde_json::json!({"success": false, "error": "Invalid URL"}));
+    }
+    let result = {
+        #[cfg(target_os = "linux")]
+        { std::process::Command::new("xdg-open").arg(&url).spawn() }
+        #[cfg(target_os = "macos")]
+        { std::process::Command::new("open").arg(&url).spawn() }
+        #[cfg(target_os = "windows")]
+        { std::process::Command::new("cmd").args(["/C", "start", &url]).spawn() }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        { Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "unsupported")) }
+    };
+    match result {
+        Ok(_) => Json(serde_json::json!({"success": true})),
+        Err(e) => Json(serde_json::json!({"success": false, "error": e.to_string()})),
+    }
 }
 
 async fn handle_bug_report_submit(
@@ -3675,7 +3700,7 @@ async fn main() {
         .route("/fonts.css", get(setup::handle_fonts_css))
         .route("/fonts/{filename}", get(setup::handle_font_file))
         .route("/setup", get(setup::handle_setup_page))
-        .route("/modules", get(setup::handle_modules_page))
+        .route("/modules", get(pages::modules::render))
         .route("/journal", get(setup::handle_journal_page))
         .route("/music", get(setup::handle_music_page))
         .route("/voice-setup", get(setup::handle_voice_setup_page))
@@ -3702,6 +3727,7 @@ async fn main() {
         .route("/api/setup/apply", post(setup::handle_setup_apply))
         .route("/api/settings/install-shortcut", post(setup::handle_install_shortcut))
         .route("/api/settings/provider", post(setup::handle_save_provider))
+        .route("/api/open-url", get(handle_open_url))
         .route("/api/bug-reports", post(handle_bug_report_submit))
         .route("/api/bug-reports", get(handle_bug_report_list))
         .route("/api/tax/receipts", post(tax::handle_receipt_upload))

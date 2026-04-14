@@ -280,8 +280,8 @@
           <!-- Populated by JS with copy buttons -->
         </div>
         <div class="flex gap-2 mb-3">
-          <a id="ext-irs-link" href="https://www.irs.gov/payments/direct-pay" target="_blank" class="btn-primary text-xs">Open IRS Website &rarr;</a>
-          <span class="text-xs text-gray-500 self-center">Opens in a new tab. Copy values above into the IRS form.</span>
+          <button id="ext-irs-link" onclick="openIrsLink()" class="btn-primary text-xs">Open IRS Website &rarr;</button>
+          <span id="ext-irs-msg" class="text-xs text-gray-500 self-center">Copy values above, then paste into the IRS form.</span>
         </div>
         <div class="bg-gray-800 rounded-lg p-3 border border-gray-700">
           <p class="text-xs text-gray-300 mb-2">After you submit on the IRS website, enter your confirmation below:</p>
@@ -2349,6 +2349,34 @@ function renderExtFile(method) {
     }
     copyFieldsEl.appendChild(row);
   });
+}
+
+let _irsUrl = 'https://www.irs.gov/payments/direct-pay';
+function openIrsLink() {
+  const msg = document.getElementById('ext-irs-msg');
+  // Try opening via backend (works from webview)
+  fetch('/api/open-url?url=' + encodeURIComponent(_irsUrl) + '&token=' + token)
+    .then(r => r.json())
+    .then(d => {
+      if (d.success) {
+        msg.textContent = 'Opened in your default browser. Paste the values from above.';
+        msg.className = 'text-xs text-green-400 self-center';
+      } else {
+        // Fallback: try window.open
+        const w = window.open(_irsUrl, '_blank');
+        if (!w) {
+          // Last resort: copy URL to clipboard
+          navigator.clipboard.writeText(_irsUrl);
+          msg.innerHTML = 'URL copied to clipboard! Paste in your browser: <span class="text-oc-400 font-mono text-[10px] select-all">' + _irsUrl + '</span>';
+          msg.className = 'text-xs text-yellow-400 self-center';
+        }
+      }
+    })
+    .catch(() => {
+      navigator.clipboard.writeText(_irsUrl);
+      msg.innerHTML = 'URL copied to clipboard! Open in your browser: <span class="text-oc-400 font-mono text-[10px] select-all">' + _irsUrl + '</span>';
+      msg.className = 'text-xs text-yellow-400 self-center';
+    });
 }
 
 async function confirmExtension() {
