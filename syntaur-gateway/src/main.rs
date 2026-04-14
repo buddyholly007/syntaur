@@ -3714,6 +3714,15 @@ async fn main() {
         .route("/api/tax/insurance/classify", post(tax::handle_insurance_classify))
         .route("/api/tax/wizard", get(tax::handle_tax_prep_wizard))
         .route("/api/tax/brackets/fetch", get(tax::handle_brackets_auto_fetch))
+        // Deduction questionnaire + auto-scanner + review queue
+        .route("/api/tax/questionnaire", get(tax::handle_questionnaire_get))
+        .route("/api/tax/questionnaire", post(tax::handle_questionnaire_save))
+        .route("/api/tax/deductions/scan", post(tax::handle_deduction_scan))
+        .route("/api/tax/deductions/candidates", get(tax::handle_deduction_candidates_list))
+        .route("/api/tax/deductions/candidates/{id}/context", get(tax::handle_deduction_candidate_context))
+        .route("/api/tax/deductions/candidates/{id}/review", axum::routing::put(tax::handle_deduction_review))
+        .route("/api/tax/deductions/bulk-review", post(tax::handle_deduction_bulk_review))
+        .route("/api/tax/deductions/summary", get(tax::handle_deduction_summary))
         // Module licensing
         .route("/api/modules/status", get(tax::handle_module_status))
         .route("/api/modules/trial", post(tax::handle_start_trial))

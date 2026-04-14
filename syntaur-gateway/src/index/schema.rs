@@ -710,6 +710,46 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX IF NOT EXISTS idx_tg_pair_code ON telegram_pairings(code);
     CREATE INDEX IF NOT EXISTS idx_tg_pair_expires ON telegram_pairings(expires_at);
     "#,
+    // v19: deduction questionnaire + auto-scanner candidates
+    r#"
+    CREATE TABLE IF NOT EXISTS deduction_questionnaire (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id         INTEGER NOT NULL DEFAULT 0,
+        tax_year        INTEGER NOT NULL,
+        answers_json    TEXT NOT NULL DEFAULT '{}',
+        completed       INTEGER NOT NULL DEFAULT 0,
+        created_at      INTEGER NOT NULL,
+        updated_at      INTEGER NOT NULL,
+        UNIQUE(user_id, tax_year)
+    );
+    CREATE INDEX IF NOT EXISTS idx_ded_quest_user ON deduction_questionnaire(user_id);
+
+    CREATE TABLE IF NOT EXISTS deduction_candidates (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id         INTEGER NOT NULL DEFAULT 0,
+        tax_year        INTEGER NOT NULL,
+        source_type     TEXT NOT NULL,
+        source_id       INTEGER NOT NULL,
+        deduction_type  TEXT NOT NULL,
+        vendor          TEXT,
+        description     TEXT,
+        amount_cents    INTEGER NOT NULL,
+        transaction_date TEXT,
+        category_suggestion TEXT,
+        entity_suggestion TEXT NOT NULL DEFAULT 'personal',
+        confidence      REAL NOT NULL DEFAULT 0.5,
+        match_rule      TEXT,
+        status          TEXT NOT NULL DEFAULT 'pending',
+        reviewed_at     INTEGER,
+        expense_id      INTEGER,
+        created_at      INTEGER NOT NULL,
+        UNIQUE(user_id, source_type, source_id, deduction_type)
+    );
+    CREATE INDEX IF NOT EXISTS idx_ded_cand_user ON deduction_candidates(user_id);
+    CREATE INDEX IF NOT EXISTS idx_ded_cand_status ON deduction_candidates(status);
+    CREATE INDEX IF NOT EXISTS idx_ded_cand_year ON deduction_candidates(tax_year);
+    CREATE INDEX IF NOT EXISTS idx_ded_cand_source ON deduction_candidates(source_type, source_id);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

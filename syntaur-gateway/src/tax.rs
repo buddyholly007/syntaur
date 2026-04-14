@@ -457,6 +457,258 @@ fn receipts_dir() -> PathBuf {
     dir
 }
 
+// ── Shared Tax Estimate Calculation ─────────────────────────────────────────
+
+#[derive(Serialize, Clone)]
+pub struct TaxEstimate {
+    pub gross_income: i64,
+    pub se_income: i64,
+    pub w2_income: i64,
+    pub biz_deductions: i64,
+    pub meals_total: i64,
+    pub meals_adjustment: i64,
+    pub se_tax: i64,
+    pub half_se_tax: i64,
+    pub se_health_deduction: i64,
+    pub student_loan_deduction: i64,
+    pub agi: i64,
+    pub standard_deduction: i64,
+    pub itemized_deduction: i64,
+    pub salt_capped: i64,
+    pub medical_deductible: i64,
+    pub qbi_deduction: i64,
+    pub deduction_used: i64,
+    pub deduction_type: String,
+    pub taxable_income: i64,
+    pub ordinary_tax: i64,
+    pub ltcg_tax: i64,
+    pub total_tax: i64,
+    pub w2_withheld: i64,
+    pub fed_paid: i64,
+    pub child_credit: i64,
+    pub total_payments: i64,
+    pub owed: i64,
+    pub effective_rate: f64,
+}
+
+pub fn compute_tax_estimate(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+    year: i64,
+    filing_status: &str,
+) -> Result<TaxEstimate, String> {
+    let start = format!("{}-01-01", year);
+    let end = format!("{}-12-31", year);
+
+    // ── Gather income ──
+    let gross_income: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(amount_cents), 0) FROM tax_income WHERE user_id = ? AND tax_year = ? AND category != 'Federal Withholding'",
+        rusqlite::params![user_id, year], |r| r.get(0),
+    ).unwrap_or(0);
+
+    // SE income = 1099-NEC + 1099-MISC (self-employment)
+    let se_income: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(amount_cents), 0) FROM tax_income WHERE user_id = ? AND tax_year = ? AND (category LIKE '%1099%NEC%' OR category LIKE '%1099%MISC%' OR category LIKE '%Self-Employ%' OR category LIKE '%Schedule C%')",
+        rusqlite::params![user_id, year], |r| r.get(0),
+    ).unwrap_or(0);
+
+    let w2_income = gross_income - se_income;
+
+    // ── Business deductions ──
+    let biz_deductions: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(e.amount_cents), 0) FROM expenses e \
+         JOIN expense_categories c ON e.category_id = c.id \
+         WHERE e.user_id = ? AND e.entity = 'business' AND e.expense_date >= ? AND e.expense_date <= ?",
+        rusqlite::params![user_id, &start, &end], |r| r.get(0),
+    ).unwrap_or(0);
+
+    // Meals 50% adjustment
+    let meals_total: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(e.amount_cents), 0) FROM expenses e \
+         JOIN expense_categories c ON e.category_id = c.id \
+         WHERE e.user_id = ? AND e.entity = 'business' AND c.name = 'Meals & Entertainment' AND e.expense_date >= ? AND e.expense_date <= ?",
+        rusqlite::params![user_id, &start, &end], |r| r.get(0),
+    ).unwrap_or(0);
+    let meals_adjustment = meals_total / 2; // only 50% deductible
+    let biz_deductions_adj = biz_deductions - meals_adjustment;
+
+    // ── SE Tax ──
+    let se_net = std::cmp::max(se_income - biz_deductions_adj, 0);
+    let se_taxable = (se_net as f64 * 0.9235) as i64;
+    let ss_wage_base: i64 = 17_610_000; // $176,100 for 2025
+    let se_tax_ss = std::cmp::min(se_taxable, ss_wage_base) * 1240 / 10000; // 12.4%
+    let se_tax_medicare = se_taxable * 290 / 10000; // 2.9%
+    let se_tax = se_tax_ss + se_tax_medicare;
+    let half_se_tax = se_tax / 2;
+
+    // ── SE Health Insurance deduction ──
+    let se_health_deduction: i64 = {
+        let q_answers: serde_json::Value = conn.query_row(
+            "SELECT answers_json FROM deduction_questionnaire WHERE user_id = ? AND tax_year = ?",
+            rusqlite::params![user_id, year], |r| r.get::<_, String>(0),
+        ).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+
+        let is_se = q_answers.get("self_employed").and_then(|v| v.as_bool()).unwrap_or(se_income > 0);
+        let pays_own = q_answers.get("health_insurance_self").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        if is_se && pays_own {
+            // Sum health insurance expenses
+            let hi: i64 = conn.query_row(
+                "SELECT COALESCE(SUM(e.amount_cents), 0) FROM expenses e \
+                 JOIN expense_categories c ON e.category_id = c.id \
+                 WHERE e.user_id = ? AND (c.name LIKE '%Health Insurance%' OR c.name = 'Medical') \
+                 AND e.entity IN ('business', 'personal') AND e.expense_date >= ? AND e.expense_date <= ?",
+                rusqlite::params![user_id, &start, &end], |r| r.get(0),
+            ).unwrap_or(0);
+            std::cmp::min(hi, se_net) // capped at net SE income
+        } else { 0 }
+    };
+
+    // Student loan interest
+    let student_loan_deduction: i64 = {
+        let sl: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(e.amount_cents), 0) FROM expenses e \
+             JOIN expense_categories c ON e.category_id = c.id \
+             WHERE e.user_id = ? AND c.name LIKE '%Student Loan%' AND e.expense_date >= ? AND e.expense_date <= ?",
+            rusqlite::params![user_id, &start, &end], |r| r.get(0),
+        ).unwrap_or(0);
+        std::cmp::min(sl, 250_000) // $2,500 cap
+    };
+
+    // ── AGI ──
+    let agi = gross_income - biz_deductions_adj - half_se_tax - se_health_deduction - student_loan_deduction;
+
+    // ── Itemized deductions ──
+    let personal_deductible: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(e.amount_cents), 0) FROM expenses e \
+         JOIN expense_categories c ON e.category_id = c.id \
+         WHERE e.user_id = ? AND c.tax_deductible = 1 AND e.entity = 'personal' AND e.expense_date >= ? AND e.expense_date <= ?",
+        rusqlite::params![user_id, &start, &end], |r| r.get(0),
+    ).unwrap_or(0);
+
+    // SALT cap: $40,000 (OBBBA 2025-2029)
+    let salt_cap: i64 = 4_000_000; // $40,000 in cents
+    let property_tax: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(e.amount_cents), 0) FROM expenses e \
+         JOIN expense_categories c ON e.category_id = c.id \
+         WHERE e.user_id = ? AND (c.name LIKE '%Property Tax%' OR c.name = 'Mortgage') AND e.entity = 'personal' AND e.expense_date >= ? AND e.expense_date <= ?",
+        rusqlite::params![user_id, &start, &end], |r| r.get(0),
+    ).unwrap_or(0);
+    let salt_capped = std::cmp::min(property_tax, salt_cap);
+    let salt_reduction = property_tax - salt_capped;
+
+    // Medical: only above 7.5% AGI
+    let medical_total: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(e.amount_cents), 0) FROM expenses e \
+         JOIN expense_categories c ON e.category_id = c.id \
+         WHERE e.user_id = ? AND c.name = 'Medical' AND e.entity = 'personal' AND e.expense_date >= ? AND e.expense_date <= ?",
+        rusqlite::params![user_id, &start, &end], |r| r.get(0),
+    ).unwrap_or(0);
+    let medical_floor = (agi as f64 * 0.075) as i64;
+    let medical_deductible = std::cmp::max(medical_total - medical_floor, 0);
+
+    let itemized_deduction = personal_deductible - salt_reduction - (medical_total - medical_deductible);
+
+    // Standard deduction
+    let (brackets, top_rate, standard_deduction) = load_brackets(year, filing_status);
+    let deduction_used = std::cmp::max(standard_deduction, itemized_deduction);
+    let deduction_type = if itemized_deduction > standard_deduction { "Itemized" } else { "Standard" };
+
+    // ── QBI deduction (Section 199A) ──
+    let qbi_deduction = if se_net > 0 {
+        let qbi_raw = se_net * 2000 / 10000; // 20%
+        let qbi_cap = std::cmp::max(agi - deduction_used, 0) * 2000 / 10000;
+        let qbi = std::cmp::min(qbi_raw, qbi_cap);
+        // Phase-out
+        let (phase_start, phase_range) = match filing_status {
+            "married_jointly" => (38_390_000i64, 10_000_000i64),
+            _ => (19_195_000i64, 5_000_000i64),
+        };
+        if agi > phase_start + phase_range { 0 }
+        else if agi > phase_start {
+            let reduction = ((agi - phase_start) as f64 / phase_range as f64).min(1.0);
+            ((1.0 - reduction) * qbi as f64) as i64
+        } else { qbi }
+    } else { 0 };
+
+    // ── Taxable income ──
+    let taxable_income = std::cmp::max(agi - deduction_used - qbi_deduction, 0);
+
+    // ── Capital gains ──
+    let long_term_gains: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(realized_pl_cents), 0) FROM investment_transactions \
+         WHERE user_id = ? AND transaction_date >= ? AND transaction_date <= ? AND activity_type = 'long_term'",
+        rusqlite::params![user_id, &start, &end], |r| r.get(0),
+    ).unwrap_or(0);
+    let ltcg = std::cmp::max(long_term_gains, 0);
+
+    // LTCG brackets (2025)
+    let ltcg_brackets: Vec<(i64, i64)> = match filing_status {
+        "married_jointly" => vec![(9_670_000, 0), (60_005_000, 1500), (i64::MAX, 2000)],
+        _ => vec![(4_835_000, 0), (53_375_000, 1500), (i64::MAX, 2000)],
+    };
+    let ordinary_portion = std::cmp::max(taxable_income - ltcg, 0);
+
+    // Ordinary tax
+    let mut ordinary_tax: i64 = 0;
+    let mut prev = 0i64;
+    for &(limit, rate_bps) in &brackets {
+        let bracket_income = std::cmp::min(ordinary_portion, limit) - prev;
+        if bracket_income <= 0 { break; }
+        ordinary_tax += bracket_income * rate_bps / 10000;
+        prev = limit;
+    }
+    if ordinary_portion > prev {
+        ordinary_tax += (ordinary_portion - prev) * top_rate / 10000;
+    }
+
+    // LTCG tax
+    let mut ltcg_tax: i64 = 0;
+    let mut prev_ltcg = 0i64;
+    for &(limit, rate_bps) in &ltcg_brackets {
+        let bracket_income = std::cmp::min(ltcg, limit) - prev_ltcg;
+        if bracket_income <= 0 { break; }
+        ltcg_tax += bracket_income * rate_bps / 10000;
+        prev_ltcg = limit;
+    }
+
+    let total_tax = ordinary_tax + ltcg_tax + se_tax;
+
+    // ── Payments & Credits ──
+    let w2_withheld: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(amount_cents), 0) FROM tax_income WHERE user_id = ? AND tax_year = ? AND category LIKE '%Withholding%'",
+        rusqlite::params![user_id, year], |r| r.get(0),
+    ).unwrap_or(0);
+    let fed_paid: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(e.amount_cents), 0) FROM expenses e \
+         JOIN expense_categories c ON e.category_id = c.id \
+         WHERE e.user_id = ? AND c.name LIKE 'Federal Income Tax%' AND e.expense_date >= ? AND e.expense_date <= ?",
+        rusqlite::params![user_id, &start, &end], |r| r.get(0),
+    ).unwrap_or(0);
+
+    // Child tax credit
+    let dependents: i64 = conn.query_row(
+        "SELECT answers_json FROM deduction_questionnaire WHERE user_id = ? AND tax_year = ?",
+        rusqlite::params![user_id, year], |r| r.get::<_, String>(0),
+    ).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+    .and_then(|v| v.get("dependents")?.as_i64()).unwrap_or(0);
+    let child_credit = dependents * 200_000; // $2,000 per child
+
+    let total_payments = w2_withheld + fed_paid + child_credit;
+    let owed = total_tax - total_payments;
+
+    let effective_rate = if gross_income > 0 { (total_tax as f64 / gross_income as f64) * 100.0 } else { 0.0 };
+
+    Ok(TaxEstimate {
+        gross_income, se_income, w2_income, biz_deductions: biz_deductions_adj,
+        meals_total, meals_adjustment, se_tax, half_se_tax, se_health_deduction,
+        student_loan_deduction, agi, standard_deduction, itemized_deduction: itemized_deduction,
+        salt_capped, medical_deductible, qbi_deduction, deduction_used, deduction_type: deduction_type.to_string(),
+        taxable_income, ordinary_tax, ltcg_tax, total_tax, w2_withheld, fed_paid,
+        child_credit, total_payments, owed, effective_rate,
+    })
+}
+
 // ── Module Gate Helper ──────────────────────────────────────────────────────
 
 /// Check if the user has access to the tax module. Returns Ok(()) if granted,
@@ -2951,4 +3203,708 @@ Respond with ONLY the JSON, no explanation."#,
         "message": format!("Successfully fetched and saved {} tax brackets.", target_year),
         "brackets": parsed,
     })))
+}
+
+// ── Deduction Questionnaire ────────────────────────────────────────────────
+
+pub async fn handle_questionnaire_get(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    require_tax_module(&state, principal.user_id()).await?;
+
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let year: i64 = params.get("year").and_then(|y| y.parse().ok())
+        .unwrap_or_else(|| default_tax_year());
+
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        match conn.query_row(
+            "SELECT answers_json, completed FROM deduction_questionnaire WHERE user_id = ? AND tax_year = ?",
+            rusqlite::params![uid, year],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)),
+        ) {
+            Ok((json_str, completed)) => {
+                let answers: serde_json::Value = serde_json::from_str(&json_str).unwrap_or_default();
+                Ok(serde_json::json!({ "answers": answers, "completed": completed, "year": year }))
+            }
+            Err(_) => Ok(serde_json::json!({ "answers": {}, "completed": false, "year": year })),
+        }
+    }).await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(serde_json::json!({ "questionnaire": result })))
+}
+
+#[derive(Deserialize)]
+pub struct QuestionnaireSaveRequest {
+    pub token: String,
+    pub year: Option<i64>,
+    pub answers: serde_json::Value,
+    pub completed: Option<bool>,
+}
+
+pub async fn handle_questionnaire_save(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<QuestionnaireSaveRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &req.token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    require_tax_module(&state, principal.user_id()).await?;
+
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let year = req.year.unwrap_or_else(|| default_tax_year());
+    let answers_json = serde_json::to_string(&req.answers).unwrap_or_else(|_| "{}".to_string());
+    let completed = req.completed.unwrap_or(false);
+    let now = chrono::Utc::now().timestamp();
+
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO deduction_questionnaire (user_id, tax_year, answers_json, completed, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(user_id, tax_year) DO UPDATE SET answers_json = excluded.answers_json, completed = excluded.completed, updated_at = excluded.updated_at",
+            rusqlite::params![uid, year, &answers_json, completed, now, now],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }).await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(serde_json::json!({ "success": true, "year": year, "completed": completed })))
+}
+
+fn default_tax_year() -> i64 {
+    let now = chrono::Utc::now();
+    let month = now.format("%m").to_string().parse::<i64>().unwrap_or(1);
+    let year = now.format("%Y").to_string().parse::<i64>().unwrap_or(2025);
+    // Before November, default to prior year (filing season). Nov+ = current year.
+    if month < 11 { year - 1 } else { year }
+}
+
+// ── Deduction Auto-Scanner ─────────────────────────────────────────────────
+
+struct DeductionRule {
+    deduction_type: &'static str,
+    keywords: &'static [&'static str],
+    category_suggestion: &'static str,
+    entity_suggestion: &'static str,
+    questionnaire_gate: &'static str, // "" = always active
+}
+
+static DEDUCTION_RULES: &[DeductionRule] = &[
+    DeductionRule {
+        deduction_type: "medical",
+        keywords: &["cvs", "walgreens", "rite aid", "pharmacy", "rx", "doctor", "hospital",
+            "urgent care", "labcorp", "lab corp", "quest diagnostics", "dental", "dentist",
+            "optometry", "optometrist", "vision center", "therapy", "therapist",
+            "mental health", "physical therapy", "chiropractic", "hearing aid",
+            "medical", "clinic", "dermatology", "radiology", "pediatric", "ortho"],
+        category_suggestion: "Medical",
+        entity_suggestion: "personal",
+        questionnaire_gate: "",
+    },
+    DeductionRule {
+        deduction_type: "health_insurance",
+        keywords: &["blue cross", "bcbs", "aetna", "kaiser", "unitedhealth", "united health",
+            "cigna", "humana", "anthem", "molina", "ambetter", "oscar health",
+            "healthcare.gov", "marketplace", "health insurance", "medical premium",
+            "dental premium", "vision premium"],
+        category_suggestion: "Medical",
+        entity_suggestion: "personal",
+        questionnaire_gate: "health_insurance_self",
+    },
+    DeductionRule {
+        deduction_type: "vehicle",
+        keywords: &["shell", "chevron", "exxon", "mobil", "bp ", "arco", "76 ", "gas station",
+            "fuel", "gasoline", "parking", "park garage", "toll", "e-zpass", "fastrak",
+            "autozone", "o'reilly", "napa auto", "jiffy lube", "oil change", "car wash",
+            "tire", "mechanic", "midas", "pep boys", "valvoline"],
+        category_suggestion: "Vehicle & Mileage",
+        entity_suggestion: "business",
+        questionnaire_gate: "vehicle_business",
+    },
+    DeductionRule {
+        deduction_type: "home_office",
+        keywords: &["comcast", "xfinity", "spectrum", "at&t internet", "verizon fios",
+            "t-mobile home", "centurylink", "lumen", "starlink", "electric", "power company",
+            "pge", "pg&e", "duke energy", "con edison", "pse", "puget sound energy",
+            "natural gas", "water utility", "sewer"],
+        category_suggestion: "Rent & Utilities",
+        entity_suggestion: "business",
+        questionnaire_gate: "home_office",
+    },
+    DeductionRule {
+        deduction_type: "software",
+        keywords: &["adobe", "github", "gitlab", "aws", "amazon web services", "google cloud",
+            "azure", "microsoft 365", "office 365", "dropbox", "slack", "zoom",
+            "notion", "figma", "jetbrains", "openai", "anthropic", "vercel", "heroku",
+            "digitalocean", "cloudflare", "netlify", "render.com", "supabase",
+            "docker", "1password", "bitwarden", "canva"],
+        category_suggestion: "Software & Subscriptions",
+        entity_suggestion: "business",
+        questionnaire_gate: "self_employed",
+    },
+    DeductionRule {
+        deduction_type: "education",
+        keywords: &["udemy", "coursera", "skillshare", "masterclass", "o'reilly",
+            "pluralsight", "linkedin learning", "egghead", "tuition", "university",
+            "college", "textbook", "academic", "certification", "training course"],
+        category_suggestion: "Education & Training",
+        entity_suggestion: "business",
+        questionnaire_gate: "",
+    },
+    DeductionRule {
+        deduction_type: "charitable",
+        keywords: &["church", "parish", "temple", "synagogue", "mosque", "salvation army",
+            "goodwill", "red cross", "united way", "habitat for humanity", "st jude",
+            "make a wish", "food bank", "american cancer", "heart association",
+            "wounded warrior", "sierra club", "aclu", "planned parenthood",
+            "doctors without", "unicef", "world vision", "charity", "donation"],
+        category_suggestion: "Donations",
+        entity_suggestion: "personal",
+        questionnaire_gate: "charitable_donations",
+    },
+    DeductionRule {
+        deduction_type: "professional",
+        keywords: &["accountant", "cpa", "accounting", "attorney", "lawyer", "legal fee",
+            "tax prep", "h&r block", "turbotax", "jackson hewitt", "bookkeeper",
+            "bookkeeping", "consulting fee", "notary"],
+        category_suggestion: "Professional Services",
+        entity_suggestion: "business",
+        questionnaire_gate: "self_employed",
+    },
+    DeductionRule {
+        deduction_type: "retirement",
+        keywords: &["fidelity", "vanguard", "schwab", "charles schwab", "ira contribution",
+            "401k", "roth ira", "sep-ira", "sep ira", "retirement", "td ameritrade",
+            "etrade", "e*trade", "betterment", "wealthfront"],
+        category_suggestion: "Retirement",
+        entity_suggestion: "personal",
+        questionnaire_gate: "retirement_contributions",
+    },
+    DeductionRule {
+        deduction_type: "student_loan",
+        keywords: &["navient", "nelnet", "mohela", "great lakes", "student loan",
+            "fedloan", "aidvantage", "sallie mae", "dept of education"],
+        category_suggestion: "Student Loan Interest",
+        entity_suggestion: "personal",
+        questionnaire_gate: "student_loan_interest",
+    },
+    DeductionRule {
+        deduction_type: "hsa",
+        keywords: &["hsa", "health savings", "optum bank", "fidelity hsa", "lively",
+            "healthequity", "further hsa"],
+        category_suggestion: "HSA Contribution",
+        entity_suggestion: "personal",
+        questionnaire_gate: "hdhp",
+    },
+];
+
+pub fn scan_for_deduction_candidates(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+    year: i64,
+) -> Result<serde_json::Value, String> {
+    // Load questionnaire answers
+    let answers: serde_json::Value = conn.query_row(
+        "SELECT answers_json FROM deduction_questionnaire WHERE user_id = ? AND tax_year = ?",
+        rusqlite::params![user_id, year],
+        |r| r.get::<_, String>(0),
+    ).ok()
+    .and_then(|s| serde_json::from_str(&s).ok())
+    .unwrap_or_else(|| serde_json::json!({}));
+
+    let now = chrono::Utc::now().timestamp();
+    let year_start = format!("{}-01-01", year);
+    let year_end = format!("{}-12-31", year);
+    let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    let mut total = 0i64;
+
+    // Filter rules by questionnaire gates
+    let active_rules: Vec<&DeductionRule> = DEDUCTION_RULES.iter().filter(|r| {
+        if r.questionnaire_gate.is_empty() { return true; }
+        answers.get(r.questionnaire_gate).and_then(|v| v.as_bool()).unwrap_or(false)
+    }).collect();
+
+    // Scan statement_transactions
+    {
+        let mut stmt = conn.prepare(
+            "SELECT id, vendor, description, amount_cents, transaction_date FROM statement_transactions \
+             WHERE user_id = ? AND transaction_date >= ? AND transaction_date <= ?"
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(rusqlite::params![user_id, &year_start, &year_end], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?, r.get::<_, String>(4)?))
+        }).map_err(|e| e.to_string())?;
+
+        for row in rows {
+            let (id, vendor, desc, amount, date) = row.map_err(|e| e.to_string())?;
+            let search_text = format!("{} {}", vendor.as_deref().unwrap_or(""), &desc).to_lowercase();
+            for rule in &active_rules {
+                let matched: Vec<&&str> = rule.keywords.iter().filter(|kw| search_text.contains(**kw)).collect();
+                if matched.is_empty() { continue; }
+                let confidence = if matched.len() >= 2 { 0.8 } else { 0.5 };
+                let inserted = conn.execute(
+                    "INSERT OR IGNORE INTO deduction_candidates \
+                     (user_id, tax_year, source_type, source_id, deduction_type, vendor, description, \
+                      amount_cents, transaction_date, category_suggestion, entity_suggestion, confidence, match_rule, status, created_at) \
+                     VALUES (?, ?, 'statement_transaction', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+                    rusqlite::params![
+                        user_id, year, id, rule.deduction_type,
+                        vendor.as_deref().unwrap_or(""), &desc, amount.abs(), &date,
+                        rule.category_suggestion, rule.entity_suggestion,
+                        confidence, matched.iter().map(|k| **k).collect::<Vec<_>>().join(", "), now
+                    ],
+                ).unwrap_or(0);
+                if inserted > 0 {
+                    total += 1;
+                    *counts.entry(rule.deduction_type.to_string()).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    // Scan financial_transactions
+    {
+        let mut stmt = conn.prepare(
+            "SELECT id, name, COALESCE(merchant_name, ''), amount_cents, date FROM financial_transactions \
+             WHERE user_id = ? AND date >= ? AND date <= ?"
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(rusqlite::params![user_id, &year_start, &year_end], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?, r.get::<_, String>(4)?))
+        }).map_err(|e| e.to_string())?;
+
+        for row in rows {
+            let (id, name, merchant, amount, date) = row.map_err(|e| e.to_string())?;
+            let search_text = format!("{} {}", &name, &merchant).to_lowercase();
+            for rule in &active_rules {
+                let matched: Vec<&&str> = rule.keywords.iter().filter(|kw| search_text.contains(**kw)).collect();
+                if matched.is_empty() { continue; }
+                let confidence = if matched.len() >= 2 { 0.8 } else { 0.5 };
+                let vendor_display = if merchant.is_empty() { &name } else { &merchant };
+                let inserted = conn.execute(
+                    "INSERT OR IGNORE INTO deduction_candidates \
+                     (user_id, tax_year, source_type, source_id, deduction_type, vendor, description, \
+                      amount_cents, transaction_date, category_suggestion, entity_suggestion, confidence, match_rule, status, created_at) \
+                     VALUES (?, ?, 'financial_transaction', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+                    rusqlite::params![
+                        user_id, year, id, rule.deduction_type,
+                        vendor_display, &name, amount.abs(), &date,
+                        rule.category_suggestion, rule.entity_suggestion,
+                        confidence, matched.iter().map(|k| **k).collect::<Vec<_>>().join(", "), now
+                    ],
+                ).unwrap_or(0);
+                if inserted > 0 {
+                    total += 1;
+                    *counts.entry(rule.deduction_type.to_string()).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    Ok(serde_json::json!({
+        "candidates_found": total,
+        "by_type": counts,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct DeductionScanRequest {
+    pub token: String,
+    pub year: Option<i64>,
+}
+
+pub async fn handle_deduction_scan(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<DeductionScanRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &req.token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    require_tax_module(&state, principal.user_id()).await?;
+
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let year = req.year.unwrap_or_else(|| default_tax_year());
+
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        scan_for_deduction_candidates(&conn, uid, year)
+    }).await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(serde_json::json!({ "success": true, "year": year, "scan": result })))
+}
+
+pub async fn handle_deduction_candidates_list(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    require_tax_module(&state, principal.user_id()).await?;
+
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let year: i64 = params.get("year").and_then(|y| y.parse().ok()).unwrap_or_else(|| default_tax_year());
+    let status_filter = params.get("status").cloned().unwrap_or_else(|| "pending".to_string());
+    let type_filter = params.get("type").cloned();
+
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+
+        // Counts
+        let pending: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM deduction_candidates WHERE user_id = ? AND tax_year = ? AND status = 'pending'",
+            rusqlite::params![uid, year], |r| r.get(0)).unwrap_or(0);
+        let approved: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM deduction_candidates WHERE user_id = ? AND tax_year = ? AND status = 'approved'",
+            rusqlite::params![uid, year], |r| r.get(0)).unwrap_or(0);
+        let denied: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM deduction_candidates WHERE user_id = ? AND tax_year = ? AND status = 'denied'",
+            rusqlite::params![uid, year], |r| r.get(0)).unwrap_or(0);
+
+        // Build query
+        let mut sql = "SELECT id, deduction_type, vendor, description, amount_cents, transaction_date, \
+                        category_suggestion, entity_suggestion, confidence, match_rule, status, source_type, source_id \
+                        FROM deduction_candidates WHERE user_id = ? AND tax_year = ? AND status = ?".to_string();
+        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+            Box::new(uid), Box::new(year), Box::new(status_filter),
+        ];
+        if let Some(ref t) = type_filter {
+            sql.push_str(" AND deduction_type = ?");
+            params_vec.push(Box::new(t.clone()));
+        }
+        sql.push_str(" ORDER BY confidence DESC, amount_cents DESC LIMIT 200");
+
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params_vec.iter().map(|p| p.as_ref())), |r| {
+            let amount: i64 = r.get(4)?;
+            Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?,
+                "deduction_type": r.get::<_, String>(1)?,
+                "vendor": r.get::<_, Option<String>>(2)?,
+                "description": r.get::<_, Option<String>>(3)?,
+                "amount_cents": amount,
+                "amount_display": cents_to_display(amount),
+                "transaction_date": r.get::<_, Option<String>>(5)?,
+                "category_suggestion": r.get::<_, Option<String>>(6)?,
+                "entity_suggestion": r.get::<_, String>(7)?,
+                "confidence": r.get::<_, f64>(8)?,
+                "match_rule": r.get::<_, Option<String>>(9)?,
+                "status": r.get::<_, String>(10)?,
+                "source_type": r.get::<_, String>(11)?,
+                "source_id": r.get::<_, i64>(12)?,
+            }))
+        }).map_err(|e| e.to_string())?;
+
+        let candidates: Vec<serde_json::Value> = rows.filter_map(|r| r.ok()).collect();
+        Ok(serde_json::json!({
+            "candidates": candidates,
+            "counts": { "pending": pending, "approved": approved, "denied": denied },
+        }))
+    }).await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(result))
+}
+
+pub async fn handle_deduction_candidate_context(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(candidate_id): axum::extract::Path<i64>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+
+        let row = conn.query_row(
+            "SELECT id, deduction_type, vendor, description, amount_cents, transaction_date, \
+             category_suggestion, entity_suggestion, confidence, source_type, source_id, status \
+             FROM deduction_candidates WHERE id = ? AND user_id = ?",
+            rusqlite::params![candidate_id, uid],
+            |r| Ok((
+                r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<String>>(3)?, r.get::<_, i64>(4)?, r.get::<_, Option<String>>(5)?,
+                r.get::<_, Option<String>>(6)?, r.get::<_, String>(7)?, r.get::<_, f64>(8)?,
+                r.get::<_, String>(9)?, r.get::<_, i64>(10)?, r.get::<_, String>(11)?,
+            )),
+        ).map_err(|_| "Candidate not found".to_string())?;
+
+        let (id, ded_type, vendor, desc, amount, date, cat_sug, ent_sug, conf, src_type, src_id, status) = row;
+
+        // Look up source document if from a statement_transaction
+        let source_document = if src_type == "statement_transaction" {
+            conn.query_row(
+                "SELECT st.document_id FROM statement_transactions st WHERE st.id = ?",
+                rusqlite::params![src_id],
+                |r| r.get::<_, Option<i64>>(0),
+            ).ok().flatten().and_then(|doc_id| {
+                conn.query_row(
+                    "SELECT id, doc_type, image_path FROM tax_documents WHERE id = ?",
+                    rusqlite::params![doc_id],
+                    |r| Ok(serde_json::json!({
+                        "id": r.get::<_, i64>(0)?,
+                        "doc_type": r.get::<_, String>(1)?,
+                        "image_url": format!("/api/tax/documents/{}/image", r.get::<_, i64>(0)?),
+                    })),
+                ).ok()
+            })
+        } else {
+            None
+        };
+
+        Ok(serde_json::json!({
+            "candidate": {
+                "id": id, "deduction_type": ded_type, "vendor": vendor, "description": desc,
+                "amount_cents": amount, "amount_display": cents_to_display(amount),
+                "transaction_date": date, "category_suggestion": cat_sug,
+                "entity_suggestion": ent_sug, "confidence": conf,
+                "source_type": src_type, "source_id": src_id, "status": status,
+            },
+            "source_document": source_document,
+        }))
+    }).await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(result))
+}
+
+#[derive(Deserialize)]
+pub struct DeductionReviewRequest {
+    pub token: String,
+    pub action: String, // "approve" or "deny"
+    pub category: Option<String>,
+    pub entity: Option<String>,
+}
+
+pub async fn handle_deduction_review(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(candidate_id): axum::extract::Path<i64>,
+    Json(req): Json<DeductionReviewRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &req.token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    require_tax_module(&state, principal.user_id()).await?;
+
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let action = req.action.clone();
+    let category = req.category.clone();
+    let entity = req.entity.clone();
+    let now = chrono::Utc::now().timestamp();
+
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+
+        // Verify ownership
+        let candidate = conn.query_row(
+            "SELECT vendor, description, amount_cents, transaction_date, category_suggestion, entity_suggestion \
+             FROM deduction_candidates WHERE id = ? AND user_id = ? AND status = 'pending'",
+            rusqlite::params![candidate_id, uid],
+            |r| Ok((
+                r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?,
+                r.get::<_, i64>(2)?, r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?, r.get::<_, String>(5)?,
+            )),
+        ).map_err(|_| "Candidate not found or already reviewed".to_string())?;
+
+        let (vendor, desc, amount, date, cat_sug, ent_sug) = candidate;
+
+        if action == "approve" {
+            let cat_name = category.as_deref().or(cat_sug.as_deref()).unwrap_or("Other");
+            let ent = entity.as_deref().unwrap_or(&ent_sug);
+            let vendor_str = vendor.as_deref().unwrap_or("Unknown");
+            let date_str = date.as_deref().unwrap_or("2025-01-01");
+
+            let category_id: Option<i64> = conn.query_row(
+                "SELECT id FROM expense_categories WHERE name = ?",
+                rusqlite::params![cat_name], |r| r.get(0),
+            ).ok();
+
+            conn.execute(
+                "INSERT INTO expenses (user_id, amount_cents, vendor, category_id, expense_date, description, entity, created_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                rusqlite::params![uid, amount, vendor_str, category_id, date_str, desc.as_deref().unwrap_or(""), ent, now],
+            ).map_err(|e| e.to_string())?;
+            let expense_id = conn.last_insert_rowid();
+
+            conn.execute(
+                "UPDATE deduction_candidates SET status = 'approved', reviewed_at = ?, expense_id = ? WHERE id = ?",
+                rusqlite::params![now, expense_id, candidate_id],
+            ).map_err(|e| e.to_string())?;
+
+            Ok(serde_json::json!({ "success": true, "action": "approved", "expense_id": expense_id }))
+        } else {
+            conn.execute(
+                "UPDATE deduction_candidates SET status = 'denied', reviewed_at = ? WHERE id = ?",
+                rusqlite::params![now, candidate_id],
+            ).map_err(|e| e.to_string())?;
+
+            Ok(serde_json::json!({ "success": true, "action": "denied" }))
+        }
+    }).await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(result))
+}
+
+#[derive(Deserialize)]
+pub struct BulkReviewRequest {
+    pub token: String,
+    pub ids: Vec<i64>,
+    pub action: String,
+    pub category: Option<String>,
+    pub entity: Option<String>,
+}
+
+pub async fn handle_deduction_bulk_review(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BulkReviewRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &req.token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    require_tax_module(&state, principal.user_id()).await?;
+
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let ids = req.ids.clone();
+    let action = req.action.clone();
+    let category = req.category.clone();
+    let entity = req.entity.clone();
+    let now = chrono::Utc::now().timestamp();
+
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let mut approved_count = 0i64;
+        let mut denied_count = 0i64;
+
+        for cid in &ids {
+            let candidate = conn.query_row(
+                "SELECT vendor, description, amount_cents, transaction_date, category_suggestion, entity_suggestion \
+                 FROM deduction_candidates WHERE id = ? AND user_id = ? AND status = 'pending'",
+                rusqlite::params![cid, uid],
+                |r| Ok((
+                    r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?,
+                    r.get::<_, i64>(2)?, r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<String>>(4)?, r.get::<_, String>(5)?,
+                )),
+            );
+            let (vendor, desc, amount, date, cat_sug, ent_sug) = match candidate {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            if action == "approve" {
+                let cat_name = category.as_deref().or(cat_sug.as_deref()).unwrap_or("Other");
+                let ent = entity.as_deref().unwrap_or(&ent_sug);
+                let category_id: Option<i64> = conn.query_row(
+                    "SELECT id FROM expense_categories WHERE name = ?",
+                    rusqlite::params![cat_name], |r| r.get(0),
+                ).ok();
+                conn.execute(
+                    "INSERT INTO expenses (user_id, amount_cents, vendor, category_id, expense_date, description, entity, created_at) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    rusqlite::params![uid, amount, vendor.as_deref().unwrap_or(""), category_id,
+                        date.as_deref().unwrap_or("2025-01-01"), desc.as_deref().unwrap_or(""), ent, now],
+                ).ok();
+                let expense_id = conn.last_insert_rowid();
+                conn.execute(
+                    "UPDATE deduction_candidates SET status = 'approved', reviewed_at = ?, expense_id = ? WHERE id = ?",
+                    rusqlite::params![now, expense_id, cid],
+                ).ok();
+                approved_count += 1;
+            } else {
+                conn.execute(
+                    "UPDATE deduction_candidates SET status = 'denied', reviewed_at = ? WHERE id = ?",
+                    rusqlite::params![now, cid],
+                ).ok();
+                denied_count += 1;
+            }
+        }
+
+        Ok(serde_json::json!({ "success": true, "approved": approved_count, "denied": denied_count }))
+    }).await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(result))
+}
+
+pub async fn handle_deduction_summary(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    require_tax_module(&state, principal.user_id()).await?;
+
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let year: i64 = params.get("year").and_then(|y| y.parse().ok()).unwrap_or_else(|| default_tax_year());
+
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+
+        let quest_complete: bool = conn.query_row(
+            "SELECT completed FROM deduction_questionnaire WHERE user_id = ? AND tax_year = ?",
+            rusqlite::params![uid, year], |r| r.get(0),
+        ).unwrap_or(false);
+
+        let pending: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM deduction_candidates WHERE user_id = ? AND tax_year = ? AND status = 'pending'",
+            rusqlite::params![uid, year], |r| r.get(0)).unwrap_or(0);
+        let approved_cents: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(amount_cents), 0) FROM deduction_candidates WHERE user_id = ? AND tax_year = ? AND status = 'approved'",
+            rusqlite::params![uid, year], |r| r.get(0)).unwrap_or(0);
+
+        // By type breakdown
+        let mut stmt = conn.prepare(
+            "SELECT deduction_type, status, COUNT(*), COALESCE(SUM(amount_cents), 0) \
+             FROM deduction_candidates WHERE user_id = ? AND tax_year = ? GROUP BY deduction_type, status"
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(rusqlite::params![uid, year], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?))
+        }).map_err(|e| e.to_string())?;
+
+        let mut by_type: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+        for row in rows {
+            let (dtype, status, count, amount) = row.map_err(|e| e.to_string())?;
+            let entry = by_type.entry(dtype).or_insert_with(|| serde_json::json!({"pending": 0, "approved": 0, "denied": 0, "approved_cents": 0}));
+            entry[&status] = serde_json::json!(count);
+            if status == "approved" {
+                entry["approved_cents"] = serde_json::json!(amount);
+            }
+        }
+
+        Ok(serde_json::json!({
+            "questionnaire_complete": quest_complete,
+            "total_pending": pending,
+            "total_approved_cents": approved_cents,
+            "total_approved_display": cents_to_display(approved_cents),
+            "by_type": by_type,
+        }))
+    }).await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(result))
 }

@@ -1956,132 +1956,60 @@ impl Tool for EstimateTaxTool {
 
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
             let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
-
-            // Get income (exclude withholding — that's a payment, not income)
-            let gross_income: i64 = conn.query_row(
-                "SELECT COALESCE(SUM(amount_cents), 0) FROM tax_income WHERE user_id = ? AND tax_year = ? AND category != 'Federal Withholding'",
-                rusqlite::params![uid, year], |r| r.get(0)
-            ).unwrap_or(0);
-
-            let start = format!("{}-01-01", year);
-            let end = format!("{}-12-31", year);
-
-            // Get business deductions (Schedule C)
-            let biz_deductions: i64 = conn.query_row(
-                "SELECT COALESCE(SUM(e.amount_cents), 0) FROM expenses e \
-                 JOIN expense_categories c ON e.category_id = c.id \
-                 WHERE e.user_id = ? AND e.entity = 'business' AND e.expense_date >= ? AND e.expense_date <= ?",
-                rusqlite::params![uid, &start, &end], |r| r.get(0)
-            ).unwrap_or(0);
-
-            // Get itemized deductions
-            let itemized: i64 = conn.query_row(
-                "SELECT COALESCE(SUM(e.amount_cents), 0) FROM expenses e \
-                 JOIN expense_categories c ON e.category_id = c.id \
-                 WHERE e.user_id = ? AND c.tax_deductible = 1 AND e.entity = 'personal' AND e.expense_date >= ? AND e.expense_date <= ?",
-                rusqlite::params![uid, &start, &end], |r| r.get(0)
-            ).unwrap_or(0);
-
-            // FICA already paid
-            let fica_paid: i64 = conn.query_row(
-                "SELECT COALESCE(SUM(e.amount_cents), 0) FROM expenses e \
-                 JOIN expense_categories c ON e.category_id = c.id \
-                 WHERE e.user_id = ? AND (c.name LIKE 'FICA%') AND e.expense_date >= ? AND e.expense_date <= ?",
-                rusqlite::params![uid, &start, &end], |r| r.get(0)
-            ).unwrap_or(0);
-
-            // Federal tax already paid
-            let fed_paid: i64 = conn.query_row(
-                "SELECT COALESCE(SUM(e.amount_cents), 0) FROM expenses e \
-                 JOIN expense_categories c ON e.category_id = c.id \
-                 WHERE e.user_id = ? AND c.name LIKE 'Federal Income Tax%' AND e.expense_date >= ? AND e.expense_date <= ?",
-                rusqlite::params![uid, &start, &end], |r| r.get(0)
-            ).unwrap_or(0);
-
-            // Standard deduction (2025, IRS Rev. Proc. 2024-40)
-            // Load brackets from config (auto-updated from IRS yearly)
-            let (brackets, top_rate, standard_deduction) = crate::tax::load_brackets(year, &status_owned);
-
-            let deduction = std::cmp::max(standard_deduction, itemized);
-            let deduction_type = if itemized > standard_deduction { "Itemized" } else { "Standard" };
-
-            // Adjusted gross income
-            let agi = gross_income - biz_deductions;
-            let taxable = std::cmp::max(agi - deduction, 0);
-
-            // Calculate tax using loaded brackets
-            let mut tax: i64 = 0;
-            let mut prev = 0i64;
-            for &(limit, rate_bps) in &brackets {
-                let bracket_income = std::cmp::min(taxable, limit) - prev;
-                if bracket_income <= 0 { break; }
-                tax += bracket_income * rate_bps / 10000;
-                prev = limit;
-            }
-            // Top bracket for income above last bracket
-            if taxable > prev {
-                tax += (taxable - prev) * top_rate / 10000;
-            }
-
-            // W-2 withholding (box 2) - check if we have it
-            let w2_withheld: i64 = conn.query_row(
-                "SELECT COALESCE(SUM(amount_cents), 0) FROM tax_income WHERE user_id = ? AND tax_year = ? AND category LIKE '%Withholding%'",
-                rusqlite::params![uid, year], |r| r.get(0)
-            ).unwrap_or(0);
-
-            // Credits against tax: W-2 withholding + estimated payments (NOT FICA — that's separate)
-            let total_payments = w2_withheld + fed_paid;
-            let owed = tax - total_payments;
-
+            let t = crate::tax::compute_tax_estimate(&conn, uid, year, &status_owned)?;
             let d = |c: i64| crate::tax::cents_to_display(c);
-            let mut result = format!(
+
+            let mut out = format!(
                 "Tax Estimate for {} ({}):\n\n\
-                 Gross Income:              {}\n\
-                 Business Deductions:      -{}\n\
-                 Adjusted Gross Income:     {}\n\
-                 {} Deduction:        -{}\n\
-                 Taxable Income:            {}\n\n\
-                 Federal Income Tax:        {}\n\n\
-                 Credits / Payments:\n",
-                year, status_owned.replace('_', " "),
-                d(gross_income), d(biz_deductions), d(agi),
-                deduction_type, d(deduction), d(taxable), d(tax));
+                 Gross Income:              {}\n",
+                year, status_owned.replace('_', " "), d(t.gross_income));
 
-            if w2_withheld > 0 {
-                result += &format!("   W-2 Withholding:       -{}\n", d(w2_withheld));
+            if t.se_income > 0 {
+                out += &format!("   W-2 Income:             {}\n", d(t.w2_income));
+                out += &format!("   Self-Employment Income: {}\n", d(t.se_income));
             }
-            if fed_paid > 0 {
-                result += &format!("   Estimated Tax Paid:    -{}\n", d(fed_paid));
-            }
-            result += &format!("   Total Payments:        -{}\n", d(total_payments));
-            result += &format!(" ────────────────────────────\n");
-            result += &format!("   {}\n", if owed > 0 { format!("ESTIMATED TAX DUE: {}", d(owed)) } else { format!("ESTIMATED REFUND: {}", d(-owed)) });
-
-            // Separate note about FICA
-            if fica_paid > 0 {
-                result += &format!("\nNote: FICA/payroll taxes ({}) are separate from federal income tax and are NOT credited against your income tax bill.\n", d(fica_paid));
+            out += &format!("Business Deductions:      -{}\n", d(t.biz_deductions));
+            if t.meals_adjustment > 0 {
+                out += &format!("  (Meals 50% limit:       -{} disallowed)\n", d(t.meals_adjustment));
             }
 
-            if w2_withheld == 0 {
-                result += &format!("\n⚠ IMPORTANT: This estimate does NOT include federal income tax withheld from your W-2 paychecks (Box 2 on your W-2 forms). \
-                    This is typically the largest credit. Check your W-2s for the actual withholding amount — it will significantly reduce the amount owed.\n");
+            out += &format!("\nAbove-the-Line Deductions:\n");
+            if t.half_se_tax > 0 { out += &format!("   Half SE Tax:           -{}\n", d(t.half_se_tax)); }
+            if t.se_health_deduction > 0 { out += &format!("   SE Health Insurance:   -{}\n", d(t.se_health_deduction)); }
+            if t.student_loan_deduction > 0 { out += &format!("   Student Loan Interest: -{}\n", d(t.student_loan_deduction)); }
+
+            out += &format!("\nAdjusted Gross Income:     {}\n", d(t.agi));
+            out += &format!("{} Deduction:        -{}\n", t.deduction_type, d(t.deduction_used));
+            if t.qbi_deduction > 0 { out += &format!("QBI Deduction (Sec 199A): -{}\n", d(t.qbi_deduction)); }
+            if t.salt_capped > 0 { out += &format!("  (SALT capped at $40,000)\n"); }
+            if t.medical_deductible > 0 { out += &format!("  (Medical above 7.5% AGI: {})\n", d(t.medical_deductible)); }
+            out += &format!("Taxable Income:            {}\n\n", d(t.taxable_income));
+
+            out += &format!("Tax Breakdown:\n");
+            out += &format!("   Federal Income Tax:     {}\n", d(t.ordinary_tax));
+            if t.ltcg_tax > 0 { out += &format!("   LTCG Tax (0/15/20%):    {}\n", d(t.ltcg_tax)); }
+            if t.se_tax > 0 { out += &format!("   Self-Employment Tax:    {}\n", d(t.se_tax)); }
+            out += &format!("   Total Tax:              {}\n\n", d(t.total_tax));
+
+            out += &format!("Credits / Payments:\n");
+            if t.w2_withheld > 0 { out += &format!("   W-2 Withholding:       -{}\n", d(t.w2_withheld)); }
+            if t.fed_paid > 0 { out += &format!("   Estimated Tax Paid:    -{}\n", d(t.fed_paid)); }
+            if t.child_credit > 0 { out += &format!("   Child Tax Credit:      -{}\n", d(t.child_credit)); }
+            out += &format!("   Total Payments:        -{}\n", d(t.total_payments));
+            out += &format!(" ────────────────────────────\n");
+            out += &format!("   {}\n", if t.owed > 0 { format!("ESTIMATED TAX DUE: {}", d(t.owed)) } else { format!("ESTIMATED REFUND: {}", d(-t.owed)) });
+
+            if t.w2_withheld == 0 && t.w2_income > 0 {
+                out += &format!("\n⚠ No W-2 withholding found. Upload your W-2 to include Box 2 withholding.\n");
             }
 
-            result += &format!("\n{}", if itemized > standard_deduction {
-                format!("Itemizing saves {} over the standard deduction.", d(itemized - standard_deduction))
-            } else {
-                format!("Standard deduction saves {}. Itemized total: {}.", d(standard_deduction - itemized), d(itemized))
-            });
+            out += &format!("\nEffective tax rate: {:.1}%", t.effective_rate);
 
-            let effective_rate = if gross_income > 0 { (tax as f64 / gross_income as f64) * 100.0 } else { 0.0 };
-            result += &format!("\nEffective federal tax rate: {:.1}%", effective_rate);
-
-            // Staleness warning
             if let Some(warning) = crate::tax::brackets_stale() {
-                result += &format!("\n\n⚠ {}", warning);
+                out += &format!("\n\n⚠ {}", warning);
             }
 
-            Ok(result)
+            Ok(out)
         }).await.map_err(|e| e.to_string())?.map_err(|e| e)?;
 
         Ok(RichToolResult::text(result))
