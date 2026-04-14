@@ -164,27 +164,67 @@
   <!-- Sync tab -->
   <div class="tab-content hidden" id="tab-sync">
     <div class="space-y-4">
-      <!-- Overview / Starter Kits -->
-      <div class="card">
-        <div class="flex items-center justify-between mb-2">
-          <h3 class="font-medium">Sync</h3>
-          <button onclick="loadSyncProviders()" class="text-xs text-gray-400 hover:text-gray-200">&#8634; Refresh</button>
-        </div>
-        <p class="text-sm text-gray-400 mb-4">Connect apps and services so Peter can act on your behalf. OAuth auto-refreshes every cycle; API keys get a daily health check and tell you when something needs attention.</p>
-        <h4 class="text-xs uppercase tracking-wider text-gray-500 mb-3">What do you want Syntaur to do?</h4>
-        <div id="sync-bundles" class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-          <!-- Populated by JS -->
+
+      <!-- Get Started — primary CTA, simplest path first -->
+      <div id="sync-getstarted-card" class="card border-2 border-oc-700 bg-gradient-to-br from-oc-900/30 to-gray-800">
+        <div class="flex items-start gap-4">
+          <div class="text-4xl flex-shrink-0">📱</div>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center justify-between mb-1">
+              <h3 class="font-semibold text-base">Start here: pair your phone</h3>
+              <span class="badge badge-blue">Recommended first</span>
+            </div>
+            <p class="text-sm text-gray-300 mb-3">Install the Syntaur Voice PWA on your phone. <strong class="text-white">That's all most people need.</strong> Once paired, Peter can listen to you, send notifications, capture your voice journal, and play music through your phone.</p>
+            <ul class="text-xs text-gray-400 space-y-1 mb-4">
+              <li>✓ Voice in / voice out (Peter listens and replies on your phone)</li>
+              <li>✓ Music playback through phone speakers, AirPods, or AirPlay</li>
+              <li>✓ Real-time notifications and reminders</li>
+              <li>✓ Voice journal capture from anywhere</li>
+            </ul>
+            <button onclick="openSyncModal('telegram')" class="hidden text-xs bg-oc-600 hover:bg-oc-700 text-white px-4 py-2 rounded-lg font-medium" id="sync-cta-telegram-btn">Connect Telegram</button>
+            <button onclick="window.open('http://' + location.hostname + ':18803', '_blank')" class="bg-oc-600 hover:bg-oc-700 text-white px-4 py-2 rounded-lg text-sm font-medium">Pair my phone</button>
+            <button onclick="openSyncModal('phone_music_pwa')" class="ml-2 text-xs text-gray-400 hover:text-gray-200">Already paired? Connect it →</button>
+          </div>
         </div>
       </div>
 
-      <!-- Full provider list by category -->
-      <div class="card">
-        <div class="flex items-center justify-between mb-3">
-          <h3 class="font-medium text-sm">All services</h3>
-          <input type="text" id="sync-filter" placeholder="Filter…" oninput="filterProviders(this.value)" class="bg-gray-900 border border-gray-700 rounded-lg text-xs text-gray-300 px-2 py-1 w-32 focus:w-48 transition-all outline-none focus:border-oc-500">
+      <div id="sync-getstarted-done" class="hidden card border-green-700/50">
+        <div class="flex items-center gap-3">
+          <span class="text-2xl">✓</span>
+          <div class="flex-1">
+            <p class="text-sm font-medium text-green-400">Phone paired</p>
+            <p class="text-xs text-gray-500">You're set. Add more below to expand what Peter can do.</p>
+          </div>
+          <button onclick="document.getElementById('sync-getstarted-card').classList.remove('hidden'); this.parentElement.parentElement.classList.add('hidden');" class="text-xs text-gray-500 hover:text-gray-300">Show again</button>
         </div>
-        <div id="sync-categories" class="space-y-5">
-          <p class="text-xs text-gray-500 italic">Loading providers…</p>
+      </div>
+
+      <!-- Want Peter to... progressive disclosure -->
+      <div class="card">
+        <div class="flex items-center justify-between mb-1">
+          <h3 class="font-medium">Want Peter to do more?</h3>
+          <button onclick="loadSyncProviders()" class="text-xs text-gray-400 hover:text-gray-200">&#8634; Refresh</button>
+        </div>
+        <p class="text-xs text-gray-500 mb-4">Each row shows the simplest path first. Add more for extra capability.</p>
+        <div id="sync-usecases" class="space-y-3">
+          <p class="text-xs text-gray-500 italic">Loading…</p>
+        </div>
+      </div>
+
+      <!-- All services — power-user view, collapsed by default -->
+      <div class="card">
+        <button onclick="toggleAllServices()" class="w-full flex items-center justify-between text-left" id="sync-all-toggle">
+          <div>
+            <h3 class="font-medium text-sm">All services</h3>
+            <p class="text-[11px] text-gray-500 mt-0.5">Browse the full catalog (29 providers) or jump to a specific service.</p>
+          </div>
+          <span class="text-gray-500 text-xs" id="sync-all-arrow">▸ Show all</span>
+        </button>
+        <div id="sync-all-services" class="hidden mt-4">
+          <input type="text" id="sync-filter" placeholder="Filter…" oninput="filterProviders(this.value)" class="w-full mb-4 bg-gray-900 border border-gray-700 rounded-lg text-xs text-gray-300 px-3 py-2 outline-none focus:border-oc-500">
+          <div id="sync-categories" class="space-y-5">
+            <p class="text-xs text-gray-500 italic">Loading providers…</p>
+          </div>
         </div>
       </div>
     </div>
@@ -663,99 +703,207 @@ const CATEGORY_DESCRIPTIONS = {
   'Storage': 'Where your Syntaur data lives. Typically info-only health cards.',
 };
 
-const STARTER_BUNDLES = [
+const USE_CASES = [
   {
-    id: 'peter_music',
-    title: '🎵 Play music on HomePod',
-    subtitle: 'Peter controls Apple Music on your HomePod or Apple TV via Home Assistant.',
-    providers: ['home_assistant', 'apple_music'],
-    optional: ['ios_shortcut_music', 'airplay'],
+    id: 'music',
+    icon: '🎵',
+    title: 'Play music',
+    tiers: [
+      {
+        label: 'Simplest',
+        providers: ['phone_music_pwa'],
+        unlocks: 'Music plays on your phone (speakers, AirPods, AirPlay HomePod). Requires the PWA paired above.',
+        cost: '0 min — already done if phone is paired',
+      },
+      {
+        label: 'Better',
+        providers: ['apple_music'],
+        unlocks: '+ Peter can search your library and pick songs by name/mood. Drag-bookmarklet on desktop, then Peter knows what to play.',
+        cost: '~3 min on desktop',
+      },
+      {
+        label: 'Best (whole-home)',
+        providers: ['home_assistant'],
+        unlocks: '+ Music plays on HomePod / Apple TV / Sonos in any room. Requires Home Assistant + paired speaker (one-time HA setup).',
+        cost: '~10 min if HA already running',
+      },
+    ],
   },
   {
-    id: 'peter_calendar',
-    title: '📅 Calendar-aware Peter',
-    subtitle: 'Peter can add events, check your schedule, and subscribe to iCloud/Google calendars.',
-    providers: ['ics_subscription'],
-    optional: ['google_calendar', 'apple_calendar'],
+    id: 'notifications',
+    icon: '🔔',
+    title: 'Get notifications + reminders',
+    tiers: [
+      {
+        label: 'Simplest',
+        providers: [],
+        unlocks: 'PWA shows notifications on your phone. Already works once phone is paired.',
+        cost: '0 min',
+      },
+      {
+        label: 'Also',
+        providers: ['telegram'],
+        unlocks: '+ Telegram bot reaches you even when phone is silent. Two-way: reply to Peter via text.',
+        cost: '~30 sec (scan QR)',
+      },
+    ],
   },
   {
-    id: 'tax_finance',
-    title: '💰 Automatic tax tracking',
-    subtitle: 'Bank feeds, broker holdings, and receipts land in the tax module automatically.',
-    providers: ['plaid', 'stripe'],
-    optional: ['simplefin', 'alpaca', 'coinbase', 'crypto_wallet', 'gmail'],
+    id: 'calendar',
+    icon: '📅',
+    title: 'See your calendar',
+    tiers: [
+      {
+        label: 'Simplest',
+        providers: ['ics_subscription'],
+        unlocks: 'Subscribe to any .ics URL — work calendar, holidays, sports schedule. Read-only.',
+        cost: '~30 sec',
+      },
+      {
+        label: 'iCloud calendars',
+        providers: ['apple_calendar'],
+        unlocks: '+ Read AND write to iCloud calendars. Requires app-specific password from appleid.apple.com.',
+        cost: '~3 min',
+      },
+    ],
+  },
+  {
+    id: 'finance',
+    icon: '💰',
+    title: 'Auto-track finances for taxes',
+    tiers: [
+      {
+        label: 'Simplest',
+        providers: ['plaid'],
+        unlocks: 'Connects ~12,000 banks via Plaid Link. Transactions flow into the tax module automatically.',
+        cost: '~5 min',
+      },
+      {
+        label: 'Add brokers',
+        providers: ['alpaca'],
+        unlocks: '+ Stock holdings + trade activity from Alpaca.',
+        cost: '~3 min',
+      },
+      {
+        label: 'Add crypto',
+        providers: ['coinbase', 'crypto_wallet'],
+        unlocks: '+ Coinbase trades and any public wallet balances.',
+        cost: '~5 min',
+      },
+      {
+        label: 'Add receipts',
+        providers: ['stripe'],
+        unlocks: '+ Stripe receipts auto-imported.',
+        cost: '~3 min',
+      },
+    ],
   },
   {
     id: 'smart_home',
-    title: '🏠 Smart home voice control',
-    subtitle: 'Peter controls every device paired to Home Assistant — lights, locks, thermostats, speakers.',
-    providers: ['home_assistant'],
-    optional: ['airplay'],
+    icon: '🏠',
+    title: 'Voice-control smart home',
+    tiers: [
+      {
+        label: 'Simplest',
+        providers: ['home_assistant'],
+        unlocks: 'One connection unlocks every device paired in Home Assistant — lights, locks, thermostats, speakers.',
+        cost: '~5 min if HA already running',
+      },
+    ],
   },
   {
-    id: 'peter_notifications',
-    title: '💬 Peter reaches out',
-    subtitle: "Reminders, alerts, and approval requests come to your phone.",
-    providers: ['telegram'],
-    optional: [],
-  },
-  {
-    id: 'quant_self',
-    title: '❤️ Quantified self',
-    subtitle: "Ask Peter 'how'd I sleep?' or 'what did I eat yesterday?'",
-    providers: ['oura'],
-    optional: ['strava', 'apple_health'],
+    id: 'health',
+    icon: '❤️',
+    title: 'Track health and sleep',
+    tiers: [
+      {
+        label: 'If you have an Oura Ring',
+        providers: ['oura'],
+        unlocks: 'Sleep, readiness, activity. Peter answers "how did I sleep?"',
+        cost: '~2 min',
+      },
+      {
+        label: 'If you use Strava',
+        providers: ['strava'],
+        unlocks: 'Workout history + Peter can summarize the week.',
+        cost: '~2 min (OAuth setup needed first)',
+      },
+      {
+        label: 'Apple Health',
+        providers: ['apple_health'],
+        unlocks: 'Full sleep/heart/workout data. Export from iPhone, upload here.',
+        cost: '~10 min one-time',
+      },
+    ],
   },
 ];
 
-function renderBundles() {
-  const box = document.getElementById('sync-bundles');
+function renderGetStarted() {
+  // Phone PWA paired = Get Started done. Otherwise show the CTA.
+  const phonePaired = syncProviders.some(p => p.id === 'phone_music_pwa' && p.connected);
+  const cta = document.getElementById('sync-getstarted-card');
+  const done = document.getElementById('sync-getstarted-done');
+  if (!cta || !done) return;
+  if (phonePaired) {
+    cta.classList.add('hidden');
+    done.classList.remove('hidden');
+  } else {
+    cta.classList.remove('hidden');
+    done.classList.add('hidden');
+  }
+}
+
+function renderUseCases() {
+  const box = document.getElementById('sync-usecases');
   if (!box) return;
-  box.innerHTML = STARTER_BUNDLES.map(b => {
-    const required = b.providers.map(id => syncProviders.find(p => p.id === id)).filter(Boolean);
-    const optional = b.optional.map(id => syncProviders.find(p => p.id === id)).filter(Boolean);
-    const reqConnected = required.filter(p => p.connected).length;
-    const pct = required.length ? Math.round((reqConnected / required.length) * 100) : 0;
-    const allConnected = required.every(p => p.connected);
-    const borderCls = allConnected ? 'border-green-700/50' : 'border-gray-700';
-    const badge = allConnected
-      ? '<span class="badge badge-green">Ready</span>'
-      : `<span class="badge badge-gray">${reqConnected}/${required.length}</span>`;
-    return `<div class="bg-gray-900 border ${borderCls} rounded-lg p-3 cursor-pointer hover:border-oc-500 transition-colors" onclick="showBundleDetail('${b.id}')">
-      <div class="flex items-center justify-between mb-1">
-        <p class="font-medium text-sm">${escapeHtml(b.title)}</p>
-        ${badge}
-      </div>
-      <p class="text-xs text-gray-500 leading-relaxed">${escapeHtml(b.subtitle)}</p>
-      <div class="mt-2 flex items-center gap-1 flex-wrap">
-        ${required.map(p => `<span class="text-[10px] px-1.5 py-0.5 rounded ${p.connected ? 'bg-green-900/40 text-green-400' : 'bg-gray-800 text-gray-500'}">${escapeHtml(p.name)}${p.connected ? ' ✓' : ''}</span>`).join('')}
-        ${optional.filter(p => p.connected).map(p => `<span class="text-[10px] px-1.5 py-0.5 rounded bg-green-900/40 text-green-400">${escapeHtml(p.name)} ✓</span>`).join('')}
-      </div>
-    </div>`;
+  box.innerHTML = USE_CASES.map(uc => {
+    const tierHtml = uc.tiers.map((tier, idx) => {
+      const tierProviders = tier.providers.map(id => syncProviders.find(p => p.id === id)).filter(Boolean);
+      const tierConnected = tierProviders.length === 0 || tierProviders.every(p => p.connected);
+      const stepLabel = idx === 0 ? '①' : (idx === 1 ? '②' : (idx === 2 ? '③' : '④'));
+      const tierColor = tierConnected ? 'text-green-400' : 'text-gray-400';
+      const buttons = tierProviders.length === 0
+        ? '<span class="text-xs text-green-400">— Already on (PWA)</span>'
+        : tierProviders.map(p => {
+            if (p.connected) return `<span class="text-xs text-green-400">✓ ${escapeHtml(p.name)}</span>`;
+            if (p.needs_oauth_config) return `<span class="text-xs text-yellow-500" title="OAuth app config required">${escapeHtml(p.name)} (needs admin)</span>`;
+            return `<button onclick="event.stopPropagation(); openSyncModal('${p.id}')" class="text-xs bg-gray-800 hover:bg-oc-700 text-gray-200 hover:text-white px-2 py-0.5 rounded transition-colors">+ ${escapeHtml(p.name)}</button>`;
+          }).join(' ');
+      return `<div class="flex items-start gap-2 py-1.5">
+        <span class="${tierColor} text-sm flex-shrink-0">${stepLabel}</span>
+        <div class="flex-1 min-w-0">
+          <div class="flex items-baseline gap-2">
+            <span class="text-xs font-medium ${tierConnected ? 'text-green-400' : 'text-gray-300'}">${escapeHtml(tier.label)}</span>
+            <span class="text-[10px] text-gray-600">${escapeHtml(tier.cost)}</span>
+          </div>
+          <p class="text-[11px] text-gray-500 leading-relaxed">${escapeHtml(tier.unlocks)}</p>
+          <div class="mt-1 flex items-center gap-1 flex-wrap">${buttons}</div>
+        </div>
+      </div>`;
+    }).join('');
+    return `<details class="bg-gray-900 border border-gray-700 rounded-lg overflow-hidden">
+      <summary class="cursor-pointer p-3 flex items-center gap-3 hover:bg-gray-800 list-none">
+        <span class="text-2xl flex-shrink-0">${uc.icon}</span>
+        <div class="flex-1 min-w-0">
+          <p class="font-medium text-sm">${escapeHtml(uc.title)}</p>
+          <p class="text-[11px] text-gray-500">${uc.tiers.length} option${uc.tiers.length > 1 ? 's' : ''} — simplest first</p>
+        </div>
+        <span class="text-gray-500 text-xs">▾</span>
+      </summary>
+      <div class="px-3 pb-3 space-y-1 border-t border-gray-700">${tierHtml}</div>
+    </details>`;
   }).join('');
 }
 
-function showBundleDetail(bundleId) {
-  const b = STARTER_BUNDLES.find(x => x.id === bundleId);
-  if (!b) return;
-  // Find the first disconnected required provider, open its modal
-  const required = b.providers.map(id => syncProviders.find(p => p.id === id)).filter(Boolean);
-  const firstMissing = required.find(p => !p.connected);
-  if (firstMissing) {
-    openSyncModal(firstMissing.id);
+function toggleAllServices() {
+  const box = document.getElementById('sync-all-services');
+  const arrow = document.getElementById('sync-all-arrow');
+  if (box.classList.contains('hidden')) {
+    box.classList.remove('hidden');
+    arrow.textContent = '▾ Hide';
   } else {
-    // All required done — offer to connect optional ones
-    const optional = b.optional.map(id => syncProviders.find(p => p.id === id)).filter(Boolean);
-    const firstOptional = optional.find(p => !p.connected);
-    if (firstOptional) openSyncModal(firstOptional.id);
-    else {
-      // All done — scroll to relevant category
-      const p = required[0] || optional[0];
-      if (p) {
-        const el = document.querySelector(`[data-category="${CSS.escape(p.category)}"]`);
-        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      }
-    }
+    box.classList.add('hidden');
+    arrow.textContent = '▸ Show all';
   }
 }
 
@@ -784,7 +932,8 @@ function renderSyncProviders() {
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">${cards}</div>
     </div>`;
   }).join('');
-  renderBundles();
+  renderGetStarted();
+  renderUseCases();
 }
 
 function filterProviders(query) {
