@@ -1,81 +1,252 @@
-//! Music playback tool — Apple Music + Plex.
+//! play_music — routes music playback across connected sync providers.
 //!
-//! ## Apple Music
-//! Requires Apple Developer Program enrollment ($99/yr) for MusicKit
-//! REST API access. Credentials needed in `~/.syntaur/syntaur.json`:
-//! ```json
-//! "connectors": {
-//!   "apple_music": {
-//!     "team_id": "<Apple Developer Team ID>",
-//!     "key_id": "<MusicKit key ID>",
-//!     "private_key_path": "<path to .p8 file>",
-//!     "enabled": true
-//!   }
-//! }
-//! ```
+//! Apple Music audio is DRM-protected; we can't decrypt it server-side.
+//! This tool instead routes commands to whichever client CAN decrypt:
 //!
-//! ## Plex
-//! Requires a Plex auth token. Get from Plex app: Settings → Account →
-//! view XML → copy X-Plex-Token. Config:
-//! ```json
-//! "connectors": {
-//!   "plex": {
-//!     "base_url": "http://<plex-server>:32400",
-//!     "token": "<X-Plex-Token>",
-//!     "enabled": true
-//!   }
-//! }
-//! ```
+//! Priority order (uses first available):
+//!   1. Home Assistant media_player (HomePod, Apple TV) — invisible/seamless
+//!   2. Browser dashboard player (if user has dashboard open) via SSE event
+//!   3. iOS Shortcut webhook — plays on user's phone
+//!   4. Fallback: returns a music.apple.com URL and status=needs_client
 //!
-//! ## Playback target
-//! Music plays on HA media_player entities (Apple TV, Sonos, Snapcast,
-//! etc.) via HA's `media_player.play_media` service. Alternatively, once
-//! Matter or AirPlay Rust integration is done, playback can be direct.
+//! Search is always done server-side against api.music.apple.com so we
+//! know which Apple Music ID to route. If Apple Music isn't connected,
+//! we fall back to passing the raw query to the routing target (HA's
+//! media_player.play_media, Shortcut webhook, etc.) and let it handle.
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use log::info;
+use log::{info, warn};
 use serde_json::{json, Value};
 
 use crate::tools::extension::{RichToolResult, Tool, ToolCapabilities, ToolContext};
 
 pub struct MusicTool;
 
-#[async_trait]
-impl Tool for MusicTool {
-    fn name(&self) -> &str {
-        "music"
+#[derive(Debug, Clone)]
+struct SyncCreds {
+    apple_music: Option<(String, String, String)>, // (dev_token, music_user_token, storefront)
+    home_assistant: Option<(String, String)>,      // (url, token)
+    ios_shortcut: Option<String>,                  // webhook url
+    has_music_assistant: bool,
+}
+
+fn load_sync_creds(db_path: &std::path::Path, user_id: i64) -> SyncCreds {
+    let conn = match rusqlite::Connection::open(db_path) {
+        Ok(c) => c,
+        Err(_) => return SyncCreds {
+            apple_music: None, home_assistant: None, ios_shortcut: None,
+            has_music_assistant: false,
+        },
+    };
+    let mut stmt = match conn.prepare(
+        "SELECT provider, credential FROM sync_connections \
+         WHERE user_id = ? AND status = 'active'"
+    ) {
+        Ok(s) => s,
+        Err(_) => return SyncCreds {
+            apple_music: None, home_assistant: None, ios_shortcut: None,
+            has_music_assistant: false,
+        },
+    };
+    let rows = stmt.query_map(rusqlite::params![user_id], |r| Ok((
+        r.get::<_, String>(0)?, r.get::<_, String>(1)?,
+    ))).ok();
+
+    let mut apple_music = None;
+    let mut home_assistant = None;
+    let mut ios_shortcut = None;
+    let mut has_music_assistant = false;
+
+    if let Some(rs) = rows {
+        for row in rs.flatten() {
+            let (provider, cred_json) = row;
+            let cred: Value = serde_json::from_str(&cred_json).unwrap_or(Value::Null);
+            match provider.as_str() {
+                "apple_music" => {
+                    let dev = cred.get("developer_token").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let mut_ = cred.get("music_user_token").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let sf = cred.get("storefront").and_then(|v| v.as_str()).unwrap_or("us").to_string();
+                    if !dev.is_empty() && !mut_.is_empty() {
+                        apple_music = Some((dev, mut_, sf));
+                    }
+                }
+                "home_assistant" => {
+                    let url = cred.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let tok = cred.get("token").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    if !url.is_empty() && !tok.is_empty() {
+                        home_assistant = Some((url, tok));
+                    }
+                }
+                "ios_shortcut_music" => {
+                    let url = cred.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    if !url.is_empty() { ios_shortcut = Some(url); }
+                }
+                "music_assistant" => { has_music_assistant = true; }
+                _ => {}
+            }
+        }
     }
 
+    SyncCreds { apple_music, home_assistant, ios_shortcut, has_music_assistant }
+}
+
+async fn apple_music_search_first(
+    client: &Arc<reqwest::Client>,
+    creds: &(String, String, String),
+    query: &str,
+) -> Result<Option<Value>, String> {
+    let (dev, mut_, sf) = creds;
+    let url = format!(
+        "https://api.music.apple.com/v1/catalog/{}/search?types=songs&limit=1&term={}",
+        sf,
+        url_encode(query)
+    );
+    let resp = client.get(&url)
+        .header("Authorization", format!("Bearer {}", dev))
+        .header("Music-User-Token", mut_)
+        .header("Origin", "https://music.apple.com")
+        .timeout(std::time::Duration::from_secs(15))
+        .send().await.map_err(|e| format!("Apple Music search: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("Apple Music returned {}", resp.status()));
+    }
+    let j: Value = resp.json().await.map_err(|e| e.to_string())?;
+    // results.songs.data[0]
+    let song = j.get("results")
+        .and_then(|r| r.get("songs"))
+        .and_then(|s| s.get("data"))
+        .and_then(|d| d.as_array())
+        .and_then(|a| a.first())
+        .cloned();
+    Ok(song)
+}
+
+async fn find_ha_media_player(
+    client: &Arc<reqwest::Client>,
+    ha: &(String, String),
+) -> Result<Option<String>, String> {
+    // Query HA states, filter for media_player domain, prefer apple_tv / homepod
+    let (url, token) = ha;
+    let states_url = format!("{}/api/states", url.trim_end_matches('/'));
+    let resp = client.get(&states_url)
+        .header("Authorization", format!("Bearer {}", token))
+        .timeout(std::time::Duration::from_secs(10))
+        .send().await.map_err(|e| format!("HA states: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("HA returned {}", resp.status()));
+    }
+    let arr: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let Some(states) = arr.as_array() else { return Ok(None); };
+
+    let mut candidates: Vec<(i32, String)> = Vec::new();
+    for s in states {
+        let entity_id = s.get("entity_id").and_then(|v| v.as_str()).unwrap_or("");
+        if !entity_id.starts_with("media_player.") { continue; }
+        let state = s.get("state").and_then(|v| v.as_str()).unwrap_or("");
+        if state == "unavailable" || state == "unknown" { continue; }
+        let attrs = s.get("attributes").cloned().unwrap_or(Value::Null);
+        let name = attrs.get("friendly_name").and_then(|v| v.as_str()).unwrap_or(entity_id);
+        let lower = name.to_ascii_lowercase();
+        let eid_lower = entity_id.to_ascii_lowercase();
+        // Scoring: HomePod > Apple TV > Sonos > any other media_player
+        let score: i32 =
+            if lower.contains("homepod") || eid_lower.contains("homepod") { 100 }
+            else if lower.contains("apple tv") || eid_lower.contains("apple_tv") { 90 }
+            else if lower.contains("sonos") || eid_lower.contains("sonos") { 70 }
+            else if attrs.get("supported_features").and_then(|v| v.as_i64()).unwrap_or(0) > 0 { 50 }
+            else { 10 };
+        candidates.push((score, entity_id.to_string()));
+    }
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    Ok(candidates.first().map(|c| c.1.clone()))
+}
+
+async fn ha_play_media(
+    client: &Arc<reqwest::Client>,
+    ha: &(String, String),
+    entity_id: &str,
+    media_content_id: &str,
+    media_content_type: &str,
+) -> Result<(), String> {
+    let (url, token) = ha;
+    let svc_url = format!("{}/api/services/media_player/play_media", url.trim_end_matches('/'));
+    let body = json!({
+        "entity_id": entity_id,
+        "media_content_id": media_content_id,
+        "media_content_type": media_content_type,
+    });
+    let resp = client.post(&svc_url)
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(15))
+        .send().await.map_err(|e| format!("HA play_media: {}", e))?;
+    if !resp.status().is_success() {
+        let s = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("HA play_media {}: {}", s, body.chars().take(200).collect::<String>()));
+    }
+    Ok(())
+}
+
+async fn trigger_ios_shortcut(
+    client: &Arc<reqwest::Client>,
+    url: &str,
+    query: &str,
+) -> Result<(), String> {
+    // Append query as URL parameter — iOS Shortcut's "Get Contents of URL"
+    // receives it as the Shortcut input
+    let full_url = if url.contains('?') {
+        format!("{}&input={}", url, url_encode(query))
+    } else {
+        format!("{}?input={}", url, url_encode(query))
+    };
+    let resp = client.get(&full_url)
+        .timeout(std::time::Duration::from_secs(10))
+        .send().await.map_err(|e| format!("Shortcut trigger: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("Shortcut returned {}", resp.status()));
+    }
+    Ok(())
+}
+
+fn url_encode(s: &str) -> String {
+    s.bytes().map(|b| {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            (b as char).to_string()
+        } else {
+            format!("%{:02X}", b)
+        }
+    }).collect()
+}
+
+#[async_trait]
+impl Tool for MusicTool {
+    fn name(&self) -> &str { "music" }
+
     fn description(&self) -> &str {
-        "Control music playback. Play songs, albums, or playlists from Apple Music \
-         or Plex. Pause, skip, or adjust volume. Supports playing by artist name, \
-         song title, genre, or mood."
+        "Play music on any connected speaker. Searches Apple Music for the requested \
+         song/artist/playlist, then routes playback automatically through whichever \
+         device is available: HomePod/Apple TV (via Home Assistant), browser dashboard \
+         player, or iPhone (via Shortcut). Peter picks the best available path."
     }
 
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["play", "pause", "skip", "volume", "search", "status"],
-                    "description": "What to do: play music, pause, skip track, set volume, search, or get current status."
-                },
                 "query": {
                     "type": "string",
-                    "description": "For play/search: artist, song, album, playlist, or genre to play/find."
+                    "description": "Song, artist, album, playlist, genre, or mood to play. E.g. 'jazz', 'Miles Davis Kind of Blue', 'workout playlist', 'something relaxing'."
                 },
-                "provider": {
+                "target": {
                     "type": "string",
-                    "enum": ["apple_music", "plex"],
-                    "description": "Music source. Default: apple_music."
-                },
-                "volume": {
-                    "type": "integer",
-                    "description": "For action=volume: volume level 0-100."
+                    "description": "Optional HA media_player entity_id to target (e.g. 'media_player.homepod_living_room'). If omitted, picks the best available speaker automatically."
                 }
             },
-            "required": ["action"]
+            "required": ["query"]
         })
     }
 
@@ -88,231 +259,97 @@ impl Tool for MusicTool {
     }
 
     async fn execute(&self, args: Value, ctx: &ToolContext<'_>) -> Result<RichToolResult, String> {
-        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("play");
-        let provider = args
-            .get("provider")
-            .and_then(|v| v.as_str())
-            .unwrap_or("apple_music");
-
-        match provider {
-            "apple_music" => {
-                // Check if Apple Music is configured
-                let config_path = format!(
-                    "{}/.syntaur/syntaur.json"/* legacy path; new installs use ~/.syntaur/ */,
-                    std::env::var("HOME").unwrap_or_else(|_| "/home/sean".to_string())
-                );
-                let has_apple = std::fs::read_to_string(&config_path)
-                    .ok()
-                    .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-                    .and_then(|c| c.get("connectors")?.get("apple_music")?.get("enabled")?.as_bool())
-                    .unwrap_or(false);
-
-                if !has_apple {
-                    return Ok(RichToolResult::text(
-                        "Apple Music is not configured yet. To set up:\n\
-                         1. Enroll in Apple Developer Program ($99/yr) if not already\n\
-                         2. Create a MusicKit key at developer.apple.com\n\
-                         3. Add connectors.apple_music to ~/.syntaur/syntaur.json \
-                            with team_id, key_id, private_key_path\n\
-                         4. Restart syntaur.\n\
-                         Sean will provide the credentials later."
-                    ));
-                }
-
-                // TODO: Implement Apple Music API calls
-                // - Generate JWT developer token (team_id + key_id + .p8 private key)
-                // - Search: GET https://api.music.apple.com/v1/catalog/us/search?term=...
-                // - Play: requires AirPlay or HA media_player integration to target a speaker
-                match action {
-                    "play" => {
-                        let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
-                        info!("[music:apple] play request: {}", query);
-                        Ok(RichToolResult::text(format!(
-                            "Apple Music play '{}' — API integration not yet implemented. \
-                             The credentials are configured but the playback pipeline \
-                             (JWT token generation → catalog search → AirPlay/HA media_player) \
-                             needs to be built.",
-                            query
-                        )))
-                    }
-                    "search" => {
-                        let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
-                        Ok(RichToolResult::text(format!(
-                            "Apple Music search '{}' — not yet implemented.", query
-                        )))
-                    }
-                    _ => Ok(RichToolResult::text(format!(
-                        "Apple Music action '{}' — not yet implemented.", action
-                    ))),
-                }
-            }
-            "plex" => {
-                let config_path = format!(
-                    "{}/.syntaur/syntaur.json"/* legacy path; new installs use ~/.syntaur/ */,
-                    std::env::var("HOME").unwrap_or_else(|_| "/home/sean".to_string())
-                );
-                let plex_config = std::fs::read_to_string(&config_path)
-                    .ok()
-                    .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-                    .and_then(|c| c.get("connectors")?.get("plex").cloned());
-
-                let (base_url, token) = match plex_config {
-                    Some(pc) if pc.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) => {
-                        let url = pc.get("base_url").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let tok = pc.get("token").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        if url.is_empty() || tok.is_empty() {
-                            return Err("Plex base_url or token is empty in config".to_string());
-                        }
-                        (url, tok)
-                    }
-                    _ => {
-                        return Ok(RichToolResult::text(
-                            "Plex is not configured yet. To set up:\n\
-                             1. Get your X-Plex-Token from Plex app Settings → Account\n\
-                             2. Add connectors.plex to ~/.syntaur/syntaur.json with \
-                                base_url and token\n\
-                             3. Restart syntaur.\n\
-                             Sean will provide the credentials later."
-                        ));
-                    }
-                };
-
-                let client = ctx.http.as_ref().ok_or("no HTTP client")?;
-
-                match action {
-                    "search" | "play" => {
-                        let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
-                        if query.is_empty() {
-                            return Err("music: 'query' is required for play/search".to_string());
-                        }
-
-                        // Search Plex library
-                        let search_url = format!(
-                            "{}/search?query={}&type=10&X-Plex-Token={}",
-                            base_url,
-                            urlencoded(query),
-                            token
-                        );
-                        let resp = client
-                            .get(&search_url)
-                            .header("Accept", "application/json")
-                            .timeout(std::time::Duration::from_secs(10))
-                            .send()
-                            .await
-                            .map_err(|e| format!("Plex search: {}", e))?;
-
-                        if !resp.status().is_success() {
-                            return Err(format!("Plex search: HTTP {}", resp.status()));
-                        }
-
-                        let body: Value = resp.json().await.map_err(|e| format!("parse: {}", e))?;
-                        let tracks = body
-                            .get("MediaContainer")
-                            .and_then(|mc| mc.get("Metadata"))
-                            .and_then(|m| m.as_array())
-                            .cloned()
-                            .unwrap_or_default();
-
-                        if tracks.is_empty() {
-                            return Ok(RichToolResult::text(format!(
-                                "No results for '{}' in Plex library.", query
-                            )));
-                        }
-
-                        let results: Vec<String> = tracks
-                            .iter()
-                            .take(5)
-                            .map(|t| {
-                                let title = t.get("title").and_then(|v| v.as_str()).unwrap_or("?");
-                                let artist = t
-                                    .get("grandparentTitle")
-                                    .or(t.get("parentTitle"))
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("Unknown");
-                                format!("{} — {}", artist, title)
-                            })
-                            .collect();
-
-                        if action == "search" {
-                            Ok(RichToolResult::text(format!(
-                                "Found {} result{} for '{}':\n{}",
-                                results.len(),
-                                if results.len() == 1 { "" } else { "s" },
-                                query,
-                                results.join("\n")
-                            )))
-                        } else {
-                            // For play: would need to send to a media_player via HA or
-                            // directly via Plex's playback API. Placeholder for now.
-                            info!("[music:plex] found {} tracks for '{}'", tracks.len(), query);
-                            Ok(RichToolResult::text(format!(
-                                "Found '{}' in Plex. Playback routing to a speaker is not yet \
-                                 wired — need to set up a media_player target (Apple TV, Sonos, \
-                                 or Snapcast). Top result: {}",
-                                query,
-                                results.first().unwrap_or(&"?".to_string())
-                            )))
-                        }
-                    }
-                    "status" => {
-                        // Check what's currently playing on Plex
-                        let status_url = format!(
-                            "{}/status/sessions?X-Plex-Token={}",
-                            base_url, token
-                        );
-                        let resp = client
-                            .get(&status_url)
-                            .header("Accept", "application/json")
-                            .timeout(std::time::Duration::from_secs(10))
-                            .send()
-                            .await
-                            .map_err(|e| format!("Plex status: {}", e))?;
-
-                        let body: Value = resp.json().await.unwrap_or_default();
-                        let sessions = body
-                            .get("MediaContainer")
-                            .and_then(|mc| mc.get("Metadata"))
-                            .and_then(|m| m.as_array())
-                            .cloned()
-                            .unwrap_or_default();
-
-                        if sessions.is_empty() {
-                            Ok(RichToolResult::text("Nothing playing on Plex right now."))
-                        } else {
-                            let lines: Vec<String> = sessions
-                                .iter()
-                                .map(|s| {
-                                    let title = s.get("title").and_then(|v| v.as_str()).unwrap_or("?");
-                                    let artist = s
-                                        .get("grandparentTitle")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("");
-                                    let player = s
-                                        .get("Player")
-                                        .and_then(|p| p.get("title"))
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("?");
-                                    format!("{} — {} (on {})", artist, title, player)
-                                })
-                                .collect();
-                            Ok(RichToolResult::text(format!(
-                                "Currently playing on Plex:\n{}",
-                                lines.join("\n")
-                            )))
-                        }
-                    }
-                    _ => Ok(RichToolResult::text(format!(
-                        "Plex action '{}' not yet implemented.", action
-                    ))),
-                }
-            }
-            other => Err(format!("music: unknown provider '{}'", other)),
+        let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("").trim();
+        if query.is_empty() {
+            return Ok(RichToolResult::text("What should I play? Tell me a song, artist, or mood."));
         }
-    }
-}
+        let target_override = args.get("target").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let client = ctx.http.as_ref().ok_or("no HTTP client")?.clone();
+        let db_path = ctx.db_path.ok_or("no db_path in context")?;
+        let creds = load_sync_creds(db_path, ctx.user_id);
 
-fn urlencoded(s: &str) -> String {
-    s.replace(' ', "+")
-        .replace('&', "%26")
-        .replace('#', "%23")
+        // Step 1: search Apple Music if connected
+        let song = if let Some(ref am) = creds.apple_music {
+            match apple_music_search_first(&client, am, query).await {
+                Ok(Some(s)) => Some(s),
+                Ok(None) => None,
+                Err(e) => { warn!("[play_music] AM search failed: {}", e); None }
+            }
+        } else { None };
+
+        let (song_name, artist_name, apple_music_url) = match &song {
+            Some(s) => {
+                let attrs = s.get("attributes").cloned().unwrap_or(Value::Null);
+                let name = attrs.get("name").and_then(|v| v.as_str()).unwrap_or(query).to_string();
+                let artist = attrs.get("artistName").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let url = attrs.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                (name, artist, url)
+            }
+            None => (query.to_string(), String::new(), String::new()),
+        };
+
+        // Step 2: route playback
+
+        // 2a. Home Assistant — preferred (HomePod/Apple TV seamless)
+        if let Some(ref ha) = creds.home_assistant {
+            let target = match target_override.clone() {
+                Some(t) => Some(t),
+                None => find_ha_media_player(&client, ha).await.ok().flatten(),
+            };
+            if let Some(entity_id) = target {
+                let (content_id, content_type) = if !apple_music_url.is_empty() {
+                    (apple_music_url.clone(), "music".to_string())
+                } else {
+                    (query.to_string(), "music".to_string())
+                };
+                match ha_play_media(&client, ha, &entity_id, &content_id, &content_type).await {
+                    Ok(_) => {
+                        info!("[play_music] routed via HA {} → {}", entity_id, song_name);
+                        return Ok(RichToolResult::text(format!(
+                            "Playing {}{}{} on {}.",
+                            song_name,
+                            if artist_name.is_empty() { "".to_string() } else { format!(" by {}", artist_name) },
+                            if apple_music_url.is_empty() { " (search query)".to_string() } else { "".to_string() },
+                            entity_id.strip_prefix("media_player.").unwrap_or(&entity_id).replace('_', " ")
+                        )));
+                    }
+                    Err(e) => warn!("[play_music] HA play_media failed: {}", e),
+                }
+            }
+        }
+
+        // 2b. iOS Shortcut fallback — plays on phone
+        if let Some(ref shortcut_url) = creds.ios_shortcut {
+            match trigger_ios_shortcut(&client, shortcut_url, query).await {
+                Ok(_) => {
+                    info!("[play_music] triggered iOS Shortcut: {}", query);
+                    return Ok(RichToolResult::text(format!(
+                        "Sent '{}' to your iPhone Shortcut. Check your phone for playback.",
+                        song_name
+                    )));
+                }
+                Err(e) => warn!("[play_music] iOS Shortcut failed: {}", e),
+            }
+        }
+
+        // 2c. Browser fallback — return URL
+        if !apple_music_url.is_empty() {
+            return Ok(RichToolResult::text(format!(
+                "Found {}{}. Open this link on any Apple device to play: {}\n\
+                 (To play automatically, connect Home Assistant with a HomePod or Apple TV, or set up the iOS Shortcut provider in Sync settings.)",
+                song_name,
+                if artist_name.is_empty() { "".to_string() } else { format!(" by {}", artist_name) },
+                apple_music_url,
+            )));
+        }
+
+        // Nothing connected at all
+        Ok(RichToolResult::text(
+            "No music playback target available. To enable music playback:\n\
+             • Connect Apple Music in Sync settings (gives metadata + search)\n\
+             • Connect Home Assistant + pair a HomePod/Apple TV (best — speakers play automatically)\n\
+             • OR set up an iOS Shortcut (plays on your phone)\n\
+             Go to Settings → Sync to add any of these."
+        ))
+    }
 }

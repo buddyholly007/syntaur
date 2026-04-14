@@ -1880,3 +1880,94 @@ pub async fn handle_apple_music_capture_page() -> axum::response::Html<&'static 
 </script></body></html>"#)
 }
 
+
+// ── HA media_player enumeration ─────────────────────────────────────────────
+
+pub async fn handle_ha_media_players(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+
+    // Load HA credential
+    let db = state.db_path.clone();
+    let ha_cred: Option<(String, String)> = tokio::task::spawn_blocking(move || -> Result<Option<(String, String)>, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let row: Option<String> = conn.query_row(
+            "SELECT credential FROM sync_connections WHERE user_id = ? AND provider = 'home_assistant' AND status = 'active'",
+            rusqlite::params![uid], |r| r.get(0),
+        ).ok();
+        if let Some(s) = row {
+            let cred: serde_json::Value = serde_json::from_str(&s).unwrap_or_default();
+            let url = cred.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let tok = cred.get("token").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if !url.is_empty() && !tok.is_empty() { return Ok(Some((url, tok))); }
+        }
+        Ok(None)
+    }).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let Some((ha_url, ha_token)) = ha_cred else {
+        return Ok(Json(serde_json::json!({
+            "connected": false,
+            "hint": "Connect Home Assistant first.",
+        })));
+    };
+
+    let states_url = format!("{}/api/states", ha_url.trim_end_matches('/'));
+    let resp = match state.client.get(&states_url)
+        .header("Authorization", format!("Bearer {}", ha_token))
+        .timeout(Duration::from_secs(15)).send().await {
+        Ok(r) => r,
+        Err(e) => return Ok(Json(serde_json::json!({
+            "connected": false, "error": e.to_string(),
+        }))),
+    };
+    if !resp.status().is_success() {
+        return Ok(Json(serde_json::json!({
+            "connected": false, "error": format!("HA {}", resp.status()),
+        })));
+    }
+    let arr: serde_json::Value = resp.json().await.unwrap_or_default();
+    let Some(states) = arr.as_array() else {
+        return Ok(Json(serde_json::json!({ "connected": true, "players": [] })));
+    };
+
+    let mut players: Vec<serde_json::Value> = Vec::new();
+    for s in states {
+        let entity_id = s.get("entity_id").and_then(|v| v.as_str()).unwrap_or("");
+        if !entity_id.starts_with("media_player.") { continue; }
+        let ha_state = s.get("state").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let attrs = s.get("attributes").cloned().unwrap_or(serde_json::Value::Null);
+        let friendly = attrs.get("friendly_name").and_then(|v| v.as_str()).unwrap_or(entity_id).to_string();
+        let lower = friendly.to_ascii_lowercase();
+        let eid_lower = entity_id.to_ascii_lowercase();
+        let kind =
+            if lower.contains("homepod") || eid_lower.contains("homepod") { "homepod" }
+            else if lower.contains("apple tv") || eid_lower.contains("apple_tv") { "appletv" }
+            else if lower.contains("sonos") || eid_lower.contains("sonos") { "sonos" }
+            else { "other" };
+        players.push(serde_json::json!({
+            "entity_id": entity_id,
+            "friendly_name": friendly,
+            "state": ha_state,
+            "kind": kind,
+            "source": attrs.get("source"),
+            "media_title": attrs.get("media_title"),
+            "media_artist": attrs.get("media_artist"),
+        }));
+    }
+    // Sort: homepods > appletvs > sonos > other
+    players.sort_by_key(|p| match p.get("kind").and_then(|v| v.as_str()).unwrap_or("") {
+        "homepod" => 0, "appletv" => 1, "sonos" => 2, _ => 3,
+    });
+
+    Ok(Json(serde_json::json!({
+        "connected": true,
+        "count": players.len(),
+        "players": players,
+    })))
+}
+
