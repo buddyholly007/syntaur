@@ -2325,28 +2325,53 @@ function renderExtFile(method) {
   const paid = document.getElementById('ext-payments').value;
   const bal = document.getElementById('ext-balance').value;
   const pay = document.getElementById('ext-payment').value;
-  const fields = [
-    ['Tax Year', yr],
-    ['Estimated Total Tax (Line 4)', tax],
-    ['Total Payments Made (Line 5)', paid],
-    ['Balance Due (Line 6)', bal],
-    ['Payment Amount (Line 7)', '$' + parseFloat(pay).toFixed(2)],
-    ['Reason for Payment', 'Extension'],
-    ['SSN', '(enter yours)'],
-  ];
   const copyFieldsEl = document.getElementById('ext-copy-fields');
   copyFieldsEl.innerHTML = '';
+
+  // Step-by-step instructions that match the actual IRS flow
+  if (method === 'direct_pay') {
+    const steps = document.createElement('div');
+    steps.className = 'mb-3 text-xs text-gray-400 space-y-1';
+    steps.innerHTML = '<p class="text-gray-300 font-medium mb-1">IRS Direct Pay steps:</p>' +
+      '<p>1. Click "Open IRS Website" below &rarr; click <strong class="text-white">Make a Payment</strong></p>' +
+      '<p>2. Select reason: <strong class="text-white">Extension</strong> &rarr; Apply Payment To: <strong class="text-white">4868 (Extension)</strong></p>' +
+      '<p>3. Tax Period: <strong class="text-white">' + yr + '</strong></p>' +
+      '<p>4. Verify identity (SSN, DOB, address, filing status)</p>' +
+      '<p>5. Enter payment amount &rarr; confirm &rarr; save your <strong class="text-green-400">confirmation number</strong></p>';
+    copyFieldsEl.appendChild(steps);
+  } else if (method === 'free_file') {
+    const steps = document.createElement('div');
+    steps.className = 'mb-3 text-xs text-gray-400 space-y-1';
+    steps.innerHTML = '<p class="text-gray-300 font-medium mb-1">IRS Free File steps:</p>' +
+      '<p>1. Click "Open IRS Website" below &rarr; choose any Free File partner</p>' +
+      '<p>2. Select <strong class="text-white">File an Extension (Form 4868)</strong></p>' +
+      '<p>3. Enter the values below when prompted</p>' +
+      '<p>4. Submit &rarr; save your <strong class="text-green-400">confirmation email</strong></p>';
+    copyFieldsEl.appendChild(steps);
+  }
+
+  // Separator
+  const sep = document.createElement('div');
+  sep.className = 'border-t border-gray-700 pt-2 mt-1';
+  sep.innerHTML = '<p class="text-[10px] text-gray-500 mb-2">Your values (copy as needed):</p>';
+  copyFieldsEl.appendChild(sep);
+
+  const fields = [
+    ['Tax Year', yr],
+    ['Estimated Total Tax', tax],
+    ['Total Payments Made', paid],
+    ['Balance Due', bal],
+    ['Payment Amount', '$' + parseFloat(pay).toFixed(2)],
+  ];
   fields.forEach(([label, value]) => {
     const row = document.createElement('div');
     row.className = 'flex items-center justify-between py-1';
     row.innerHTML = '<span class="text-xs text-gray-400">' + label + '</span><div class="flex items-center gap-2"><span class="text-sm text-white font-mono">' + value + '</span></div>';
-    if (value !== '(enter yours)') {
-      const btn = document.createElement('button');
-      btn.className = 'text-[10px] text-oc-500 hover:text-oc-400 px-1.5 py-0.5 bg-gray-800 rounded';
-      btn.textContent = 'Copy';
-      btn.onclick = function() { navigator.clipboard.writeText(value).then(() => { btn.textContent = 'Copied!'; setTimeout(() => btn.textContent = 'Copy', 1500); }); };
-      row.querySelector('div').appendChild(btn);
-    }
+    const btn = document.createElement('button');
+    btn.className = 'text-[10px] text-oc-500 hover:text-oc-400 px-1.5 py-0.5 bg-gray-800 rounded';
+    btn.textContent = 'Copy';
+    btn.onclick = function() { navigator.clipboard.writeText(value).then(() => { btn.textContent = 'Copied!'; setTimeout(() => btn.textContent = 'Copy', 1500); }); };
+    row.querySelector('div').appendChild(btn);
     copyFieldsEl.appendChild(row);
   });
 }
