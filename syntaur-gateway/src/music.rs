@@ -1368,20 +1368,8 @@ pub async fn handle_music_duck(
     let _ = crate::resolve_principal(&state, &req.token).await?;
     let active = req.state == "on";
     let duration = req.duration_secs.unwrap_or(if active { 30 } else { 0 });
-    set_duck_state(active, duration).await;
-
-    // Also broadcast to bridge command channel so phone PWA can attenuate
-    let event_type = if active { "duck" } else { "unduck" };
-    let cmd = serde_json::json!({
-        "type": event_type,
-        "message": if active { "TTS speaking — duck music" } else { "TTS done — restore music" },
-    });
-    let _ = state.client.post("http://127.0.0.1:18804/command")
-        .json(&cmd)
-        .timeout(std::time::Duration::from_secs(2))
-        .send().await;
-
-    info!("[music-duck] {} (for {}s)", event_type, duration);
+    // This actually lowers volume on Spotify Connect + HA media_players
+    trigger_duck_with_state(&state, active, duration).await;
     Ok(Json(serde_json::json!({"ok": true, "state": req.state})))
 }
 
@@ -1411,6 +1399,28 @@ pub async fn trigger_duck(active: bool, duration_secs: i64) {
         .json(&cmd)
         .timeout(std::time::Duration::from_secs(2))
         .send().await;
+}
+
+/// Like trigger_duck but ALSO calls music-service volume APIs to actually
+/// lower the audio. Use this from gateway code paths that have AppState.
+pub async fn trigger_duck_with_state(state: &Arc<AppState>, active: bool, duration_secs: i64) {
+    trigger_duck(active, duration_secs).await;
+    apply_ducking_to_all_users(state, active).await;
+    if active && duration_secs > 0 {
+        // Schedule auto-unduck in case no explicit unduck arrives
+        let state_clone = state.clone();
+        let dur = duration_secs;
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(dur as u64)).await;
+            let now_ds = get_duck_state().await;
+            // Only unduck if state hasn't been refreshed by another call
+            if now_ds.until_ts > 0 && chrono::Utc::now().timestamp() >= now_ds.until_ts {
+                set_duck_state(false, 0).await;
+                apply_ducking_to_all_users(&state_clone, false).await;
+                info!("[music-duck] auto-restored after {}s", dur);
+            }
+        });
+    }
 }
 
 // ── iOS Shortcut integration for music ducking ──────────────────────────────
@@ -1461,5 +1471,133 @@ pub async fn handle_shortcut_setup_guide(
         ],
         "note": "iOS 17+ required for the Set Music Volume action. The PWA fires the Shortcut via URL scheme on every duck/unduck event from the gateway. After this one-time setup, ducking is fully automatic.",
     })))
+}
+
+// ── Gateway-side automatic volume control during ducking ───────────────────
+//
+// When trigger_duck() fires, we proactively call music-service APIs to lower
+// the actual volume on whatever device is playing. No client involvement, no
+// iOS Shortcut needed for Spotify or HA-controlled speakers. Apple Music on
+// phone is the one provider with no remote-volume API — for that niche case
+// the user needs the Shortcut documented in /sync.
+
+static PREVIOUS_VOLUMES: tokio::sync::OnceCell<tokio::sync::RwLock<std::collections::HashMap<String, i64>>> = tokio::sync::OnceCell::const_new();
+
+async fn store_previous_volume(key: &str, vol: i64) {
+    let cell = PREVIOUS_VOLUMES.get_or_init(|| async { tokio::sync::RwLock::new(std::collections::HashMap::new()) }).await;
+    let mut w = cell.write().await;
+    w.insert(key.to_string(), vol);
+}
+
+async fn pop_previous_volume(key: &str) -> Option<i64> {
+    let cell = PREVIOUS_VOLUMES.get_or_init(|| async { tokio::sync::RwLock::new(std::collections::HashMap::new()) }).await;
+    let mut w = cell.write().await;
+    w.remove(key)
+}
+
+/// Try to lower (or restore) volume on every connected music service for
+/// every user with active credentials. Best-effort; failures logged not raised.
+pub async fn apply_ducking_to_all_users(state: &Arc<AppState>, ducking: bool) {
+    // Find all users with active sync_connections for any music provider
+    let db = state.db_path.clone();
+    let users: Vec<i64> = tokio::task::spawn_blocking(move || -> Vec<i64> {
+        let mut out = Vec::new();
+        if let Ok(conn) = rusqlite::Connection::open(&db) {
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT DISTINCT user_id FROM sync_connections                  WHERE provider IN ('spotify','home_assistant','apple_music','phone_music_pwa')                  AND status='active'"
+            ) {
+                if let Ok(rs) = stmt.query_map([], |r| r.get::<_, i64>(0)) {
+                    for u in rs.flatten() { out.push(u); }
+                }
+            }
+        }
+        out
+    }).await.unwrap_or_default();
+
+    for uid in users {
+        // Spotify ducking
+        if let Some(tok) = load_oauth_access_token(state, uid, "spotify").await {
+            apply_spotify_ducking(state, uid, &tok, ducking).await;
+        }
+        // HA ducking
+        if let Some((url, ha_tok)) = load_ha(state, uid).await {
+            apply_ha_ducking(state, uid, &url, &ha_tok, ducking).await;
+        }
+    }
+}
+
+async fn apply_spotify_ducking(state: &Arc<AppState>, uid: i64, token: &str, ducking: bool) {
+    let key = format!("spotify:{}", uid);
+    if ducking {
+        // Capture current volume, then drop to 20
+        let resp = state.client.get("https://api.spotify.com/v1/me/player")
+            .header("Authorization", format!("Bearer {}", token))
+            .timeout(Duration::from_secs(5))
+            .send().await;
+        if let Ok(r) = resp {
+            if r.status().is_success() {
+                if let Ok(j) = r.json::<serde_json::Value>().await {
+                    let prev = j.get("device").and_then(|d| d.get("volume_percent"))
+                        .and_then(|v| v.as_i64()).unwrap_or(75);
+                    store_previous_volume(&key, prev).await;
+                    let _ = state.client.put("https://api.spotify.com/v1/me/player/volume?volume_percent=20")
+                        .header("Authorization", format!("Bearer {}", token))
+                        .timeout(Duration::from_secs(5))
+                        .send().await;
+                    info!("[duck] Spotify user {} 20% (was {}%)", uid, prev);
+                }
+            }
+        }
+    } else {
+        let prev = pop_previous_volume(&key).await.unwrap_or(75);
+        let url = format!("https://api.spotify.com/v1/me/player/volume?volume_percent={}", prev);
+        let _ = state.client.put(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .timeout(Duration::from_secs(5))
+            .send().await;
+        info!("[duck] Spotify user {} restored to {}%", uid, prev);
+    }
+}
+
+async fn apply_ha_ducking(state: &Arc<AppState>, uid: i64, ha_url: &str, ha_token: &str, ducking: bool) {
+    // Find an actively-playing media_player
+    let states_url = format!("{}/api/states", ha_url.trim_end_matches('/'));
+    let resp = state.client.get(&states_url)
+        .header("Authorization", format!("Bearer {}", ha_token))
+        .timeout(Duration::from_secs(5))
+        .send().await;
+    let arr: serde_json::Value = match resp {
+        Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
+        _ => return,
+    };
+    let states = match arr.as_array() { Some(s) => s, None => return };
+    for s in states {
+        let eid = s.get("entity_id").and_then(|v| v.as_str()).unwrap_or("");
+        if !eid.starts_with("media_player.") { continue; }
+        let st = s.get("state").and_then(|v| v.as_str()).unwrap_or("");
+        if st != "playing" { continue; }
+        let attrs = s.get("attributes").cloned().unwrap_or_default();
+        let key = format!("ha:{}:{}", uid, eid);
+        if ducking {
+            let prev_vol = attrs.get("volume_level").and_then(|v| v.as_f64()).unwrap_or(0.5);
+            store_previous_volume(&key, (prev_vol * 100.0) as i64).await;
+            let svc_url = format!("{}/api/services/media_player/volume_set", ha_url.trim_end_matches('/'));
+            let _ = state.client.post(&svc_url)
+                .header("Authorization", format!("Bearer {}", ha_token))
+                .json(&serde_json::json!({"entity_id": eid, "volume_level": 0.2}))
+                .timeout(Duration::from_secs(5))
+                .send().await;
+            info!("[duck] HA {} 0.2 (was {})", eid, prev_vol);
+        } else {
+            let prev = pop_previous_volume(&key).await.unwrap_or(50);
+            let svc_url = format!("{}/api/services/media_player/volume_set", ha_url.trim_end_matches('/'));
+            let _ = state.client.post(&svc_url)
+                .header("Authorization", format!("Bearer {}", ha_token))
+                .json(&serde_json::json!({"entity_id": eid, "volume_level": (prev as f64) / 100.0}))
+                .timeout(Duration::from_secs(5))
+                .send().await;
+            info!("[duck] HA {} restored to {}", eid, prev as f64 / 100.0);
+        }
+    }
 }
 

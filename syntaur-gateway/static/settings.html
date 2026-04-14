@@ -1463,24 +1463,30 @@ function openSyncModal(providerId) {
       <p id="sync-error" class="text-xs text-red-400 mt-2 hidden"></p>`;
   } else if (p.flow === 'phone_pwa') {
     flowHtml = `${renderInstructions(p.instructions)}
-      <div class="mt-4 bg-gray-900 border border-gray-700 rounded-lg p-3 space-y-3">
+      <div class="mt-4 bg-green-900/20 border border-green-700/40 rounded-lg p-3">
         <div class="flex items-start gap-2">
-          <span class="text-xl flex-shrink-0">🔉</span>
+          <span class="text-xl flex-shrink-0">✓</span>
           <div class="flex-1">
-            <p class="text-sm font-medium text-gray-200">Auto-duck music when AI voice speaks</p>
-            <p class="text-xs text-gray-400 mt-1">iOS doesn't let web pages programmatically lower another app's audio — but a one-time iOS Shortcut install lets the PWA auto-duck Apple Music every time Syntaur speaks. After setup it's fully automatic.</p>
-            <details class="mt-2">
-              <summary class="text-xs text-oc-500 cursor-pointer hover:text-oc-400">How to set it up (3 minutes, one time)</summary>
-              <div id="shortcut-setup-steps" class="mt-2 text-xs text-gray-300">Loading guide…</div>
-            </details>
-            <div class="mt-3 flex flex-wrap gap-2">
-              <button onclick="testDuckShortcut()" class="text-xs bg-oc-700 hover:bg-oc-600 text-white px-3 py-1.5 rounded-lg">Test the Shortcut</button>
-              <button onclick="connectPhonePwa()" class="text-xs bg-gray-800 hover:bg-gray-700 text-gray-200 px-3 py-1.5 rounded-lg">Save phone connection</button>
-            </div>
-            <p id="shortcut-test-status" class="text-xs text-gray-500 mt-2"></p>
+            <p class="text-sm font-medium text-green-300">Music ducking is automatic</p>
+            <p class="text-xs text-gray-300 mt-1">When Syntaur's voice speaks, the gateway calls your music service's volume API directly — Spotify Connect, Home Assistant <code class="bg-gray-900 px-1">media_player.volume_set</code>. Music drops to 20%, restores when the voice ends. Works on phone, desktop, Sonos, anywhere your music plays. <strong class="text-white">No setup needed.</strong></p>
           </div>
         </div>
-      </div>`;
+      </div>
+      <div class="mt-3 flex flex-wrap gap-2">
+        <button onclick="testDuckShortcut()" class="text-xs bg-oc-700 hover:bg-oc-600 text-white px-3 py-1.5 rounded-lg">Test ducking now</button>
+        <button onclick="connectPhonePwa()" class="text-xs bg-gray-800 hover:bg-gray-700 text-gray-200 px-3 py-1.5 rounded-lg">Save phone connection</button>
+      </div>
+      <p id="shortcut-test-status" class="text-xs text-gray-500 mt-2"></p>
+      <details class="mt-4">
+        <summary class="text-xs text-gray-500 cursor-pointer hover:text-gray-300">Edge case: I use Apple Music app on iPhone with no HomePod (one-time setup)</summary>
+        <div class="mt-2 bg-gray-900 border border-gray-700 rounded-lg p-3">
+          <p class="text-xs text-gray-400 mb-2">Apple Music is the only major service with no remote-volume API, so for that specific case (Apple Music app on phone, no HA-connected speaker) you need a one-time iOS Shortcut install.</p>
+          <details>
+            <summary class="text-xs text-oc-500 cursor-pointer">Show 3-minute setup steps</summary>
+            <div id="shortcut-setup-steps" class="mt-2 text-xs text-gray-300">Loading…</div>
+          </details>
+        </div>
+      </details>`;
     setTimeout(() => loadShortcutSetup(), 100);
   } else if (p.flow === 'apple_music') {
     flowHtml = `${renderInstructions(p.instructions)}
