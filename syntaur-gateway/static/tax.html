@@ -238,33 +238,34 @@
       <!-- Step 1: Review + Choose Method -->
       <div id="ext-step-review">
         <p class="text-xs text-gray-400 mb-3">Review your estimated tax data, adjust if needed, then choose how to file. Extends filing deadline to <strong class="text-gray-300">October 15</strong>. Payment is still due <strong class="text-red-400">April 15</strong>.</p>
-        <div class="bg-gray-900 rounded-lg p-3 mb-3">
+        <div class="bg-gray-800 rounded-lg p-3 mb-3 border border-gray-700">
           <div class="grid grid-cols-2 gap-3 text-sm">
-            <div><label class="text-xs text-gray-500">Estimated total tax</label><input class="input text-sm text-white" id="ext-total-tax" value="$0.00"></div>
-            <div><label class="text-xs text-gray-500">Payments made (withholding + estimated)</label><input class="input text-sm text-white" id="ext-payments" value="$0.00"></div>
-            <div><label class="text-xs text-gray-500">Balance due</label><input class="input text-sm font-medium text-green-400" id="ext-balance" value="$0.00" readonly></div>
-            <div><label class="text-xs text-gray-500">Paying with this extension</label><input class="input text-sm text-white" id="ext-payment" value="0.00" oninput="updateExtBalance()"></div>
+            <div><label class="text-xs text-gray-400">Estimated total tax</label><input style="background:#1a1a2e;color:#f0f0f0;border:1px solid #444;border-radius:8px;padding:6px 10px;width:100%;font-size:14px" id="ext-total-tax" value="$0.00"></div>
+            <div><label class="text-xs text-gray-400">Payments made (withholding + estimated)</label><input style="background:#1a1a2e;color:#f0f0f0;border:1px solid #444;border-radius:8px;padding:6px 10px;width:100%;font-size:14px" id="ext-payments" value="$0.00"></div>
+            <div><label class="text-xs text-gray-400">Balance due</label><input style="background:#1a1a2e;color:#4ade80;border:1px solid #444;border-radius:8px;padding:6px 10px;width:100%;font-size:14px;font-weight:600" id="ext-balance" value="$0.00" readonly></div>
+            <div><label class="text-xs text-gray-400">Paying with this extension</label><input style="background:#1a1a2e;color:#f0f0f0;border:1px solid #444;border-radius:8px;padding:6px 10px;width:100%;font-size:14px" id="ext-payment" value="0.00" oninput="updateExtBalance()"></div>
           </div>
         </div>
+        <p class="text-xs text-gray-400 mb-2">Choose how to file:</p>
         <div class="space-y-2">
-          <div class="p-3 rounded-lg bg-gray-900 border border-gray-700 hover:border-oc-600 cursor-pointer transition-colors" onclick="startExtFiling('direct_pay')">
+          <a href="javascript:void(0)" onclick="startExtFiling('direct_pay')" class="block p-3 rounded-lg bg-gray-900 border border-gray-700 hover:border-oc-600 cursor-pointer transition-colors no-underline">
             <div class="flex items-center justify-between">
               <div><p class="text-sm text-white font-medium">IRS Direct Pay</p><p class="text-[11px] text-gray-500">Payment auto-files your extension. Instant confirmation number.</p></div>
               <span class="text-oc-500 text-xs font-medium">Recommended &rarr;</span>
             </div>
           </div>
-          <div class="p-3 rounded-lg bg-gray-900 border border-gray-700 hover:border-gray-600 cursor-pointer transition-colors" onclick="startExtFiling('free_file')">
+          <a href="javascript:void(0)" onclick="startExtFiling('free_file')" class="block p-3 rounded-lg bg-gray-900 border border-gray-700 hover:border-gray-600 cursor-pointer transition-colors no-underline">
             <div class="flex items-center justify-between">
               <div><p class="text-sm text-white font-medium">IRS Free File</p><p class="text-[11px] text-gray-500">E-file Form 4868 free. Confirmation via email within 24-48h.</p></div>
               <span class="text-gray-500 text-xs">Free &rarr;</span>
             </div>
-          </div>
-          <div class="p-3 rounded-lg bg-gray-900 border border-gray-700 hover:border-gray-600 cursor-pointer transition-colors" onclick="startExtFiling('mail')">
+          </a>
+          <a href="javascript:void(0)" onclick="startExtFiling('mail')" class="block p-3 rounded-lg bg-gray-900 border border-gray-700 hover:border-gray-600 cursor-pointer transition-colors no-underline">
             <div class="flex items-center justify-between">
               <div><p class="text-sm text-white font-medium">Print &amp; Mail</p><p class="text-[11px] text-gray-500">Download form, print, mail by April 15. Use certified mail for proof.</p></div>
               <span class="text-gray-500 text-xs">Download &rarr;</span>
             </div>
-          </div>
+          </a>
         </div>
         <span id="ext-result" class="text-xs mt-2 block"></span>
       </div>
@@ -2283,7 +2284,6 @@ async function startExtFiling(method) {
 
   if (method === 'mail') {
     // Download form text and mark as filed
-    const yr = selectedYear || yearStart().slice(0,4);
     const payment = parseCents(document.getElementById('ext-payment').value);
     const resp = await authFetch(`/api/tax/extension?token=${token}&year=${yr}&payment=${payment}`);
     if (resp.ok) {
