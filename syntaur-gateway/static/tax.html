@@ -647,8 +647,12 @@
     <div class="card mb-4">
       <div class="flex items-center justify-between mb-3">
         <h3 class="font-medium text-sm">Deduction Scanner</h3>
-        <button onclick="triggerScan()" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-3 py-1 rounded-lg" id="scan-btn">Scan Now</button>
+        <div class="flex gap-2">
+          <button onclick="triggerScan()" class="text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 px-3 py-1 rounded-lg" id="scan-btn">Quick Scan</button>
+          <button onclick="triggerDeepScan()" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-3 py-1 rounded-lg" id="deep-scan-btn">AI Deep Scan</button>
+        </div>
       </div>
+      <p id="scan-status-msg" class="text-xs text-gray-500 mb-2 hidden"></p>
       <div class="flex gap-4 text-sm">
         <div><span id="ded-pending" class="text-yellow-400 font-medium">0</span> <span class="text-gray-500">pending</span></div>
         <div><span id="ded-approved" class="text-green-400 font-medium">0</span> <span class="text-gray-500">approved</span></div>
@@ -2469,17 +2473,47 @@ async function completeQuestionnaire() {
 
 async function triggerScan() {
   const btn = document.getElementById('scan-btn');
+  const msg = document.getElementById('scan-status-msg');
   btn.textContent = 'Scanning...'; btn.disabled = true;
+  msg.textContent = 'Quick scan: checking vendor names and descriptions...'; msg.classList.remove('hidden');
   try {
     const resp = await authFetch('/api/tax/deductions/scan', {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ token, year: parseInt(selectedYear || yearStart().slice(0,4)) })
     });
     const data = await resp.json();
+    const found = data.scan?.candidates_found || 0;
+    msg.textContent = found > 0 ? `Quick scan found ${found} potential deduction${found>1?'s':''}` : 'Quick scan complete — no new deductions found';
+    msg.className = 'text-xs mb-2 ' + (found > 0 ? 'text-green-400' : 'text-gray-500');
     await loadDeductionSummary();
     await loadCandidates();
-  } catch(e) {}
-  btn.textContent = 'Scan Now'; btn.disabled = false;
+  } catch(e) { msg.textContent = 'Scan error'; msg.className = 'text-xs mb-2 text-red-400'; }
+  btn.textContent = 'Quick Scan'; btn.disabled = false;
+}
+
+async function triggerDeepScan() {
+  const btn = document.getElementById('deep-scan-btn');
+  const msg = document.getElementById('scan-status-msg');
+  btn.textContent = 'Analyzing...'; btn.disabled = true;
+  document.getElementById('scan-btn').disabled = true;
+  msg.classList.remove('hidden');
+  msg.className = 'text-xs mb-2 text-oc-400';
+  msg.textContent = 'AI Deep Scan: analyzing receipts and documents with AI vision... This may take a minute.';
+  try {
+    const resp = await authFetch('/api/tax/deductions/deep-scan', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ token, year: parseInt(selectedYear || yearStart().slice(0,4)) })
+    });
+    const data = await resp.json();
+    const found = data.candidates_found || 0;
+    const docs = data.documents_analyzed || 0;
+    msg.textContent = `Deep scan complete: analyzed ${docs} documents, found ${found} potential deduction${found!==1?'s':''}`;
+    msg.className = 'text-xs mb-2 ' + (found > 0 ? 'text-green-400' : 'text-gray-500');
+    await loadDeductionSummary();
+    await loadCandidates();
+  } catch(e) { msg.textContent = 'Deep scan error: ' + (e.message||'unknown'); msg.className = 'text-xs mb-2 text-red-400'; }
+  btn.textContent = 'AI Deep Scan'; btn.disabled = false;
+  document.getElementById('scan-btn').disabled = false;
 }
 
 async function loadDeductionSummary() {

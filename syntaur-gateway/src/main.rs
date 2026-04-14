@@ -3747,6 +3747,7 @@ async fn main() {
         .route("/api/tax/questionnaire", get(tax::handle_questionnaire_get))
         .route("/api/tax/questionnaire", post(tax::handle_questionnaire_save))
         .route("/api/tax/deductions/scan", post(tax::handle_deduction_scan))
+        .route("/api/tax/deductions/deep-scan", post(tax::handle_deduction_deep_scan))
         .route("/api/tax/deductions/candidates", get(tax::handle_deduction_candidates_list))
         .route("/api/tax/deductions/candidates/{id}/context", get(tax::handle_deduction_candidate_context))
         .route("/api/tax/deductions/candidates/{id}/review", axum::routing::put(tax::handle_deduction_review))

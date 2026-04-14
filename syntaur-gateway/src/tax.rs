@@ -4463,6 +4463,142 @@ pub async fn handle_deduction_scan(
     Ok(Json(serde_json::json!({ "success": true, "year": year, "scan": result })))
 }
 
+pub async fn handle_deduction_deep_scan(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<DeductionScanRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &req.token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    require_tax_module(&state, principal.user_id()).await?;
+
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let year = req.year.unwrap_or_else(|| default_tax_year());
+    let start = format!("{}-01-01", year);
+    let end = format!("{}-12-31", year);
+
+    // First, run the quick scan
+    let quick_result = {
+        let db2 = db.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = rusqlite::Connection::open(&db2).map_err(|e| e.to_string())?;
+            scan_for_deduction_candidates(&conn, uid, year)
+        }).await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+    };
+
+    // Gather all expenses for AI analysis
+    let expenses_summary = {
+        let db2 = db.clone();
+        let s = start.clone();
+        let e = end.clone();
+        tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let conn = rusqlite::Connection::open(&db2).map_err(|e| e.to_string())?;
+            let mut stmt = conn.prepare(
+                "SELECT e.vendor, e.amount_cents, e.expense_date, COALESCE(c.name, 'Uncategorized'), e.entity, e.description \
+                 FROM expenses e LEFT JOIN expense_categories c ON e.category_id = c.id \
+                 WHERE e.user_id = ? AND e.expense_date >= ? AND e.expense_date <= ? ORDER BY e.expense_date"
+            ).map_err(|e| e.to_string())?;
+            let rows = stmt.query_map(rusqlite::params![uid, &s, &e], |r| {
+                Ok(format!("{}: {} ({}) [{}] - {}",
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(0)?,
+                    cents_to_display(r.get::<_, i64>(1)?),
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?))
+            }).map_err(|e| e.to_string())?;
+            let lines: Vec<String> = rows.filter_map(|r| r.ok()).collect();
+            Ok(lines.join("\n"))
+        }).await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+    };
+
+    // Send to LLM for deep analysis
+    let prompt = format!(
+        "You are a tax deduction expert. Analyze these {} tax year expenses and identify ANY missed deductions or misclassified items.\n\n\
+         EXPENSES:\n{}\n\n\
+         For each potential deduction you find, respond with EXACTLY this JSON format (one per line):\n\
+         {{\"vendor\":\"...\",\"amount\":\"...\",\"type\":\"medical|vehicle|home_office|software|education|charitable|professional|retirement|student_loan|hsa|health_insurance\",\"reason\":\"...\",\"category\":\"...\",\"entity\":\"business|personal\"}}\n\n\
+         Look for:\n\
+         - Expenses that could be business deductions but are marked personal\n\
+         - Medical expenses mixed in with other categories\n\
+         - Home office related utilities not properly categorized\n\
+         - Software/subscriptions that could be business expenses\n\
+         - Vehicle expenses for business use\n\
+         - Professional services (legal, accounting) that are deductible\n\
+         - Charitable contributions\n\n\
+         If no missed deductions found, respond with: NONE\n\
+         Only include items you are confident about. Do not guess.",
+        year, expenses_summary
+    );
+
+    let chain = crate::llm::LlmChain::from_config(&state.config, "main", state.client.clone());
+    let llm_response = chain.call(&[
+        crate::llm::ChatMessage::system("You are a tax deduction expert. Respond only with JSON lines or NONE."),
+        crate::llm::ChatMessage::user(&prompt),
+    ]).await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("LLM error: {}", e)))?;
+
+    // Parse LLM suggestions and create candidates
+    let now = chrono::Utc::now().timestamp();
+    let mut ai_found = 0i64;
+    let db2 = db.clone();
+
+    if !llm_response.contains("NONE") {
+        let candidates: Vec<serde_json::Value> = llm_response.lines()
+            .filter_map(|line| {
+                let trimmed = line.trim();
+                if trimmed.starts_with('{') && trimmed.ends_with('}') {
+                    serde_json::from_str(trimmed).ok()
+                } else { None }
+            }).collect();
+
+        if !candidates.is_empty() {
+            let count = candidates.len();
+            tokio::task::spawn_blocking(move || -> Result<i64, String> {
+                let conn = rusqlite::Connection::open(&db2).map_err(|e| e.to_string())?;
+                let mut inserted = 0i64;
+                for (i, c) in candidates.iter().enumerate() {
+                    let vendor = c.get("vendor").and_then(|v| v.as_str()).unwrap_or("Unknown");
+                    let reason = c.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+                    let dtype = c.get("type").and_then(|v| v.as_str()).unwrap_or("medical");
+                    let category = c.get("category").and_then(|v| v.as_str()).unwrap_or("Other");
+                    let entity = c.get("entity").and_then(|v| v.as_str()).unwrap_or("personal");
+                    let amount_str = c.get("amount").and_then(|v| v.as_str()).unwrap_or("0");
+                    let amount_cents = (amount_str.replace(['$', ','], "").parse::<f64>().unwrap_or(0.0) * 100.0) as i64;
+
+                    let r = conn.execute(
+                        "INSERT OR IGNORE INTO deduction_candidates \
+                         (user_id, tax_year, source_type, source_id, deduction_type, vendor, description, \
+                          amount_cents, transaction_date, category_suggestion, entity_suggestion, confidence, match_rule, status, created_at) \
+                         VALUES (?, ?, 'ai_deep_scan', ?, ?, ?, ?, ?, ?, ?, ?, 0.9, ?, 'pending', ?)",
+                        rusqlite::params![uid, year, i as i64, dtype, vendor, reason, amount_cents.abs(),
+                            format!("{}-01-01", year), category, entity, format!("AI: {}", reason), now],
+                    ).unwrap_or(0);
+                    if r > 0 { inserted += 1; }
+                }
+                Ok(inserted)
+            }).await
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            ai_found = count as i64;
+        }
+    }
+
+    let quick_found = quick_result.get("candidates_found").and_then(|v| v.as_i64()).unwrap_or(0);
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "documents_analyzed": 1,
+        "expenses_analyzed": expenses_summary.lines().count(),
+        "candidates_found": quick_found + ai_found,
+        "quick_scan": quick_found,
+        "ai_found": ai_found,
+    })))
+}
+
 pub async fn handle_deduction_candidates_list(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
