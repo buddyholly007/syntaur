@@ -344,6 +344,21 @@ pub async fn handle_music_speakers(
     let uid = principal.user_id();
     let mut speakers: Vec<serde_json::Value> = Vec::new();
 
+    // "This computer" is a playback target when a /music tab is subscribed
+    // to the local events stream (Spotify Web Playback SDK / YouTube IFrame
+    // Player are ready to play on that tab's audio output)
+    if this_computer_available().await {
+        speakers.push(serde_json::json!({
+            "id": "this_computer",
+            "entity_id": "this_computer",
+            "name": "This computer",
+            "kind": "this_computer",
+            "state": "available",
+            "can_control": true,
+            "hint": "Plays through this browser\'s audio output (laptop speakers, headphones, whatever your OS has selected). Requires the /music page to be open.",
+        }));
+    }
+
     // Phone is always a playback target (if PWA paired)
     let db = state.db_path.clone();
     let pwa_connected = tokio::task::spawn_blocking(move || -> bool {
@@ -1406,6 +1421,17 @@ pub async fn trigger_duck(active: bool, duration_secs: i64) {
 pub async fn trigger_duck_with_state(state: &Arc<AppState>, active: bool, duration_secs: i64) {
     trigger_duck(active, duration_secs).await;
     apply_ducking_to_all_users(state, active).await;
+    // Also emit local duck/unduck for /music tabs playing through Spotify SDK / YT IFrame
+    emit_local_event(LocalEvent {
+        event_type: if active { "duck".to_string() } else { "unduck".to_string() },
+        provider: None,
+        track_id: None,
+        uri: None,
+        name: None,
+        artist: None,
+        volume: Some(if active { 0.2 } else { 1.0 }),
+        message: None,
+    }).await;
     if active && duration_secs > 0 {
         // Schedule auto-unduck in case no explicit unduck arrives
         let state_clone = state.clone();
@@ -1599,5 +1625,125 @@ async fn apply_ha_ducking(state: &Arc<AppState>, uid: i64, ha_url: &str, ha_toke
             info!("[duck] HA {} restored to {}", eid, prev as f64 / 100.0);
         }
     }
+}
+
+// ── Local playback SSE channel ──────────────────────────────────────────────
+// /music tabs subscribe to /api/music/local_events. When the music tool
+// targets "this_computer" or ducking fires, we broadcast JSON events for
+// the client-side audio players (Spotify Web Playback SDK, YouTube IFrame,
+// HTML5 audio) to handle. Zero external API round trip for the play command
+// itself — the /music tab IS the player.
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct LocalEvent {
+    #[serde(rename = "type")]
+    pub event_type: String,   // "play" | "pause" | "next" | "duck" | "unduck" | "volume"
+    pub provider: Option<String>,   // "spotify" | "youtube_music" | "apple_music"
+    pub track_id: Option<String>,
+    pub uri: Option<String>,        // e.g. "spotify:track:ID" or YouTube videoId
+    pub name: Option<String>,
+    pub artist: Option<String>,
+    pub volume: Option<f64>,        // 0.0-1.0
+    pub message: Option<String>,
+}
+
+static LOCAL_EVENT_TX: tokio::sync::OnceCell<tokio::sync::broadcast::Sender<LocalEvent>> = tokio::sync::OnceCell::const_new();
+
+async fn get_local_event_tx() -> tokio::sync::broadcast::Sender<LocalEvent> {
+    LOCAL_EVENT_TX.get_or_init(|| async {
+        let (tx, _rx) = tokio::sync::broadcast::channel(64);
+        tx
+    }).await.clone()
+}
+
+/// Broadcast a local playback event to all /music tabs.
+pub async fn emit_local_event(ev: LocalEvent) {
+    let tx = get_local_event_tx().await;
+    let _ = tx.send(ev);
+}
+
+/// SSE stream of local playback events for /music tabs.
+pub async fn handle_local_events(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use axum::response::IntoResponse;
+
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    if crate::resolve_principal(&state, token).await.is_err() {
+        return (axum::http::StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+
+    let tx = get_local_event_tx().await;
+    let mut rx = tx.subscribe();
+    let stream = async_stream::stream! {
+        yield Ok::<_, std::convert::Infallible>(Event::default().data(r#"{"type":"connected"}"#));
+        loop {
+            match rx.recv().await {
+                Ok(ev) => {
+                    let json = serde_json::to_string(&ev).unwrap_or_default();
+                    yield Ok(Event::default().data(json));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            }
+        }
+    };
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(20)))
+        .into_response()
+}
+
+/// Is there at least one /music tab subscribed (i.e. "this computer" available)?
+pub async fn this_computer_available() -> bool {
+    let tx = get_local_event_tx().await;
+    tx.receiver_count() > 0
+}
+
+/// Play a track on the active /music tab via the Web Playback / IFrame SDKs.
+/// Called by the music tool when target == "this_computer".
+pub async fn play_on_this_computer(
+    provider: &str,
+    track_id: &str,
+    name: &str,
+    artist: &str,
+) -> bool {
+    let tx = get_local_event_tx().await;
+    if tx.receiver_count() == 0 { return false; }
+    let uri = match provider {
+        "spotify" => format!("spotify:track:{}", track_id),
+        "youtube_music" => track_id.to_string(),  // raw videoId
+        _ => track_id.to_string(),
+    };
+    let _ = tx.send(LocalEvent {
+        event_type: "play".to_string(),
+        provider: Some(provider.to_string()),
+        track_id: Some(track_id.to_string()),
+        uri: Some(uri),
+        name: Some(name.to_string()),
+        artist: Some(artist.to_string()),
+        volume: None,
+        message: None,
+    });
+    true
+}
+
+/// Check if the user has set "this_computer" as their default playback target.
+pub async fn preferred_target_is_this_computer(db_path: &std::path::Path, user_id: i64) -> bool {
+    let db = db_path.to_path_buf();
+    tokio::task::spawn_blocking(move || -> bool {
+        let Ok(conn) = rusqlite::Connection::open(&db) else { return false; };
+        let cred: Option<String> = conn.query_row(
+            "SELECT metadata FROM sync_connections WHERE user_id = ? AND provider = 'music_preferences'",
+            rusqlite::params![user_id], |r| r.get(0)
+        ).ok();
+        if let Some(s) = cred {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+                return v.get("preferred_target").and_then(|x| x.as_str()) == Some("this_computer");
+            }
+        }
+        false
+    }).await.unwrap_or(false)
 }
 

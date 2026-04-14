@@ -446,6 +446,42 @@ impl Tool for MusicTool {
 
         // Step 2: route playback
 
+        // 2pre. "This computer" — if a /music tab is open and the user\'s
+        // default target is this_computer (or an explicit target override),
+        // dispatch to the local playback SSE channel. Audio plays via
+        // Spotify Web Playback SDK / YouTube IFrame Player in that tab.
+        if target_override.as_deref() == Some("this_computer")
+            || (target_override.is_none() && crate::music::this_computer_available().await
+                && crate::music::preferred_target_is_this_computer(db_path, ctx.user_id).await)
+        {
+            if provider_id == "apple_music" {
+                return Ok(RichToolResult::text(format!(
+                    "Found {}{}. Apple Music's FairPlay DRM can\'t decrypt in a browser tab. To play on this computer, open Apple Music on macOS (or click {} to launch it).",
+                    song_name,
+                    if artist_name.is_empty() { "".to_string() } else { format!(" by {}", artist_name) },
+                    if apple_music_url.is_empty() { "music.apple.com".to_string() } else { apple_music_url.clone() },
+                )));
+            }
+            if !play_url.is_empty() && provider_id != "none" {
+                // Extract track_id from play_url if possible
+                let track_id = if provider_id == "apple_music" {
+                    play_url.split('/').last().unwrap_or("").to_string()
+                } else if provider_id == "spotify" {
+                    play_url.strip_prefix("spotify:track:").unwrap_or(&play_url).to_string()
+                } else {
+                    play_url.clone()
+                };
+                if crate::music::play_on_this_computer(&provider_id, &track_id, &song_name, &artist_name).await {
+                    info!("[play_music] routed via this_computer (provider={})", provider_id);
+                    return Ok(RichToolResult::text(format!(
+                        "Playing {}{} on this computer\'s speakers.",
+                        song_name,
+                        if artist_name.is_empty() { "".to_string() } else { format!(" by {}", artist_name) },
+                    )));
+                }
+            }
+        }
+
         // 2a. Phone PWA — TOP priority for mobile users. Sends music:// URL
         // through the bridge SSE channel; phone's Music.app opens and plays.
         // No DRM workaround needed — phone has its own Apple Music subscription.

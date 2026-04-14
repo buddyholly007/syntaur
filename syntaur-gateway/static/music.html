@@ -40,6 +40,11 @@
   <button onclick="refreshAll()" class="text-xs text-gray-400 hover:text-gray-200">&#8634; Refresh</button>
 </div>
 
+<!-- Hidden player containers — audio plays through browser's audio output -->
+<div id="local-players" style="position:fixed; width:0; height:0; overflow:hidden; pointer-events:none;">
+  <div id="yt-player-mount"></div>
+</div>
+
 <div class="max-w-4xl mx-auto px-4 py-6 space-y-4">
 
   <!-- Now Playing -->
@@ -350,7 +355,7 @@ async function loadSpeakers() {
     const defaultTarget = localStorage.getItem('syntaur_music_target') || '';
 
     list.innerHTML = speakersData.map(s => {
-      const icon = s.kind === 'phone' ? '📱' : s.kind === 'homepod' ? '🏠' : s.kind === 'appletv' ? '📺' : s.kind === 'sonos' ? '🔊' : s.kind === 'airplay' ? '📡' : '🔉';
+      const icon = s.kind === 'this_computer' ? '💻' : s.kind === 'phone' ? '📱' : s.kind === 'homepod' ? '🏠' : s.kind === 'appletv' ? '📺' : s.kind === 'sonos' ? '🔊' : s.kind === 'airplay' ? '📡' : '🔉';
       const sid = s.entity_id || s.id;
       const isDefault = defaultTarget === sid;
       const canControl = s.can_control !== false;
@@ -809,6 +814,168 @@ async function pollDuckState() {
 }
 setInterval(pollDuckState, 1500);
 pollDuckState();
+
+
+
+// ── Local playback (This Computer) ────────────────────────────────────────
+// When music plays "on this computer", audio goes through the browser tab's
+// audio output (laptop speakers, headphones, whatever the OS is using).
+// Ducking is trivial here — we control the players directly. No external
+// API round-trips needed.
+
+let ytPlayer = null;
+let ytPlayerReady = false;
+let ytSdkLoaded = false;
+let localEventSource = null;
+let localDuckingActive = false;
+
+function loadYtIframeApi() {
+  if (ytSdkLoaded) return;
+  ytSdkLoaded = true;
+  const s = document.createElement('script');
+  s.src = 'https://www.youtube.com/iframe_api';
+  document.head.appendChild(s);
+}
+
+window.onYouTubeIframeAPIReady = function() {
+  ytPlayer = new YT.Player('yt-player-mount', {
+    height: '1', width: '1',
+    playerVars: { autoplay: 0, controls: 0 },
+    events: {
+      'onReady': () => {
+        ytPlayerReady = true;
+        console.log('[yt-iframe] ready');
+      },
+      'onStateChange': (e) => {
+        // YT.PlayerState: -1=unstarted, 0=ended, 1=playing, 2=paused, 3=buffering, 5=cued
+        if (e.data === 0) console.log('[yt-iframe] track ended');
+      },
+      'onError': (e) => console.warn('[yt-iframe] error', e.data),
+    },
+  });
+};
+
+function playOnThisComputer(provider, trackId, uri, name, artist) {
+  console.log('[local-play]', provider, trackId, name, '—', artist);
+  showMusicNotice('▶ ' + (name || trackId) + (artist ? ' — ' + artist : ''), false);
+  if (provider === 'spotify') {
+    // Use the Spotify Connect API to play on this tab's registered device
+    if (!spotifyDeviceId) {
+      // SDK hasn't connected yet — load + connect then retry
+      loadSpotifySDK();
+      setTimeout(() => playOnThisComputer(provider, trackId, uri, name, artist), 2000);
+      return;
+    }
+    fetch('/api/music/spotify_play', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        token: token,
+        uri: uri || ('spotify:track:' + trackId),
+        device_id: spotifyDeviceId,
+      }),
+    }).catch(e => console.warn('[spotify-play]', e));
+  } else if (provider === 'youtube_music') {
+    if (!ytSdkLoaded) loadYtIframeApi();
+    if (ytPlayerReady && ytPlayer) {
+      ytPlayer.loadVideoById(trackId);
+    } else {
+      // Wait for ready
+      const waitForYt = setInterval(() => {
+        if (ytPlayerReady && ytPlayer) {
+          clearInterval(waitForYt);
+          ytPlayer.loadVideoById(trackId);
+        }
+      }, 500);
+      setTimeout(() => clearInterval(waitForYt), 15000);
+    }
+  } else if (provider === 'apple_music') {
+    // Apple Music's FairPlay DRM means we can't play it in-page. Honest fallback:
+    // open the song in a new tab at music.apple.com (or launch Music.app on macOS).
+    const appleUrl = 'https://music.apple.com/us/song/' + trackId;
+    showMusicNotice('Opening Apple Music — FairPlay DRM means we can\'t play it in this tab. Clicking this link opens the Apple Music web player or app.', true);
+    // Try to open the native Music.app first (macOS has music:// handler),
+    // fall back to web.
+    try {
+      window.location.href = 'music://music.apple.com/us/song/' + trackId;
+    } catch(e) {
+      window.open(appleUrl, '_blank');
+    }
+  } else {
+    console.warn('[local-play] unknown provider:', provider);
+  }
+}
+
+function localPauseAll() {
+  if (ytPlayerReady && ytPlayer && typeof ytPlayer.pauseVideo === 'function') {
+    ytPlayer.pauseVideo();
+  }
+  if (spotifyPlayer && typeof spotifyPlayer.pause === 'function') {
+    spotifyPlayer.pause();
+  }
+}
+
+function applyLocalDuck(active) {
+  localDuckingActive = active;
+  const factor = active ? 0.2 : 1.0;
+  // Spotify Web Playback SDK
+  if (spotifyPlayer && typeof spotifyPlayer.setVolume === 'function') {
+    spotifyPlayer.setVolume(factor);
+  }
+  // YouTube IFrame Player
+  if (ytPlayerReady && ytPlayer && typeof ytPlayer.setVolume === 'function') {
+    ytPlayer.setVolume(Math.round(factor * 100));
+  }
+  // Any <audio> elements (e.g., TTS playback shouldn't duck itself, but other audio)
+  document.querySelectorAll('audio').forEach(a => {
+    if (!a.dataset.isTts) a.volume = factor;
+  });
+}
+
+function startLocalEventStream() {
+  if (localEventSource) return;
+  const url = '/api/music/local_events?token=' + encodeURIComponent(token);
+  localEventSource = new EventSource(url);
+  localEventSource.onopen = () => console.log('[local-sse] connected');
+  localEventSource.onmessage = (e) => {
+    try {
+      const ev = JSON.parse(e.data);
+      switch (ev.type) {
+        case 'connected': break;
+        case 'play':
+          playOnThisComputer(ev.provider, ev.track_id, ev.uri, ev.name, ev.artist);
+          break;
+        case 'pause':
+          localPauseAll();
+          break;
+        case 'duck':
+          applyLocalDuck(true);
+          break;
+        case 'unduck':
+          applyLocalDuck(false);
+          break;
+        case 'volume':
+          if (typeof ev.volume === 'number') {
+            if (spotifyPlayer?.setVolume) spotifyPlayer.setVolume(ev.volume);
+            if (ytPlayerReady && ytPlayer?.setVolume) ytPlayer.setVolume(Math.round(ev.volume * 100));
+          }
+          break;
+      }
+    } catch(err) { console.warn('[local-sse] bad event', err); }
+  };
+  localEventSource.onerror = () => {
+    console.warn('[local-sse] error, reconnecting in 5s');
+    try { localEventSource.close(); } catch(e){}
+    localEventSource = null;
+    setTimeout(startLocalEventStream, 5000);
+  };
+}
+
+// Start listening immediately so the gateway sees this tab as "this_computer" available
+startLocalEventStream();
+
+// Preload YouTube IFrame API eagerly too (small, cached) so playback is instant
+loadYtIframeApi();
 
 </script>
 </body>
