@@ -2387,3 +2387,83 @@ impl Tool for DeductionAutofillTool {
         Ok(RichToolResult::text(result))
     }
 }
+
+pub struct UpdateTaxProfileTool;
+
+#[async_trait]
+impl Tool for UpdateTaxProfileTool {
+    fn name(&self) -> &str { "update_tax_profile" }
+    fn description(&self) -> &str { "Update the taxpayer's filing profile: name, address, SSN, filing status, spouse info, or dependents. Can add, edit, or remove dependents. Use action='profile' for personal info, 'add_dependent'/'update_dependent'/'remove_dependent' for dependents." }
+    fn parameters(&self) -> Value {
+        json!({ "type": "object", "properties": {
+            "year": { "type": "integer", "description": "Tax year" },
+            "action": { "type": "string", "description": "profile | add_dependent | update_dependent | remove_dependent" },
+            "first_name": { "type": "string" }, "last_name": { "type": "string" },
+            "ssn": { "type": "string" }, "date_of_birth": { "type": "string", "description": "YYYY-MM-DD" },
+            "address_line1": { "type": "string" }, "city": { "type": "string" },
+            "state": { "type": "string" }, "zip": { "type": "string" },
+            "filing_status": { "type": "string", "description": "single | married_jointly | married_separately | head_of_household" },
+            "spouse_first": { "type": "string" }, "spouse_last": { "type": "string" },
+            "spouse_ssn": { "type": "string" }, "occupation": { "type": "string" },
+            "dependent_id": { "type": "integer" },
+            "relationship": { "type": "string", "description": "child | stepchild | foster_child | sibling | parent | other" },
+            "months_lived": { "type": "integer" }
+        }, "required": ["action"] })
+    }
+    async fn execute(&self, args: Value, ctx: &ToolContext<'_>) -> Result<RichToolResult, String> {
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("profile").to_string();
+        let year = args.get("year").and_then(|v| v.as_i64()).unwrap_or(2025);
+        let db = ctx.db_path.ok_or("database not available")?.to_path_buf();
+        let uid = ctx.user_id;
+        let a = args.clone();
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+            let now = chrono::Utc::now().timestamp();
+            match action.as_str() {
+                "profile" => {
+                    let fs = a.get("filing_status").and_then(|v| v.as_str()).unwrap_or("single");
+                    conn.execute(
+                        "INSERT INTO taxpayer_profiles (user_id,tax_year,first_name,last_name,ssn_encrypted,date_of_birth,\
+                         address_line1,city,state,zip,filing_status,spouse_first,spouse_last,spouse_ssn_encrypted,occupation,\
+                         created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) \
+                         ON CONFLICT(user_id,tax_year) DO UPDATE SET \
+                         first_name=COALESCE(excluded.first_name,first_name),last_name=COALESCE(excluded.last_name,last_name),\
+                         ssn_encrypted=COALESCE(excluded.ssn_encrypted,ssn_encrypted),date_of_birth=COALESCE(excluded.date_of_birth,date_of_birth),\
+                         address_line1=COALESCE(excluded.address_line1,address_line1),city=COALESCE(excluded.city,city),\
+                         state=COALESCE(excluded.state,state),zip=COALESCE(excluded.zip,zip),\
+                         filing_status=COALESCE(excluded.filing_status,filing_status),\
+                         spouse_first=COALESCE(excluded.spouse_first,spouse_first),spouse_last=COALESCE(excluded.spouse_last,spouse_last),\
+                         spouse_ssn_encrypted=COALESCE(excluded.spouse_ssn_encrypted,spouse_ssn_encrypted),\
+                         occupation=COALESCE(excluded.occupation,occupation),updated_at=excluded.updated_at",
+                        rusqlite::params![uid,year,a.get("first_name").and_then(|v|v.as_str()),a.get("last_name").and_then(|v|v.as_str()),
+                            a.get("ssn").and_then(|v|v.as_str()),a.get("date_of_birth").and_then(|v|v.as_str()),
+                            a.get("address_line1").and_then(|v|v.as_str()),a.get("city").and_then(|v|v.as_str()),
+                            a.get("state").and_then(|v|v.as_str()),a.get("zip").and_then(|v|v.as_str()),fs,
+                            a.get("spouse_first").and_then(|v|v.as_str()),a.get("spouse_last").and_then(|v|v.as_str()),
+                            a.get("spouse_ssn").and_then(|v|v.as_str()),a.get("occupation").and_then(|v|v.as_str()),now,now],
+                    ).map_err(|e| e.to_string())?;
+                    Ok(format!("Updated taxpayer profile for {} (filing: {})", year, fs))
+                }
+                "add_dependent" => {
+                    let f = a.get("first_name").and_then(|v|v.as_str()).unwrap_or("Unknown");
+                    let l = a.get("last_name").and_then(|v|v.as_str()).unwrap_or("");
+                    let r = a.get("relationship").and_then(|v|v.as_str()).unwrap_or("child");
+                    conn.execute("INSERT INTO dependents (user_id,tax_year,first_name,last_name,ssn_encrypted,date_of_birth,\
+                        relationship,months_lived,qualifies_ctc,created_at) VALUES (?,?,?,?,?,?,?,?,1,?)",
+                        rusqlite::params![uid,year,f,l,a.get("ssn").and_then(|v|v.as_str()),
+                            a.get("date_of_birth").and_then(|v|v.as_str()),r,
+                            a.get("months_lived").and_then(|v|v.as_i64()).unwrap_or(12),now],
+                    ).map_err(|e| e.to_string())?;
+                    Ok(format!("Added dependent: {} {} ({})", f, l, r))
+                }
+                "remove_dependent" => {
+                    let did = a.get("dependent_id").and_then(|v|v.as_i64()).ok_or("dependent_id required")?;
+                    conn.execute("DELETE FROM dependents WHERE id=? AND user_id=?", rusqlite::params![did,uid]).map_err(|e| e.to_string())?;
+                    Ok(format!("Removed dependent #{}", did))
+                }
+                _ => Err(format!("Unknown action: {}", action))
+            }
+        }).await.map_err(|e| e.to_string())?.map_err(|e| e)?;
+        Ok(RichToolResult::text(result))
+    }
+}

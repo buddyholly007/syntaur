@@ -332,6 +332,7 @@ impl ToolRegistry {
         reg!(built_in_tools::FetchTaxBracketsTool);
         reg!(built_in_tools::PropertyProfileTool);
         reg!(built_in_tools::DeductionAutofillTool);
+        reg!(built_in_tools::UpdateTaxProfileTool);
         reg!(built_in_tools::BrowserScreenshotTool);
         reg!(built_in_tools::BrowserExecuteJsTool);
         reg!(built_in_tools::BrowserClickAtTool);

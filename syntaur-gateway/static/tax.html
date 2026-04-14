@@ -90,6 +90,67 @@
 
   <!-- Overview tab -->
   <div id="tab-overview">
+    <!-- Taxpayer Profile -->
+    <div class="card mb-4" id="profile-card">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-medium text-sm">Tax Filing Profile</h3>
+        <div class="flex items-center gap-2">
+          <span id="profile-year-label" class="text-xs text-gray-500"></span>
+          <button onclick="toggleProfileEdit()" class="text-xs text-oc-500 hover:text-oc-400" id="profile-edit-btn">Edit</button>
+        </div>
+      </div>
+      <!-- View mode -->
+      <div id="profile-view">
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm" id="profile-summary">
+          <p class="text-xs text-gray-600 col-span-4">Loading profile...</p>
+        </div>
+        <!-- Dependents -->
+        <div id="dependents-section" class="hidden mt-3 pt-3 border-t border-gray-800">
+          <div class="flex items-center justify-between mb-2">
+            <p class="text-xs text-gray-500 font-medium">Dependents</p>
+            <button onclick="showAddDependent()" class="text-[10px] text-oc-500 hover:text-oc-400">+ Add</button>
+          </div>
+          <div id="dependents-list" class="space-y-1"></div>
+        </div>
+      </div>
+      <!-- Edit mode -->
+      <div id="profile-edit" class="hidden">
+        <div class="grid grid-cols-2 gap-3 text-sm">
+          <div><label class="text-xs text-gray-500">First Name</label><input class="input text-sm" id="pf-first"></div>
+          <div><label class="text-xs text-gray-500">Last Name</label><input class="input text-sm" id="pf-last"></div>
+          <div><label class="text-xs text-gray-500">SSN</label><input class="input text-sm" id="pf-ssn" type="password" placeholder="XXX-XX-XXXX"></div>
+          <div><label class="text-xs text-gray-500">Date of Birth</label><input class="input text-sm" id="pf-dob" type="date"></div>
+          <div class="col-span-2"><label class="text-xs text-gray-500">Address</label><input class="input text-sm" id="pf-addr" placeholder="123 Main St"></div>
+          <div><label class="text-xs text-gray-500">City</label><input class="input text-sm" id="pf-city"></div>
+          <div class="grid grid-cols-2 gap-2">
+            <div><label class="text-xs text-gray-500">State</label><input class="input text-sm" id="pf-state" maxlength="2" placeholder="WA"></div>
+            <div><label class="text-xs text-gray-500">ZIP</label><input class="input text-sm" id="pf-zip" maxlength="10"></div>
+          </div>
+          <div><label class="text-xs text-gray-500">Filing Status</label>
+            <select class="input text-sm" id="pf-filing">
+              <option value="single">Single</option><option value="married_jointly">Married Filing Jointly</option>
+              <option value="married_separately">Married Filing Separately</option><option value="head_of_household">Head of Household</option>
+            </select>
+          </div>
+          <div><label class="text-xs text-gray-500">Occupation</label><input class="input text-sm" id="pf-occupation"></div>
+        </div>
+        <details class="mt-3" id="spouse-section">
+          <summary class="text-xs text-gray-400 cursor-pointer hover:text-gray-300">Spouse Information</summary>
+          <div class="grid grid-cols-2 gap-3 text-sm mt-2">
+            <div><label class="text-xs text-gray-500">Spouse First Name</label><input class="input text-sm" id="pf-sp-first"></div>
+            <div><label class="text-xs text-gray-500">Spouse Last Name</label><input class="input text-sm" id="pf-sp-last"></div>
+            <div><label class="text-xs text-gray-500">Spouse SSN</label><input class="input text-sm" id="pf-sp-ssn" type="password"></div>
+            <div><label class="text-xs text-gray-500">Spouse DOB</label><input class="input text-sm" id="pf-sp-dob" type="date"></div>
+          </div>
+        </details>
+        <div class="flex gap-2 mt-3">
+          <button onclick="saveProfile()" class="btn-primary text-xs">Save Profile</button>
+          <button onclick="toggleProfileEdit()" class="text-xs text-gray-500 hover:text-gray-300">Cancel</button>
+          <span id="profile-save-result" class="text-xs self-center"></span>
+        </div>
+      </div>
+    </div>
+
     <!-- Summary cards -->
     <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
       <div class="card">
@@ -1978,6 +2039,139 @@ document.addEventListener('visibilitychange', async () => {
   }
 });
 
+// ── Taxpayer Profile ────────────────────────────────────────────────────
+
+async function loadProfile() {
+  try {
+    const yr = selectedYear || yearStart().slice(0,4);
+    document.getElementById('profile-year-label').textContent = `Tax Year ${yr}`;
+    const resp = await authFetch(`/api/tax/profile?token=${token}&year=${yr}`);
+    const data = await resp.json();
+    renderProfileView(data.profile, data.dependents, data.income_sources);
+  } catch(e) {}
+}
+
+function renderProfileView(profile, deps, income) {
+  const summary = document.getElementById('profile-summary');
+  if (!profile) {
+    summary.innerHTML = `<div class="col-span-4 text-center py-3">
+      <p class="text-xs text-gray-500 mb-2">No filing profile yet. Set up your basic information to get started.</p>
+      <button onclick="toggleProfileEdit()" class="btn-primary text-xs">Set Up Profile</button>
+    </div>`;
+    return;
+  }
+  const p = profile;
+  const statuses = {single:'Single', married_jointly:'Married Filing Jointly', married_separately:'Married Filing Separately', head_of_household:'Head of Household'};
+  let html = `
+    <div><p class="text-xs text-gray-500">Name</p><p class="text-white">${p.first_name||''} ${p.last_name||''}</p></div>
+    <div><p class="text-xs text-gray-500">Filing Status</p><p class="text-white">${statuses[p.filing_status]||p.filing_status}</p></div>
+    <div><p class="text-xs text-gray-500">SSN</p><p class="text-white font-mono">${p.ssn_last4||'Not set'}</p></div>
+    <div><p class="text-xs text-gray-500">Occupation</p><p class="text-white">${p.occupation||'—'}</p></div>`;
+  if (p.address_line1) html += `<div class="col-span-2"><p class="text-xs text-gray-500">Address</p><p class="text-white">${p.address_line1}${p.city ? ', '+p.city : ''}${p.state ? ' '+p.state : ''} ${p.zip||''}</p></div>`;
+  if (p.filing_status === 'married_jointly' && p.spouse_first) {
+    html += `<div><p class="text-xs text-gray-500">Spouse</p><p class="text-white">${p.spouse_first} ${p.spouse_last||''}</p></div>`;
+    html += `<div><p class="text-xs text-gray-500">Spouse SSN</p><p class="text-white font-mono">${p.spouse_ssn_last4||'Not set'}</p></div>`;
+  }
+  summary.innerHTML = html;
+
+  // Fill edit form for later
+  if (p.first_name) document.getElementById('pf-first').value = p.first_name;
+  if (p.last_name) document.getElementById('pf-last').value = p.last_name;
+  if (p.date_of_birth) document.getElementById('pf-dob').value = p.date_of_birth;
+  if (p.address_line1) document.getElementById('pf-addr').value = p.address_line1;
+  if (p.city) document.getElementById('pf-city').value = p.city;
+  if (p.state) document.getElementById('pf-state').value = p.state;
+  if (p.zip) document.getElementById('pf-zip').value = p.zip;
+  if (p.filing_status) document.getElementById('pf-filing').value = p.filing_status;
+  if (p.occupation) document.getElementById('pf-occupation').value = p.occupation;
+  if (p.spouse_first) document.getElementById('pf-sp-first').value = p.spouse_first;
+  if (p.spouse_last) document.getElementById('pf-sp-last').value = p.spouse_last;
+  if (p.spouse_dob) document.getElementById('pf-sp-dob').value = p.spouse_dob;
+
+  // Dependents
+  const depSection = document.getElementById('dependents-section');
+  const depList = document.getElementById('dependents-list');
+  if (deps && deps.length > 0) {
+    depSection.classList.remove('hidden');
+    depList.innerHTML = deps.map(d => `
+      <div class="flex items-center justify-between p-2 rounded-lg bg-gray-900 text-xs">
+        <div class="flex items-center gap-3">
+          <span class="text-white font-medium">${d.first_name} ${d.last_name}</span>
+          <span class="badge badge-blue">${d.relationship}</span>
+          ${d.date_of_birth ? `<span class="text-gray-500">DOB: ${d.date_of_birth}</span>` : ''}
+          ${d.qualifies_ctc ? '<span class="badge badge-green">CTC eligible</span>' : ''}
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="text-gray-600">${d.ssn_last4 || 'No SSN'}</span>
+          <button onclick="deleteDependent(${d.id})" class="text-red-500 hover:text-red-400 text-xs">Remove</button>
+        </div>
+      </div>`).join('');
+  } else {
+    depSection.classList.remove('hidden');
+    depList.innerHTML = '<p class="text-xs text-gray-600">No dependents. Click "+ Add" to add one.</p>';
+  }
+}
+
+function toggleProfileEdit() {
+  const view = document.getElementById('profile-view');
+  const edit = document.getElementById('profile-edit');
+  const btn = document.getElementById('profile-edit-btn');
+  const showing = !edit.classList.contains('hidden');
+  view.classList.toggle('hidden', !showing);
+  edit.classList.toggle('hidden', showing);
+  btn.textContent = showing ? 'Edit' : 'View';
+}
+
+async function saveProfile() {
+  const yr = selectedYear || yearStart().slice(0,4);
+  const result = document.getElementById('profile-save-result');
+  result.textContent = 'Saving...'; result.className = 'text-xs self-center text-gray-400';
+  try {
+    const body = {
+      token, year: parseInt(yr),
+      first_name: document.getElementById('pf-first').value || null,
+      last_name: document.getElementById('pf-last').value || null,
+      ssn: document.getElementById('pf-ssn').value || null,
+      date_of_birth: document.getElementById('pf-dob').value || null,
+      address_line1: document.getElementById('pf-addr').value || null,
+      city: document.getElementById('pf-city').value || null,
+      state: document.getElementById('pf-state').value || null,
+      zip: document.getElementById('pf-zip').value || null,
+      filing_status: document.getElementById('pf-filing').value,
+      occupation: document.getElementById('pf-occupation').value || null,
+      spouse_first: document.getElementById('pf-sp-first').value || null,
+      spouse_last: document.getElementById('pf-sp-last').value || null,
+      spouse_ssn: document.getElementById('pf-sp-ssn').value || null,
+      spouse_dob: document.getElementById('pf-sp-dob').value || null,
+    };
+    await authFetch('/api/tax/profile', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+    result.textContent = 'Saved!'; result.className = 'text-xs self-center text-green-400';
+    toggleProfileEdit();
+    loadProfile();
+  } catch(e) { result.textContent = 'Error'; result.className = 'text-xs self-center text-red-400'; }
+}
+
+function showAddDependent() {
+  const name = prompt('Dependent full name (First Last):');
+  if (!name) return;
+  const parts = name.trim().split(' ');
+  const first = parts[0] || '';
+  const last = parts.slice(1).join(' ') || '';
+  const rel = prompt('Relationship (child, stepchild, parent, sibling, other):', 'child') || 'child';
+  const dob = prompt('Date of birth (YYYY-MM-DD):', '') || null;
+  const yr = selectedYear || yearStart().slice(0,4);
+  authFetch('/api/tax/dependents', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ token, year:parseInt(yr), first_name:first, last_name:last, relationship:rel, date_of_birth:dob })
+  }).then(() => loadProfile());
+}
+
+async function deleteDependent(id) {
+  if (!confirm('Remove this dependent?')) return;
+  await authFetch(`/api/tax/dependents/${id}?token=${token}`, { method:'DELETE' });
+  loadProfile();
+}
+
 // ── Extension Filing Workflow ────────────────────────────────────────────
 
 let extId = null;
@@ -2437,6 +2631,7 @@ document.addEventListener('keydown', e => {
 });
 
 // Init
+loadProfile();
 loadOverview();
 loadCategories();
 loadTaxConversation();

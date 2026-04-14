@@ -3816,6 +3816,198 @@ Respond with ONLY the JSON, no explanation."#,
     })))
 }
 
+// ── Taxpayer Profile + Dependents ───────────────────────────────────────────
+
+pub async fn handle_taxpayer_profile_get(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let year: i64 = params.get("year").and_then(|y| y.parse().ok()).unwrap_or_else(|| default_tax_year());
+
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let profile = conn.query_row(
+            "SELECT first_name, last_name, ssn_encrypted, date_of_birth, address_line1, address_line2, \
+             city, state, zip, phone, email, filing_status, spouse_first, spouse_last, spouse_ssn_encrypted, \
+             spouse_dob, occupation, spouse_occupation FROM taxpayer_profiles WHERE user_id = ? AND tax_year = ?",
+            rusqlite::params![uid, year],
+            |r| Ok(serde_json::json!({
+                "first_name": r.get::<_, Option<String>>(0)?, "last_name": r.get::<_, Option<String>>(1)?,
+                "ssn_last4": r.get::<_, Option<String>>(2)?.map(|s| if s.len()>=4 { format!("***-**-{}", &s[s.len()-4..]) } else { s }),
+                "date_of_birth": r.get::<_, Option<String>>(3)?,
+                "address_line1": r.get::<_, Option<String>>(4)?, "address_line2": r.get::<_, Option<String>>(5)?,
+                "city": r.get::<_, Option<String>>(6)?, "state": r.get::<_, Option<String>>(7)?, "zip": r.get::<_, Option<String>>(8)?,
+                "phone": r.get::<_, Option<String>>(9)?, "email": r.get::<_, Option<String>>(10)?,
+                "filing_status": r.get::<_, String>(11)?,
+                "spouse_first": r.get::<_, Option<String>>(12)?, "spouse_last": r.get::<_, Option<String>>(13)?,
+                "spouse_ssn_last4": r.get::<_, Option<String>>(14)?.map(|s| if s.len()>=4 { format!("***-**-{}", &s[s.len()-4..]) } else { s }),
+                "spouse_dob": r.get::<_, Option<String>>(15)?,
+                "occupation": r.get::<_, Option<String>>(16)?, "spouse_occupation": r.get::<_, Option<String>>(17)?,
+            })),
+        ).ok();
+
+        let mut dep_stmt = conn.prepare(
+            "SELECT id, first_name, last_name, ssn_encrypted, date_of_birth, relationship, months_lived, \
+             qualifies_ctc, qualifies_odc, is_student, is_disabled FROM dependents WHERE user_id = ? AND tax_year = ?"
+        ).map_err(|e| e.to_string())?;
+        let deps: Vec<serde_json::Value> = dep_stmt.query_map(rusqlite::params![uid, year], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?, "first_name": r.get::<_, String>(1)?, "last_name": r.get::<_, String>(2)?,
+                "ssn_last4": r.get::<_, Option<String>>(3)?.map(|s| if s.len()>=4 { format!("***-**-{}", &s[s.len()-4..]) } else { s }),
+                "date_of_birth": r.get::<_, Option<String>>(4)?, "relationship": r.get::<_, String>(5)?,
+                "months_lived": r.get::<_, i64>(6)?, "qualifies_ctc": r.get::<_, bool>(7)?,
+                "is_student": r.get::<_, bool>(9)?, "is_disabled": r.get::<_, bool>(10)?,
+            }))
+        }).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
+
+        let mut inc_stmt = conn.prepare(
+            "SELECT category, source, SUM(amount_cents) FROM tax_income WHERE user_id = ? AND tax_year = ? GROUP BY category, source"
+        ).map_err(|e| e.to_string())?;
+        let income: Vec<serde_json::Value> = inc_stmt.query_map(rusqlite::params![uid, year], |r| {
+            Ok(serde_json::json!({ "category": r.get::<_, String>(0)?, "source": r.get::<_, Option<String>>(1)?, "amount": cents_to_display(r.get::<_, i64>(2)?) }))
+        }).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
+
+        Ok(serde_json::json!({ "profile": profile, "dependents": deps, "income_sources": income, "year": year }))
+    }).await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(result))
+}
+
+#[derive(Deserialize)]
+pub struct TaxpayerProfileSave {
+    pub token: String, pub year: Option<i64>,
+    pub first_name: Option<String>, pub last_name: Option<String>, pub ssn: Option<String>,
+    pub date_of_birth: Option<String>, pub address_line1: Option<String>, pub address_line2: Option<String>,
+    pub city: Option<String>, pub state: Option<String>, pub zip: Option<String>,
+    pub phone: Option<String>, pub email: Option<String>, pub filing_status: Option<String>,
+    pub spouse_first: Option<String>, pub spouse_last: Option<String>, pub spouse_ssn: Option<String>,
+    pub spouse_dob: Option<String>, pub occupation: Option<String>, pub spouse_occupation: Option<String>,
+}
+
+pub async fn handle_taxpayer_profile_save(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<TaxpayerProfileSave>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &req.token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    require_tax_module(&state, principal.user_id()).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let year = req.year.unwrap_or_else(|| default_tax_year());
+    let now = chrono::Utc::now().timestamp();
+    let r = req;
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO taxpayer_profiles (user_id, tax_year, first_name, last_name, ssn_encrypted, \
+             date_of_birth, address_line1, address_line2, city, state, zip, phone, email, filing_status, \
+             spouse_first, spouse_last, spouse_ssn_encrypted, spouse_dob, occupation, spouse_occupation, \
+             created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) \
+             ON CONFLICT(user_id, tax_year) DO UPDATE SET \
+             first_name=COALESCE(excluded.first_name,first_name), last_name=COALESCE(excluded.last_name,last_name), \
+             ssn_encrypted=COALESCE(excluded.ssn_encrypted,ssn_encrypted), date_of_birth=COALESCE(excluded.date_of_birth,date_of_birth), \
+             address_line1=COALESCE(excluded.address_line1,address_line1), address_line2=COALESCE(excluded.address_line2,address_line2), \
+             city=COALESCE(excluded.city,city), state=COALESCE(excluded.state,state), zip=COALESCE(excluded.zip,zip), \
+             phone=COALESCE(excluded.phone,phone), email=COALESCE(excluded.email,email), \
+             filing_status=COALESCE(excluded.filing_status,filing_status), \
+             spouse_first=COALESCE(excluded.spouse_first,spouse_first), spouse_last=COALESCE(excluded.spouse_last,spouse_last), \
+             spouse_ssn_encrypted=COALESCE(excluded.spouse_ssn_encrypted,spouse_ssn_encrypted), \
+             spouse_dob=COALESCE(excluded.spouse_dob,spouse_dob), \
+             occupation=COALESCE(excluded.occupation,occupation), spouse_occupation=COALESCE(excluded.spouse_occupation,spouse_occupation), \
+             updated_at=excluded.updated_at",
+            rusqlite::params![uid, year, r.first_name, r.last_name, r.ssn, r.date_of_birth,
+                r.address_line1, r.address_line2, r.city, r.state, r.zip, r.phone, r.email,
+                r.filing_status.as_deref().unwrap_or("single"),
+                r.spouse_first, r.spouse_last, r.spouse_ssn, r.spouse_dob,
+                r.occupation, r.spouse_occupation, now, now],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }).await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(serde_json::json!({ "success": true })))
+}
+
+#[derive(Deserialize)]
+pub struct DependentSaveReq {
+    pub token: String, pub year: Option<i64>, pub id: Option<i64>,
+    pub first_name: String, pub last_name: String, pub ssn: Option<String>,
+    pub date_of_birth: Option<String>, pub relationship: Option<String>,
+    pub months_lived: Option<i64>, pub is_student: Option<bool>, pub is_disabled: Option<bool>,
+}
+
+pub async fn handle_dependent_save(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<DependentSaveReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &req.token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    require_tax_module(&state, principal.user_id()).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let year = req.year.unwrap_or_else(|| default_tax_year());
+    let now = chrono::Utc::now().timestamp();
+    let dep_id = req.id;
+    let first = req.first_name.clone(); let last = req.last_name.clone();
+    let ssn = req.ssn.clone(); let dob = req.date_of_birth.clone();
+    let rel = req.relationship.clone().unwrap_or_else(|| "child".to_string());
+    let months = req.months_lived.unwrap_or(12);
+    let student = req.is_student.unwrap_or(false);
+    let disabled = req.is_disabled.unwrap_or(false);
+
+    let id = tokio::task::spawn_blocking(move || -> Result<i64, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let qualifies_ctc = dob.as_deref().map(|d| {
+            let birth_year: i64 = d.split('-').next().and_then(|y| y.parse().ok()).unwrap_or(2020);
+            (year - birth_year) < 17
+        }).unwrap_or(true);
+        if let Some(eid) = dep_id {
+            conn.execute(
+                "UPDATE dependents SET first_name=?, last_name=?, ssn_encrypted=?, date_of_birth=?, \
+                 relationship=?, months_lived=?, qualifies_ctc=?, is_student=?, is_disabled=? WHERE id=? AND user_id=?",
+                rusqlite::params![&first, &last, &ssn, &dob, &rel, months, qualifies_ctc, student, disabled, eid, uid],
+            ).map_err(|e| e.to_string())?;
+            Ok(eid)
+        } else {
+            conn.execute(
+                "INSERT INTO dependents (user_id, tax_year, first_name, last_name, ssn_encrypted, date_of_birth, \
+                 relationship, months_lived, qualifies_ctc, is_student, is_disabled, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                rusqlite::params![uid, year, &first, &last, &ssn, &dob, &rel, months, qualifies_ctc, student, disabled, now],
+            ).map_err(|e| e.to_string())?;
+            Ok(conn.last_insert_rowid())
+        }
+    }).await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(serde_json::json!({ "success": true, "id": id })))
+}
+
+pub async fn handle_dependent_delete(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(dep_id): axum::extract::Path<i64>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM dependents WHERE id = ? AND user_id = ?", rusqlite::params![dep_id, uid]).map_err(|e| e.to_string())?;
+        Ok(())
+    }).await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(serde_json::json!({ "success": true })))
+}
+
 // ── Deduction Questionnaire ────────────────────────────────────────────────
 
 pub async fn handle_questionnaire_get(

@@ -803,6 +803,54 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX IF NOT EXISTS idx_tax_ext_user ON tax_extensions(user_id);
     "#,
+    // v23: taxpayer profile + dependents for tax filing
+    r#"
+    CREATE TABLE IF NOT EXISTS taxpayer_profiles (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id         INTEGER NOT NULL,
+        tax_year        INTEGER NOT NULL,
+        first_name      TEXT,
+        last_name       TEXT,
+        ssn_encrypted   TEXT,
+        date_of_birth   TEXT,
+        address_line1   TEXT,
+        address_line2   TEXT,
+        city            TEXT,
+        state           TEXT,
+        zip             TEXT,
+        phone           TEXT,
+        email           TEXT,
+        filing_status   TEXT NOT NULL DEFAULT 'single',
+        spouse_first    TEXT,
+        spouse_last     TEXT,
+        spouse_ssn_encrypted TEXT,
+        spouse_dob      TEXT,
+        occupation      TEXT,
+        spouse_occupation TEXT,
+        created_at      INTEGER NOT NULL,
+        updated_at      INTEGER NOT NULL,
+        UNIQUE(user_id, tax_year)
+    );
+    CREATE INDEX IF NOT EXISTS idx_tp_user ON taxpayer_profiles(user_id);
+
+    CREATE TABLE IF NOT EXISTS dependents (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id         INTEGER NOT NULL DEFAULT 0,
+        tax_year        INTEGER NOT NULL,
+        first_name      TEXT NOT NULL,
+        last_name       TEXT NOT NULL,
+        ssn_encrypted   TEXT,
+        date_of_birth   TEXT,
+        relationship    TEXT NOT NULL DEFAULT 'child',
+        months_lived    INTEGER NOT NULL DEFAULT 12,
+        qualifies_ctc   INTEGER NOT NULL DEFAULT 1,
+        qualifies_odc   INTEGER NOT NULL DEFAULT 0,
+        is_student      INTEGER NOT NULL DEFAULT 0,
+        is_disabled     INTEGER NOT NULL DEFAULT 0,
+        created_at      INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_dep_user ON dependents(user_id, tax_year);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

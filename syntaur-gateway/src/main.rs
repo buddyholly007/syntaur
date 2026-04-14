@@ -3727,6 +3727,11 @@ async fn main() {
         .route("/api/tax/extension/create", post(tax::handle_extension_create))
         .route("/api/tax/extension/{id}/file", axum::routing::put(tax::handle_extension_file))
         .route("/api/tax/extension/{id}/confirm", axum::routing::put(tax::handle_extension_confirm))
+        // Taxpayer profile + dependents
+        .route("/api/tax/profile", get(tax::handle_taxpayer_profile_get))
+        .route("/api/tax/profile", post(tax::handle_taxpayer_profile_save))
+        .route("/api/tax/dependents", post(tax::handle_dependent_save))
+        .route("/api/tax/dependents/{id}", axum::routing::delete(tax::handle_dependent_delete))
         // Items 10-16: smart routing, statements, property, deduction, insurance, wizard, brackets
         .route("/api/tax/upload", post(tax::handle_smart_upload))
         .route("/api/tax/statements/transactions", get(tax::handle_statement_transactions))
