@@ -280,8 +280,8 @@
           <!-- Populated by JS with copy buttons -->
         </div>
         <div class="flex gap-2 mb-3">
-          <button id="ext-irs-link" onclick="openIrsLink()" class="btn-primary text-xs">Open IRS Website &rarr;</button>
-          <span id="ext-irs-msg" class="text-xs text-gray-500 self-center">Copy values above, then paste into the IRS form.</span>
+          <a id="ext-irs-link" href="https://www.irs.gov/payments/direct-pay-with-bank-account" class="btn-primary text-xs inline-block no-underline">Open IRS Website &rarr;</a>
+          <span id="ext-irs-msg" class="text-xs text-gray-500 self-center">Opens in your browser. Copy values above, then paste into the IRS form.</span>
         </div>
         <div class="bg-gray-800 rounded-lg p-3 border border-gray-700">
           <p class="text-xs text-gray-300 mb-2">After you submit on the IRS website, enter your confirmation below:</p>
@@ -2313,7 +2313,7 @@ async function startExtFiling(method) {
 
 function renderExtFile(method) {
   const labels = {direct_pay:'IRS Direct Pay', free_file:'IRS Free File', mail:'Print & Mail'};
-  const urls = {direct_pay:'https://www.irs.gov/payments/direct-pay', free_file:'https://www.irs.gov/filing/free-file-do-your-federal-taxes-for-free', mail:null};
+  const urls = {direct_pay:'https://www.irs.gov/payments/direct-pay-with-bank-account', free_file:'https://www.irs.gov/filing/free-file-do-your-federal-taxes-for-free', mail:null};
   document.getElementById('ext-method-label').textContent = 'Filing via ' + (labels[method]||method);
   const link = document.getElementById('ext-irs-link');
   if (urls[method]) { link.href = urls[method]; link.classList.remove('hidden'); }
