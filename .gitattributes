@@ -1,0 +1,4 @@
+# Linguist overrides — keep repo language stats accurate.
+# tailwind.js is a pinned minified vendor copy (for offline self-hosted
+# UI rendering), not project source. Don't count it toward JavaScript.
+syntaur-gateway/static/tailwind.js linguist-vendored
