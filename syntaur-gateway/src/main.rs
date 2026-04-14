@@ -3786,6 +3786,7 @@ async fn main() {
         .route("/api/music/eq", post(music::handle_music_eq))
         .route("/api/music/dj", post(music::handle_music_dj))
         .route("/api/music/pwa_state", post(music::handle_pwa_state))
+        .route("/api/music/set_preferred_target", post(music::handle_set_preferred_target))
         .route("/apple_music_capture", get(sync::handle_apple_music_capture_page))
         .with_state(Arc::clone(&state))
         .layer(axum::middleware::from_fn_with_state(

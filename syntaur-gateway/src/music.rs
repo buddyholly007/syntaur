@@ -727,3 +727,57 @@ pub async fn handle_pwa_state(
     }).await;
     Ok(Json(serde_json::json!({"ok": true})))
 }
+// ── Preferred playback target (persisted per-user) ──────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct PreferredTargetRequest {
+    pub token: String,
+    pub entity_id: String,
+    pub name: Option<String>,
+}
+
+pub async fn handle_set_preferred_target(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PreferredTargetRequest>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let principal = crate::resolve_principal(&state, &req.token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let target = req.entity_id.clone();
+    let name = req.name.unwrap_or_else(|| target.clone());
+    let now = chrono::Utc::now().timestamp();
+
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        // Store as metadata on a dedicated row (or patch existing if phone_music_pwa is connected)
+        let meta = serde_json::json!({"preferred_target": target, "preferred_name": name});
+        let meta_json = serde_json::to_string(&meta).unwrap_or_default();
+        conn.execute(
+            "INSERT INTO sync_connections (user_id, provider, display_name, credential, metadata, status, created_at, updated_at, last_check_at)
+             VALUES (?, 'music_preferences', 'Preferences', '{}', ?, 'active', ?, ?, ?)
+             ON CONFLICT(user_id, provider) DO UPDATE SET
+               metadata = excluded.metadata,
+               updated_at = excluded.updated_at",
+            rusqlite::params![uid, meta_json, now, now, now],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({"ok": true, "target": req.entity_id})))
+}
+
+pub async fn load_preferred_target(state: &Arc<AppState>, uid: i64) -> Option<(String, String)> {
+    let db = state.db_path.clone();
+    tokio::task::spawn_blocking(move || -> Option<(String, String)> {
+        let conn = rusqlite::Connection::open(&db).ok()?;
+        let meta: String = conn.query_row(
+            "SELECT metadata FROM sync_connections WHERE user_id = ? AND provider = 'music_preferences'",
+            rusqlite::params![uid], |r| r.get(0)
+        ).ok()?;
+        let v: serde_json::Value = serde_json::from_str(&meta).ok()?;
+        let target = v.get("preferred_target")?.as_str()?.to_string();
+        let name = v.get("preferred_name").and_then(|n| n.as_str()).unwrap_or(&target).to_string();
+        Some((target, name))
+    }).await.ok().flatten()
+}
+

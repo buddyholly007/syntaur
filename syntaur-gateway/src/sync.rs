@@ -48,7 +48,7 @@ pub struct ProviderDef {
     pub instructions: &'static str,
     pub help_url: &'static str,
     pub scopes: &'static [(&'static str, &'static str)],
-    pub unlocks: &'static str,   // One line shown post-connect: "what can Peter do now?"
+    pub unlocks: &'static str,   // One line shown post-connect: "what can Syntaur do now?"
     pub info_only: bool,         // Status-card style — no Connect button
 }
 
@@ -60,7 +60,7 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "Sign in with Google to let Syntaur read your inbox for receipts and confirmations.",
             help_url: "",
             scopes: &[("readonly", "Read-only"), ("modify", "Read + organize")],
-            unlocks: "Peter can scan your inbox for receipts and important messages.",
+            unlocks: "Syntaur scans your inbox for receipts and important messages.",
             info_only: false,
         },
         ProviderDef {
@@ -69,7 +69,7 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "Sign in with Google to sync your calendar events.",
             help_url: "",
             scopes: &[("readonly", "Read-only"), ("events", "Read + write events")],
-            unlocks: "Your Google events appear alongside Syntaur's calendar. Peter can add/move events.",
+            unlocks: "Your Google events appear alongside Syntaur's calendar. Syntaur can add or move events.",
             info_only: false,
         },
         ProviderDef {
@@ -87,7 +87,7 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "Scan the QR with your phone — it opens a chat with the Syntaur bot. Tap START to link your account.",
             help_url: "",
             scopes: &[],
-            unlocks: "Peter can send reminders, alerts, and approval requests to your Telegram. Reply to Peter by text.",
+            unlocks: "Reminders, alerts, and approval requests come to Telegram. You can reply by text.",
             info_only: false,
         },
         ProviderDef {
@@ -105,7 +105,7 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "Bluesky uses app passwords for third-party apps:  1. Click the button below — Bluesky app password settings.  2. Tap + Add App Password → name it Syntaur → Create.  3. Copy the generated password and paste below with your handle.",
             help_url: "https://bsky.app/settings/app-passwords",
             scopes: &[],
-            unlocks: "Peter can post, reply, and monitor mentions on your Bluesky account.",
+            unlocks: "Syntaur can post, reply, and monitor mentions on your Bluesky account.",
             info_only: false,
         },
         ProviderDef {
@@ -160,7 +160,7 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "Syntaur auto-discovers your Home Assistant on the network. You just need a token:  1. Open your HA dashboard, click your profile (bottom-left).  2. Security tab → scroll to \"Long-Lived Access Tokens\" → Create Token.  3. Name it Syntaur, copy the token, paste it below.",
             help_url: "https://www.home-assistant.io/docs/authentication/#your-account-profile",
             scopes: &[],
-            unlocks: "Peter gets full control of every device you've paired in HA. The backbone for music-on-HomePod and smart-home voice commands.",
+            unlocks: "Syntaur gets full control of every device you've paired in HA. Unlocks music-on-HomePod and smart-home voice commands.",
             info_only: false,
         },
         ProviderDef {
@@ -169,7 +169,7 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "1. Click Connect — we generate a 4-character code.  2. On any device, go to plex.tv/link and enter the code.  3. Syntaur detects when you\'re signed in (usually 5-10 seconds). No token to copy.",
             help_url: "",
             scopes: &[],
-            unlocks: "Peter knows your library, recent watches, and what's currently playing.",
+            unlocks: "Syntaur knows your library, recent watches, and what's currently playing.",
             info_only: false,
         },
         ProviderDef {
@@ -191,12 +191,30 @@ pub fn catalog() -> Vec<ProviderDef> {
             info_only: false,
         },
         ProviderDef {
-            id: "spotify", name: "Spotify", category: "Media",
+            id: "spotify", name: "Spotify", category: "Music",
             flow: FlowKind::Oauth,
-            instructions: "Sign in with Spotify. Peter can play your playlists, show recent tracks, and change what's playing on any Spotify Connect device.",
+            instructions: "Sign in with Spotify. Syntaur can play your playlists, show recent tracks, and change what's playing on any Spotify Connect device.",
             help_url: "",
             scopes: &[("read", "Read-only (recent plays, playlists)"), ("control", "Read + playback control")],
-            unlocks: "Peter can play your Spotify library on any Spotify Connect device.",
+            unlocks: "Syntaur can play your Spotify library on any Spotify Connect device.",
+            info_only: false,
+        },
+        ProviderDef {
+            id: "youtube_music", name: "YouTube Music", category: "Music",
+            flow: FlowKind::Oauth,
+            instructions: "Sign in with Google to control YouTube Music playback. Same search/DJ/queue experience as Apple Music and Spotify.",
+            help_url: "",
+            scopes: &[("read", "Read-only"), ("control", "Read + playback control")],
+            unlocks: "Search and play from YouTube Music on any supported device.",
+            info_only: false,
+        },
+        ProviderDef {
+            id: "tidal", name: "Tidal", category: "Music",
+            flow: FlowKind::Oauth,
+            instructions: "Sign in with Tidal. Syntaur can play your library and queue tracks on any Tidal Connect device.",
+            help_url: "",
+            scopes: &[("read", "Read-only"), ("control", "Read + playback control")],
+            unlocks: "Search and play from Tidal's high-res catalog.",
             info_only: false,
         },
         ProviderDef {
@@ -211,10 +229,10 @@ pub fn catalog() -> Vec<ProviderDef> {
         ProviderDef {
             id: "strava", name: "Strava", category: "Health",
             flow: FlowKind::Oauth,
-            instructions: "Sign in with Strava. Syncs recent workouts so Peter can answer 'how was my run today'.",
+            instructions: "Sign in with Strava. Recent workouts sync so you can ask 'how was my run today?'",
             help_url: "",
             scopes: &[("read_all", "Read all activity")],
-            unlocks: "Peter can answer 'how was my run this week?' and log workouts.",
+            unlocks: "Syntaur can answer 'how was my run this week?' and log workouts.",
             info_only: false,
         },
         ProviderDef {
@@ -223,7 +241,7 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "1. Click the button below — opens Oura Cloud.  2. Sign in, then click + Create New Personal Access Token.  3. Name it Syntaur → Create.  4. Copy the token and paste it here.",
             help_url: "https://cloud.ouraring.com/personal-access-tokens",
             scopes: &[],
-            unlocks: "Peter knows your sleep, readiness, and activity data for daily check-ins.",
+            unlocks: "Syntaur knows your sleep, readiness, and activity data for daily check-ins.",
             info_only: false,
         },
         ProviderDef {
@@ -247,10 +265,10 @@ pub fn catalog() -> Vec<ProviderDef> {
         ProviderDef {
             id: "apple_health", name: "Apple Health", category: "Health",
             flow: FlowKind::FileUpload,
-            instructions: "Export your Health data from iPhone (Health app → profile → Export All Health Data), then upload the export.zip here. Peter gets full access to your sleep, heart rate, and workouts.",
+            instructions: "Export your Health data from iPhone (Health app → profile → Export All Health Data), then upload the export.zip here. Syntaur gets full access to your sleep, heart rate, and workouts.",
             help_url: "https://support.apple.com/en-us/HT203037",
             scopes: &[],
-            unlocks: "Peter has full access to your sleep, heart rate, and workouts.",
+            unlocks: "Syntaur has full access to your sleep, heart rate, and workouts.",
             info_only: false,
         },
         ProviderDef {
@@ -275,10 +293,10 @@ pub fn catalog() -> Vec<ProviderDef> {
         ProviderDef {
             id: "airplay", name: "AirPlay Speakers", category: "Music",
             flow: FlowKind::AirPlay,
-            instructions: "Auto-discovers HomePods, Apple TVs, and AirPlay speakers on your network. No login needed. Peter voice can announce on any discovered device.",
+            instructions: "Auto-discovers HomePods, Apple TVs, and AirPlay speakers on your network. No login needed. Syntaur can announce on any discovered device.",
             help_url: "",
             scopes: &[],
-            unlocks: "Peter can announce and play audio on any detected speaker (HomePod, Apple TV, AirPlay speakers).",
+            unlocks: "Syntaur can announce and play audio on any detected speaker (HomePod, Apple TV, AirPlay speakers).",
             info_only: false,
         },
         ProviderDef {
@@ -293,28 +311,28 @@ pub fn catalog() -> Vec<ProviderDef> {
         ProviderDef {
             id: "phone_music_pwa", name: "Phone (via Syntaur Voice PWA)", category: "Music",
             flow: FlowKind::PhonePwa,
-            instructions: "If you have the Syntaur Voice PWA installed on your phone, Peter can launch Apple Music on it directly. No bookmarklet, no Shortcut — just install the PWA and tap Connect. Music plays through your phone's speakers, AirPods, or any device your phone is AirPlaying to.",
+            instructions: "If you have the Syntaur Voice PWA installed on your phone, Syntaur can launch Apple Music on it directly. No bookmarklet, no Shortcut — just install the PWA and tap Connect. Music plays through your phone's speakers, AirPods, or any device your phone is AirPlaying to.",
             help_url: "",
             scopes: &[],
-            unlocks: "Peter sends play commands straight to Music.app on your phone. Audio comes out wherever the phone is connected (speakers, AirPods, AirPlay HomePod).",
+            unlocks: "Play commands go straight to Music.app on your phone. Audio comes out wherever the phone is connected (speakers, AirPods, AirPlay HomePod).",
             info_only: false,
         },
         ProviderDef {
             id: "apple_music", name: "Apple Music", category: "Music",
             flow: FlowKind::AppleMusic,
-            instructions: "No developer account needed. Sign into Apple Music in your browser, then click the Syntaur bookmarklet — it captures your login tokens from the Apple Music page and sends them back here. After that, Peter can search, queue, and manage your library.",
+            instructions: "No developer account needed. Sign into Apple Music in your browser, then click the Syntaur bookmarklet — it captures your login tokens from the Apple Music page and sends them back here. After that, Syntaur can search, queue, and manage your library.",
             help_url: "https://music.apple.com",
             scopes: &[],
-            unlocks: "Peter can search your library, show what you've been listening to, and cue songs to HomePod (via HA).",
+            unlocks: "Syntaur can search your library, show what you've been listening to, and cue songs to HomePod (via HA).",
             info_only: false,
         },
         ProviderDef {
             id: "ios_shortcut_music", name: "iOS Shortcut (Music)", category: "Music",
             flow: FlowKind::IosShortcut,
-            instructions: "1. On iPhone, open Shortcuts app → + to create.  2. Add action \"Play Apple Music\" → configure search by name.  3. Tap share arrow → Add to Home Screen → enable \"Run with URL\".  4. Copy the icloud.com/shortcuts/... URL and paste below. Peter triggers it when you say \"play music\".",
+            instructions: "1. On iPhone, open Shortcuts app → + to create.  2. Add action \"Play Apple Music\" → configure search by name.  3. Tap share arrow → Add to Home Screen → enable \"Run with URL\".  4. Copy the icloud.com/shortcuts/... URL and paste below. Syntaur triggers it when you say \"play music\".",
             help_url: "https://www.icloud.com/shortcuts/",
             scopes: &[],
-            unlocks: "Peter can trigger music playback on your iPhone — works even when you're out of the house.",
+            unlocks: "Syntaur can trigger music playback on your iPhone — works even when you're out of the house.",
             info_only: false,
         },
     ]
@@ -1669,7 +1687,7 @@ pub async fn handle_music_assistant_probe(
             "connected": true,
             "status": "active",
             "has_media_players": has_mass_players,
-            "hint": "Music Assistant is available. Peter voice will route music through it.",
+            "hint": "Music Assistant is available. Syntaur will route music through it.",
         })))
     } else {
         Ok(Json(serde_json::json!({

@@ -50,7 +50,7 @@
         <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="text-gray-600"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
       </div>
       <div class="flex-1 min-w-0">
-        <p class="text-lg font-medium text-gray-200 truncate" id="np-song">Nothing playing</p>
+        <div class="text-lg font-medium text-gray-200 overflow-hidden" id="np-song-wrap"><span id="np-song">Nothing playing</span></div>
         <p class="text-sm text-gray-500 truncate" id="np-artist">—</p>
         <p class="text-xs text-gray-600 mt-1" id="np-source"></p>
       </div>
@@ -66,6 +66,39 @@
         </button>
       </div>
     </div>
+    <!-- Volume slider (hidden when no playback target supports it) -->
+    <div id="volume-row" class="hidden mt-4 pt-4 border-t border-gray-700/50 flex items-center gap-3">
+      <span class="text-xs text-gray-500">🔈</span>
+      <input type="range" id="volume-slider" min="0" max="100" value="50" class="flex-1 accent-oc-500" oninput="onVolumeChange(this.value)">
+      <span class="text-xs text-gray-500">🔊</span>
+      <span class="text-xs text-gray-400 w-10 text-right" id="volume-label">50%</span>
+    </div>
+  </div>
+
+  <!-- Music provider chip — shows which provider is active -->
+  <div id="provider-chip" class="card bg-gray-900 border-gray-700 py-3 hidden">
+    <div class="flex items-center justify-between gap-3">
+      <div class="flex items-center gap-3 flex-1 min-w-0">
+        <span class="text-xl flex-shrink-0" id="provider-icon">🎵</span>
+        <div class="flex-1 min-w-0">
+          <p class="text-xs text-gray-500">Music provider</p>
+          <p class="text-sm font-medium truncate" id="provider-name">—</p>
+        </div>
+      </div>
+      <a href="/settings?tab=sync" class="text-xs text-gray-500 hover:text-gray-200">Change →</a>
+    </div>
+  </div>
+
+  <!-- No provider connected banner -->
+  <div id="no-provider-banner" class="hidden card border-yellow-700/50 bg-yellow-900/20">
+    <div class="flex items-start gap-3">
+      <span class="text-2xl flex-shrink-0">🎵</span>
+      <div class="flex-1">
+        <p class="text-sm font-medium text-yellow-300">No music provider connected</p>
+        <p class="text-xs text-gray-400 mt-1">Pick a service — Apple Music (works now via bookmarklet), Spotify (OAuth), YouTube Music (OAuth), or Tidal (coming soon). Connect one in Sync settings and the DJ, queue, and search all light up.</p>
+        <a href="/settings?tab=sync" class="inline-block mt-2 text-xs text-yellow-300 hover:text-yellow-200 underline">Open Sync settings →</a>
+      </div>
+    </div>
   </div>
 
   <!-- AI DJ -->
@@ -73,7 +106,7 @@
     <div class="flex items-center justify-between mb-3">
       <div>
         <h3 class="font-medium text-gray-100">🎙️ AI DJ</h3>
-        <p class="text-xs text-gray-500 mt-0.5">Tell me the vibe. I'll build a playlist from Apple Music's catalog.</p>
+        <p class="text-xs text-gray-500 mt-0.5">Tell me the vibe. I'll build a playlist from your music provider's catalog.</p>
       </div>
     </div>
     <div class="flex gap-2">
@@ -82,7 +115,7 @@
     </div>
     <div class="mt-2 flex items-center gap-4 text-xs text-gray-500">
       <label class="flex items-center gap-1.5 cursor-pointer">
-        <input type="checkbox" id="dj-create-playlist" class="accent-oc-500"> Save as Apple Music playlist
+        <input type="checkbox" id="dj-create-playlist" class="accent-oc-500"> Save as playlist
       </label>
       <label class="flex items-center gap-1.5">
         <span>Track count:</span>
@@ -94,6 +127,23 @@
       </label>
     </div>
     <div id="dj-results" class="mt-4 hidden"></div>
+    <div id="dj-feedback" class="hidden mt-3 flex flex-wrap items-center gap-2 pt-3 border-t border-gray-700/50">
+      <span class="text-xs text-gray-500">Refine:</span>
+      <button onclick="refineDj('more like the liked tracks')" class="text-xs bg-green-900/30 hover:bg-green-900/50 text-green-300 px-2 py-1 rounded">More like the 👍 ones</button>
+      <button onclick="refineDj('drop anything resembling the disliked tracks')" class="text-xs bg-red-900/30 hover:bg-red-900/50 text-red-300 px-2 py-1 rounded">Drop the 👎 ones</button>
+      <button onclick="refineDj('slower, more chill')" class="text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 px-2 py-1 rounded">Slower/chill</button>
+      <button onclick="refineDj('faster, more energy')" class="text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 px-2 py-1 rounded">Faster/energy</button>
+      <button onclick="refineDj('different genre entirely')" class="text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 px-2 py-1 rounded">Different genre</button>
+    </div>
+  </div>
+
+  <!-- Queue (up next) -->
+  <div id="queue-card" class="card hidden">
+    <div class="flex items-center justify-between mb-3">
+      <h3 class="font-medium text-gray-100">📃 Queue</h3>
+      <button onclick="clearQueue()" class="text-xs text-gray-500 hover:text-gray-300">Clear</button>
+    </div>
+    <div id="queue-list" class="space-y-1"></div>
   </div>
 
   <!-- Speakers -->
@@ -116,6 +166,22 @@
     </div>
   </div>
 
+  <!-- Equalizer -->
+  <div class="card" id="eq-card">
+    <div class="flex items-center justify-between mb-3">
+      <div>
+        <h3 class="font-medium text-gray-100">🎚 Equalizer</h3>
+        <p class="text-xs text-gray-500 mt-0.5" id="eq-hint">Pick a sound preset. Available presets depend on your speaker.</p>
+      </div>
+    </div>
+    <div id="eq-targets" class="space-y-3">
+      <p class="text-xs text-gray-500 italic">Select a speaker above to see its EQ options.</p>
+    </div>
+    <div class="mt-3 p-3 bg-gray-900/50 rounded-lg border border-gray-800">
+      <p class="text-xs text-gray-400"><strong class="text-gray-200">📱 Phone playback:</strong> EQ is controlled by iOS — open Settings → Music → EQ on your phone to pick a preset. That setting persists across all music playback on the phone.</p>
+    </div>
+  </div>
+
   <!-- Honest disclosure -->
   <div class="card border-gray-800 bg-gray-900/50">
     <h4 class="text-xs uppercase tracking-wider text-gray-500 mb-2">How this works</h4>
@@ -123,7 +189,7 @@
       <li>📱 <strong>Phone (default):</strong> the Syntaur Voice PWA on your phone launches Music.app with the selected track. Audio plays through the phone's output — your speakers, AirPods, or AirPlay target.</li>
       <li>🎚️ <strong>iOS Control Center:</strong> to AirPlay to multiple speakers at once, swipe iOS Control Center → hold the music widget → tap each speaker. This works with zero extra setup.</li>
       <li>🏠 <strong>Home Assistant (optional):</strong> if you run HA, Syntaur can target specific HomePods/Apple TVs/Sonos directly and group them from this page. Skip if you don't use HA — the phone path covers most cases.</li>
-      <li>🎵 <strong>Apple Music DRM:</strong> the audio decoder always runs on a licensed Apple client (your phone's Music.app or a HomePod). Syntaur never handles encrypted audio.</li>
+      <li>🎵 <strong>DRM-protected streams:</strong> all major services (Apple Music, Spotify, Tidal, YouTube Music) encrypt audio. The decoder always runs on a licensed client — your phone's native app or a smart speaker. Syntaur orchestrates commands but never touches the encrypted audio itself.</li>
     </ul>
   </div>
 
@@ -135,19 +201,64 @@ if (!token) { window.location.href = '/'; }
 
 const selectedSpeakers = new Set();
 let lastNowPlaying = null;
+let speakersData = [];
+let djLastPrompt = '';
+let djLastTracks = [];
+const djLikes = new Set();   // track ids the user liked
+const djDislikes = new Set(); // track ids the user disliked
+const queueTracks = [];
+
+const DJ_PLACEHOLDERS = [
+  "e.g. upbeat 80s synthwave",
+  "e.g. jazz for studying",
+  "e.g. something like Miles Davis but more modern",
+  "e.g. chill background music for dinner",
+  "e.g. high-energy workout, 130+ BPM",
+  "e.g. songs that would be in a Wes Anderson movie",
+  "e.g. new indie rock from the last year",
+];
+(function rotatePlaceholder(){
+  const input = document.getElementById('dj-prompt');
+  if (!input) return;
+  let i = Math.floor(Math.random() * DJ_PLACEHOLDERS.length);
+  input.placeholder = DJ_PLACEHOLDERS[i];
+  setInterval(() => {
+    if (document.activeElement === input || input.value) return;
+    i = (i + 1) % DJ_PLACEHOLDERS.length;
+    input.placeholder = DJ_PLACEHOLDERS[i];
+  }, 5000);
+})();
 
 function escapeHtml(s){ if(s===null||s===undefined)return'';return String(s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
+async function authFetch(url, opts) {
+  opts = opts || {};
+  opts.headers = opts.headers || {};
+  opts.headers['Authorization'] = 'Bearer ' + token;
+  const resp = await fetch(url, opts);
+  if (resp.status === 401) {
+    try { sessionStorage.removeItem('syntaur_token'); } catch(e){}
+    window.location.href = '/';
+    throw new Error('unauthorized');
+  }
+  return resp;
+}
+
 async function loadNowPlaying() {
   try {
-    const resp = await fetch(`/api/music/now_playing?token=${token}`, { headers: { 'Authorization': 'Bearer ' + token } });
+    const resp = await authFetch(`/api/music/now_playing?token=${token}`);
     const data = await resp.json();
     lastNowPlaying = data;
     const song = data.song || '';
     const artist = data.artist || '';
     const source = data.source || 'none';
     const state = data.state || 'off';
-    document.getElementById('np-song').textContent = song || (state === 'off' ? 'Nothing playing' : (state === 'recent' ? 'Recent' : '—'));
+
+    const songEl = document.getElementById('np-song');
+    songEl.textContent = song || (state === 'off' ? 'Nothing playing' : '—');
+    // Apply marquee if song overflows its container
+    applyMarquee('np-song-wrap', 'np-song');
+
     document.getElementById('np-artist').textContent = artist || (data.hint || '—');
     let sourceLine = '';
     if (source === 'phone') sourceLine = `📱 Phone (${data.device || 'My Phone'})`;
@@ -157,25 +268,48 @@ async function loadNowPlaying() {
     else if (source === 'apple_music_recent') sourceLine = `♫ Last played on Apple Music (not live)`;
     else if (source === 'media_player') sourceLine = `🔊 ${data.device || 'Speaker'}`;
     document.getElementById('np-source').textContent = sourceLine;
-    // Album art
+
     const artEl = document.getElementById('np-art');
     if (data.art_url) {
-      artEl.innerHTML = `<img src="${data.art_url.replace('{w}','160').replace('{h}','160')}" class="w-full h-full object-cover" onerror="this.parentElement.innerHTML='<span class=\\'text-gray-600\\'>♪</span>'">`;
+      artEl.innerHTML = `<img src="${data.art_url.replace('{w}','160').replace('{h}','160')}" class="w-full h-full object-cover" onerror="this.parentElement.innerHTML=\'<span class=\\'text-gray-600\\'>♪</span>\'">`;
     }
-    // Play/pause icon
+
     const playBtn = document.getElementById('np-play');
     if (state === 'playing') {
       playBtn.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
     } else {
       playBtn.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>';
     }
-  } catch(e) { console.log('now_playing:', e); }
+
+    // Show volume slider only when HA entity has volume support
+    const volRow = document.getElementById('volume-row');
+    if (data.entity_id && source !== 'phone' && source !== 'apple_music_recent') {
+      volRow.classList.remove('hidden');
+    } else {
+      volRow.classList.add('hidden');
+    }
+  } catch(e) { /* silent except 401 */ }
+}
+
+function applyMarquee(wrapId, textId) {
+  const wrap = document.getElementById(wrapId);
+  const text = document.getElementById(textId);
+  if (!wrap || !text) return;
+  // Reset
+  text.classList.remove('marquee-track');
+  text.style.display = '';
+  // Measure
+  setTimeout(() => {
+    if (text.scrollWidth > wrap.clientWidth + 4) {
+      text.classList.add('marquee-track');
+    }
+  }, 10);
 }
 
 async function control(action) {
   try {
     const entity_id = lastNowPlaying?.entity_id || null;
-    const resp = await fetch('/api/music/control', {
+    const resp = await authFetch('/api/music/control', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token, action, entity_id }),
@@ -183,40 +317,77 @@ async function control(action) {
     const data = await resp.json();
     if (data.error) alert(data.error + (data.hint ? '\n' + data.hint : ''));
     setTimeout(loadNowPlaying, 500);
-  } catch(e) { alert('Control failed: ' + e.message); }
+  } catch(e) { if (e.message !== 'unauthorized') alert('Control failed: ' + e.message); }
+}
+
+async function onVolumeChange(v) {
+  document.getElementById('volume-label').textContent = v + '%';
+  if (!lastNowPlaying?.entity_id) return;
+  try {
+    await authFetch('/api/music/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, action: 'volume', entity_id: lastNowPlaying.entity_id, value: parseInt(v)/100 }),
+    });
+  } catch(e) { /* ignore */ }
 }
 
 async function loadSpeakers() {
   const list = document.getElementById('speakers-list');
   try {
-    const resp = await fetch(`/api/music/speakers?token=${token}`, { headers: { 'Authorization': 'Bearer ' + token } });
+    const resp = await authFetch(`/api/music/speakers?token=${token}`);
     const data = await resp.json();
-    const speakers = data.speakers || [];
-    if (speakers.length === 0) {
+    speakersData = data.speakers || [];
+    if (speakersData.length === 0) {
       list.innerHTML = `<p class="text-xs text-gray-500 italic">${escapeHtml(data.note || 'No speakers detected yet.')}</p>`;
       return;
     }
-    list.innerHTML = speakers.map(s => {
+    // Load persisted default target
+    const defaultTarget = localStorage.getItem('syntaur_music_target') || '';
+
+    list.innerHTML = speakersData.map(s => {
       const icon = s.kind === 'phone' ? '📱' : s.kind === 'homepod' ? '🏠' : s.kind === 'appletv' ? '📺' : s.kind === 'sonos' ? '🔊' : s.kind === 'airplay' ? '📡' : '🔉';
+      const sid = s.entity_id || s.id;
+      const isDefault = defaultTarget === sid;
       const canControl = s.can_control !== false;
-      const controls = canControl ? `<button onclick="selectSpeaker('${escapeHtml(s.entity_id || s.id)}')" class="text-xs text-oc-500 hover:text-oc-400 px-2">Select</button>` : '';
+      const defaultBadge = isDefault ? '<span class="badge badge-green">Default</span>' : '';
+      const controls = canControl
+        ? `<button onclick="setDefaultTarget('${escapeHtml(sid)}', '${escapeHtml(s.name)}')" class="text-xs ${isDefault ? 'text-green-400' : 'text-oc-500 hover:text-oc-400'} px-2">${isDefault ? '✓ Default' : 'Set default'}</button>
+           <button onclick="selectSpeaker('${escapeHtml(sid)}')" class="text-xs text-gray-400 hover:text-gray-200 px-2">Group-select</button>`
+        : '';
       const hint = s.hint ? `<p class="text-[11px] text-gray-600 mt-0.5">${escapeHtml(s.hint)}</p>` : '';
-      return `<div class="speaker-card bg-gray-900 border border-gray-700 rounded-lg p-3 flex items-start gap-3" data-speaker-id="${escapeHtml(s.entity_id || s.id)}">
+      return `<div class="speaker-card bg-gray-900 border border-gray-700 rounded-lg p-3 flex items-start gap-3" data-speaker-id="${escapeHtml(sid)}">
         <span class="text-xl flex-shrink-0">${icon}</span>
         <div class="flex-1 min-w-0">
-          <div class="flex items-center gap-2">
+          <div class="flex items-center gap-2 flex-wrap">
             <p class="text-sm font-medium truncate">${escapeHtml(s.name)}</p>
+            ${defaultBadge}
             <span class="badge badge-${s.state === 'playing' ? 'green' : 'gray'}">${escapeHtml(s.state)}</span>
           </div>
           ${hint}
         </div>
-        ${controls}
+        <div class="flex flex-col gap-1">${controls}</div>
       </div>`;
     }).join('');
+
     if (data.can_group) document.getElementById('group-controls').classList.remove('hidden');
+    loadEqOptions();
   } catch(e) {
-    list.innerHTML = `<p class="text-xs text-red-400">Load failed: ${e.message}</p>`;
+    if (e.message !== 'unauthorized') list.innerHTML = `<p class="text-xs text-red-400">Load failed: ${e.message}</p>`;
   }
+}
+
+async function setDefaultTarget(id, name) {
+  localStorage.setItem('syntaur_music_target', id);
+  // Also persist server-side so play_music tool can read it
+  try {
+    await authFetch('/api/music/set_preferred_target', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, entity_id: id, name }),
+    });
+  } catch(e) { /* server-side is best-effort */ }
+  loadSpeakers();
 }
 
 function selectSpeaker(id) {
@@ -233,38 +404,101 @@ async function groupSelected() {
   if (ids.length < 2) { alert('Select 2 or more speakers to group.'); return; }
   const [leader, ...members] = ids;
   try {
-    const resp = await fetch('/api/music/group', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+    const resp = await authFetch('/api/music/group', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token, action: 'join', entity_id: leader, group_members: members }),
     });
     if (resp.ok) { alert('Grouped!'); await loadSpeakers(); }
     else alert('Group failed — Home Assistant required for grouping.');
-  } catch(e) { alert('Error: ' + e.message); }
+  } catch(e) { if (e.message !== 'unauthorized') alert('Error: ' + e.message); }
 }
 
 async function ungroupSelected() {
   for (const id of selectedSpeakers) {
-    await fetch('/api/music/group', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+    await authFetch('/api/music/group', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token, action: 'unjoin', entity_id: id }),
-    });
+    }).catch(() => {});
   }
   selectedSpeakers.clear();
   await loadSpeakers();
 }
 
-async function runDj() {
-  const prompt = document.getElementById('dj-prompt').value.trim();
+function loadEqOptions() {
+  const box = document.getElementById('eq-targets');
+  if (!box) return;
+  // Show EQ for HA speakers with sound_mode_list
+  const eqable = speakersData.filter(s => s.sound_mode_list && Array.isArray(s.sound_mode_list) && s.sound_mode_list.length > 0);
+  if (eqable.length === 0) {
+    box.innerHTML = '<p class="text-xs text-gray-500 italic">No speakers with EQ presets detected. HomePod and Sonos expose presets via Home Assistant; phone EQ is controlled by iOS Settings → Music.</p>';
+    return;
+  }
+  box.innerHTML = eqable.map(s => {
+    const current = s.sound_mode || '';
+    const options = s.sound_mode_list.map(m => `<option value="${escapeHtml(m)}"${m === current ? ' selected' : ''}>${escapeHtml(m)}</option>`).join('');
+    return `<div class="bg-gray-900 rounded-lg p-3">
+      <div class="flex items-center justify-between mb-2">
+        <p class="text-sm font-medium">${escapeHtml(s.name)}</p>
+        <span class="text-[11px] text-gray-500">current: ${escapeHtml(current || 'default')}</span>
+      </div>
+      <select onchange="setEq('${escapeHtml(s.entity_id)}', this.value)" class="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm">${options}</select>
+    </div>`;
+  }).join('');
+}
+
+async function setEq(entity_id, sound_mode) {
+  try {
+    const resp = await authFetch('/api/music/eq', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, entity_id, sound_mode }),
+    });
+    if (resp.ok) alert(`EQ set to ${sound_mode}`);
+  } catch(e) { /* ignore */ }
+}
+
+async function checkMusicProvider() {
+  try {
+    const resp = await authFetch(`/api/sync/providers?token=${token}`);
+    const data = await resp.json();
+    // All music catalog providers in priority order (user's preferred → others)
+    const musicIds = ['apple_music', 'spotify', 'youtube_music', 'tidal'];
+    const connected = musicIds
+      .map(id => (data.providers || []).find(p => p.id === id))
+      .filter(p => p && p.connected);
+
+    const chip = document.getElementById('provider-chip');
+    const banner = document.getElementById('no-provider-banner');
+
+    if (connected.length === 0) {
+      chip.classList.add('hidden');
+      banner.classList.remove('hidden');
+      window._activeMusicProvider = null;
+    } else {
+      banner.classList.add('hidden');
+      chip.classList.remove('hidden');
+      // Pick the first connected provider as active
+      const active = connected[0];
+      const icons = { apple_music: '🍎', spotify: '🟢', youtube_music: '📺', tidal: '🌊' };
+      document.getElementById('provider-icon').textContent = icons[active.id] || '🎵';
+      const label = active.display_name ? `${active.name} (${active.display_name})` : active.name;
+      document.getElementById('provider-name').textContent = label;
+      window._activeMusicProvider = active.id;
+    }
+  } catch(e) { /* ignore */ }
+}
+
+async function runDj(overridePrompt) {
+  const promptEl = document.getElementById('dj-prompt');
+  const prompt = overridePrompt || promptEl.value.trim();
   if (!prompt) return;
+  djLastPrompt = prompt;
   const btn = document.getElementById('dj-run-btn');
   btn.textContent = 'Working…'; btn.disabled = true;
   const results = document.getElementById('dj-results');
   results.classList.remove('hidden');
-  results.innerHTML = '<p class="text-xs text-gray-500 italic">Peter is picking tracks…</p>';
+  results.innerHTML = '<p class="text-xs text-gray-500 italic">Picking tracks…</p>';
   try {
-    const resp = await fetch('/api/music/dj', {
+    const resp = await authFetch('/api/music/dj', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -280,37 +514,102 @@ async function runDj() {
       return;
     }
     const tracks = data.tracks || [];
+    djLastTracks = tracks;
     if (tracks.length === 0) {
       results.innerHTML = '<p class="text-xs text-gray-500">No matches found in the Apple Music catalog for those ideas.</p>';
       return;
     }
-    const playlistLine = data.playlist_id
-      ? `<p class="text-xs text-green-400 mb-3">✓ Saved as Apple Music playlist</p>`
-      : '';
-    results.innerHTML = playlistLine + '<p class="text-xs text-gray-400 mb-2">Found ' + tracks.length + ' tracks:</p>' + tracks.map(t => {
-      const art = (t.artwork && typeof t.artwork === 'string') ? t.artwork.replace('{w}','48').replace('{h}','48') : '';
-      return `<div class="flex items-center gap-3 py-2 border-b border-gray-800">
-        ${art ? `<img src="${art}" class="w-10 h-10 rounded flex-shrink-0" onerror="this.style.display='none'">` : '<div class="w-10 h-10 bg-gray-800 rounded flex-shrink-0"></div>'}
-        <div class="flex-1 min-w-0">
-          <p class="text-sm truncate">${escapeHtml(t.name || t.query || '')}</p>
-          <p class="text-xs text-gray-500 truncate">${escapeHtml(t.artist || '')}</p>
-        </div>
-        ${t.url ? `<a href="${escapeHtml(t.url)}" target="_blank" class="text-xs text-oc-500 hover:text-oc-400">Open ↗</a>` : ''}
-      </div>`;
-    }).join('');
+    const playlistLine = data.playlist_id ? `<p class="text-xs text-green-400 mb-3">✓ Saved as Apple Music playlist</p>` : '';
+    results.innerHTML = playlistLine + '<p class="text-xs text-gray-400 mb-2">Found ' + tracks.length + ' tracks:</p>' + tracks.map(t => renderDjTrack(t)).join('');
+    document.getElementById('dj-feedback').classList.remove('hidden');
+    // Auto-populate queue
+    queueTracks.length = 0;
+    tracks.forEach(t => queueTracks.push(t));
+    renderQueue();
   } catch(e) {
-    results.innerHTML = `<p class="text-xs text-red-400">DJ failed: ${escapeHtml(e.message)}</p>`;
+    if (e.message !== 'unauthorized') results.innerHTML = `<p class="text-xs text-red-400">DJ failed: ${escapeHtml(e.message)}</p>`;
   }
   btn.textContent = 'Build'; btn.disabled = false;
+}
+
+function renderDjTrack(t) {
+  const art = (t.artwork && typeof t.artwork === 'string') ? t.artwork.replace('{w}','48').replace('{h}','48') : '';
+  const id = t.id || '';
+  const liked = djLikes.has(id);
+  const disliked = djDislikes.has(id);
+  return `<div class="flex items-center gap-3 py-2 border-b border-gray-800" data-track-id="${escapeHtml(id)}">
+    ${art ? `<img src="${art}" class="w-10 h-10 rounded flex-shrink-0" onerror="this.style.display='none'">` : '<div class="w-10 h-10 bg-gray-800 rounded flex-shrink-0"></div>'}
+    <div class="flex-1 min-w-0">
+      <p class="text-sm truncate">${escapeHtml(t.name || t.query || '')}</p>
+      <p class="text-xs text-gray-500 truncate">${escapeHtml(t.artist || '')}</p>
+    </div>
+    <button onclick="toggleLike('${escapeHtml(id)}')" class="text-xs ${liked ? 'text-green-400' : 'text-gray-600 hover:text-green-400'} px-1" title="More like this">👍</button>
+    <button onclick="toggleDislike('${escapeHtml(id)}')" class="text-xs ${disliked ? 'text-red-400' : 'text-gray-600 hover:text-red-400'} px-1" title="Drop tracks like this">👎</button>
+    ${t.url ? `<a href="${escapeHtml(t.url)}" target="_blank" class="text-xs text-oc-500 hover:text-oc-400">Open ↗</a>` : ''}
+  </div>`;
+}
+
+function toggleLike(id) {
+  if (djLikes.has(id)) djLikes.delete(id); else { djLikes.add(id); djDislikes.delete(id); }
+  renderDjResultsInPlace();
+}
+function toggleDislike(id) {
+  if (djDislikes.has(id)) djDislikes.delete(id); else { djDislikes.add(id); djLikes.delete(id); }
+  renderDjResultsInPlace();
+}
+function renderDjResultsInPlace() {
+  const results = document.getElementById('dj-results');
+  if (!results || djLastTracks.length === 0) return;
+  const header = `<p class="text-xs text-gray-400 mb-2">Found ${djLastTracks.length} tracks (${djLikes.size} 👍, ${djDislikes.size} 👎):</p>`;
+  results.innerHTML = header + djLastTracks.map(t => renderDjTrack(t)).join('');
+}
+
+async function refineDj(instruction) {
+  if (djLastTracks.length === 0) return;
+  const likedNames = djLastTracks.filter(t => djLikes.has(t.id)).map(t => `${t.name} — ${t.artist}`).join('; ');
+  const dislikedNames = djLastTracks.filter(t => djDislikes.has(t.id)).map(t => `${t.name} — ${t.artist}`).join('; ');
+  let refinedPrompt = djLastPrompt + '. ' + instruction;
+  if (likedNames) refinedPrompt += `. The user LIKED: ${likedNames}`;
+  if (dislikedNames) refinedPrompt += `. The user DISLIKED: ${dislikedNames}`;
+  djLikes.clear(); djDislikes.clear();
+  await runDj(refinedPrompt);
+}
+
+function renderQueue() {
+  const card = document.getElementById('queue-card');
+  const list = document.getElementById('queue-list');
+  if (queueTracks.length === 0) { card.classList.add('hidden'); return; }
+  card.classList.remove('hidden');
+  list.innerHTML = queueTracks.map((t, idx) => `<div class="flex items-center gap-2 py-1.5 text-xs border-b border-gray-800" data-queue-idx="${idx}">
+    <span class="text-gray-600 w-5 text-right">${idx+1}</span>
+    <span class="flex-1 truncate">${escapeHtml(t.name || t.query || '')} <span class="text-gray-500">— ${escapeHtml(t.artist || '')}</span></span>
+    <button onclick="moveQueue(${idx}, -1)" class="text-gray-500 hover:text-gray-200 px-1" title="Up">↑</button>
+    <button onclick="moveQueue(${idx}, 1)" class="text-gray-500 hover:text-gray-200 px-1" title="Down">↓</button>
+    <button onclick="removeFromQueue(${idx})" class="text-gray-500 hover:text-red-400 px-1" title="Remove">×</button>
+  </div>`).join('');
+}
+function moveQueue(idx, delta) {
+  const to = idx + delta;
+  if (to < 0 || to >= queueTracks.length) return;
+  [queueTracks[idx], queueTracks[to]] = [queueTracks[to], queueTracks[idx]];
+  renderQueue();
+}
+function removeFromQueue(idx) {
+  queueTracks.splice(idx, 1);
+  renderQueue();
+}
+function clearQueue() {
+  queueTracks.length = 0;
+  renderQueue();
 }
 
 function refreshAll() {
   loadNowPlaying();
   loadSpeakers();
+  checkMusicProvider();
 }
 
 refreshAll();
-// Poll now-playing every 5s while the page is open
 setInterval(loadNowPlaying, 5000);
 </script>
 </body>

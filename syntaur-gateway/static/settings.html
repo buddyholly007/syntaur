@@ -174,13 +174,16 @@
               <h3 class="font-semibold text-base">Start here: pair your phone</h3>
               <span class="badge badge-blue">Recommended first</span>
             </div>
-            <p class="text-sm text-gray-300 mb-3">Install the Syntaur Voice PWA on your phone. <strong class="text-white">That's all most people need.</strong> Once paired, Peter can listen to you, send notifications, capture your voice journal, and play music through your phone.</p>
-            <ul class="text-xs text-gray-400 space-y-1 mb-4">
-              <li>✓ Voice in / voice out (Peter listens and replies on your phone)</li>
+            <p class="text-sm text-gray-300 mb-3">Install the Syntaur Voice PWA on your phone. <strong class="text-white">That's all most people need.</strong> Once paired, Syntaur can listen to you, send notifications, capture your voice journal, and play music through your phone.</p>
+            <ul class="text-xs text-gray-400 space-y-1 mb-3">
+              <li>✓ Voice in / voice out (Syntaur listens and replies on your phone)</li>
               <li>✓ Music playback through phone speakers, AirPods, or AirPlay</li>
               <li>✓ Real-time notifications and reminders</li>
               <li>✓ Voice journal capture from anywhere</li>
             </ul>
+            <div class="bg-gray-900/60 border border-gray-700 rounded-lg p-3 mb-4">
+              <p class="text-xs text-gray-300"><strong class="text-oc-400">✨ Pair once, works anywhere.</strong> Also install <a href="https://tailscale.com/download" target="_blank" class="text-oc-500 hover:text-oc-400 underline">Tailscale</a> on your phone (one-time, free) — the same QR below then works at the coffee shop, on cellular, anywhere you have internet. No extra setup.</p>
+            </div>
             <button onclick="openSyncModal('telegram')" class="hidden text-xs bg-oc-600 hover:bg-oc-700 text-white px-4 py-2 rounded-lg font-medium" id="sync-cta-telegram-btn">Connect Telegram</button>
             <button onclick="window.open('http://' + location.hostname + ':18803', '_blank')" class="bg-oc-600 hover:bg-oc-700 text-white px-4 py-2 rounded-lg text-sm font-medium">Pair my phone</button>
             <button onclick="openSyncModal('phone_music_pwa')" class="ml-2 text-xs text-gray-400 hover:text-gray-200">Already paired? Connect it →</button>
@@ -193,16 +196,16 @@
           <span class="text-2xl">✓</span>
           <div class="flex-1">
             <p class="text-sm font-medium text-green-400">Phone paired</p>
-            <p class="text-xs text-gray-500">You're set. Add more below to expand what Peter can do.</p>
+            <p class="text-xs text-gray-500">You're set. Add more below to expand what Syntaur can do.</p>
           </div>
           <button onclick="document.getElementById('sync-getstarted-card').classList.remove('hidden'); this.parentElement.parentElement.classList.add('hidden');" class="text-xs text-gray-500 hover:text-gray-300">Show again</button>
         </div>
       </div>
 
-      <!-- Want Peter to... progressive disclosure -->
+      <!-- Want Syntaur to... progressive disclosure -->
       <div class="card">
         <div class="flex items-center justify-between mb-1">
-          <h3 class="font-medium">Want Peter to do more?</h3>
+          <h3 class="font-medium">Want Syntaur to do more?</h3>
           <button onclick="loadSyncProviders()" class="text-xs text-gray-400 hover:text-gray-200">&#8634; Refresh</button>
         </div>
         <p class="text-xs text-gray-500 mb-4">Each row shows the simplest path first. Add more for extra capability.</p>
@@ -689,17 +692,17 @@ async function loadSyncProviders() {
 }
 
 const CATEGORY_DESCRIPTIONS = {
-  'Email': 'Connect inboxes so Peter can find receipts and important messages.',
+  'Email': 'Connect inboxes so Syntaur can find receipts and important messages.',
   'Calendar': 'Merge calendars from multiple sources. Events become voice-queryable.',
-  'Messaging': 'Where Peter reaches out to you (reminders, approvals, alerts).',
+  'Messaging': 'Where Syntaur reaches out to you (reminders, approvals, alerts).',
   'Finance': 'Banks, brokers, exchanges, and payment processors. Feed the tax module.',
   'Social': 'Publish and monitor. Used by the Crimson Lantern pipeline.',
   'Developer': 'Dev tools that surface on your dashboard.',
   'Smart Home': 'Home Assistant is the hub. Connecting it unlocks HomePod music, Matter devices, and voice control of every HA entity.',
-  'Media': 'Music, video, and TV sources Peter can query or control.',
+  'Media': 'Music, video, and TV sources Syntaur can query or control.',
   'Music': 'These four work together. Connect Home Assistant + Apple Music for the best experience (HomePod playback). iOS Shortcut is a fallback.',
   'Health': 'Activity, sleep, and biometrics for daily check-ins.',
-  'AI': 'Usage tracking for the models that power Syntaur and Peter.',
+  'AI': 'Usage tracking for the models that power Syntaur.',
   'Storage': 'Where your Syntaur data lives. Typically info-only health cards.',
 };
 
@@ -716,15 +719,15 @@ const USE_CASES = [
         cost: '0 min — already done if phone is paired',
       },
       {
-        label: 'Better',
-        providers: ['apple_music'],
-        unlocks: '+ Peter can search your library and pick songs by name/mood. Bookmarklet flow on desktop, one-time setup.',
-        cost: '~3 min on desktop',
+        label: 'Pick your music service',
+        providers: ['apple_music', 'spotify', 'youtube_music'],
+        unlocks: '+ Search your library and pick songs by name/mood. Apple Music uses a desktop bookmarklet; Spotify and YouTube Music use OAuth (admin setup required).',
+        cost: '~3 min after admin OAuth setup',
       },
       {
         label: 'If you already run Home Assistant',
         providers: ['home_assistant'],
-        unlocks: '+ Whole-home: Peter controls HomePod, Apple TV, Sonos directly. Also unlocks speaker grouping and EQ. Optional — skip if you don\'t use HA.',
+        unlocks: '+ Whole-home: Syntaur controls HomePod, Apple TV, Sonos directly. Also unlocks speaker grouping and EQ. Optional — skip if you don\'t use HA.',
         cost: '~10 min if HA already running',
       },
     ],
@@ -743,7 +746,7 @@ const USE_CASES = [
       {
         label: 'Also',
         providers: ['telegram'],
-        unlocks: '+ Telegram bot reaches you even when phone is silent. Two-way: reply to Peter via text.',
+        unlocks: '+ Telegram bot reaches you even when phone is silent. Two-way: reply by text.',
         cost: '~30 sec (scan QR)',
       },
     ],
@@ -806,7 +809,7 @@ const USE_CASES = [
       {
         label: 'If you run Home Assistant',
         providers: ['home_assistant'],
-        unlocks: 'Connect HA once, Peter controls every device already paired there — lights, locks, thermostats. No HA? Skip this whole row.',
+        unlocks: 'Connect HA once, Syntaur controls every device already paired there — lights, locks, thermostats. No HA? Skip this whole row.',
         cost: '~5 min if HA already running',
       },
     ],
@@ -819,13 +822,13 @@ const USE_CASES = [
       {
         label: 'If you have an Oura Ring',
         providers: ['oura'],
-        unlocks: 'Sleep, readiness, activity. Peter answers "how did I sleep?"',
+        unlocks: 'Sleep, readiness, activity. Ask "how did I sleep?"',
         cost: '~2 min',
       },
       {
         label: 'If you use Strava',
         providers: ['strava'],
-        unlocks: 'Workout history + Peter can summarize the week.',
+        unlocks: 'Workout history — ask Syntaur to summarize the week.',
         cost: '~2 min (OAuth setup needed first)',
       },
       {
