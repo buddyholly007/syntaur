@@ -54,6 +54,34 @@ fn is_external_url(url: &str, gateway_origin: &str) -> bool {
 }
 
 #[cfg(target_os = "linux")]
+fn open_companion_window(app: &gtk4::Application, url: &str) {
+    use gtk4::prelude::*;
+    use gtk4::ApplicationWindow;
+    use webkit6::prelude::*;
+    use webkit6::WebView;
+
+    // Extract a short title from the URL
+    let title = url.split('/').filter(|s| !s.is_empty()).last()
+        .unwrap_or("External Page")
+        .replace('-', " ");
+
+    let window = ApplicationWindow::builder()
+        .application(app)
+        .title(&format!("{} — Syntaur", title))
+        .default_width(1000)
+        .default_height(750)
+        .build();
+
+    let webview = WebView::new();
+    webview.set_vexpand(true);
+    webview.set_hexpand(true);
+    webview.load_uri(url);
+
+    window.set_child(Some(&webview));
+    window.present();
+}
+
+#[cfg(target_os = "linux")]
 fn run_viewer(url: &str) -> Result<(), String> {
     use gtk4::prelude::*;
     use gtk4::{Application, ApplicationWindow};
@@ -78,8 +106,9 @@ fn run_viewer(url: &str) -> Result<(), String> {
         webview.set_vexpand(true);
         webview.set_hexpand(true);
 
-        // Intercept external links — open in system browser
+        // Intercept external links — open in a companion window within the viewer
         let origin = url_owned.clone();
+        let app_ref = app.clone();
         webview.connect_decide_policy(move |_wv, decision, decision_type| {
             if decision_type == PolicyDecisionType::NavigationAction {
                 if let Some(nav) = decision.downcast_ref::<NavigationPolicyDecision>() {
@@ -88,7 +117,7 @@ fn run_viewer(url: &str) -> Result<(), String> {
                             if let Some(uri) = request.uri() {
                                 let uri_str = uri.to_string();
                                 if is_external_url(&uri_str, &origin) {
-                                    open_in_system_browser(&uri_str);
+                                    open_companion_window(&app_ref, &uri_str);
                                     decision.ignore();
                                     return true;
                                 }
