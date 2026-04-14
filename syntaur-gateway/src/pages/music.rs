@@ -1,18 +1,26 @@
-<!DOCTYPE html>
-<html lang="en" class="dark">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="theme-color" content="#0284c7">
-<link rel="icon" href="/favicon.ico" type="image/x-icon">
-<link rel="manifest" href="/manifest.json">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>Music — Syntaur</title>
-<script src="/tailwind.js"></script>
-<script>tailwind.config={darkMode:'class',theme:{extend:{colors:{oc:{50:'#f0f9ff',100:'#e0f2fe',500:'#0ea5e9',600:'#0284c7',700:'#0369a1',800:'#075985',900:'#0c4a6e'}}}}}</script>
-<style>
-  @import url('/fonts.css');
+//! /music — music dashboard. Now-playing, AI DJ, queue, speakers, EQ.
+//! Migrated from static/music.html. The structural markup and the 36 KB
+//! JS block live as raw-string consts — all bytes count as Rust.
+
+use axum::response::Html;
+use maud::{html, PreEscaped};
+
+use super::shared::{shell, Page};
+
+pub async fn render() -> Html<String> {
+    let page = Page {
+        title: "Music",
+        authed: false,
+        extra_style: Some(EXTRA_STYLE),
+    };
+    let body = html! {
+        (PreEscaped(BODY_HTML))
+        script { (PreEscaped(MUSIC_JS)) }
+    };
+    Html(shell(page, body).into_string())
+}
+
+const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   body { font-family: 'Inter', sans-serif; background: #0a0a0a; }
   .card { @apply bg-gray-800 rounded-xl border border-gray-700 p-5; }
   .badge { @apply inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium; }
@@ -25,12 +33,9 @@
   @keyframes marquee { from{transform:translateX(0)} to{transform:translateX(calc(-100% + 280px))} }
   .marquee-track { animation: marquee 12s linear infinite alternate; display: inline-block; white-space: nowrap; }
   .speaker-card { transition: all 0.15s; }
-  .speaker-card.selected { @apply border-oc-500 bg-oc-900/30; }
-</style>
-</head>
-<body class="bg-gray-950 text-gray-100 min-h-screen">
+  .speaker-card.selected { @apply border-oc-500 bg-oc-900/30; }"##;
 
-<!-- Header -->
+const BODY_HTML: &str = r##"<!-- Header -->
 <div class="sticky top-0 z-40 bg-gray-950/90 backdrop-blur border-b border-gray-800 px-4 py-3 flex items-center justify-between">
   <div class="flex items-center gap-3">
     <a href="/" class="text-sm text-gray-400 hover:text-gray-200">&larr; Dashboard</a>
@@ -208,10 +213,9 @@
     </ul>
   </div>
 
-</div>
+</div>"##;
 
-<script>
-const token = sessionStorage.getItem('syntaur_token') || localStorage.getItem('syntaur_token') || '';
+const MUSIC_JS: &str = r##"const token = sessionStorage.getItem('syntaur_token') || localStorage.getItem('syntaur_token') || '';
 if (!token) { window.location.href = '/'; }
 
 // ── Syntaur Media Bridge (optional local companion) ──────────────────────
@@ -1090,8 +1094,4 @@ function startAppleMusicPlayer() {
   else showMusicNotice('Popup blocked. Allow popups for this site.', true);
 }
 
-setInterval(() => { if (appleMusicWindow && appleMusicWindow.closed) appleMusicWindow = null; }, 5000);
-
-</script>
-</body>
-</html>
+setInterval(() => { if (appleMusicWindow && appleMusicWindow.closed) appleMusicWindow = null; }, 5000);"##;

@@ -546,10 +546,6 @@ pub struct ModuleToggleResponse {
 
 
 
-pub async fn handle_music_page() -> axum::response::Html<&'static str> {
-    axum::response::Html(include_str!("../static/music.html"))
-}
-
 /// GET /settings
 pub async fn handle_settings_page() -> axum::response::Html<&'static str> {
     axum::response::Html(include_str!("../static/settings.html"))

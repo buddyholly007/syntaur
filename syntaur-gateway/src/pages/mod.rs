@@ -16,7 +16,7 @@
 //!   [done] journal.html     → pages::journal
 //!   [done] voice-setup.html → pages::voice_setup
 //!   [done] landing.html     → pages::landing
-//!   [todo] music.html
+//!   [done] music.html      → pages::music
 //!   [todo] dashboard.html
 //!   [todo] chat.html
 //!   [todo] setup.html
@@ -27,5 +27,6 @@ pub mod history;
 pub mod journal;
 pub mod landing;
 pub mod modules;
+pub mod music;
 pub mod shared;
 pub mod voice_setup;

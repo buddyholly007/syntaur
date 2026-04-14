@@ -3702,7 +3702,7 @@ async fn main() {
         .route("/setup", get(setup::handle_setup_page))
         .route("/modules", get(pages::modules::render))
         .route("/journal", get(pages::journal::render))
-        .route("/music", get(setup::handle_music_page))
+        .route("/music", get(pages::music::render))
         .route("/voice-setup", get(pages::voice_setup::render))
         .route("/settings", get(setup::handle_settings_page))
         .route("/tax", get(setup::handle_tax_page))
