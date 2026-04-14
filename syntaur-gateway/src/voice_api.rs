@@ -144,11 +144,16 @@ pub async fn synthesize_speech(Json(req): Json<TtsRequest>) -> Json<Value> {
 
     info!("[tts-api] synthesizing: {}", &text[..text.len().min(60)]);
 
+    // Fire duck event for ~estimated duration (150ms per word, min 2s, max 30s)
+    let words = text.split_whitespace().count().max(1);
+    let est_dur = (words as f64 * 0.15).clamp(2.0, 30.0) as i64;
+    crate::music::trigger_duck(true, est_dur).await;
     match satellite_client::run_tts(crate::voice_ws::TTS_HOST, text).await {
         Ok((audio, rate, ch, bits)) => {
             let url = satellite_client::cache_tts_audio(audio, 18789, rate, ch, bits).await;
             Json(json!({
                 "audio_url": url,
+                "estimated_duration_secs": est_dur,
             }))
         }
         Err(e) => {

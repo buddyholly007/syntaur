@@ -227,15 +227,126 @@ fn url_encode(s: &str) -> String {
     }).collect()
 }
 
+
+/// DJ mode: call the gateway's DJ endpoint (same-machine, localhost),
+/// get a playlist, fire the first track through the PWA command channel
+/// so playback starts immediately.
+async fn dj_playlist_and_start(
+    query: &str,
+    count: usize,
+    client: &std::sync::Arc<reqwest::Client>,
+    user_id: i64,
+) -> Result<RichToolResult, String> {
+    // Use a service token if available; for now call the DJ endpoint directly
+    // via the gateway's own HTTP server using a loopback request.
+    // Simpler path: call DJ logic via the /api/music/dj endpoint on localhost.
+    // We need a valid token — use the admin bootstrap token if present.
+    let token = std::env::var("SYNTAUR_INTERNAL_TOKEN").ok()
+        .or_else(|| {
+            // Try to read the bootstrap token from the users DB
+            let db_path = std::env::var("HOME")
+                .map(|h| format!("{}/.syntaur/index.db", h))
+                .unwrap_or_else(|_| "/home/sean/.syntaur/index.db".to_string());
+            let conn = rusqlite::Connection::open(&db_path).ok()?;
+            // Return any non-revoked token for this user
+            conn.query_row(
+                "SELECT token_hash FROM user_api_tokens WHERE user_id = ? AND revoked_at IS NULL LIMIT 1",
+                rusqlite::params![user_id], |r| r.get::<_, String>(0),
+            ).ok()
+        })
+        .unwrap_or_default();
+
+    if token.is_empty() {
+        return Ok(RichToolResult::text("DJ mode needs a valid user token. Try 'play X' for a single song instead."));
+    }
+
+    let gateway_port: u16 = std::env::var("SYNTAUR_PORT").ok()
+        .and_then(|s| s.parse().ok()).unwrap_or(18789);
+    let url = format!("http://127.0.0.1:{}/api/music/dj", gateway_port);
+    let body = serde_json::json!({
+        "token": token,
+        "prompt": query,
+        "count": count,
+        "create_playlist": false,
+    });
+    let resp = client.post(&url)
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(45))
+        .send().await.map_err(|e| format!("DJ call: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Ok(RichToolResult::text(format!(
+            "DJ playlist failed (HTTP {}). Try connecting Apple Music or Spotify in Sync settings.",
+            resp.status()
+        )));
+    }
+    let j: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    if let Some(err) = j.get("error").and_then(|v| v.as_str()) {
+        let hint = j.get("hint").and_then(|v| v.as_str()).unwrap_or("");
+        return Ok(RichToolResult::text(format!("{} — {}", err, hint)));
+    }
+    let tracks = j.get("tracks").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    if tracks.is_empty() {
+        return Ok(RichToolResult::text(format!(
+            "Couldn't build a playlist for '{}'. Try different wording.", query
+        )));
+    }
+    let provider = j.get("provider").and_then(|v| v.as_str()).unwrap_or("apple_music");
+
+    // Auto-start the first track by emitting a play_music event via the bridge command channel
+    let first = &tracks[0];
+    let first_url = first.get("play_url").and_then(|v| v.as_str())
+        .or_else(|| first.get("url").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    let song_name = first.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let artist = first.get("artist").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    if !first_url.is_empty() {
+        let play_url = if first_url.starts_with("https://music.apple.com") {
+            first_url.replacen("https://", "music://", 1)
+        } else { first_url.to_string() };
+        let cmd = serde_json::json!({
+            "type": "play_music",
+            "url": play_url,
+            "song": song_name,
+            "artist": artist,
+            "queue_count": tracks.len() - 1,
+            "provider": provider,
+        });
+        let _ = client.post("http://127.0.0.1:18804/command")
+            .json(&cmd)
+            .timeout(std::time::Duration::from_secs(3))
+            .send().await;
+    }
+
+    let summary = tracks.iter().take(5).filter_map(|t| {
+        let n = t.get("name").and_then(|v| v.as_str())?;
+        let a = t.get("artist").and_then(|v| v.as_str()).unwrap_or("");
+        Some(format!("{} ({})", n, a))
+    }).collect::<Vec<_>>().join("; ");
+
+    Ok(RichToolResult::text(format!(
+        "Built a {}-track {} playlist. Starting with {}{}.\nQueue: {}{}",
+        tracks.len(),
+        provider.replace('_', " "),
+        song_name,
+        if artist.is_empty() { "".to_string() } else { format!(" by {}", artist) },
+        summary,
+        if tracks.len() > 5 { format!(" + {} more", tracks.len() - 5) } else { String::new() }
+    )))
+}
+
 #[async_trait]
 impl Tool for MusicTool {
     fn name(&self) -> &str { "music" }
 
     fn description(&self) -> &str {
-        "Play music on any connected speaker. Searches Apple Music for the requested \
-         song/artist/playlist, then routes playback automatically through whichever \
-         device is available: HomePod/Apple TV (via Home Assistant), browser dashboard \
-         player, or iPhone (via Shortcut). Peter picks the best available path."
+        "Play music or build an AI DJ playlist. Single-song mode: pass query, plays one match. \
+         Playlist mode (mode=\"playlist\"): DJ builds a multi-track playlist from the prompt \
+         (\"play some jazz\", \"workout music\", \"hour of chill\"), remembers user preferences \
+         across sessions, and auto-starts the first track. Routes playback through phone PWA, \
+         HomePod/Apple TV via Home Assistant, or Spotify/YouTube Music catalog. Detects user \
+         preference cues and stores them for future DJ sessions."
     }
 
     fn parameters(&self) -> Value {
@@ -246,9 +357,22 @@ impl Tool for MusicTool {
                     "type": "string",
                     "description": "Song, artist, album, playlist, genre, or mood to play. E.g. 'jazz', 'Miles Davis Kind of Blue', 'workout playlist', 'something relaxing'."
                 },
+                "mode": {
+                    "type": "string",
+                    "enum": ["single", "playlist"],
+                    "description": "'single' plays one best-match song. 'playlist' asks the AI DJ to build a multi-track playlist matching the vibe (use for 'make me a X playlist', 'play some Y', 'give me an hour of Z')."
+                },
+                "count": {
+                    "type": "integer",
+                    "description": "For mode=playlist: number of tracks (default 15)."
+                },
                 "target": {
                     "type": "string",
-                    "description": "Optional HA media_player entity_id to target (e.g. 'media_player.homepod_living_room'). If omitted, picks the best available speaker automatically."
+                    "description": "Optional HA media_player entity_id to target. If omitted, picks the best available speaker automatically."
+                },
+                "remember_preference": {
+                    "type": "string",
+                    "description": "Optional — remember a user preference. E.g. 'user likes upbeat jazz', 'user dislikes country', 'prefers morning coffee playlists chill'."
                 }
             },
             "required": ["query"]
@@ -268,9 +392,31 @@ impl Tool for MusicTool {
         if query.is_empty() {
             return Ok(RichToolResult::text("What should I play? Tell me a song, artist, or mood."));
         }
+        let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("single");
+        let count = args.get("count").and_then(|v| v.as_u64()).unwrap_or(15).min(30) as usize;
         let target_override = args.get("target").and_then(|v| v.as_str()).map(|s| s.to_string());
         let client = ctx.http.as_ref().ok_or("no HTTP client")?.clone();
         let db_path = ctx.db_path.ok_or("no db_path in context")?;
+
+        // If the LLM passed a preference note, persist it first
+        if let Some(pref) = args.get("remember_preference").and_then(|v| v.as_str()) {
+            if !pref.trim().is_empty() {
+                let conn = rusqlite::Connection::open(db_path).ok();
+                if let Some(conn) = conn {
+                    let now = chrono::Utc::now().timestamp();
+                    let _ = conn.execute(
+                        "INSERT INTO user_music_preferences (user_id, category, kind, value, source, created_at) VALUES (?, 'note', 'general', ?, 'voice', ?)",
+                        rusqlite::params![ctx.user_id, pref, now],
+                    );
+                }
+            }
+        }
+
+        // DJ mode: build a playlist + queue the first track
+        if mode == "playlist" {
+            return dj_playlist_and_start(query, count, &client, ctx.user_id).await;
+        }
+
         let creds = load_sync_creds(db_path, ctx.user_id);
 
         // Step 1: search whatever music provider is connected (Apple Music preferred,

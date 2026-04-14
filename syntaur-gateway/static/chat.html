@@ -1277,7 +1277,11 @@ async function handleVmTranscript(e) {
               const words = ev.response.split(/\s+/).length;
               vmLastTtsDuration = Math.max(2, Math.round(words * 0.15));
 
+              audio.onplay = () => {
+                fetch('/api/music/duck', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({token: authToken, state: 'on', duration_secs: vmLastTtsDuration + 5}) }).catch(()=>{});
+              };
               audio.onended = () => {
+                fetch('/api/music/duck', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({token: authToken, state: 'off'}) }).catch(()=>{});
                 // Enter cooldown, then resume listening
                 setVmState('cooldown');
                 vmCooldownTimer = setTimeout(() => {
@@ -1325,6 +1329,13 @@ async function playTts(text) {
     const data = await resp.json();
     if (data.audio_url) {
       const audio = new Audio(data.audio_url);
+      const estDur = data.estimated_duration_secs || 10;
+      audio.onplay = () => {
+        fetch('/api/music/duck', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({token: authToken, state: 'on', duration_secs: estDur + 5}) }).catch(()=>{});
+      };
+      audio.onended = () => {
+        fetch('/api/music/duck', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({token: authToken, state: 'off'}) }).catch(()=>{});
+      };
       audio.play().catch(e => console.log('audio play blocked:', e));
     }
   } catch(e) { console.log('TTS error:', e); }

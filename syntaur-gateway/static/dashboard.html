@@ -1368,6 +1368,13 @@ async function mpPoll() {
     const data = await resp.json();
     const mp = document.getElementById('mini-player');
     if (!mp) return;
+    // Apply duck state to mini player visuals
+    if (data.ducking) {
+      mp.style.opacity = '0.55';
+    } else {
+      mp.style.opacity = '1';
+    }
+    document.querySelectorAll('audio').forEach(a => { a.volume = data.ducking ? 0.2 : 1.0; });
     const state = data.state || 'off';
     const song = data.song || '';
     const artist = data.artist || '';

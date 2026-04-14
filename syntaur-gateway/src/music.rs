@@ -218,10 +218,12 @@ pub async fn handle_music_now_playing(
         }
     }
 
+    let ducking = get_duck_state().await;
     Ok(Json(serde_json::json!({
         "state": "off",
         "source": "none",
-        "hint": "Nothing playing. Ask Peter to play something, or connect Apple Music / pair your phone in Sync.",
+        "ducking": ducking.active,
+        "hint": "Nothing playing. Ask to play something, or connect Apple Music / pair your phone in Sync.",
     })))
 }
 
@@ -574,10 +576,18 @@ pub async fn handle_music_dj(
     let count = req.count.unwrap_or(15).min(30);
 
     // Step 1: ask the LLM for track ideas matching the prompt
+    // Pull recent preferences for personalization
+    let prefs_context = load_prefs_context(&state, uid, 30).await;
+    let prefs_preamble = if prefs_context.is_empty() {
+        String::new()
+    } else {
+        format!("\n\nUser preference context (use to bias selection):\n{}\n", prefs_context)
+    };
     let llm_prompt = format!(
-        "You are a DJ. Build a playlist based on this request: \"{}\"\n\n         Return ONLY a JSON array of {} strings, each a \"SONG - ARTIST\" search query. \
+        "You are a music DJ building a playlist. Request: \"{}\"\n{}\n         Return ONLY a JSON array of {} strings, each a \"SONG - ARTIST\" search query. \
+         Favor artists/genres the user likes; avoid what they dislike. \
          No markdown fences, no prose, just the JSON array. Example:\n         [\"Kind of Blue - Miles Davis\", \"Take Five - Dave Brubeck\"]",
-        req.prompt, count
+        req.prompt, prefs_preamble, count
     );
 
     let chain = crate::llm::LlmChain::from_config_fast(&state.config, "main", state.client.clone());
@@ -1179,5 +1189,227 @@ pub async fn handle_spotify_token(
         Some(t) => Ok(Json(serde_json::json!({"access_token": t}))),
         None => Ok(Json(serde_json::json!({"error": "spotify not authorized"}))),
     }
+}
+
+// ── User music preferences (persistent DJ memory) ──────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct MusicPrefSaveRequest {
+    pub token: String,
+    pub category: String,  // "like" | "dislike" | "note"
+    pub kind: Option<String>,
+    pub value: String,
+    pub track_id: Option<String>,
+    pub provider: Option<String>,
+    pub source: Option<String>,
+}
+
+pub async fn handle_music_pref_save(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<MusicPrefSaveRequest>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let principal = crate::resolve_principal(&state, &req.token).await?;
+    let uid = principal.user_id();
+    if req.value.trim().is_empty() { return Err(axum::http::StatusCode::BAD_REQUEST); }
+    let db = state.db_path.clone();
+    let now = chrono::Utc::now().timestamp();
+    let cat = req.category.clone();
+    let kind = req.kind.clone();
+    let val = req.value.clone();
+    let tid = req.track_id.clone();
+    let prov = req.provider.clone();
+    let src = req.source.unwrap_or_else(|| "manual".to_string());
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO user_music_preferences (user_id, category, kind, value, track_id, provider, source, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            rusqlite::params![uid, cat, kind, val, tid, prov, src, now],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+pub async fn handle_music_prefs_list(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let limit: i64 = params.get("limit").and_then(|s| s.parse().ok()).unwrap_or(50);
+    let db = state.db_path.clone();
+    let rows: Vec<serde_json::Value> = tokio::task::spawn_blocking(move || -> Vec<serde_json::Value> {
+        let mut out = Vec::new();
+        if let Ok(conn) = rusqlite::Connection::open(&db) {
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT id, category, kind, value, track_id, provider, source, created_at                  FROM user_music_preferences WHERE user_id = ? ORDER BY created_at DESC LIMIT ?"
+            ) {
+                if let Ok(rs) = stmt.query_map(rusqlite::params![uid, limit], |r| Ok(serde_json::json!({
+                    "id": r.get::<_, i64>(0)?,
+                    "category": r.get::<_, String>(1)?,
+                    "kind": r.get::<_, Option<String>>(2)?,
+                    "value": r.get::<_, String>(3)?,
+                    "track_id": r.get::<_, Option<String>>(4)?,
+                    "provider": r.get::<_, Option<String>>(5)?,
+                    "source": r.get::<_, Option<String>>(6)?,
+                    "created_at": r.get::<_, i64>(7)?,
+                }))) {
+                    for row in rs.flatten() { out.push(row); }
+                }
+            }
+        }
+        out
+    }).await.unwrap_or_default();
+    Ok(Json(serde_json::json!({"preferences": rows})))
+}
+
+pub async fn handle_music_pref_delete(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(pref_id): axum::extract::Path<i64>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let _ = tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM user_music_preferences WHERE id = ? AND user_id = ?",
+            rusqlite::params![pref_id, uid]).map_err(|e| e.to_string())?;
+        Ok(())
+    }).await;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+/// Fetch the user's recent preferences formatted as a context string
+/// for the DJ LLM prompt.
+async fn load_prefs_context(state: &Arc<AppState>, uid: i64, limit: i64) -> String {
+    let db = state.db_path.clone();
+    let rows: Vec<(String, String)> = tokio::task::spawn_blocking(move || -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        if let Ok(conn) = rusqlite::Connection::open(&db) {
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT category, value FROM user_music_preferences                  WHERE user_id = ? ORDER BY created_at DESC LIMIT ?"
+            ) {
+                if let Ok(rs) = stmt.query_map(rusqlite::params![uid, limit], |r| Ok((
+                    r.get::<_, String>(0)?, r.get::<_, String>(1)?
+                ))) {
+                    for row in rs.flatten() { out.push(row); }
+                }
+            }
+        }
+        out
+    }).await.unwrap_or_default();
+    if rows.is_empty() { return String::new(); }
+    let mut likes = Vec::new();
+    let mut dislikes = Vec::new();
+    let mut notes = Vec::new();
+    for (cat, val) in rows {
+        match cat.as_str() {
+            "like" => likes.push(val),
+            "dislike" => dislikes.push(val),
+            _ => notes.push(val),
+        }
+    }
+    let mut out = String::new();
+    if !likes.is_empty() { out.push_str(&format!("User likes: {}. ", likes.join("; "))); }
+    if !dislikes.is_empty() { out.push_str(&format!("User dislikes: {}. ", dislikes.join("; "))); }
+    if !notes.is_empty() { out.push_str(&format!("Notes: {}. ", notes.join("; "))); }
+    out
+}
+
+// ── Music ducking during TTS ───────────────────────────────────────────────
+// Shared ducking state: when TTS is speaking, music player clients attenuate
+// their volume. Set via /api/music/duck {state}, read via /api/music/duck_state
+// or as the `ducking` field on /api/music/now_playing.
+
+static DUCKING_STATE: tokio::sync::OnceCell<tokio::sync::RwLock<DuckingState>> = tokio::sync::OnceCell::const_new();
+
+#[derive(Clone, Debug, Default)]
+pub struct DuckingState {
+    pub active: bool,
+    pub until_ts: i64,  // unix epoch; auto-unduck after this time
+}
+
+async fn get_duck_state() -> DuckingState {
+    let cell = DUCKING_STATE.get_or_init(|| async { tokio::sync::RwLock::new(DuckingState::default()) }).await;
+    let s = cell.read().await;
+    // Auto-expire if past until_ts
+    let now = chrono::Utc::now().timestamp();
+    if s.active && s.until_ts > 0 && now > s.until_ts {
+        return DuckingState::default();
+    }
+    DuckingState { active: s.active, until_ts: s.until_ts }
+}
+
+async fn set_duck_state(active: bool, duration_secs: i64) {
+    let cell = DUCKING_STATE.get_or_init(|| async { tokio::sync::RwLock::new(DuckingState::default()) }).await;
+    let mut w = cell.write().await;
+    w.active = active;
+    w.until_ts = if active && duration_secs > 0 {
+        chrono::Utc::now().timestamp() + duration_secs
+    } else { 0 };
+}
+
+#[derive(serde::Deserialize)]
+pub struct DuckRequest {
+    pub token: String,
+    pub state: String,  // "on" | "off"
+    pub duration_secs: Option<i64>,
+}
+
+pub async fn handle_music_duck(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<DuckRequest>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let _ = crate::resolve_principal(&state, &req.token).await?;
+    let active = req.state == "on";
+    let duration = req.duration_secs.unwrap_or(if active { 30 } else { 0 });
+    set_duck_state(active, duration).await;
+
+    // Also broadcast to bridge command channel so phone PWA can attenuate
+    let event_type = if active { "duck" } else { "unduck" };
+    let cmd = serde_json::json!({
+        "type": event_type,
+        "message": if active { "TTS speaking — duck music" } else { "TTS done — restore music" },
+    });
+    let _ = state.client.post("http://127.0.0.1:18804/command")
+        .json(&cmd)
+        .timeout(std::time::Duration::from_secs(2))
+        .send().await;
+
+    info!("[music-duck] {} (for {}s)", event_type, duration);
+    Ok(Json(serde_json::json!({"ok": true, "state": req.state})))
+}
+
+pub async fn handle_music_duck_state(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let _ = crate::resolve_principal(&state, token).await?;
+    let ds = get_duck_state().await;
+    Ok(Json(serde_json::json!({
+        "ducking": ds.active,
+        "until_ts": ds.until_ts,
+    })))
+}
+
+/// Public helper for in-process callers (e.g. voice_api TTS handler) to
+/// trigger ducking without going through the HTTP endpoint.
+pub async fn trigger_duck(active: bool, duration_secs: i64) {
+    set_duck_state(active, duration_secs).await;
+    info!("[music-duck] (in-process) {} for {}s", if active {"duck"} else {"unduck"}, duration_secs);
+    // Best-effort broadcast to bridge so phone PWA also attenuates
+    let client = reqwest::Client::new();
+    let event_type = if active { "duck" } else { "unduck" };
+    let cmd = serde_json::json!({"type": event_type, "message": "TTS"});
+    let _ = client.post("http://127.0.0.1:18804/command")
+        .json(&cmd)
+        .timeout(std::time::Duration::from_secs(2))
+        .send().await;
 }
 

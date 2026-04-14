@@ -3806,6 +3806,11 @@ async fn main() {
         .route("/api/admin/oauth_config/{identity_provider}", axum::routing::delete(sync::handle_oauth_config_delete))
         .route("/api/music/spotify_play", post(music::handle_spotify_play))
         .route("/api/music/spotify_token", get(music::handle_spotify_token))
+        .route("/api/music/prefs", get(music::handle_music_prefs_list))
+        .route("/api/music/prefs", post(music::handle_music_pref_save))
+        .route("/api/music/prefs/{id}", axum::routing::delete(music::handle_music_pref_delete))
+        .route("/api/music/duck", post(music::handle_music_duck))
+        .route("/api/music/duck_state", get(music::handle_music_duck_state))
         .route("/apple_music_capture", get(sync::handle_apple_music_capture_page))
         .with_state(Arc::clone(&state))
         .layer(axum::middleware::from_fn_with_state(

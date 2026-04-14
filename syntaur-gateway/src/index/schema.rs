@@ -763,6 +763,25 @@ const MIGRATIONS: &[&str] = &[
         configured_by     INTEGER
     );
     "#,
+    // v20: music preferences — persistent memory for the AI DJ.
+    // Stores likes/dislikes at multiple granularities (track, artist, genre, free-form note).
+    // The DJ reads the most-recent N entries into its LLM prompt.
+    r#"
+    CREATE TABLE IF NOT EXISTS user_music_preferences (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id         INTEGER NOT NULL DEFAULT 0,
+        category        TEXT NOT NULL,  -- "like" | "dislike" | "note" | "context"
+        kind            TEXT,            -- "track" | "artist" | "genre" | "mood" | "general"
+        value           TEXT NOT NULL,   -- e.g. "Take Five — Dave Brubeck" or "chill jazz for coding"
+        track_id        TEXT,            -- optional provider-specific ID
+        provider        TEXT,            -- "apple_music" | "spotify" | etc
+        weight          REAL NOT NULL DEFAULT 1.0,
+        source          TEXT,            -- "dj_ui" | "voice" | "manual"
+        created_at      INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_mpref_user ON user_music_preferences(user_id);
+    CREATE INDEX IF NOT EXISTS idx_mpref_created ON user_music_preferences(created_at);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

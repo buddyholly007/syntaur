@@ -112,6 +112,9 @@
     </div>
     <div class="flex gap-2">
       <input type="text" id="dj-prompt" placeholder="e.g. upbeat 80s synthwave, jazz for studying, something like Miles Davis but more modern…" class="flex-1 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-oc-500" onkeydown="if(event.key==='Enter')runDj()">
+      <button onmousedown="startDjStt(event)" onmouseup="stopDjStt(event)" ontouchstart="startDjStt(event)" ontouchend="stopDjStt(event)" id="dj-mic-btn" class="bg-gray-800 hover:bg-gray-700 text-gray-300 px-3 rounded-lg text-sm flex items-center" title="Hold to dictate">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+      </button>
       <button onclick="runDj()" id="dj-run-btn" class="bg-oc-600 hover:bg-oc-700 text-white px-4 rounded-lg text-sm font-medium">Build</button>
     </div>
     <div class="mt-2 flex items-center gap-4 text-xs text-gray-500">
@@ -717,6 +720,96 @@ function refreshAll() {
 
 refreshAll();
 setInterval(loadNowPlaying, 5000);
+
+
+// ── DJ STT ────────────────────────────────────────────────────────────────
+let djSttWs = null;
+let djMediaRecorder = null;
+let djAudioCtx = null;
+let djProcessor = null;
+
+async function startDjStt(e) {
+  e.preventDefault();
+  const btn = document.getElementById('dj-mic-btn');
+  btn.classList.add('bg-red-700');
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+    djAudioCtx = new AudioContext({ sampleRate: 16000 });
+    const source = djAudioCtx.createMediaStreamSource(stream);
+    djProcessor = djAudioCtx.createScriptProcessor(4096, 1, 1);
+    const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    djSttWs = new WebSocket(`${wsProto}//${location.host}/ws/stt?token=${token}`);
+    djSttWs.binaryType = 'arraybuffer';
+    djSttWs.onmessage = (msg) => {
+      try {
+        const data = JSON.parse(msg.data);
+        if (data.text) {
+          document.getElementById('dj-prompt').value = data.text;
+        }
+      } catch(err) {}
+    };
+    djSttWs.onopen = () => {
+      djProcessor.onaudioprocess = (ev) => {
+        if (djSttWs.readyState !== 1) return;
+        const input = ev.inputBuffer.getChannelData(0);
+        const pcm = new Int16Array(input.length);
+        for (let i = 0; i < input.length; i++) {
+          pcm[i] = Math.max(-32768, Math.min(32767, input[i] * 32768));
+        }
+        djSttWs.send(pcm.buffer);
+      };
+      source.connect(djProcessor);
+      djProcessor.connect(djAudioCtx.destination);
+    };
+    djSttWs._stream = stream;
+  } catch(err) {
+    console.warn('STT start failed:', err);
+    btn.classList.remove('bg-red-700');
+  }
+}
+
+function stopDjStt(e) {
+  e.preventDefault();
+  const btn = document.getElementById('dj-mic-btn');
+  btn.classList.remove('bg-red-700');
+  if (djProcessor) { try { djProcessor.disconnect(); } catch{} djProcessor = null; }
+  if (djAudioCtx) { try { djAudioCtx.close(); } catch{} djAudioCtx = null; }
+  if (djSttWs) {
+    try { djSttWs._stream?.getTracks().forEach(t => t.stop()); } catch{}
+    try { djSttWs.send(JSON.stringify({type:'eof'})); } catch{}
+    setTimeout(() => { try { djSttWs.close(); } catch{} djSttWs = null; }, 200);
+  }
+}
+
+// ── Music ducking listener (polls duck state, attenuates audio elements) ───
+let lastDuckState = false;
+async function pollDuckState() {
+  try {
+    const r = await fetch(`/api/music/duck_state?token=${token}`, { headers: { 'Authorization': 'Bearer ' + token } });
+    const d = await r.json();
+    const ducking = !!d.ducking;
+    if (ducking !== lastDuckState) {
+      lastDuckState = ducking;
+      // Attenuate any <audio> elements on the page
+      document.querySelectorAll('audio').forEach(a => {
+        a.volume = ducking ? 0.2 : 1.0;
+      });
+      // Show/hide duck indicator
+      let badge = document.getElementById('duck-badge');
+      if (!badge) {
+        badge = document.createElement('div');
+        badge.id = 'duck-badge';
+        badge.style.cssText = 'position:fixed;top:60px;right:16px;background:#1e3a5f;color:#7b9ef0;padding:6px 12px;border-radius:8px;font-size:11px;z-index:100;display:none';
+        badge.textContent = '🔉 Music ducked — voice speaking';
+        document.body.appendChild(badge);
+      }
+      badge.style.display = ducking ? 'block' : 'none';
+    }
+  } catch(e) { /* silent */ }
+}
+setInterval(pollDuckState, 1500);
+pollDuckState();
+
 </script>
 </body>
 </html>
