@@ -240,10 +240,10 @@
         <p class="text-xs text-gray-400 mb-3">Review your estimated tax data, adjust if needed, then choose how to file. Extends filing deadline to <strong class="text-gray-300">October 15</strong>. Payment is still due <strong class="text-red-400">April 15</strong>.</p>
         <div class="bg-gray-900 rounded-lg p-3 mb-3">
           <div class="grid grid-cols-2 gap-3 text-sm">
-            <div><label class="text-xs text-gray-500">Estimated total tax</label><input class="input text-sm" id="ext-total-tax" placeholder="$0.00"></div>
-            <div><label class="text-xs text-gray-500">Payments made (withholding + estimated)</label><input class="input text-sm" id="ext-payments" placeholder="$0.00"></div>
-            <div><label class="text-xs text-gray-500">Balance due</label><input class="input text-sm font-medium" id="ext-balance" readonly></div>
-            <div><label class="text-xs text-gray-500">Paying with this extension</label><input class="input text-sm" id="ext-payment" value="0" oninput="updateExtBalance()"></div>
+            <div><label class="text-xs text-gray-500">Estimated total tax</label><input class="input text-sm text-white" id="ext-total-tax" value="$0.00"></div>
+            <div><label class="text-xs text-gray-500">Payments made (withholding + estimated)</label><input class="input text-sm text-white" id="ext-payments" value="$0.00"></div>
+            <div><label class="text-xs text-gray-500">Balance due</label><input class="input text-sm font-medium text-green-400" id="ext-balance" value="$0.00" readonly></div>
+            <div><label class="text-xs text-gray-500">Paying with this extension</label><input class="input text-sm text-white" id="ext-payment" value="0.00" oninput="updateExtBalance()"></div>
           </div>
         </div>
         <div class="space-y-2">
@@ -2212,6 +2212,12 @@ async function loadExtensionData() {
     const resp = await authFetch(`/api/tax/extension/status?token=${token}&year=${yr}`);
     const data = await resp.json();
     extData = data;
+    // Debug: show what we got
+    const dbg = document.getElementById('ext-result');
+    if (dbg && data.estimate && data.estimate.total_tax_cents === 0 && data.estimate.total_paid_cents === 0 && !data.extension) {
+      dbg.textContent = 'No tax data found for ' + yr + '. Upload W-2s and expenses first.';
+      dbg.className = 'text-xs mt-2 block text-yellow-400';
+    }
     if (data.extension) {
       extId = data.extension.id;
       const ext = data.extension;
