@@ -2311,7 +2311,7 @@ async function startExtFiling(method) {
   updateExtBadge('filed');
 }
 
-function renderExtFile(method) {
+async function renderExtFile(method) {
   const labels = {direct_pay:'IRS Direct Pay', free_file:'IRS Free File', mail:'Print & Mail'};
   const urls = {direct_pay:'https://www.irs.gov/payments/direct-pay-with-bank-account', free_file:'https://www.irs.gov/filing/free-file-do-your-federal-taxes-for-free', mail:null};
   document.getElementById('ext-method-label').textContent = 'Filing via ' + (labels[method]||method);
@@ -2352,30 +2352,62 @@ function renderExtFile(method) {
     copyFieldsEl.appendChild(steps);
   }
 
-  // Separator
-  const sep = document.createElement('div');
-  sep.className = 'border-t border-gray-700 pt-2 mt-1';
-  sep.innerHTML = '<p class="text-[10px] text-gray-500 mb-2">Your values (copy as needed):</p>';
-  copyFieldsEl.appendChild(sep);
+  // Fetch taxpayer profile for identity fields
+  try {
+    const profResp = await authFetch('/api/tax/profile?token=' + token + '&year=' + yr);
+    const profData = await profResp.json();
+    const p = profData.profile || {};
+    const filingLabels = {single:'Single', married_jointly:'Married Filing Jointly', married_separately:'Married Filing Separately', head_of_household:'Head of Household'};
 
-  const fields = [
-    ['Tax Year', yr],
-    ['Estimated Total Tax', tax],
-    ['Total Payments Made', paid],
-    ['Balance Due', bal],
-    ['Payment Amount', '$' + parseFloat(pay).toFixed(2)],
-  ];
-  fields.forEach(([label, value]) => {
-    const row = document.createElement('div');
-    row.className = 'flex items-center justify-between py-1';
-    row.innerHTML = '<span class="text-xs text-gray-400">' + label + '</span><div class="flex items-center gap-2"><span class="text-sm text-white font-mono">' + value + '</span></div>';
+    // Identity section
+    addSection(copyFieldsEl, 'Identity verification');
+    addCopyRow(copyFieldsEl, 'SSN', p.ssn || '(set in Tax Profile above)');
+    addCopyRow(copyFieldsEl, 'Date of Birth', p.date_of_birth || '(set in Tax Profile)');
+    addCopyRow(copyFieldsEl, 'Filing Status', filingLabels[p.filing_status] || p.filing_status || 'Single');
+    if (p.first_name) addCopyRow(copyFieldsEl, 'Name', p.first_name + ' ' + (p.last_name || ''));
+    if (p.address_line1) addCopyRow(copyFieldsEl, 'Street Address', p.address_line1);
+    if (p.city) addCopyRow(copyFieldsEl, 'City, State, ZIP', p.city + ', ' + (p.state || '') + ' ' + (p.zip || ''));
+
+    // Spouse section (if filing jointly)
+    if (p.filing_status === 'married_jointly') {
+      addSection(copyFieldsEl, 'Spouse information (jointly filed)');
+      addCopyRow(copyFieldsEl, 'Spouse Name', (p.spouse_first || '') + ' ' + (p.spouse_last || '') || '(set in Tax Profile)');
+      addCopyRow(copyFieldsEl, 'Spouse SSN', p.spouse_ssn || '(set in Tax Profile)');
+      if (p.spouse_dob) addCopyRow(copyFieldsEl, 'Spouse DOB', p.spouse_dob);
+    }
+
+    // Payment section
+    addSection(copyFieldsEl, 'Payment details');
+  } catch(e) {
+    addSection(copyFieldsEl, 'Payment details (set up Tax Profile above for identity fields)');
+  }
+
+  addCopyRow(copyFieldsEl, 'Tax Year', yr);
+  addCopyRow(copyFieldsEl, 'Estimated Total Tax', tax);
+  addCopyRow(copyFieldsEl, 'Total Payments Made', paid);
+  addCopyRow(copyFieldsEl, 'Balance Due', bal);
+  addCopyRow(copyFieldsEl, 'Payment Amount', '$' + parseFloat(pay).toFixed(2));
+}
+
+function addSection(parent, title) {
+  const s = document.createElement('div');
+  s.className = 'border-t border-gray-700 pt-2 mt-2';
+  s.innerHTML = '<p class="text-[10px] text-gray-500 font-medium mb-1">' + title + '</p>';
+  parent.appendChild(s);
+}
+
+function addCopyRow(parent, label, value) {
+  const row = document.createElement('div');
+  row.className = 'flex items-center justify-between py-0.5';
+  row.innerHTML = '<span class="text-xs text-gray-400">' + label + '</span><div class="flex items-center gap-2"><span class="text-sm text-white font-mono">' + (value || '—') + '</span></div>';
+  if (value && !value.startsWith('(')) {
     const btn = document.createElement('button');
     btn.className = 'text-[10px] text-oc-500 hover:text-oc-400 px-1.5 py-0.5 bg-gray-800 rounded';
     btn.textContent = 'Copy';
     btn.onclick = function() { navigator.clipboard.writeText(value).then(() => { btn.textContent = 'Copied!'; setTimeout(() => btn.textContent = 'Copy', 1500); }); };
     row.querySelector('div').appendChild(btn);
-    copyFieldsEl.appendChild(row);
-  });
+  }
+  parent.appendChild(row);
 }
 
 let _irsUrl = 'https://www.irs.gov/payments/direct-pay';

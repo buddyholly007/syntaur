@@ -3943,19 +3943,25 @@ pub async fn handle_taxpayer_profile_get(
              city, state, zip, phone, email, filing_status, spouse_first, spouse_last, spouse_ssn_encrypted, \
              spouse_dob, occupation, spouse_occupation FROM taxpayer_profiles WHERE user_id = ? AND tax_year = ?",
             rusqlite::params![uid, year],
-            |r| Ok(serde_json::json!({
+            |r| {
+                let ssn_raw: Option<String> = r.get(2)?;
+                let spouse_ssn_raw: Option<String> = r.get(14)?;
+                Ok(serde_json::json!({
                 "first_name": r.get::<_, Option<String>>(0)?, "last_name": r.get::<_, Option<String>>(1)?,
-                "ssn_last4": r.get::<_, Option<String>>(2)?.map(|s| if s.len()>=4 { format!("***-**-{}", &s[s.len()-4..]) } else { s }),
+                "ssn": ssn_raw.clone(),
+                "ssn_last4": ssn_raw.map(|s| if s.len()>=4 { format!("***-**-{}", &s[s.len()-4..]) } else { s }),
                 "date_of_birth": r.get::<_, Option<String>>(3)?,
                 "address_line1": r.get::<_, Option<String>>(4)?, "address_line2": r.get::<_, Option<String>>(5)?,
                 "city": r.get::<_, Option<String>>(6)?, "state": r.get::<_, Option<String>>(7)?, "zip": r.get::<_, Option<String>>(8)?,
                 "phone": r.get::<_, Option<String>>(9)?, "email": r.get::<_, Option<String>>(10)?,
                 "filing_status": r.get::<_, String>(11)?,
                 "spouse_first": r.get::<_, Option<String>>(12)?, "spouse_last": r.get::<_, Option<String>>(13)?,
-                "spouse_ssn_last4": r.get::<_, Option<String>>(14)?.map(|s| if s.len()>=4 { format!("***-**-{}", &s[s.len()-4..]) } else { s }),
+                "spouse_ssn": spouse_ssn_raw.clone(),
+                "spouse_ssn_last4": spouse_ssn_raw.map(|s| if s.len()>=4 { format!("***-**-{}", &s[s.len()-4..]) } else { s }),
                 "spouse_dob": r.get::<_, Option<String>>(15)?,
                 "occupation": r.get::<_, Option<String>>(16)?, "spouse_occupation": r.get::<_, Option<String>>(17)?,
-            })),
+                }))
+            },
         ).ok();
 
         let mut dep_stmt = conn.prepare(
