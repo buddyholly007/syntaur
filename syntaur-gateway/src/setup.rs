@@ -544,10 +544,6 @@ pub struct ModuleToggleResponse {
 }
 
 
-/// GET /modules — serve the module management page.
-pub async fn handle_modules_page() -> axum::response::Html<&'static str> {
-    axum::response::Html(include_str!("../static/modules.html"))
-}
 
 pub async fn handle_journal_page() -> axum::response::Html<&'static str> {
     axum::response::Html(include_str!("../static/journal.html"))

@@ -35,12 +35,30 @@ fn read_saved_url() -> Option<String> {
     Some(rest[q1..q2].to_string())
 }
 
+/// Open a URL in the system's default browser.
+fn open_in_system_browser(url: &str) {
+    #[cfg(target_os = "linux")]
+    { let _ = std::process::Command::new("xdg-open").arg(url).spawn(); }
+    #[cfg(target_os = "macos")]
+    { let _ = std::process::Command::new("open").arg(url).spawn(); }
+    #[cfg(target_os = "windows")]
+    { let _ = std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn(); }
+}
+
+/// Check if a URL is internal (belongs to the Syntaur gateway) or external.
+fn is_external_url(url: &str, gateway_origin: &str) -> bool {
+    if url.starts_with(gateway_origin) { return false; }
+    if url.starts_with("about:") || url.starts_with("data:") || url.starts_with("blob:") { return false; }
+    if url.starts_with("javascript:") { return false; }
+    url.starts_with("http://") || url.starts_with("https://")
+}
+
 #[cfg(target_os = "linux")]
 fn run_viewer(url: &str) -> Result<(), String> {
     use gtk4::prelude::*;
     use gtk4::{Application, ApplicationWindow};
     use webkit6::prelude::*;
-    use webkit6::WebView;
+    use webkit6::{WebView, NavigationPolicyDecision, PolicyDecisionType};
 
     let app = Application::builder()
         .application_id("dev.syntaur.viewer")
@@ -59,8 +77,30 @@ fn run_viewer(url: &str) -> Result<(), String> {
         let webview = WebView::new();
         webview.set_vexpand(true);
         webview.set_hexpand(true);
-        webview.load_uri(&url_owned);
 
+        // Intercept external links — open in system browser
+        let origin = url_owned.clone();
+        webview.connect_decide_policy(move |_wv, decision, decision_type| {
+            if decision_type == PolicyDecisionType::NavigationAction {
+                if let Some(nav) = decision.downcast_ref::<NavigationPolicyDecision>() {
+                    if let Some(mut action) = nav.navigation_action() {
+                        if let Some(request) = action.request() {
+                            if let Some(uri) = request.uri() {
+                                let uri_str = uri.to_string();
+                                if is_external_url(&uri_str, &origin) {
+                                    open_in_system_browser(&uri_str);
+                                    decision.ignore();
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            false
+        });
+
+        webview.load_uri(&url_owned);
         window.set_child(Some(&webview));
         window.present();
     });
@@ -79,6 +119,7 @@ fn run_viewer(url: &str) -> Result<(), String> {
     };
     use wry::WebViewBuilder;
 
+    let gateway_origin = url.to_string();
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
         .with_title(WINDOW_TITLE)
@@ -88,6 +129,14 @@ fn run_viewer(url: &str) -> Result<(), String> {
 
     let _webview = WebViewBuilder::new()
         .with_url(url)
+        .with_navigation_handler(move |uri| {
+            if is_external_url(&uri, &gateway_origin) {
+                open_in_system_browser(&uri);
+                false // block navigation in webview
+            } else {
+                true // allow internal navigation
+            }
+        })
         .build(&window)
         .map_err(|e| format!("webview: {}", e))?;
 
@@ -109,6 +158,7 @@ fn run_viewer(url: &str) -> Result<(), String> {
     };
     use wry::WebViewBuilder;
 
+    let gateway_origin = url.to_string();
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
         .with_title(WINDOW_TITLE)
@@ -119,6 +169,14 @@ fn run_viewer(url: &str) -> Result<(), String> {
     let _webview = WebViewBuilder::new()
         .with_url(url)
         .with_additional_browser_args("--disable-gpu --disable-software-rasterizer")
+        .with_navigation_handler(move |uri| {
+            if is_external_url(&uri, &gateway_origin) {
+                open_in_system_browser(&uri);
+                false
+            } else {
+                true
+            }
+        })
         .build(&window)
         .map_err(|e| format!("webview: {}", e))?;
 

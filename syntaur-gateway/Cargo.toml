@@ -31,6 +31,7 @@ rand = "0.8"
 mdns-sd = "0.13"
 sha2 = "0.10"
 async-stream = "0.3"
+maud = "0.26"
 serde_yaml = "0.9"
 
 # Phase 0 voice skill router: pure-Rust ONNX embeddings for find_tool dispatch.
