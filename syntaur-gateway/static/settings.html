@@ -281,6 +281,47 @@
         <span id="setup-result" class="text-sm mt-2 block"></span>
       </div>
 
+      <div class="card" id="gpu-assignment-card">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="font-medium">GPU & Model Assignment</h3>
+          <button onclick="scanGpus()" class="text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 px-3 py-1 rounded-lg" id="gpu-scan-btn">Scan Network</button>
+        </div>
+        <p class="text-sm text-gray-400 mb-3">Syntaur can use multiple GPUs across your network. Assign each GPU a role for optimal performance.</p>
+        <div id="gpu-list" class="space-y-2">
+          <p class="text-xs text-gray-600">Click "Scan Network" to detect GPUs on your LAN.</p>
+        </div>
+        <div id="gpu-assignments" class="hidden mt-4 pt-3 border-t border-gray-700">
+          <p class="text-xs text-gray-500 font-medium mb-2">Model Assignments</p>
+          <div class="space-y-2 text-sm">
+            <div class="flex items-center justify-between p-2 rounded-lg bg-gray-900">
+              <div><span class="text-gray-400">Chat / Agent</span><p class="text-[10px] text-gray-600">Main conversational AI, tool calling</p></div>
+              <select id="assign-chat" class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-xs text-gray-300 outline-none w-48" onchange="saveAssignment('primary', this.value)">
+                <option value="">Cloud only</option>
+              </select>
+            </div>
+            <div class="flex items-center justify-between p-2 rounded-lg bg-gray-900">
+              <div><span class="text-gray-400">Vision / OCR</span><p class="text-[10px] text-gray-600">Receipt scanning, document analysis</p></div>
+              <select id="assign-vision" class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-xs text-gray-300 outline-none w-48" onchange="saveAssignment('vision', this.value)">
+                <option value="">Cloud only</option>
+              </select>
+            </div>
+            <div class="flex items-center justify-between p-2 rounded-lg bg-gray-900">
+              <div><span class="text-gray-400">Voice / TTS</span><p class="text-[10px] text-gray-600">Speech-to-text, text-to-speech</p></div>
+              <select id="assign-voice" class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-xs text-gray-300 outline-none w-48" onchange="saveAssignment('voice', this.value)">
+                <option value="">Cloud only</option>
+              </select>
+            </div>
+            <div class="flex items-center justify-between p-2 rounded-lg bg-gray-900">
+              <div><span class="text-gray-400">Fast / Classification</span><p class="text-[10px] text-gray-600">Quick tasks, categorization, routing</p></div>
+              <select id="assign-fast" class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-xs text-gray-300 outline-none w-48" onchange="saveAssignment('fast', this.value)">
+                <option value="">Use chat model</option>
+              </select>
+            </div>
+          </div>
+          <span id="assign-result" class="text-xs mt-2 block"></span>
+        </div>
+      </div>
+
       <div class="card">
         <h3 class="font-medium mb-2">Test a Connection</h3>
         <p class="text-sm text-gray-400 mb-4">Verify an LLM endpoint is reachable and responding.</p>
@@ -2097,6 +2138,74 @@ async function saveProvider(name, baseUrl, apiKey, apiType, modelId) {
     result.className = 'text-sm mt-2 block text-red-400';
     result.textContent = 'Error: ' + e.message;
   }
+}
+
+// GPU scanning and assignment
+async function scanGpus() {
+  const btn = document.getElementById('gpu-scan-btn');
+  const list = document.getElementById('gpu-list');
+  btn.textContent = 'Scanning...'; btn.disabled = true;
+  list.innerHTML = '<p class="text-xs text-gray-400">Scanning your network for GPUs... This takes ~30 seconds.</p>';
+  try {
+    const resp = await fetch('/api/setup/scan', { headers: { 'Authorization': 'Bearer ' + token } });
+    const data = await resp.json();
+    const gpus = [];
+    // Local GPU
+    if (data.gpu_name) gpus.push({ host: 'localhost', name: data.gpu_name, vram: data.gpu_vram_gb + ' GB', local: true });
+    // Network GPUs
+    if (data.network_gpus) data.network_gpus.forEach(g => gpus.push({ host: g.host, name: g.name, vram: g.vram_gb + ' GB', local: false }));
+    // Network LLMs (already running)
+    const llms = data.network_llms || [];
+
+    if (gpus.length === 0 && llms.length === 0) {
+      list.innerHTML = '<p class="text-xs text-gray-500">No GPUs or LLM services found on your network. You can still use cloud providers above.</p>';
+      btn.textContent = 'Scan Network'; btn.disabled = false;
+      return;
+    }
+
+    list.innerHTML = gpus.map(g => {
+      const vramNum = parseFloat(g.vram);
+      const recModel = vramNum >= 20 ? '70B+ (Qwen 72B, Llama 70B)' : vramNum >= 10 ? '27B-34B (Qwen 27B, Mistral)' : vramNum >= 6 ? '7B-8B (Qwen 7B, Llama 8B)' : '3B (Qwen 3B, Phi)';
+      return '<div class="p-3 rounded-lg bg-gray-900 border border-gray-700">' +
+        '<div class="flex items-center justify-between">' +
+        '<div><p class="text-sm text-white font-medium">' + g.name + '</p>' +
+        '<p class="text-[10px] text-gray-500">' + (g.local ? 'This machine' : g.host) + ' &middot; ' + g.vram + ' VRAM</p></div>' +
+        '<span class="badge badge-green text-[10px]">Available</span></div>' +
+        '<p class="text-[10px] text-gray-600 mt-1">Recommended model size: ' + recModel + '</p></div>';
+    }).join('') + llms.map(l => {
+      return '<div class="p-3 rounded-lg bg-gray-900 border border-oc-700">' +
+        '<div class="flex items-center justify-between">' +
+        '<div><p class="text-sm text-white font-medium">' + l.name + '</p>' +
+        '<p class="text-[10px] text-gray-500">' + l.host + ' &middot; ' + (l.models||[]).join(', ') + '</p></div>' +
+        '<span class="badge badge-blue text-[10px]">Running</span></div></div>';
+    }).join('');
+
+    // Populate assignment dropdowns
+    const assigns = document.getElementById('gpu-assignments');
+    assigns.classList.remove('hidden');
+    const options = gpus.map(g => '<option value="' + (g.local ? 'localhost' : g.host) + '">' + g.name + ' (' + (g.local ? 'local' : g.host) + ', ' + g.vram + ')</option>').join('');
+    const llmOpts = llms.map(l => '<option value="' + l.url + '">' + l.name + ' @ ' + l.host + '</option>').join('');
+    ['assign-chat','assign-vision','assign-voice','assign-fast'].forEach(id => {
+      const sel = document.getElementById(id);
+      const defaultOpt = sel.options[0].outerHTML;
+      sel.innerHTML = defaultOpt + options + llmOpts;
+    });
+  } catch(e) {
+    list.innerHTML = '<p class="text-xs text-red-400">Scan failed: ' + e.message + '</p>';
+  }
+  btn.textContent = 'Scan Network'; btn.disabled = false;
+}
+
+async function saveAssignment(role, value) {
+  const result = document.getElementById('assign-result');
+  try {
+    await fetch('/api/settings/provider', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, name: '__gpu_' + role + '__', base_url: value, api_key: '', api: 'openai-completions', model_id: role })
+    });
+    result.textContent = 'Saved ' + role + ' assignment'; result.className = 'text-xs mt-2 block text-green-400';
+    setTimeout(() => { result.textContent = ''; }, 2000);
+  } catch(e) {}
 }
 
 // Save vision model config
