@@ -690,6 +690,8 @@ function renderProviderCard(p) {
     spotify: '&#127925;', youtube: '&#9654;', strava: '&#127939;',
     oura: '&#128131;', anthropic_usage: '&#129302;', openrouter_usage: '&#9889;',
     apple_health: '&#10084;', notebooklm_status: '&#128214;', vault_health: '&#128190;',
+    airplay: '&#128251;', music_assistant: '&#127925;', ios_shortcut_music: '&#128241;',
+    apple_music: '&#127925;',
   };
   const icon = icons[p.id] || '&#128279;';
   const statusBadge = p.connected ? (
@@ -834,6 +836,31 @@ function openSyncModal(providerId) {
         <p class="text-xs text-gray-500">Generating code…</p>
       </div>`;
     setTimeout(() => startPlexPin(), 100);
+  } else if (p.flow === 'airplay') {
+    flowHtml = `${renderInstructions(p.instructions)}
+      <div id="sync-airplay-container" class="mt-3">
+        <p class="text-xs text-gray-500 italic">Scanning network…</p>
+      </div>
+      <button onclick="confirmAirplay()" id="sync-submit-btn" class="w-full mt-3 bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg hidden">Save detected speakers</button>`;
+    setTimeout(() => discoverAirplay(), 100);
+  } else if (p.flow === 'music_assistant') {
+    flowHtml = `${renderInstructions(p.instructions)}
+      <div id="sync-ma-container" class="mt-3">
+        <p class="text-xs text-gray-500 italic">Checking Home Assistant…</p>
+      </div>`;
+    setTimeout(() => probeMusicAssistant(), 100);
+  } else if (p.flow === 'ios_shortcut') {
+    flowHtml = `${renderInstructions(p.instructions)}
+      ${helpLink}
+      <input type="url" id="sync-field-url" class="w-full mt-3 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="https://www.icloud.com/shortcuts/...">
+      <button onclick="submitShortcutUrl('${p.id}')" id="sync-submit-btn" class="w-full mt-3 bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Save</button>
+      <p id="sync-error" class="text-xs text-red-400 mt-2 hidden"></p>`;
+  } else if (p.flow === 'apple_music') {
+    flowHtml = `${renderInstructions(p.instructions)}
+      <div id="sync-am-container" class="mt-3">
+        <p class="text-xs text-gray-500 italic">Preparing bookmarklet…</p>
+      </div>`;
+    setTimeout(() => setupAppleMusic(), 100);
   }
   body.innerHTML = flowHtml;
   document.getElementById('sync-modal').classList.remove('hidden');
@@ -1054,6 +1081,138 @@ async function loadStatusCard(providerId) {
   } catch(e) {
     container.innerHTML = '<p class="text-xs text-red-400">Failed to load: ' + e.message + '</p>';
   }
+}
+
+async function discoverAirplay() {
+  const container = document.getElementById('sync-airplay-container');
+  const saveBtn = document.getElementById('sync-submit-btn');
+  try {
+    const resp = await fetch(`/api/sync/airplay/discover?token=${token}`, { headers: { 'Authorization': 'Bearer ' + token } });
+    const data = await resp.json();
+    const devices = data.devices || [];
+    if (devices.length === 0) {
+      container.innerHTML = '<p class="text-xs text-gray-500 italic">No AirPlay devices found on this network. Make sure they\'re powered on and on the same Wi-Fi.</p>';
+      return;
+    }
+    container.innerHTML = '<p class="text-xs text-gray-400 mb-2">Found ' + devices.length + ' device(s):</p>' +
+      devices.map(d => `<div class="bg-gray-900 rounded-lg p-2 mb-1 text-xs">
+        <div class="text-gray-200">${escapeHtml(d.name)}</div>
+        <div class="text-gray-500">${escapeHtml(d.hostname)} · port ${d.port}${d.model ? ' · ' + escapeHtml(d.model) : ''}</div>
+      </div>`).join('');
+    saveBtn.classList.remove('hidden');
+    window._airplay_devices = devices;
+  } catch(e) {
+    container.innerHTML = '<p class="text-xs text-red-400">Discovery failed: ' + e.message + '</p>';
+  }
+}
+
+async function confirmAirplay() {
+  const devices = window._airplay_devices || [];
+  try {
+    await fetch('/api/sync/connect', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        token: token, provider: 'airplay',
+        credential: { devices: devices },
+        display_name: devices.length + ' speaker(s)',
+      }),
+    });
+    closeSyncModal();
+    await loadSyncProviders();
+  } catch(e) { alert('Save failed: ' + e.message); }
+}
+
+async function probeMusicAssistant() {
+  const container = document.getElementById('sync-ma-container');
+  try {
+    const resp = await fetch(`/api/sync/music_assistant/probe?token=${token}`, { headers: { 'Authorization': 'Bearer ' + token } });
+    const data = await resp.json();
+    const color = data.connected ? 'text-green-400' : 'text-yellow-400';
+    let btn = '';
+    if (data.connected) {
+      btn = `<button onclick="saveMusicAssistant()" class="w-full mt-3 bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Enable in Syntaur</button>`;
+    }
+    container.innerHTML = `<div class="bg-gray-900 rounded-lg p-3 text-xs">
+      <p class="${color} font-medium mb-2">● ${escapeHtml(data.status)}</p>
+      <p class="text-gray-400">${escapeHtml(data.hint || '')}</p>
+      ${btn}
+    </div>`;
+  } catch(e) {
+    container.innerHTML = '<p class="text-xs text-red-400">Probe failed: ' + e.message + '</p>';
+  }
+}
+
+async function saveMusicAssistant() {
+  try {
+    await fetch('/api/sync/connect', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        token: token, provider: 'music_assistant',
+        credential: { routed_via: 'home_assistant' },
+        display_name: 'via Home Assistant',
+      }),
+    });
+    closeSyncModal();
+    await loadSyncProviders();
+  } catch(e) { alert('Save failed: ' + e.message); }
+}
+
+async function submitShortcutUrl(providerId) {
+  const url = document.getElementById('sync-field-url').value.trim();
+  if (!url) { showSyncError('Shortcut URL required'); return; }
+  const btn = document.getElementById('sync-submit-btn');
+  btn.textContent = 'Saving…'; btn.disabled = true;
+  try {
+    const resp = await fetch('/api/sync/connect', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: token, provider: providerId, credential: { url: url } }),
+    });
+    const data = await resp.json();
+    if (data.success) { closeSyncModal(); await loadSyncProviders(); }
+    else { showSyncError(data.error || 'Failed'); }
+  } catch(e) { showSyncError(e.message); }
+  btn.textContent = 'Save'; btn.disabled = false;
+}
+
+function setupAppleMusic() {
+  const container = document.getElementById('sync-am-container');
+  const origin = window.location.origin;
+  const bookmarklet = `javascript:(function(){var m=MusicKit.getInstance();if(!m||!m.musicUserToken){alert('Sign into music.apple.com first, then click this again.');return;}var d={dev:m.developerToken,mut:m.musicUserToken};window.location.href='${origin}/apple_music_capture#'+encodeURIComponent(JSON.stringify(d));})()`;
+  // sessionStorage needs to carry the Syntaur token across the capture redirect
+  try { localStorage.setItem('syntaur_token', token); } catch(e) {}
+  container.innerHTML = `
+    <div class="space-y-3 text-sm text-gray-300">
+      <div class="flex items-start gap-2">
+        <span class="bg-oc-600 text-white rounded-full w-6 h-6 flex items-center justify-center flex-shrink-0 text-xs font-bold">1</span>
+        <div class="flex-1">
+          <p>Open Apple Music in a new tab.</p>
+          <a href="https://music.apple.com" target="_blank" class="inline-flex items-center gap-1.5 bg-gray-900 border border-gray-700 hover:border-oc-500 rounded-lg px-3 py-2 text-oc-500 text-xs mt-1">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3"/></svg>
+            music.apple.com
+          </a>
+        </div>
+      </div>
+      <div class="flex items-start gap-2">
+        <span class="bg-oc-600 text-white rounded-full w-6 h-6 flex items-center justify-center flex-shrink-0 text-xs font-bold">2</span>
+        <div class="flex-1">
+          <p>Sign in with your Apple ID (if you aren't already).</p>
+        </div>
+      </div>
+      <div class="flex items-start gap-2">
+        <span class="bg-oc-600 text-white rounded-full w-6 h-6 flex items-center justify-center flex-shrink-0 text-xs font-bold">3</span>
+        <div class="flex-1">
+          <p>Drag this button to your bookmarks bar:</p>
+          <a draggable="true" href="${bookmarklet}" onclick="event.preventDefault(); alert('Drag this button to your bookmarks bar instead of clicking.');" class="inline-block mt-1 bg-oc-600 hover:bg-oc-700 text-white px-3 py-1.5 rounded-lg text-xs cursor-grab">🎵 Connect Syntaur</a>
+          <p class="text-xs text-gray-500 mt-1">Your browser should let you drag this link to the bookmarks bar.</p>
+        </div>
+      </div>
+      <div class="flex items-start gap-2">
+        <span class="bg-oc-600 text-white rounded-full w-6 h-6 flex items-center justify-center flex-shrink-0 text-xs font-bold">4</span>
+        <div class="flex-1">
+          <p>On the music.apple.com tab, click the bookmark. You'll be redirected back here automatically.</p>
+        </div>
+      </div>
+    </div>`;
 }
 
 async function disconnectSync(providerId, name) {

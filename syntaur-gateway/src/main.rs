@@ -3769,6 +3769,14 @@ async fn main() {
         .route("/api/sync/homeassistant/discover", get(sync::handle_ha_discover))
         .route("/api/sync/plex/pin", post(sync::handle_plex_pin_create))
         .route("/api/sync/plex/poll", post(sync::handle_plex_pin_poll))
+        .route("/api/sync/airplay/discover", get(sync::handle_airplay_discover))
+        .route("/api/sync/music_assistant/probe", get(sync::handle_music_assistant_probe))
+        .route("/api/sync/apple_music/dev_token", get(sync::handle_apple_music_dev_token))
+        .route("/api/sync/apple_music/save", post(sync::handle_apple_music_save))
+        .route("/api/sync/apple_music/playlists", get(sync::handle_apple_music_playlists))
+        .route("/api/sync/apple_music/search", get(sync::handle_apple_music_search))
+        .route("/api/sync/apple_music/bookmarklet", get(sync::handle_apple_music_bookmarklet))
+        .route("/apple_music_capture", get(sync::handle_apple_music_capture_page))
         .with_state(Arc::clone(&state))
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),
