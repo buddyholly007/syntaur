@@ -164,15 +164,26 @@
   <!-- Sync tab -->
   <div class="tab-content hidden" id="tab-sync">
     <div class="space-y-4">
+      <!-- Overview / Starter Kits -->
       <div class="card">
-        <div class="flex items-center justify-between mb-3">
-          <div>
-            <h3 class="font-medium">Connect Your Accounts</h3>
-            <p class="text-xs text-gray-500 mt-1">Link email, calendars, banks, and more. OAuth connections auto-renew; API keys get daily health checks.</p>
-          </div>
+        <div class="flex items-center justify-between mb-2">
+          <h3 class="font-medium">Sync</h3>
           <button onclick="loadSyncProviders()" class="text-xs text-gray-400 hover:text-gray-200">&#8634; Refresh</button>
         </div>
-        <div id="sync-categories" class="space-y-4">
+        <p class="text-sm text-gray-400 mb-4">Connect apps and services so Peter can act on your behalf. OAuth auto-refreshes every cycle; API keys get a daily health check and tell you when something needs attention.</p>
+        <h4 class="text-xs uppercase tracking-wider text-gray-500 mb-3">What do you want Syntaur to do?</h4>
+        <div id="sync-bundles" class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          <!-- Populated by JS -->
+        </div>
+      </div>
+
+      <!-- Full provider list by category -->
+      <div class="card">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="font-medium text-sm">All services</h3>
+          <input type="text" id="sync-filter" placeholder="Filter…" oninput="filterProviders(this.value)" class="bg-gray-900 border border-gray-700 rounded-lg text-xs text-gray-300 px-2 py-1 w-32 focus:w-48 transition-all outline-none focus:border-oc-500">
+        </div>
+        <div id="sync-categories" class="space-y-5">
           <p class="text-xs text-gray-500 italic">Loading providers…</p>
         </div>
       </div>
@@ -637,6 +648,117 @@ async function loadSyncProviders() {
   }
 }
 
+const CATEGORY_DESCRIPTIONS = {
+  'Email': 'Connect inboxes so Peter can find receipts and important messages.',
+  'Calendar': 'Merge calendars from multiple sources. Events become voice-queryable.',
+  'Messaging': 'Where Peter reaches out to you (reminders, approvals, alerts).',
+  'Finance': 'Banks, brokers, exchanges, and payment processors. Feed the tax module.',
+  'Social': 'Publish and monitor. Used by the Crimson Lantern pipeline.',
+  'Developer': 'Dev tools that surface on your dashboard.',
+  'Smart Home': 'Home Assistant is the hub. Connecting it unlocks HomePod music, Matter devices, and voice control of every HA entity.',
+  'Media': 'Music, video, and TV sources Peter can query or control.',
+  'Music': 'These four work together. Connect Home Assistant + Apple Music for the best experience (HomePod playback). iOS Shortcut is a fallback.',
+  'Health': 'Activity, sleep, and biometrics for daily check-ins.',
+  'AI': 'Usage tracking for the models that power Syntaur and Peter.',
+  'Storage': 'Where your Syntaur data lives. Typically info-only health cards.',
+};
+
+const STARTER_BUNDLES = [
+  {
+    id: 'peter_music',
+    title: '🎵 Play music on HomePod',
+    subtitle: 'Peter controls Apple Music on your HomePod or Apple TV via Home Assistant.',
+    providers: ['home_assistant', 'apple_music'],
+    optional: ['ios_shortcut_music', 'airplay'],
+  },
+  {
+    id: 'peter_calendar',
+    title: '📅 Calendar-aware Peter',
+    subtitle: 'Peter can add events, check your schedule, and subscribe to iCloud/Google calendars.',
+    providers: ['ics_subscription'],
+    optional: ['google_calendar', 'apple_calendar'],
+  },
+  {
+    id: 'tax_finance',
+    title: '💰 Automatic tax tracking',
+    subtitle: 'Bank feeds, broker holdings, and receipts land in the tax module automatically.',
+    providers: ['plaid', 'stripe'],
+    optional: ['simplefin', 'alpaca', 'coinbase', 'crypto_wallet', 'gmail'],
+  },
+  {
+    id: 'smart_home',
+    title: '🏠 Smart home voice control',
+    subtitle: 'Peter controls every device paired to Home Assistant — lights, locks, thermostats, speakers.',
+    providers: ['home_assistant'],
+    optional: ['airplay'],
+  },
+  {
+    id: 'peter_notifications',
+    title: '💬 Peter reaches out',
+    subtitle: "Reminders, alerts, and approval requests come to your phone.",
+    providers: ['telegram'],
+    optional: [],
+  },
+  {
+    id: 'quant_self',
+    title: '❤️ Quantified self',
+    subtitle: "Ask Peter 'how'd I sleep?' or 'what did I eat yesterday?'",
+    providers: ['oura'],
+    optional: ['strava', 'apple_health'],
+  },
+];
+
+function renderBundles() {
+  const box = document.getElementById('sync-bundles');
+  if (!box) return;
+  box.innerHTML = STARTER_BUNDLES.map(b => {
+    const required = b.providers.map(id => syncProviders.find(p => p.id === id)).filter(Boolean);
+    const optional = b.optional.map(id => syncProviders.find(p => p.id === id)).filter(Boolean);
+    const reqConnected = required.filter(p => p.connected).length;
+    const pct = required.length ? Math.round((reqConnected / required.length) * 100) : 0;
+    const allConnected = required.every(p => p.connected);
+    const borderCls = allConnected ? 'border-green-700/50' : 'border-gray-700';
+    const badge = allConnected
+      ? '<span class="badge badge-green">Ready</span>'
+      : `<span class="badge badge-gray">${reqConnected}/${required.length}</span>`;
+    return `<div class="bg-gray-900 border ${borderCls} rounded-lg p-3 cursor-pointer hover:border-oc-500 transition-colors" onclick="showBundleDetail('${b.id}')">
+      <div class="flex items-center justify-between mb-1">
+        <p class="font-medium text-sm">${escapeHtml(b.title)}</p>
+        ${badge}
+      </div>
+      <p class="text-xs text-gray-500 leading-relaxed">${escapeHtml(b.subtitle)}</p>
+      <div class="mt-2 flex items-center gap-1 flex-wrap">
+        ${required.map(p => `<span class="text-[10px] px-1.5 py-0.5 rounded ${p.connected ? 'bg-green-900/40 text-green-400' : 'bg-gray-800 text-gray-500'}">${escapeHtml(p.name)}${p.connected ? ' ✓' : ''}</span>`).join('')}
+        ${optional.filter(p => p.connected).map(p => `<span class="text-[10px] px-1.5 py-0.5 rounded bg-green-900/40 text-green-400">${escapeHtml(p.name)} ✓</span>`).join('')}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function showBundleDetail(bundleId) {
+  const b = STARTER_BUNDLES.find(x => x.id === bundleId);
+  if (!b) return;
+  // Find the first disconnected required provider, open its modal
+  const required = b.providers.map(id => syncProviders.find(p => p.id === id)).filter(Boolean);
+  const firstMissing = required.find(p => !p.connected);
+  if (firstMissing) {
+    openSyncModal(firstMissing.id);
+  } else {
+    // All required done — offer to connect optional ones
+    const optional = b.optional.map(id => syncProviders.find(p => p.id === id)).filter(Boolean);
+    const firstOptional = optional.find(p => !p.connected);
+    if (firstOptional) openSyncModal(firstOptional.id);
+    else {
+      // All done — scroll to relevant category
+      const p = required[0] || optional[0];
+      if (p) {
+        const el = document.querySelector(`[data-category="${CSS.escape(p.category)}"]`);
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }
+  }
+}
+
 function renderSyncProviders() {
   const box = document.getElementById('sync-categories');
   if (!syncProviders.length) { box.innerHTML = '<p class="text-xs text-gray-500 italic">No providers.</p>'; return; }
@@ -644,15 +766,41 @@ function renderSyncProviders() {
   for (const p of syncProviders) {
     (byCat[p.category] = byCat[p.category] || []).push(p);
   }
-  const catOrder = ['Email', 'Calendar', 'Messaging', 'Finance', 'Social'];
+  const catOrder = ['Music', 'Smart Home', 'Calendar', 'Messaging', 'Finance', 'Email', 'Developer', 'Social', 'Health', 'AI', 'Media', 'Storage'];
   const ordered = catOrder.filter(c => byCat[c]).concat(Object.keys(byCat).filter(c => !catOrder.includes(c)));
   box.innerHTML = ordered.map(cat => {
-    const cards = byCat[cat].map(p => renderProviderCard(p)).join('');
-    return `<div>
-      <h4 class="text-xs uppercase tracking-wider text-gray-500 mb-2">${escapeHtml(cat)}</h4>
+    // Sort within category: connected first, then alphabetical
+    const sorted = [...byCat[cat]].sort((a, b) => {
+      if (a.connected !== b.connected) return a.connected ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+    const cards = sorted.map(p => renderProviderCard(p)).join('');
+    const desc = CATEGORY_DESCRIPTIONS[cat] || '';
+    return `<div data-category="${escapeHtml(cat)}">
+      <div class="mb-2">
+        <h4 class="text-xs uppercase tracking-wider text-gray-400 font-semibold">${escapeHtml(cat)}</h4>
+        ${desc ? `<p class="text-[11px] text-gray-600 mt-0.5">${escapeHtml(desc)}</p>` : ''}
+      </div>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">${cards}</div>
     </div>`;
   }).join('');
+  renderBundles();
+}
+
+function filterProviders(query) {
+  const q = (query || '').toLowerCase().trim();
+  document.querySelectorAll('#sync-categories [data-provider]').forEach(el => {
+    const pid = el.dataset.provider;
+    const p = syncProviders.find(x => x.id === pid);
+    if (!p) return;
+    const match = !q || p.name.toLowerCase().includes(q) || p.category.toLowerCase().includes(q) || (p.unlocks || '').toLowerCase().includes(q);
+    el.style.display = match ? '' : 'none';
+  });
+  // Hide empty categories
+  document.querySelectorAll('#sync-categories [data-category]').forEach(catEl => {
+    const visibleCards = catEl.querySelectorAll('[data-provider]:not([style*="display: none"])');
+    catEl.style.display = visibleCards.length === 0 && q ? 'none' : '';
+  });
 }
 
 function renderInstructions(text) {
@@ -694,14 +842,45 @@ function renderProviderCard(p) {
     apple_music: '&#127925;',
   };
   const icon = icons[p.id] || '&#128279;';
-  const statusBadge = p.connected ? (
-    p.status === 'needs_reconnect' ?
-      '<span class="badge badge-red">Reconnect</span>' :
-      '<span class="badge badge-green">Connected</span>'
-  ) : '';
-  const sub = p.connected && p.display_name ? `<p class="text-[11px] text-gray-500 truncate">${escapeHtml(p.display_name)}</p>` : '';
-  const lastSync = p.last_sync_at ? `<p class="text-[10px] text-gray-600">synced ${relTime(p.last_sync_at)}</p>` : '';
-  return `<div class="bg-gray-900 border border-gray-700 hover:border-gray-600 rounded-lg p-3 transition-colors">
+  let statusBadge = '';
+  let action = '';
+
+  if (p.info_only) {
+    statusBadge = '<span class="badge badge-blue">Info</span>';
+    action = `<button onclick="openSyncModal('${p.id}')" class="text-xs text-oc-500 hover:text-oc-400">View status</button>`;
+  } else if (p.needs_oauth_config) {
+    statusBadge = '<span class="badge badge-yellow" title="OAuth app registration required — admin setup">Setup needed</span>';
+    action = `<button class="text-xs text-gray-500 cursor-not-allowed" disabled title="This provider requires an OAuth app (client_id + secret) registered in config.oauth.providers. Not available in this installation yet.">Not available</button>`;
+  } else if (p.connected) {
+    if (p.status === 'needs_reconnect') {
+      statusBadge = '<span class="badge badge-red">Reconnect</span>';
+      action = `<button onclick="openSyncModal('${p.id}')" class="text-xs text-oc-500 hover:text-oc-400">Reconnect</button>
+                <button onclick="disconnectSyncStyled('${p.id}','${escapeHtmlAttr(p.name)}')" class="text-xs text-gray-400 hover:text-red-400">Remove</button>`;
+    } else {
+      statusBadge = '<span class="badge badge-green">Connected</span>';
+      action = `<button onclick="testSyncProvider('${p.id}')" class="text-xs text-gray-400 hover:text-gray-200" title="Verify credentials still work">Test</button>
+                <button onclick="disconnectSyncStyled('${p.id}','${escapeHtmlAttr(p.name)}')" class="text-xs text-gray-400 hover:text-red-400">Disconnect</button>`;
+    }
+  } else {
+    action = `<button onclick="openSyncModal('${p.id}')" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-3 py-1 rounded-lg">Connect</button>`;
+  }
+
+  const subLine = p.connected && p.display_name
+    ? `<p class="text-[11px] text-gray-500 truncate">${escapeHtml(p.display_name)}</p>`
+    : '';
+  const unlocksText = (p.connected && p.unlocks)
+    ? `<p class="text-[11px] text-gray-400 mt-1 leading-snug">${escapeHtml(p.unlocks)}</p>`
+    : (!p.connected && !p.info_only && p.unlocks)
+      ? `<p class="text-[11px] text-gray-600 mt-1 leading-snug italic">${escapeHtml(p.unlocks)}</p>`
+      : '';
+  const lastSync = p.connected && p.last_sync_at
+    ? `<p class="text-[10px] text-gray-600 mt-0.5">checked ${relTime(p.last_check_at || p.last_sync_at)}</p>`
+    : '';
+  const errorLine = p.connected && p.last_error
+    ? `<p class="text-[10px] text-red-400 mt-0.5 truncate" title="${escapeHtmlAttr(p.last_error)}">${escapeHtml(p.last_error.substring(0, 60))}</p>`
+    : '';
+
+  return `<div class="bg-gray-900 border border-gray-700 hover:border-gray-600 rounded-lg p-3 transition-colors" data-provider="${escapeHtml(p.id)}">
     <div class="flex items-start gap-3">
       <span class="text-2xl flex-shrink-0">${icon}</span>
       <div class="flex-1 min-w-0">
@@ -709,17 +888,84 @@ function renderProviderCard(p) {
           <p class="font-medium text-sm truncate">${escapeHtml(p.name)}</p>
           ${statusBadge}
         </div>
-        ${sub}${lastSync}
-        <div class="mt-2 flex gap-2">
-          ${p.connected ?
-            `<button onclick="disconnectSync('${p.id}','${escapeHtml(p.name)}')" class="text-xs text-gray-400 hover:text-red-400">Disconnect</button>${p.status === 'needs_reconnect' ? `<button onclick="openSyncModal('${p.id}')" class="text-xs text-oc-500 hover:text-oc-400">Reconnect</button>` : ''}` :
-            `<button onclick="openSyncModal('${p.id}')" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-3 py-1 rounded-lg">Connect</button>`
-          }
-        </div>
+        ${subLine}
+        ${unlocksText}
+        ${lastSync}
+        ${errorLine}
+        <div class="mt-2 flex gap-2 flex-wrap">${action}</div>
       </div>
     </div>
   </div>`;
 }
+
+function escapeHtmlAttr(s) { return escapeHtml(s).replace(/'/g, '&#39;'); }
+
+async function testSyncProvider(providerId) {
+  const p = syncProviders.find(x => x.id === providerId);
+  if (!p) return;
+  // Re-open the provider's modal with a test indicator — simpler than a new endpoint for every case
+  // Or just call /api/sync/providers to refresh status
+  showToast('Testing ' + p.name + '…');
+  try {
+    const resp = await fetch(`/api/sync/providers?token=${token}`, { headers: { 'Authorization': 'Bearer ' + token } });
+    const data = await resp.json();
+    syncProviders = data.providers || [];
+    renderSyncProviders();
+    const updated = syncProviders.find(x => x.id === providerId);
+    if (updated && updated.status === 'active') showToast(p.name + ' ✓ Still connected');
+    else showToast(p.name + ' — needs attention');
+  } catch(e) { showToast('Test failed: ' + e.message); }
+}
+
+function disconnectSyncStyled(providerId, name) {
+  showConfirm(`Disconnect ${name}?`, `Syntaur will stop syncing with ${name}. You can reconnect anytime.`, async () => {
+    try {
+      await fetch(`/api/sync/connections/${providerId}?token=${token}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': 'Bearer ' + token },
+      });
+      await loadSyncProviders();
+      showToast(`${name} disconnected`);
+    } catch(e) { showToast('Disconnect failed: ' + e.message); }
+  });
+}
+
+function showToast(msg) {
+  let t = document.getElementById('sync-toast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'sync-toast';
+    t.className = 'fixed bottom-4 right-4 bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-sm text-gray-200 shadow-lg z-50 transition-opacity';
+    document.body.appendChild(t);
+  }
+  t.textContent = msg;
+  t.style.opacity = '1';
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => { t.style.opacity = '0'; }, 3000);
+}
+
+function showConfirm(title, message, onConfirm) {
+  const existing = document.getElementById('sync-confirm-modal');
+  if (existing) existing.remove();
+  const modal = document.createElement('div');
+  modal.id = 'sync-confirm-modal';
+  modal.className = 'fixed inset-0 bg-black/75 z-50 flex items-center justify-center p-4';
+  modal.innerHTML = `
+    <div class="bg-gray-800 rounded-xl border border-gray-700 max-w-sm w-full p-5">
+      <h3 class="font-medium text-gray-100 mb-2">${escapeHtml(title)}</h3>
+      <p class="text-sm text-gray-400 mb-4">${escapeHtml(message)}</p>
+      <div class="flex gap-2 justify-end">
+        <button onclick="document.getElementById('sync-confirm-modal').remove()" class="text-sm text-gray-400 hover:text-gray-200 px-3 py-1.5">Cancel</button>
+        <button id="sync-confirm-ok" class="text-sm bg-red-600 hover:bg-red-700 text-white px-3 py-1.5 rounded-lg">Disconnect</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  document.getElementById('sync-confirm-ok').onclick = async () => {
+    modal.remove();
+    await onConfirm();
+  };
+}
+
 
 function relTime(ts) {
   const sec = Math.floor(Date.now()/1000) - ts;
@@ -1228,7 +1474,16 @@ async function disconnectSync(providerId, name) {
 
 function showSyncError(msg) {
   const el = document.getElementById('sync-error');
-  if (el) { el.textContent = msg; el.classList.remove('hidden'); }
+  if (!el) return;
+  // Map common API errors to friendlier hints
+  let friendly = msg;
+  if (/401|unauthorized/i.test(msg)) friendly = 'That token/key was rejected. Double-check you copied the whole thing.';
+  else if (/403|forbidden/i.test(msg)) friendly = 'The key works but doesn\'t have permission. Check the scopes.';
+  else if (/404/i.test(msg)) friendly = 'Endpoint not found. URL might be wrong.';
+  else if (/timeout|timed out/i.test(msg)) friendly = 'Connection timed out. Is the service reachable from this network?';
+  else if (/fetch failed|error sending request/i.test(msg)) friendly = 'Could not reach the service. Check the URL and that it\'s running.';
+  el.textContent = friendly;
+  el.classList.remove('hidden');
 }
 
 function escapeHtml(s) {

@@ -42,11 +42,13 @@ pub enum FlowKind {
 pub struct ProviderDef {
     pub id: &'static str,
     pub name: &'static str,
-    pub category: &'static str, // "Email", "Calendar", "Finance", "Social", "Messaging"
+    pub category: &'static str,
     pub flow: FlowKind,
     pub instructions: &'static str,
     pub help_url: &'static str,
-    pub scopes: &'static [(&'static str, &'static str)], // (id, label) for per-scope toggles
+    pub scopes: &'static [(&'static str, &'static str)],
+    pub unlocks: &'static str,   // One line shown post-connect: "what can Peter do now?"
+    pub info_only: bool,         // Status-card style — no Connect button
 }
 
 pub fn catalog() -> Vec<ProviderDef> {
@@ -57,6 +59,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "Sign in with Google to let Syntaur read your inbox for receipts and confirmations.",
             help_url: "",
             scopes: &[("readonly", "Read-only"), ("modify", "Read + organize")],
+            unlocks: "Peter can scan your inbox for receipts and important messages.",
+            info_only: false,
         },
         ProviderDef {
             id: "google_calendar", name: "Google Calendar", category: "Calendar",
@@ -64,6 +68,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "Sign in with Google to sync your calendar events.",
             help_url: "",
             scopes: &[("readonly", "Read-only"), ("events", "Read + write events")],
+            unlocks: "Your Google events appear alongside Syntaur's calendar. Peter can add/move events.",
+            info_only: false,
         },
         ProviderDef {
             id: "ics_subscription", name: "ICS / Web Calendar", category: "Calendar",
@@ -71,6 +77,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "Paste any .ics URL (iCloud, Google Calendar share link, webcal://). Syntaur fetches events every hour.",
             help_url: "https://support.google.com/calendar/answer/37648",
             scopes: &[],
+            unlocks: "Any .ics feed (work calendar, sports team schedule, holidays) shows in your dashboard.",
+            info_only: false,
         },
         ProviderDef {
             id: "telegram", name: "Telegram", category: "Messaging",
@@ -78,6 +86,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "Scan the QR with your phone — it opens a chat with the Syntaur bot. Tap START to link your account.",
             help_url: "",
             scopes: &[],
+            unlocks: "Peter can send reminders, alerts, and approval requests to your Telegram. Reply to Peter by text.",
+            info_only: false,
         },
         ProviderDef {
             id: "stripe", name: "Stripe", category: "Finance",
@@ -85,6 +95,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "1. Click the button below.  2. On Stripe, click \"+ Create restricted key\".  3. Name it Syntaur, set Charges/Customers/Invoices to Read.  4. Copy the rk_live_... key and paste it here.",
             help_url: "https://dashboard.stripe.com/apikeys",
             scopes: &[],
+            unlocks: "Automatic receipt capture from your Stripe account for the tax module.",
+            info_only: false,
         },
         ProviderDef {
             id: "bluesky", name: "Bluesky", category: "Social",
@@ -92,6 +104,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "Bluesky uses app passwords for third-party apps:  1. Click the button below — Bluesky app password settings.  2. Tap + Add App Password → name it Syntaur → Create.  3. Copy the generated password and paste below with your handle.",
             help_url: "https://bsky.app/settings/app-passwords",
             scopes: &[],
+            unlocks: "Peter can post, reply, and monitor mentions on your Bluesky account.",
+            info_only: false,
         },
         ProviderDef {
             id: "plaid", name: "Plaid (Banks)", category: "Finance",
@@ -99,6 +113,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "Launch Plaid Link to connect 12,000+ banks. Pulls transactions and balances for taxes.",
             help_url: "",
             scopes: &[],
+            unlocks: "Bank transactions flow into the tax module automatically.",
+            info_only: false,
         },
         ProviderDef {
             id: "simplefin", name: "SimpleFIN", category: "Finance",
@@ -106,6 +122,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "Paste your SimpleFIN setup token. Aggregates multiple bank feeds into one.",
             help_url: "https://beta-bridge.simplefin.org/",
             scopes: &[],
+            unlocks: "Aggregated bank feeds, lighter-weight alternative to Plaid.",
+            info_only: false,
         },
         ProviderDef {
             id: "alpaca", name: "Alpaca (Broker)", category: "Finance",
@@ -113,6 +131,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "1. Click the button below — opens your Alpaca dashboard.  2. Scroll to the right sidebar → \"Your API Keys\" → click View → Generate New Key.  3. Copy both the Key ID and Secret Key into the fields below.  Default is Paper (safe). Switch to Live only if you want real trading.",
             help_url: "https://app.alpaca.markets/paper/dashboard/overview",
             scopes: &[],
+            unlocks: "Portfolio holdings + trade activity for tax reporting and performance tracking.",
+            info_only: false,
         },
         ProviderDef {
             id: "coinbase", name: "Coinbase", category: "Finance",
@@ -120,6 +140,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "Paste a read-only Coinbase API key and secret. Pulls crypto holdings and transactions.",
             help_url: "https://www.coinbase.com/settings/api",
             scopes: &[],
+            unlocks: "Crypto holdings and transactions pulled automatically for taxes.",
+            info_only: false,
         },
         // ── New Tier-1 providers ────────────────────────────────────────────
         ProviderDef {
@@ -128,6 +150,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "1. Click the button below — GitHub opens with the right scopes pre-selected.  2. Name it \"Syntaur\" (already filled).  3. Click Generate token at the bottom.  4. Copy the token (starts with ghp_) and paste it here.",
             help_url: "https://github.com/settings/tokens/new?description=Syntaur&scopes=repo,notifications,read:user",
             scopes: &[],
+            unlocks: "Failing CI, open PRs, and unread notifications surface on your dashboard.",
+            info_only: false,
         },
         ProviderDef {
             id: "home_assistant", name: "Home Assistant", category: "Smart Home",
@@ -135,6 +159,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "Syntaur auto-discovers your Home Assistant on the network. You just need a token:  1. Open your HA dashboard, click your profile (bottom-left).  2. Security tab → scroll to \"Long-Lived Access Tokens\" → Create Token.  3. Name it Syntaur, copy the token, paste it below.",
             help_url: "https://www.home-assistant.io/docs/authentication/#your-account-profile",
             scopes: &[],
+            unlocks: "Peter gets full control of every device you've paired in HA. The backbone for music-on-HomePod and smart-home voice commands.",
+            info_only: false,
         },
         ProviderDef {
             id: "plex", name: "Plex", category: "Media",
@@ -142,6 +168,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "1. Click Connect — we generate a 4-character code.  2. On any device, go to plex.tv/link and enter the code.  3. Syntaur detects when you\'re signed in (usually 5-10 seconds). No token to copy.",
             help_url: "",
             scopes: &[],
+            unlocks: "Peter knows your library, recent watches, and what's currently playing.",
+            info_only: false,
         },
         ProviderDef {
             id: "apple_calendar", name: "Apple Calendar (iCloud)", category: "Calendar",
@@ -149,6 +177,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "iCloud requires an app-specific password (not your normal Apple ID password):  1. Click the button below — opens appleid.apple.com.  2. Sign in, then Sign-in Security → App-Specific Passwords → + → name it Syntaur.  3. Copy the password (xxxx-xxxx-xxxx-xxxx) and paste below with your iCloud email.",
             help_url: "https://account.apple.com/account/manage",
             scopes: &[],
+            unlocks: "iCloud calendars sync alongside your other calendars.",
+            info_only: false,
         },
         ProviderDef {
             id: "crypto_wallet", name: "Crypto Wallet (public)", category: "Finance",
@@ -156,6 +186,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "Paste a public wallet address. Read-only — no keys needed. Tracks balance + transactions for tax reporting. Bitcoin, Ethereum, and Solana supported.",
             help_url: "",
             scopes: &[],
+            unlocks: "Cold-storage balances tracked on your finance dashboard.",
+            info_only: false,
         },
         ProviderDef {
             id: "spotify", name: "Spotify", category: "Media",
@@ -163,6 +195,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "Sign in with Spotify. Peter can play your playlists, show recent tracks, and change what's playing on any Spotify Connect device.",
             help_url: "",
             scopes: &[("read", "Read-only (recent plays, playlists)"), ("control", "Read + playback control")],
+            unlocks: "Peter can play your Spotify library on any Spotify Connect device.",
+            info_only: false,
         },
         ProviderDef {
             id: "youtube", name: "YouTube", category: "Social",
@@ -170,6 +204,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "Sign in with Google to manage your YouTube channel — uploads, comments, analytics. Used by Crimson Lantern publishing pipeline.",
             help_url: "",
             scopes: &[("read", "Read analytics + comments"), ("upload", "Read + upload + reply")],
+            unlocks: "Analytics + upload scheduling for Crimson Lantern.",
+            info_only: false,
         },
         ProviderDef {
             id: "strava", name: "Strava", category: "Health",
@@ -177,6 +213,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "Sign in with Strava. Syncs recent workouts so Peter can answer 'how was my run today'.",
             help_url: "",
             scopes: &[("read_all", "Read all activity")],
+            unlocks: "Peter can answer 'how was my run this week?' and log workouts.",
+            info_only: false,
         },
         ProviderDef {
             id: "oura", name: "Oura Ring", category: "Health",
@@ -184,6 +222,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "1. Click the button below — opens Oura Cloud.  2. Sign in, then click + Create New Personal Access Token.  3. Name it Syntaur → Create.  4. Copy the token and paste it here.",
             help_url: "https://cloud.ouraring.com/personal-access-tokens",
             scopes: &[],
+            unlocks: "Peter knows your sleep, readiness, and activity data for daily check-ins.",
+            info_only: false,
         },
         ProviderDef {
             id: "anthropic_usage", name: "Anthropic API (usage)", category: "AI",
@@ -191,6 +231,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "Paste your Anthropic admin API key. Syntaur pulls daily spend + request counts for your dashboard.",
             help_url: "https://console.anthropic.com/settings/keys",
             scopes: &[],
+            unlocks: "Your Claude API spend appears on the dashboard. Warn before rate limits.",
+            info_only: false,
         },
         ProviderDef {
             id: "openrouter_usage", name: "OpenRouter (usage)", category: "AI",
@@ -198,6 +240,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "Paste your OpenRouter API key. Pulls credit balance and daily usage breakdown.",
             help_url: "https://openrouter.ai/keys",
             scopes: &[],
+            unlocks: "Live balance + daily usage for OpenRouter keys.",
+            info_only: false,
         },
         ProviderDef {
             id: "apple_health", name: "Apple Health", category: "Health",
@@ -205,6 +249,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "Export your Health data from iPhone (Health app → profile → Export All Health Data), then upload the export.zip here. Peter gets full access to your sleep, heart rate, and workouts.",
             help_url: "https://support.apple.com/en-us/HT203037",
             scopes: &[],
+            unlocks: "Peter has full access to your sleep, heart rate, and workouts.",
+            info_only: false,
         },
         ProviderDef {
             id: "notebooklm_status", name: "NotebookLM Auth", category: "AI",
@@ -212,6 +258,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "Status of the one-time Google auth for NotebookLM research. Refreshes every 2-4 weeks via 'notebooklm login' on the gaming PC.",
             help_url: "",
             scopes: &[],
+            unlocks: "Shows whether your NotebookLM auth is fresh. Not a setup card — just a status indicator.",
+            info_only: true,
         },
         ProviderDef {
             id: "vault_health", name: "Vault Health", category: "Storage",
@@ -219,6 +267,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "NFS-mounted Obsidian vault shared between claudevm and gaming PC. Shows mount status, last-write time, and read/write latency.",
             help_url: "",
             scopes: &[],
+            unlocks: "Monitors the NFS-mounted Obsidian vault. Not a setup card — just a status indicator.",
+            info_only: true,
         },
         // ── Music layer ─────────────────────────────────────────────────────
         ProviderDef {
@@ -227,6 +277,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "Auto-discovers HomePods, Apple TVs, and AirPlay speakers on your network. No login needed. Peter voice can announce on any discovered device.",
             help_url: "",
             scopes: &[],
+            unlocks: "Peter can announce and play audio on any detected speaker (HomePod, Apple TV, AirPlay speakers).",
+            info_only: false,
         },
         ProviderDef {
             id: "music_assistant", name: "Music Assistant (via Home Assistant)", category: "Music",
@@ -234,6 +286,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "Music Assistant is a Home Assistant add-on that handles Apple Music, Spotify, YouTube Music, and more. Connect Home Assistant first, then we auto-detect if Music Assistant is installed — gives you full Apple Music control with zero extra setup.",
             help_url: "https://music-assistant.io/",
             scopes: &[],
+            unlocks: "Full Apple Music / Spotify / YT Music control routed through Home Assistant.",
+            info_only: false,
         },
         ProviderDef {
             id: "apple_music", name: "Apple Music", category: "Music",
@@ -241,6 +295,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "No developer account needed. Sign into Apple Music in your browser, then click the Syntaur bookmarklet — it captures your login tokens from the Apple Music page and sends them back here. After that, Peter can search, queue, and manage your library.",
             help_url: "https://music.apple.com",
             scopes: &[],
+            unlocks: "Peter can search your library, show what you've been listening to, and cue songs to HomePod (via HA).",
+            info_only: false,
         },
         ProviderDef {
             id: "ios_shortcut_music", name: "iOS Shortcut (Music)", category: "Music",
@@ -248,6 +304,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             instructions: "1. On iPhone, open Shortcuts app → + to create.  2. Add action \"Play Apple Music\" → configure search by name.  3. Tap share arrow → Add to Home Screen → enable \"Run with URL\".  4. Copy the icloud.com/shortcuts/... URL and paste below. Peter triggers it when you say \"play music\".",
             help_url: "https://www.icloud.com/shortcuts/",
             scopes: &[],
+            unlocks: "Peter can trigger music playback on your iPhone — works even when you're out of the house.",
+            info_only: false,
         },
     ]
 }
@@ -412,6 +470,12 @@ pub async fn handle_sync_providers(
             FlowKind::IosShortcut => "ios_shortcut",
             FlowKind::AppleMusic => "apple_music",
         };
+        // Check if OAuth provider has config — gate "Connect" button if not
+        let oauth_configured = matches!(p.flow, FlowKind::Oauth) &&
+            state.config.oauth.providers.contains_key(p.id) &&
+            !state.config.oauth.providers.get(p.id)
+                .map(|c| c.client_id.is_empty())
+                .unwrap_or(true);
         let mut entry = serde_json::json!({
             "id": p.id,
             "name": p.name,
@@ -420,6 +484,10 @@ pub async fn handle_sync_providers(
             "instructions": p.instructions,
             "help_url": p.help_url,
             "scopes": p.scopes.iter().map(|(id, label)| serde_json::json!({"id": id, "label": label})).collect::<Vec<_>>(),
+            "unlocks": p.unlocks,
+            "info_only": p.info_only,
+            "oauth_configured": oauth_configured,
+            "needs_oauth_config": matches!(p.flow, FlowKind::Oauth) && !oauth_configured,
             "connected": false,
         });
         if let Some(c) = connections.get(p.id) {
