@@ -128,6 +128,112 @@
       </div>
 
       <div class="card">
+        <h3 class="font-medium mb-2">Quick Setup</h3>
+        <p class="text-sm text-gray-400 mb-4">Choose the option that fits your setup. You can always change this later.</p>
+        <div class="space-y-3">
+          <details class="group">
+            <summary class="flex items-center gap-3 p-3 rounded-lg bg-gray-900 hover:bg-gray-800 cursor-pointer transition-colors">
+              <span class="text-lg">&#9729;</span>
+              <div class="flex-1">
+                <p class="text-sm font-medium text-white">Cloud API (Recommended)</p>
+                <p class="text-xs text-gray-500">OpenRouter, Anthropic, or OpenAI — best quality, no hardware needed</p>
+              </div>
+              <span class="text-xs text-gray-600 group-open:rotate-90 transition-transform">&#9654;</span>
+            </summary>
+            <div class="mt-2 ml-9 space-y-3 text-sm">
+              <div class="p-3 bg-gray-900/50 rounded-lg border border-gray-800">
+                <p class="text-gray-300 font-medium mb-2">OpenRouter (easiest, free tier available)</p>
+                <ol class="text-xs text-gray-400 space-y-1 list-decimal ml-4">
+                  <li>Sign up at <a href="https://openrouter.ai" target="_blank" class="text-oc-500 hover:text-oc-400">openrouter.ai</a></li>
+                  <li>Go to Keys &rarr; Create Key</li>
+                  <li>Paste below and click Save</li>
+                </ol>
+                <div class="flex gap-2 mt-2">
+                  <input class="input flex-1 text-xs" id="setup-or-key" placeholder="sk-or-v1-...">
+                  <button onclick="saveProvider('openrouter','https://openrouter.ai/api/v1',document.getElementById('setup-or-key').value,'openai-completions','nvidia/nemotron-3-super-120b-a12b:free')" class="btn-primary text-xs">Save</button>
+                </div>
+                <p class="text-[10px] text-gray-600 mt-1">Free model: nvidia/nemotron-3-super-120b-a12b:free (262K context). $10 credit unlocks 1000 req/day.</p>
+              </div>
+              <div class="p-3 bg-gray-900/50 rounded-lg border border-gray-800">
+                <p class="text-gray-300 font-medium mb-2">Anthropic (Claude)</p>
+                <ol class="text-xs text-gray-400 space-y-1 list-decimal ml-4">
+                  <li>Get an API key at <a href="https://console.anthropic.com/settings/keys" target="_blank" class="text-oc-500 hover:text-oc-400">console.anthropic.com</a></li>
+                  <li>Paste below and click Save</li>
+                </ol>
+                <div class="flex gap-2 mt-2">
+                  <input class="input flex-1 text-xs" id="setup-anthropic-key" placeholder="sk-ant-...">
+                  <button onclick="saveProvider('anthropic','https://api.anthropic.com',document.getElementById('setup-anthropic-key').value,'anthropic','claude-sonnet-4-6')" class="btn-primary text-xs">Save</button>
+                </div>
+              </div>
+              <div class="p-3 bg-gray-900/50 rounded-lg border border-gray-800">
+                <p class="text-gray-300 font-medium mb-2">OpenAI</p>
+                <ol class="text-xs text-gray-400 space-y-1 list-decimal ml-4">
+                  <li>Get an API key at <a href="https://platform.openai.com/api-keys" target="_blank" class="text-oc-500 hover:text-oc-400">platform.openai.com</a></li>
+                  <li>Paste below and click Save</li>
+                </ol>
+                <div class="flex gap-2 mt-2">
+                  <input class="input flex-1 text-xs" id="setup-openai-key" placeholder="sk-...">
+                  <button onclick="saveProvider('openai','https://api.openai.com/v1',document.getElementById('setup-openai-key').value,'openai-completions','gpt-4o')" class="btn-primary text-xs">Save</button>
+                </div>
+              </div>
+            </div>
+          </details>
+
+          <details class="group">
+            <summary class="flex items-center gap-3 p-3 rounded-lg bg-gray-900 hover:bg-gray-800 cursor-pointer transition-colors">
+              <span class="text-lg">&#128187;</span>
+              <div class="flex-1">
+                <p class="text-sm font-medium text-white">Local Model (Private, Free)</p>
+                <p class="text-xs text-gray-500">Ollama, LM Studio, or llama.cpp — runs on your own hardware, no API costs</p>
+              </div>
+              <span class="text-xs text-gray-600 group-open:rotate-90 transition-transform">&#9654;</span>
+            </summary>
+            <div class="mt-2 ml-9 space-y-3 text-sm">
+              <div class="p-3 bg-gray-900/50 rounded-lg border border-gray-800">
+                <p class="text-gray-300 font-medium mb-2">Ollama (simplest local option)</p>
+                <ol class="text-xs text-gray-400 space-y-1 list-decimal ml-4">
+                  <li>Install from <a href="https://ollama.ai" target="_blank" class="text-oc-500 hover:text-oc-400">ollama.ai</a></li>
+                  <li>Run: <code class="bg-gray-800 px-1 rounded">ollama pull llama3.1</code></li>
+                  <li>Ollama runs on port 11434 by default</li>
+                </ol>
+                <div class="flex gap-2 mt-2">
+                  <input class="input flex-1 text-xs" id="setup-ollama-url" placeholder="http://localhost:11434" value="http://localhost:11434">
+                  <button onclick="saveProvider('ollama',document.getElementById('setup-ollama-url').value,'','openai-completions','llama3.1')" class="btn-primary text-xs">Save</button>
+                </div>
+              </div>
+              <div class="p-3 bg-gray-900/50 rounded-lg border border-gray-800">
+                <p class="text-gray-300 font-medium mb-2">LM Studio / llama.cpp</p>
+                <ol class="text-xs text-gray-400 space-y-1 list-decimal ml-4">
+                  <li>Start your server (default port 1234 for LM Studio)</li>
+                  <li>Enter the URL below</li>
+                </ol>
+                <div class="flex gap-2 mt-2">
+                  <input class="input flex-1 text-xs" id="setup-local-url" placeholder="http://localhost:1234/v1">
+                  <input class="input w-32 text-xs" id="setup-local-model" placeholder="Model name">
+                  <button onclick="saveProvider('local',document.getElementById('setup-local-url').value,'','openai-completions',document.getElementById('setup-local-model').value||'default')" class="btn-primary text-xs">Save</button>
+                </div>
+              </div>
+            </div>
+          </details>
+
+          <details class="group">
+            <summary class="flex items-center gap-3 p-3 rounded-lg bg-gray-900 hover:bg-gray-800 cursor-pointer transition-colors">
+              <span class="text-lg">&#9889;</span>
+              <div class="flex-1">
+                <p class="text-sm font-medium text-white">Hybrid (Cloud + Local Fallback)</p>
+                <p class="text-xs text-gray-500">Cloud for quality, local for privacy/offline — automatic failover</p>
+              </div>
+              <span class="text-xs text-gray-600 group-open:rotate-90 transition-transform">&#9654;</span>
+            </summary>
+            <div class="mt-2 ml-9 text-sm">
+              <p class="text-xs text-gray-400 p-3 bg-gray-900/50 rounded-lg border border-gray-800">Set up a cloud provider above as primary, then add a local model as fallback. Syntaur tries the primary first and falls back automatically if it fails or is unreachable.</p>
+            </div>
+          </details>
+        </div>
+        <span id="setup-result" class="text-sm mt-2 block"></span>
+      </div>
+
+      <div class="card">
         <h3 class="font-medium mb-2">Test a Connection</h3>
         <p class="text-sm text-gray-400 mb-4">Verify an LLM endpoint is reachable and responding.</p>
         <div class="space-y-3">
@@ -144,16 +250,6 @@
           <div class="flex items-center gap-3">
             <button class="btn-primary" onclick="testConnection()">Test</button>
             <span id="test-result" class="text-sm"></span>
-          </div>
-        </div>
-      </div>
-
-      <div class="p-4 rounded-xl bg-gray-900 border border-gray-700">
-        <div class="flex items-start gap-2">
-          <span class="text-oc-500 mt-0.5">&#8505;</span>
-          <div class="text-sm">
-            <p class="text-gray-300">To change LLM backends, edit <code class="bg-gray-800 px-1.5 py-0.5 rounded text-xs">~/.syntaur/syntaur.json</code> and restart the gateway.</p>
-            <p class="text-gray-500 mt-1">Dashboard-based LLM management is coming in a future update.</p>
           </div>
         </div>
       </div>
@@ -413,15 +509,24 @@ async function loadSettings() {
     document.getElementById('sys-ext-mods').textContent = `${extEnabled} / ${mods.extension_modules.length}`;
 
     // LLM providers
-    document.getElementById('llm-providers-list').innerHTML = (health.llm_providers || []).map((p, i) => `
+    const providers = health.providers || [];
+    document.getElementById('llm-providers-list').innerHTML = providers.map((p, i) => {
+      const circuitOk = p.circuit_state === 'Closed';
+      const badgeClass = circuitOk ? 'badge-green' : 'badge-red';
+      const badgeText = circuitOk ? 'Active' : p.circuit_state;
+      const latency = p.avg_latency_ms > 0 ? `${Math.round(p.avg_latency_ms)}ms avg` : '';
+      return `
       <div class="flex items-center justify-between p-3 rounded-lg bg-gray-900">
         <div>
-          <p class="text-sm font-medium">${p}</p>
-          <p class="text-xs text-gray-500">${i === 0 ? 'Primary' : 'Fallback ' + i}</p>
+          <p class="text-sm font-medium">${p.name}</p>
+          <p class="text-xs text-gray-500">${i === 0 ? 'Primary' : 'Fallback ' + i} &middot; ${p.model_id} ${latency ? '&middot; ' + latency : ''}</p>
         </div>
-        <span class="badge badge-green">Active</span>
-      </div>
-    `).join('') || '<p class="text-gray-500 text-sm">No providers configured</p>';
+        <div class="flex items-center gap-2">
+          <span class="text-xs text-gray-600">${p.total_requests} req</span>
+          <span class="badge ${badgeClass}">${badgeText}</span>
+        </div>
+      </div>`;
+    }).join('') || '<p class="text-gray-500 text-sm">No providers configured. Use Quick Setup below to add one.</p>';
 
     // Token
     if (token) {
@@ -1649,6 +1754,32 @@ showTab = function(name) {
   _origShowTab(name);
   if (name === 'sync' && !syncProviders.length) loadSyncProviders();
 };
+
+// Save LLM provider via API
+async function saveProvider(name, baseUrl, apiKey, apiType, modelId) {
+  const result = document.getElementById('setup-result');
+  result.className = 'text-sm mt-2 block text-gray-400';
+  result.textContent = 'Saving...';
+  try {
+    const resp = await fetch('/api/settings/provider', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ token, name, base_url: baseUrl, api_key: apiKey, api: apiType, model_id: modelId })
+    });
+    const data = await resp.json();
+    if (data.success) {
+      result.className = 'text-sm mt-2 block text-green-400';
+      result.textContent = data.message || 'Provider saved! Restart the gateway to apply changes.';
+      loadSettings();
+    } else {
+      result.className = 'text-sm mt-2 block text-red-400';
+      result.textContent = data.error || 'Failed to save provider.';
+    }
+  } catch(e) {
+    result.className = 'text-sm mt-2 block text-red-400';
+    result.textContent = 'Error: ' + e.message;
+  }
+}
 
 // Auto-open Sync tab if redirected there (e.g., after OAuth callback)
 if (window.location.search.includes('tab=sync')) {

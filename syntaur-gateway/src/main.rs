@@ -82,6 +82,8 @@ pub struct AppState {
         Arc<tokio::sync::Mutex<HashMap<String, crate::circuit_breaker::CircuitBreaker>>>,
     /// Path to index.db for direct queries (bug reports, etc).
     pub db_path: PathBuf,
+    /// Path to the syntaur.json config file (for settings UI edits).
+    pub config_path: PathBuf,
     /// Per-user auth store (users, tokens, Telegram links). v5 Item 3.
     pub users: Arc<auth::UserStore>,
     /// In-memory state cache for in-flight OAuth2 authorization_code
@@ -3499,6 +3501,7 @@ async fn main() {
         )),
         tool_circuit_breakers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         db_path: PathBuf::from(format!("{}/index.db", data_dir_str)),
+        config_path: config_path.clone(),
         users: Arc::clone(&users),
         oauth_state: Arc::clone(&oauth_state),
         oauth_tokens: Arc::clone(&oauth_tokens),
@@ -3689,6 +3692,7 @@ async fn main() {
         .route("/api/license/activate", post(setup::handle_license_activate))
         .route("/api/setup/apply", post(setup::handle_setup_apply))
         .route("/api/settings/install-shortcut", post(setup::handle_install_shortcut))
+        .route("/api/settings/provider", post(setup::handle_save_provider))
         .route("/api/bug-reports", post(handle_bug_report_submit))
         .route("/api/bug-reports", get(handle_bug_report_list))
         .route("/api/tax/receipts", post(tax::handle_receipt_upload))

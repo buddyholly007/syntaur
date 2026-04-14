@@ -2112,3 +2112,76 @@ for s in [48, 64, 128, 256]:
         message: "Desktop shortcuts are not supported on this platform. Bookmark http://localhost:18789 in your browser instead.".into(),
     })
 }
+
+// ── LLM Provider Setup ─────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct ProviderSaveRequest {
+    pub token: String,
+    pub name: String,
+    pub base_url: String,
+    pub api_key: Option<String>,
+    pub api: String,
+    pub model_id: String,
+}
+
+pub async fn handle_save_provider(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<crate::AppState>>,
+    axum::Json(req): axum::Json<ProviderSaveRequest>,
+) -> Result<axum::Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let _ = crate::resolve_principal(&state, &req.token).await
+        .map_err(|_| (axum::http::StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+
+    // Read current config
+    let config_path = state.config_path.clone();
+    let mut config: serde_json::Value = {
+        let text = std::fs::read_to_string(&config_path)
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Cannot read config: {}", e)))?;
+        serde_json::from_str(&text)
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Cannot parse config: {}", e)))?
+    };
+
+    // Build provider entry
+    let mut provider = serde_json::json!({
+        "name": req.name,
+        "url": req.base_url,
+        "api": req.api,
+        "model": req.model_id,
+    });
+    if let Some(key) = &req.api_key {
+        if !key.is_empty() {
+            provider["apiKey"] = serde_json::json!(key);
+        }
+    }
+
+    // Ensure llm.providers array exists
+    if config.get("llm").is_none() {
+        config["llm"] = serde_json::json!({ "providers": [] });
+    }
+    if config["llm"].get("providers").is_none() {
+        config["llm"]["providers"] = serde_json::json!([]);
+    }
+
+    // Check if provider with this name already exists — update it
+    let providers = config["llm"]["providers"].as_array_mut()
+        .ok_or((axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Invalid providers array".to_string()))?;
+    let existing = providers.iter().position(|p| p.get("name").and_then(|n| n.as_str()) == Some(&req.name));
+    if let Some(idx) = existing {
+        providers[idx] = provider;
+    } else {
+        providers.push(provider);
+    }
+
+    // Write config back
+    let text = serde_json::to_string_pretty(&config)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Serialize error: {}", e)))?;
+    std::fs::write(&config_path, &text)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Cannot write config: {}", e)))?;
+
+    log::info!("[settings] Saved LLM provider '{}' ({})", req.name, req.model_id);
+
+    Ok(axum::Json(serde_json::json!({
+        "success": true,
+        "message": format!("Provider '{}' saved. Restart the gateway to apply.", req.name),
+    })))
+}
