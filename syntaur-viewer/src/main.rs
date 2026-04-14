@@ -54,39 +54,13 @@ fn is_external_url(url: &str, gateway_origin: &str) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn open_companion_window(app: &gtk4::Application, url: &str) {
-    use gtk4::prelude::*;
-    use gtk4::ApplicationWindow;
-    use webkit6::prelude::*;
-    use webkit6::WebView;
-
-    // Extract a short title from the URL
-    let title = url.split('/').filter(|s| !s.is_empty()).last()
-        .unwrap_or("External Page")
-        .replace('-', " ");
-
-    let window = ApplicationWindow::builder()
-        .application(app)
-        .title(&format!("{} — Syntaur", title))
-        .default_width(1000)
-        .default_height(750)
-        .build();
-
-    let webview = WebView::new();
-    webview.set_vexpand(true);
-    webview.set_hexpand(true);
-    webview.load_uri(url);
-
-    window.set_child(Some(&webview));
-    window.present();
-}
-
-#[cfg(target_os = "linux")]
 fn run_viewer(url: &str) -> Result<(), String> {
     use gtk4::prelude::*;
-    use gtk4::{Application, ApplicationWindow};
+    use gtk4::{Application, ApplicationWindow, Paned, Orientation, Button, Box as GtkBox, Label};
     use webkit6::prelude::*;
     use webkit6::{WebView, NavigationPolicyDecision, PolicyDecisionType};
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     let app = Application::builder()
         .application_id("dev.syntaur.viewer")
@@ -102,13 +76,69 @@ fn run_viewer(url: &str) -> Result<(), String> {
             .default_height(800)
             .build();
 
+        // Main layout: horizontal paned — left=Syntaur, right=companion panel
+        let paned = Paned::new(Orientation::Horizontal);
+
+        // Left: main Syntaur webview
         let webview = WebView::new();
         webview.set_vexpand(true);
         webview.set_hexpand(true);
+        paned.set_start_child(Some(&webview));
 
-        // Intercept external links — open in a companion window within the viewer
+        // Right: companion panel (starts hidden)
+        let companion_box = GtkBox::new(Orientation::Vertical, 0);
+        companion_box.set_visible(false);
+
+        // Companion header bar with title + close button
+        let header = GtkBox::new(Orientation::Horizontal, 4);
+        header.set_margin_start(8);
+        header.set_margin_end(4);
+        header.set_margin_top(4);
+        header.set_margin_bottom(4);
+        let companion_title = Label::new(Some(""));
+        companion_title.set_hexpand(true);
+        companion_title.set_xalign(0.0);
+        companion_title.add_css_class("caption");
+        let close_btn = Button::with_label("Close");
+        close_btn.add_css_class("flat");
+        header.append(&companion_title);
+        header.append(&close_btn);
+        companion_box.append(&header);
+
+        // Companion webview
+        let companion_wv = WebView::new();
+        companion_wv.set_vexpand(true);
+        companion_wv.set_hexpand(true);
+        companion_box.append(&companion_wv);
+
+        paned.set_end_child(Some(&companion_box));
+        paned.set_resize_end_child(true);
+        paned.set_shrink_start_child(false);
+        paned.set_shrink_end_child(false);
+
+        // State for companion panel
+        let companion_visible = Rc::new(RefCell::new(false));
+
+        // Close button hides the companion panel
+        {
+            let companion_box_c = companion_box.clone();
+            let paned_c = paned.clone();
+            let vis = companion_visible.clone();
+            close_btn.connect_clicked(move |_| {
+                companion_box_c.set_visible(false);
+                *vis.borrow_mut() = false;
+                // Give all space to the main webview
+                paned_c.set_position(paned_c.allocation().width());
+            });
+        }
+
+        // Intercept external links — show in companion panel
         let origin = url_owned.clone();
-        let app_ref = app.clone();
+        let companion_box_nav = companion_box.clone();
+        let companion_wv_nav = companion_wv.clone();
+        let companion_title_nav = companion_title.clone();
+        let paned_nav = paned.clone();
+        let vis_nav = companion_visible.clone();
         webview.connect_decide_policy(move |_wv, decision, decision_type| {
             if decision_type == PolicyDecisionType::NavigationAction {
                 if let Some(nav) = decision.downcast_ref::<NavigationPolicyDecision>() {
@@ -117,7 +147,18 @@ fn run_viewer(url: &str) -> Result<(), String> {
                             if let Some(uri) = request.uri() {
                                 let uri_str = uri.to_string();
                                 if is_external_url(&uri_str, &origin) {
-                                    open_companion_window(&app_ref, &uri_str);
+                                    // Show companion panel with the external page
+                                    companion_wv_nav.load_uri(&uri_str);
+                                    let title = uri_str.split('/').filter(|s| !s.is_empty()).last()
+                                        .unwrap_or("Page").replace('-', " ").replace('_', " ");
+                                    companion_title_nav.set_text(&title);
+                                    companion_box_nav.set_visible(true);
+                                    *vis_nav.borrow_mut() = true;
+                                    // Split ~40% for companion
+                                    let total_w = paned_nav.allocation().width();
+                                    if total_w > 400 {
+                                        paned_nav.set_position(total_w * 60 / 100);
+                                    }
                                     decision.ignore();
                                     return true;
                                 }
@@ -130,7 +171,7 @@ fn run_viewer(url: &str) -> Result<(), String> {
         });
 
         webview.load_uri(&url_owned);
-        window.set_child(Some(&webview));
+        window.set_child(Some(&paned));
         window.present();
     });
 
