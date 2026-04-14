@@ -4290,10 +4290,22 @@ pub fn scan_for_deduction_candidates(
     let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     let mut total = 0i64;
 
-    // Filter rules by questionnaire gates
+    // Filter rules by questionnaire gates.
+    // If the questionnaire isn't completed, still activate rules where the user
+    // said "yes" to a specific question, plus always-on rules. Also activate
+    // charitable/retirement/student_loan by default since they're common.
+    let has_any_answers = !answers.as_object().map(|o| o.is_empty()).unwrap_or(true);
     let active_rules: Vec<&DeductionRule> = DEDUCTION_RULES.iter().filter(|r| {
         if r.questionnaire_gate.is_empty() { return true; }
-        answers.get(r.questionnaire_gate).and_then(|v| v.as_bool()).unwrap_or(false)
+        // If user explicitly answered this gate, use their answer
+        if let Some(v) = answers.get(r.questionnaire_gate).and_then(|v| v.as_bool()) {
+            return v;
+        }
+        // If no questionnaire at all, activate common categories
+        if !has_any_answers {
+            return matches!(r.questionnaire_gate, "charitable_donations" | "retirement_contributions" | "student_loan_interest");
+        }
+        false
     }).collect();
 
     // Scan statement_transactions
@@ -4361,6 +4373,44 @@ pub fn scan_for_deduction_candidates(
                     rusqlite::params![
                         user_id, year, id, rule.deduction_type,
                         vendor_display, &name, amount.abs(), &date,
+                        rule.category_suggestion, rule.entity_suggestion,
+                        confidence, matched.iter().map(|k| **k).collect::<Vec<_>>().join(", "), now
+                    ],
+                ).unwrap_or(0);
+                if inserted > 0 {
+                    total += 1;
+                    *counts.entry(rule.deduction_type.to_string()).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    // Scan expenses (user's existing expense entries)
+    {
+        let mut stmt = conn.prepare(
+            "SELECT e.id, e.vendor, COALESCE(e.description, ''), e.amount_cents, e.expense_date \
+             FROM expenses e WHERE e.user_id = ? AND e.expense_date >= ? AND e.expense_date <= ?"
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(rusqlite::params![user_id, &year_start, &year_end], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?, r.get::<_, String>(4)?))
+        }).map_err(|e| e.to_string())?;
+
+        for row in rows {
+            let (id, vendor, desc, amount, date) = row.map_err(|e| e.to_string())?;
+            let search_text = format!("{} {}", &vendor, &desc).to_lowercase();
+            for rule in &active_rules {
+                let matched: Vec<&&str> = rule.keywords.iter().filter(|kw| search_text.contains(**kw)).collect();
+                if matched.is_empty() { continue; }
+                let confidence = if matched.len() >= 2 { 0.8 } else { 0.5 };
+                let inserted = conn.execute(
+                    "INSERT OR IGNORE INTO deduction_candidates \
+                     (user_id, tax_year, source_type, source_id, deduction_type, vendor, description, \
+                      amount_cents, transaction_date, category_suggestion, entity_suggestion, confidence, match_rule, status, created_at) \
+                     VALUES (?, ?, 'expense', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+                    rusqlite::params![
+                        user_id, year, id, rule.deduction_type,
+                        &vendor, &desc, amount.abs(), &date,
                         rule.category_suggestion, rule.entity_suggestion,
                         confidence, matched.iter().map(|k| **k).collect::<Vec<_>>().join(", "), now
                     ],
