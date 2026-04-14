@@ -4386,10 +4386,16 @@ pub fn scan_for_deduction_candidates(
     }
 
     // Scan expenses (user's existing expense entries)
+    // Exclude income/wage/tax entries — these are not deductible expenses
     {
         let mut stmt = conn.prepare(
             "SELECT e.id, e.vendor, COALESCE(e.description, ''), e.amount_cents, e.expense_date \
-             FROM expenses e WHERE e.user_id = ? AND e.expense_date >= ? AND e.expense_date <= ?"
+             FROM expenses e LEFT JOIN expense_categories c ON e.category_id = c.id \
+             WHERE e.user_id = ? AND e.expense_date >= ? AND e.expense_date <= ? \
+             AND COALESCE(c.name, '') NOT LIKE '%Wages%' AND COALESCE(c.name, '') NOT LIKE '%FICA%' \
+             AND COALESCE(c.name, '') NOT LIKE '%Income Tax%' AND COALESCE(c.name, '') NOT LIKE '%Withholding%' \
+             AND COALESCE(c.name, '') NOT LIKE '%Revenue%' AND COALESCE(c.name, '') NOT LIKE '%Income%' \
+             AND COALESCE(c.name, '') NOT LIKE '%Capital Gains%' AND COALESCE(c.name, '') NOT LIKE '%Dividend%'"
         ).map_err(|e| e.to_string())?;
         let rows = stmt.query_map(rusqlite::params![user_id, &year_start, &year_end], |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?,
