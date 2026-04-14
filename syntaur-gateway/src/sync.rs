@@ -28,6 +28,10 @@ pub enum FlowKind {
     UrlOnly,      // Just a URL (ICS subscription)
     Pairing,      // Short code + QR (Telegram)
     LinkSdk,      // External SDK handles it (Plaid Link)
+    CalDav,       // URL + username + app-specific password (Apple/Nextcloud)
+    Crypto,       // Wallet address + chain (public read-only)
+    FileUpload,   // File drop (Apple Health export)
+    StatusOnly,   // Read-only info card (NotebookLM auth, Vault health)
 }
 
 pub struct ProviderDef {
@@ -110,6 +114,105 @@ pub fn catalog() -> Vec<ProviderDef> {
             flow: FlowKind::ApiKey,
             instructions: "Paste a read-only Coinbase API key and secret. Pulls crypto holdings and transactions.",
             help_url: "https://www.coinbase.com/settings/api",
+            scopes: &[],
+        },
+        // ── New Tier-1 providers ────────────────────────────────────────────
+        ProviderDef {
+            id: "github", name: "GitHub", category: "Developer",
+            flow: FlowKind::ApiKey,
+            instructions: "Paste a fine-grained Personal Access Token (classic PATs also work). Used to surface failing CI runs, open PRs, and unread notifications on your dashboard.",
+            help_url: "https://github.com/settings/tokens?type=beta",
+            scopes: &[("read", "Read repo status + notifications"), ("write", "Read + comment/close issues")],
+        },
+        ProviderDef {
+            id: "home_assistant", name: "Home Assistant", category: "Smart Home",
+            flow: FlowKind::ApiKey,
+            instructions: "Paste your HA URL (e.g. http://homeassistant.local:8123) and a long-lived access token. Syntaur learns your devices and gives Peter voice full HA control.",
+            help_url: "https://www.home-assistant.io/docs/authentication/#your-account-profile",
+            scopes: &[],
+        },
+        ProviderDef {
+            id: "plex", name: "Plex", category: "Media",
+            flow: FlowKind::ApiKey,
+            instructions: "Paste your plex.tv auth token and server URL. Peter can query 'what were we watching last night' and control playback.",
+            help_url: "https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/",
+            scopes: &[],
+        },
+        ProviderDef {
+            id: "apple_calendar", name: "Apple Calendar (iCloud)", category: "Calendar",
+            flow: FlowKind::CalDav,
+            instructions: "Enter your iCloud account and an app-specific password (generate one at appleid.apple.com). Syntaur syncs your iCloud calendars alongside Google Calendar.",
+            help_url: "https://support.apple.com/en-us/HT204397",
+            scopes: &[("readonly", "Read-only"), ("events", "Read + write events")],
+        },
+        ProviderDef {
+            id: "crypto_wallet", name: "Crypto Wallet (public)", category: "Finance",
+            flow: FlowKind::Crypto,
+            instructions: "Paste a public wallet address. Read-only — no keys needed. Tracks balance + transactions for tax reporting. Bitcoin, Ethereum, and Solana supported.",
+            help_url: "",
+            scopes: &[],
+        },
+        ProviderDef {
+            id: "spotify", name: "Spotify", category: "Media",
+            flow: FlowKind::Oauth,
+            instructions: "Sign in with Spotify. Peter can play your playlists, show recent tracks, and change what's playing on any Spotify Connect device.",
+            help_url: "",
+            scopes: &[("read", "Read-only (recent plays, playlists)"), ("control", "Read + playback control")],
+        },
+        ProviderDef {
+            id: "youtube", name: "YouTube", category: "Social",
+            flow: FlowKind::Oauth,
+            instructions: "Sign in with Google to manage your YouTube channel — uploads, comments, analytics. Used by Crimson Lantern publishing pipeline.",
+            help_url: "",
+            scopes: &[("read", "Read analytics + comments"), ("upload", "Read + upload + reply")],
+        },
+        ProviderDef {
+            id: "strava", name: "Strava", category: "Health",
+            flow: FlowKind::Oauth,
+            instructions: "Sign in with Strava. Syncs recent workouts so Peter can answer 'how was my run today'.",
+            help_url: "",
+            scopes: &[("read_all", "Read all activity")],
+        },
+        ProviderDef {
+            id: "oura", name: "Oura Ring", category: "Health",
+            flow: FlowKind::ApiKey,
+            instructions: "Paste a Personal Access Token from cloud.ouraring.com. Syncs sleep, readiness, and activity data.",
+            help_url: "https://cloud.ouraring.com/personal-access-tokens",
+            scopes: &[],
+        },
+        ProviderDef {
+            id: "anthropic_usage", name: "Anthropic API (usage)", category: "AI",
+            flow: FlowKind::ApiKey,
+            instructions: "Paste your Anthropic admin API key. Syntaur pulls daily spend + request counts for your dashboard.",
+            help_url: "https://console.anthropic.com/settings/keys",
+            scopes: &[],
+        },
+        ProviderDef {
+            id: "openrouter_usage", name: "OpenRouter (usage)", category: "AI",
+            flow: FlowKind::ApiKey,
+            instructions: "Paste your OpenRouter API key. Pulls credit balance and daily usage breakdown.",
+            help_url: "https://openrouter.ai/keys",
+            scopes: &[],
+        },
+        ProviderDef {
+            id: "apple_health", name: "Apple Health", category: "Health",
+            flow: FlowKind::FileUpload,
+            instructions: "Export your Health data from iPhone (Health app → profile → Export All Health Data), then upload the export.zip here. Peter gets full access to your sleep, heart rate, and workouts.",
+            help_url: "https://support.apple.com/en-us/HT203037",
+            scopes: &[],
+        },
+        ProviderDef {
+            id: "notebooklm_status", name: "NotebookLM Auth", category: "AI",
+            flow: FlowKind::StatusOnly,
+            instructions: "Status of the one-time Google auth for NotebookLM research. Refreshes every 2-4 weeks via 'notebooklm login' on the gaming PC.",
+            help_url: "",
+            scopes: &[],
+        },
+        ProviderDef {
+            id: "vault_health", name: "Vault Health", category: "Storage",
+            flow: FlowKind::StatusOnly,
+            instructions: "NFS-mounted Obsidian vault shared between claudevm and gaming PC. Shows mount status, last-write time, and read/write latency.",
+            help_url: "",
             scopes: &[],
         },
     ]
@@ -265,6 +368,10 @@ pub async fn handle_sync_providers(
             FlowKind::UrlOnly => "url",
             FlowKind::Pairing => "pairing",
             FlowKind::LinkSdk => "link_sdk",
+            FlowKind::CalDav => "caldav",
+            FlowKind::Crypto => "crypto",
+            FlowKind::FileUpload => "file_upload",
+            FlowKind::StatusOnly => "status",
         };
         let mut entry = serde_json::json!({
             "id": p.id,
@@ -461,6 +568,178 @@ async fn test_credential(
             let token = credential.get("setup_token").and_then(|v| v.as_str()).unwrap_or("");
             if token.is_empty() { return Err("setup token required".to_string()); }
             Ok("Saved".to_string())
+        }
+        "github" => {
+            let key = credential.get("api_key").and_then(|v| v.as_str()).unwrap_or("");
+            if key.is_empty() { return Err("API key required".to_string()); }
+            let resp = client.get("https://api.github.com/user")
+                .header("Authorization", format!("Bearer {}", key))
+                .header("User-Agent", "syntaur")
+                .header("Accept", "application/vnd.github+json")
+                .timeout(Duration::from_secs(15)).send().await
+                .map_err(|e| format!("GitHub API: {}", e))?;
+            if !resp.status().is_success() {
+                return Err(format!("GitHub rejected token ({})", resp.status()));
+            }
+            let j: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+            let login = j.get("login").and_then(|v| v.as_str()).unwrap_or("?");
+            Ok(format!("@{}", login))
+        }
+        "home_assistant" => {
+            let url = credential.get("url").and_then(|v| v.as_str()).unwrap_or("");
+            let token = credential.get("token").and_then(|v| v.as_str()).unwrap_or("");
+            if url.is_empty() || token.is_empty() { return Err("URL and token required".to_string()); }
+            let api_url = format!("{}/api/", url.trim_end_matches('/'));
+            let resp = client.get(&api_url)
+                .header("Authorization", format!("Bearer {}", token))
+                .timeout(Duration::from_secs(15)).send().await
+                .map_err(|e| format!("HA API: {}", e))?;
+            if !resp.status().is_success() {
+                return Err(format!("HA rejected token ({})", resp.status()));
+            }
+            let j: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+            let msg = j.get("message").and_then(|v| v.as_str()).unwrap_or("API reachable");
+            Ok(msg.to_string())
+        }
+        "plex" => {
+            let token = credential.get("token").and_then(|v| v.as_str()).unwrap_or("");
+            if token.is_empty() { return Err("Plex token required".to_string()); }
+            // Test against plex.tv — works without needing a server URL
+            let resp = client.get("https://plex.tv/api/v2/user")
+                .header("X-Plex-Token", token)
+                .header("Accept", "application/json")
+                .timeout(Duration::from_secs(15)).send().await
+                .map_err(|e| format!("Plex API: {}", e))?;
+            if !resp.status().is_success() {
+                return Err(format!("Plex rejected token ({})", resp.status()));
+            }
+            let j: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+            let uname = j.get("username").and_then(|v| v.as_str()).unwrap_or("account");
+            Ok(format!("Verified: {}", uname))
+        }
+        "apple_calendar" => {
+            let url = credential.get("url").and_then(|v| v.as_str()).unwrap_or("");
+            let user = credential.get("username").and_then(|v| v.as_str()).unwrap_or("");
+            let pw = credential.get("password").and_then(|v| v.as_str()).unwrap_or("");
+            if url.is_empty() || user.is_empty() || pw.is_empty() {
+                return Err("URL, username, and app-specific password required".to_string());
+            }
+            // iCloud CalDAV: PROPFIND against principal URL
+            let effective = if url.is_empty() || url == "auto" {
+                "https://caldav.icloud.com/.well-known/caldav".to_string()
+            } else { url.to_string() };
+            let resp = client.request(
+                reqwest::Method::from_bytes(b"PROPFIND").unwrap_or(reqwest::Method::GET),
+                &effective)
+                .basic_auth(user, Some(pw))
+                .header("Depth", "0")
+                .header("Content-Type", "application/xml")
+                .body(r#"<?xml version="1.0"?><propfind xmlns="DAV:"><prop><current-user-principal/></prop></propfind>"#)
+                .timeout(Duration::from_secs(15)).send().await
+                .map_err(|e| format!("CalDAV: {}", e))?;
+            let status = resp.status();
+            if !(status == reqwest::StatusCode::MULTI_STATUS || status.is_success()) {
+                return Err(format!("CalDAV rejected ({})", status));
+            }
+            Ok("Verified".to_string())
+        }
+        "crypto_wallet" => {
+            let address = credential.get("address").and_then(|v| v.as_str()).unwrap_or("");
+            let chain = credential.get("chain").and_then(|v| v.as_str()).unwrap_or("btc");
+            if address.is_empty() { return Err("Wallet address required".to_string()); }
+            match chain {
+                "btc" => {
+                    let u = format!("https://blockstream.info/api/address/{}", address);
+                    let r = client.get(&u).timeout(Duration::from_secs(15)).send().await
+                        .map_err(|e| format!("Blockstream: {}", e))?;
+                    if !r.status().is_success() { return Err(format!("Invalid BTC address ({})", r.status())); }
+                    let j: serde_json::Value = r.json().await.unwrap_or_default();
+                    let funded = j.get("chain_stats").and_then(|s| s.get("funded_txo_sum")).and_then(|v| v.as_i64()).unwrap_or(0);
+                    let spent = j.get("chain_stats").and_then(|s| s.get("spent_txo_sum")).and_then(|v| v.as_i64()).unwrap_or(0);
+                    let sats = funded - spent;
+                    Ok(format!("{:.8} BTC", sats as f64 / 100_000_000.0))
+                }
+                "eth" => {
+                    let body = serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1, "method": "eth_getBalance",
+                        "params": [address, "latest"]
+                    });
+                    let r = client.post("https://ethereum-rpc.publicnode.com")
+                        .json(&body).timeout(Duration::from_secs(15)).send().await
+                        .map_err(|e| format!("ETH RPC: {}", e))?;
+                    if !r.status().is_success() { return Err(format!("ETH RPC ({})", r.status())); }
+                    let j: serde_json::Value = r.json().await.unwrap_or_default();
+                    let hex = j.get("result").and_then(|v| v.as_str()).unwrap_or("0x0");
+                    let wei = i128::from_str_radix(hex.trim_start_matches("0x"), 16).unwrap_or(0);
+                    Ok(format!("{:.6} ETH", wei as f64 / 1e18))
+                }
+                "sol" => {
+                    let body = serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1, "method": "getBalance",
+                        "params": [address]
+                    });
+                    let r = client.post("https://api.mainnet-beta.solana.com")
+                        .json(&body).timeout(Duration::from_secs(15)).send().await
+                        .map_err(|e| format!("Solana RPC: {}", e))?;
+                    if !r.status().is_success() { return Err(format!("SOL RPC ({})", r.status())); }
+                    let j: serde_json::Value = r.json().await.unwrap_or_default();
+                    let lamports = j.get("result").and_then(|r| r.get("value")).and_then(|v| v.as_i64()).unwrap_or(0);
+                    Ok(format!("{:.6} SOL", lamports as f64 / 1e9))
+                }
+                _ => Err(format!("Unsupported chain: {}", chain)),
+            }
+        }
+        "oura" => {
+            let token = credential.get("api_key").and_then(|v| v.as_str()).unwrap_or("");
+            if token.is_empty() { return Err("Personal Access Token required".to_string()); }
+            let resp = client.get("https://api.ouraring.com/v2/usercollection/personal_info")
+                .header("Authorization", format!("Bearer {}", token))
+                .timeout(Duration::from_secs(15)).send().await
+                .map_err(|e| format!("Oura API: {}", e))?;
+            if !resp.status().is_success() {
+                return Err(format!("Oura rejected token ({})", resp.status()));
+            }
+            let j: serde_json::Value = resp.json().await.unwrap_or_default();
+            let email = j.get("email").and_then(|v| v.as_str()).unwrap_or("account");
+            Ok(format!("Verified: {}", email))
+        }
+        "anthropic_usage" => {
+            let key = credential.get("api_key").and_then(|v| v.as_str()).unwrap_or("");
+            if key.is_empty() { return Err("API key required".to_string()); }
+            let resp = client.get("https://api.anthropic.com/v1/models")
+                .header("x-api-key", key)
+                .header("anthropic-version", "2023-06-01")
+                .timeout(Duration::from_secs(15)).send().await
+                .map_err(|e| format!("Anthropic API: {}", e))?;
+            if !resp.status().is_success() {
+                return Err(format!("Anthropic rejected key ({})", resp.status()));
+            }
+            Ok("Verified".to_string())
+        }
+        "openrouter_usage" => {
+            let key = credential.get("api_key").and_then(|v| v.as_str()).unwrap_or("");
+            if key.is_empty() { return Err("API key required".to_string()); }
+            let resp = client.get("https://openrouter.ai/api/v1/auth/key")
+                .header("Authorization", format!("Bearer {}", key))
+                .timeout(Duration::from_secs(15)).send().await
+                .map_err(|e| format!("OpenRouter API: {}", e))?;
+            if !resp.status().is_success() {
+                return Err(format!("OpenRouter rejected key ({})", resp.status()));
+            }
+            let j: serde_json::Value = resp.json().await.unwrap_or_default();
+            let limit = j.get("data").and_then(|d| d.get("limit")).and_then(|v| v.as_f64());
+            let usage = j.get("data").and_then(|d| d.get("usage")).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let info = match limit {
+                Some(l) => format!("${:.2} / ${:.2} used", usage, l),
+                None => format!("${:.2} used (no limit)", usage),
+            };
+            Ok(info)
+        }
+        "apple_health" => {
+            // File upload provider — credential is just a marker that a file was uploaded
+            let path = credential.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+            if path.is_empty() { return Err("Upload required".to_string()); }
+            Ok("File received".to_string())
         }
         // OAuth and pairing providers don't use this endpoint (they save via their own flows)
         _ => Ok("Saved".to_string()),
@@ -719,3 +998,189 @@ async fn health_check_tick(state: &Arc<AppState>) -> Result<(), String> {
     }
     Ok(())
 }
+
+
+// ── Apple Health file upload ────────────────────────────────────────────────
+
+pub async fn handle_health_upload(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    if body.is_empty() { return Err(axum::http::StatusCode::BAD_REQUEST); }
+    if body.len() > 500 * 1024 * 1024 { // 500 MB cap
+        return Err(axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    // Store under ~/.syntaur/uploads/health/{uid}/export-{ts}.zip (or .xml)
+    let data_dir = crate::resolve_data_dir();
+    let upload_dir = data_dir.join("uploads").join("health").join(uid.to_string());
+    if let Err(e) = std::fs::create_dir_all(&upload_dir) {
+        warn!("[health-upload] mkdir failed: {}", e);
+        return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    let filename = format!("export-{}.bin", chrono::Utc::now().timestamp());
+    let fpath = upload_dir.join(&filename);
+    let path_str = fpath.to_string_lossy().to_string();
+    if let Err(e) = std::fs::write(&fpath, &body) {
+        warn!("[health-upload] write failed: {}", e);
+        return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    // Quick sanity check — is this actually a Health export?
+    // Apple exports as .zip containing export.xml. We accept both.
+    let file_size = body.len();
+    let mut detected_kind = "unknown";
+    let head: &[u8] = &body[..body.len().min(8)];
+    if head.starts_with(b"PK") { detected_kind = "zip"; }
+    else if head.starts_with(b"<?xml") || head.starts_with(b"<Health") { detected_kind = "xml"; }
+
+    // Save as sync_connection
+    let now = chrono::Utc::now().timestamp();
+    let db = state.db_path.clone();
+    let credential = serde_json::json!({"file_path": path_str, "size": file_size, "kind": detected_kind});
+    let credential_json = serde_json::to_string(&credential).unwrap_or_default();
+    let display_name = format!("{} ({} MB)", filename, file_size / 1_048_576);
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO sync_connections (user_id, provider, display_name, credential, status, created_at, updated_at, last_check_at)
+             VALUES (?, 'apple_health', ?, ?, 'active', ?, ?, ?)
+             ON CONFLICT(user_id, provider) DO UPDATE SET
+               display_name = excluded.display_name,
+               credential = excluded.credential,
+               status = 'active',
+               last_error = NULL,
+               updated_at = excluded.updated_at,
+               last_check_at = excluded.last_check_at",
+            rusqlite::params![uid, display_name, credential_json, now, now, now],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    info!("[health-upload] stored {} bytes for user {} ({})", file_size, uid, detected_kind);
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "size": file_size,
+        "kind": detected_kind,
+        "path": path_str,
+    })))
+}
+
+// ── Status-only cards ───────────────────────────────────────────────────────
+
+pub async fn handle_notebooklm_status(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let _ = crate::resolve_principal(&state, token).await?;
+
+    // Check common notebooklm-py storage_state.json locations
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/sean".to_string());
+    let candidates = [
+        format!("{}/.notebooklm/storage_state.json", home),
+        format!("{}/notebooklm-py/storage_state.json", home),
+        format!("{}/.config/notebooklm/storage_state.json", home),
+        "/home/sean/notebooklm-py/storage_state.json".to_string(),
+    ];
+
+    for path in &candidates {
+        if let Ok(meta) = std::fs::metadata(path) {
+            let modified_secs = meta.modified().ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let now = chrono::Utc::now().timestamp();
+            let age_days = (now - modified_secs) / 86400;
+            // Google session cookies last ~14 days typical — warn past 10
+            let status = if age_days > 14 { "stale" }
+                         else if age_days > 10 { "warning" }
+                         else { "ok" };
+            return Ok(Json(serde_json::json!({
+                "connected": true,
+                "status": status,
+                "path": path,
+                "age_days": age_days,
+                "last_login": modified_secs,
+                "hint": "Run `notebooklm login` on gaming PC to refresh",
+            })));
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "connected": false,
+        "status": "not_configured",
+        "hint": "Install notebooklm-py and run `notebooklm login` on gaming PC",
+    })))
+}
+
+pub async fn handle_vault_status(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let _ = crate::resolve_principal(&state, token).await?;
+
+    let vault_path = "/home/sean/vault";
+    let check_start = std::time::Instant::now();
+
+    let mounted = std::path::Path::new(vault_path).exists();
+    let mut last_write: Option<i64> = None;
+    let mut file_count = 0;
+    let mut read_latency_ms = 0_u128;
+
+    if mounted {
+        // Read latency: stat a known file
+        let memory_md = format!("{}/MEMORY.md", vault_path);
+        let t0 = std::time::Instant::now();
+        if let Ok(meta) = std::fs::metadata(&memory_md) {
+            read_latency_ms = t0.elapsed().as_millis();
+            if let Ok(m) = meta.modified() {
+                if let Ok(d) = m.duration_since(std::time::UNIX_EPOCH) {
+                    last_write = Some(d.as_secs() as i64);
+                }
+            }
+        }
+        // Count files (quick scan — shallow)
+        if let Ok(entries) = std::fs::read_dir(format!("{}/projects", vault_path)) {
+            file_count = entries.count();
+        }
+    }
+
+    // Write latency: touch a test file in vault
+    let mut write_latency_ms = 0_u128;
+    let mut writable = false;
+    if mounted {
+        let test_path = format!("{}/.health-check", vault_path);
+        let t0 = std::time::Instant::now();
+        if std::fs::write(&test_path, chrono::Utc::now().timestamp().to_string().as_bytes()).is_ok() {
+            write_latency_ms = t0.elapsed().as_millis();
+            writable = true;
+            let _ = std::fs::remove_file(&test_path);
+        }
+    }
+
+    let status = if !mounted { "offline" }
+                 else if !writable { "read_only" }
+                 else if read_latency_ms > 500 || write_latency_ms > 1000 { "degraded" }
+                 else { "healthy" };
+
+    Ok(Json(serde_json::json!({
+        "connected": mounted,
+        "status": status,
+        "mounted": mounted,
+        "writable": writable,
+        "path": vault_path,
+        "projects_count": file_count,
+        "last_write_at": last_write,
+        "read_latency_ms": read_latency_ms,
+        "write_latency_ms": write_latency_ms,
+        "check_took_ms": check_start.elapsed().as_millis() as u64,
+    })))
+}
+

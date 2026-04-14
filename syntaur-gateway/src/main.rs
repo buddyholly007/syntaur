@@ -3761,6 +3761,9 @@ async fn main() {
         .route("/api/sync/connections/{provider}", axum::routing::delete(sync::handle_sync_disconnect))
         .route("/api/sync/telegram/pair", post(sync::handle_telegram_pair_create))
         .route("/api/sync/telegram/status", get(sync::handle_telegram_pair_status))
+        .route("/api/sync/health/upload", post(sync::handle_health_upload))
+        .route("/api/sync/notebooklm/status", get(sync::handle_notebooklm_status))
+        .route("/api/sync/vault/status", get(sync::handle_vault_status))
         .with_state(Arc::clone(&state))
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),

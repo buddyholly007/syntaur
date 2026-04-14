@@ -660,6 +660,11 @@ function renderProviderCard(p) {
     gmail: '&#9993;', google_calendar: '&#128197;', ics_subscription: '&#128197;',
     telegram: '&#128172;', stripe: '&#128179;', bluesky: '&#9729;',
     plaid: '&#127974;', simplefin: '&#127974;', alpaca: '&#128200;', coinbase: '&#8383;',
+    github: '&#128187;', home_assistant: '&#127968;', plex: '&#127916;',
+    apple_calendar: '&#128197;', crypto_wallet: '&#128184;',
+    spotify: '&#127925;', youtube: '&#9654;', strava: '&#127939;',
+    oura: '&#128131;', anthropic_usage: '&#129302;', openrouter_usage: '&#9889;',
+    apple_health: '&#10084;', notebooklm_status: '&#128214;', vault_health: '&#128190;',
   };
   const icon = icons[p.id] || '&#128279;';
   const statusBadge = p.connected ? (
@@ -733,6 +738,13 @@ function openSyncModal(providerId) {
         <input id="sync-field-api_secret" type="password" class="w-full mt-2 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="API Secret">`;
     } else if (p.id === 'simplefin') {
       fields = `<input id="sync-field-setup_token" type="password" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="Setup token">`;
+    } else if (p.id === 'home_assistant') {
+      fields = `<input id="sync-field-url" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="http://homeassistant.local:8123" value="http://homeassistant.local:8123">
+        <input id="sync-field-token" type="password" class="w-full mt-2 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="Long-lived access token">`;
+    } else if (p.id === 'plex') {
+      fields = `<input id="sync-field-token" type="password" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="X-Plex-Token">`;
+    } else if (p.id === 'github' || p.id === 'oura' || p.id === 'anthropic_usage' || p.id === 'openrouter_usage') {
+      fields = `<input id="sync-field-api_key" type="password" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="Paste your token">`;
     } else {
       fields = `<input id="sync-field-api_key" type="password" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="API key">`;
     }
@@ -748,6 +760,45 @@ function openSyncModal(providerId) {
   } else if (p.flow === 'link_sdk') {
     flowHtml = `<p class="text-sm text-gray-300 mb-3">${escapeHtml(p.instructions)}</p>
       <p class="text-xs text-gray-500 italic">Plaid Link requires the financial tab's setup flow. Coming soon to this panel.</p>`;
+  } else if (p.flow === 'caldav') {
+    flowHtml = `<p class="text-sm text-gray-300 mb-3">${escapeHtml(p.instructions)}</p>
+      ${helpLink}
+      <div class="mt-3 space-y-2">
+        <input id="sync-field-username" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="iCloud email (e.g. you@icloud.com)">
+        <input id="sync-field-password" type="password" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="App-specific password">
+        <input id="sync-field-url" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="CalDAV URL (leave blank for iCloud auto-discovery)" value="https://caldav.icloud.com/">
+      </div>
+      <button onclick="submitApiKey('${p.id}')" id="sync-submit-btn" class="w-full mt-3 bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Test & Save</button>
+      <p id="sync-error" class="text-xs text-red-400 mt-2 hidden"></p>`;
+  } else if (p.flow === 'crypto') {
+    flowHtml = `<p class="text-sm text-gray-300 mb-3">${escapeHtml(p.instructions)}</p>
+      <div class="mt-3 space-y-2">
+        <select id="sync-field-chain" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm">
+          <option value="btc">Bitcoin (BTC)</option>
+          <option value="eth">Ethereum (ETH)</option>
+          <option value="sol">Solana (SOL)</option>
+        </select>
+        <input id="sync-field-address" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="Wallet address (public — no keys)">
+      </div>
+      <button onclick="submitApiKey('${p.id}')" id="sync-submit-btn" class="w-full mt-3 bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Test & Save</button>
+      <p id="sync-error" class="text-xs text-red-400 mt-2 hidden"></p>`;
+  } else if (p.flow === 'file_upload') {
+    flowHtml = `<p class="text-sm text-gray-300 mb-3">${escapeHtml(p.instructions)}</p>
+      ${helpLink}
+      <div class="mt-3">
+        <label class="block w-full border-2 border-dashed border-gray-700 hover:border-oc-500 rounded-lg p-6 text-center cursor-pointer transition-colors">
+          <input type="file" id="sync-upload-file" accept=".zip,.xml" class="hidden" onchange="document.getElementById('sync-upload-name').textContent = this.files[0]?.name || 'No file'">
+          <svg class="mx-auto mb-2" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
+          <p class="text-xs text-gray-400">Click to choose export.zip or export.xml</p>
+          <p class="text-xs text-oc-500 mt-1" id="sync-upload-name">No file selected</p>
+        </label>
+      </div>
+      <button onclick="submitFileUpload('${p.id}')" id="sync-submit-btn" class="w-full mt-3 bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Upload</button>
+      <p id="sync-error" class="text-xs text-red-400 mt-2 hidden"></p>`;
+  } else if (p.flow === 'status') {
+    flowHtml = `<p class="text-sm text-gray-300 mb-3">${escapeHtml(p.instructions)}</p>
+      <div id="sync-status-container" class="mt-3"><p class="text-xs text-gray-500">Checking status…</p></div>`;
+    setTimeout(() => loadStatusCard(p.id), 100);
   }
   body.innerHTML = flowHtml;
   document.getElementById('sync-modal').classList.remove('hidden');
@@ -854,6 +905,57 @@ async function startPairing(providerId) {
     }, 2000);
   } catch(e) {
     container.innerHTML = '<p class="text-xs text-red-400">Failed to generate code: ' + e.message + '</p>';
+  }
+}
+
+async function submitFileUpload(providerId) {
+  const fileInput = document.getElementById('sync-upload-file');
+  const file = fileInput.files[0];
+  if (!file) { showSyncError('Choose a file first'); return; }
+  const btn = document.getElementById('sync-submit-btn');
+  btn.textContent = 'Uploading…'; btn.disabled = true;
+  try {
+    const resp = await fetch('/api/sync/health/upload?token=' + token, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: file,
+    });
+    if (resp.ok) {
+      closeSyncModal();
+      await loadSyncProviders();
+    } else {
+      showSyncError('Upload failed (' + resp.status + ')');
+    }
+  } catch(e) { showSyncError(e.message); }
+  btn.textContent = 'Upload'; btn.disabled = false;
+}
+
+async function loadStatusCard(providerId) {
+  const container = document.getElementById('sync-status-container');
+  let endpoint = '';
+  if (providerId === 'notebooklm_status') endpoint = '/api/sync/notebooklm/status';
+  else if (providerId === 'vault_health') endpoint = '/api/sync/vault/status';
+  else { container.innerHTML = '<p class="text-xs text-gray-500">No status endpoint for ' + providerId + '</p>'; return; }
+
+  try {
+    const resp = await fetch(endpoint + '?token=' + token, { headers: { 'Authorization': 'Bearer ' + token } });
+    const data = await resp.json();
+    let rows = '';
+    for (const [k, v] of Object.entries(data)) {
+      let display = v;
+      if (k === 'last_write_at' || k === 'last_login') {
+        display = v ? new Date(v * 1000).toLocaleString() : '—';
+      } else if (typeof v === 'boolean') {
+        display = v ? '✓' : '✗';
+      }
+      rows += '<div class="flex justify-between py-1 border-b border-gray-800 text-xs"><span class="text-gray-500">' + escapeHtml(k) + '</span><span class="text-gray-200">' + escapeHtml(String(display)) + '</span></div>';
+    }
+    const statusColor = (data.status === 'healthy' || data.status === 'ok') ? 'text-green-400' :
+                        (data.status === 'warning' || data.status === 'degraded') ? 'text-yellow-400' :
+                        'text-red-400';
+    container.innerHTML = '<div class="bg-gray-900 rounded-lg p-3"><div class="text-sm mb-2"><span class="' + statusColor + ' font-medium">● ' + escapeHtml(data.status || 'unknown') + '</span></div>' + rows + (data.hint ? '<p class="text-xs text-gray-500 italic mt-2">' + escapeHtml(data.hint) + '</p>' : '') + '</div>';
+  } catch(e) {
+    container.innerHTML = '<p class="text-xs text-red-400">Failed to load: ' + e.message + '</p>';
   }
 }
 
