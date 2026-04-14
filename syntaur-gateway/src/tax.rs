@@ -1787,6 +1787,66 @@ pub async fn handle_category_list(
     Ok(Json(serde_json::json!({ "categories": categories })))
 }
 
+#[derive(Deserialize)]
+pub struct CategoryCreateRequest {
+    pub token: String,
+    pub name: String,
+    pub entity: Option<String>,
+    pub tax_deductible: Option<bool>,
+}
+
+pub async fn handle_category_create(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CategoryCreateRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &req.token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let name = req.name.clone();
+    let entity = req.entity.clone().unwrap_or_else(|| "business".to_string());
+    let deductible = req.tax_deductible.unwrap_or(entity == "business");
+
+    let id = tokio::task::spawn_blocking(move || -> Result<i64, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR IGNORE INTO expense_categories (name, entity, tax_deductible, user_id, is_custom) VALUES (?, ?, ?, ?, 1)",
+            rusqlite::params![&name, &entity, deductible, uid],
+        ).map_err(|e| e.to_string())?;
+        let id = conn.query_row(
+            "SELECT id FROM expense_categories WHERE name = ?", rusqlite::params![&name], |r| r.get(0),
+        ).map_err(|e| e.to_string())?;
+        Ok(id)
+    }).await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(serde_json::json!({ "success": true, "id": id, "name": req.name })))
+}
+
+pub async fn handle_category_delete(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(cat_id): axum::extract::Path<i64>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let _ = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let db = state.db_path.clone();
+
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        // Only allow deleting custom categories
+        conn.execute("DELETE FROM expense_categories WHERE id = ? AND is_custom = 1", rusqlite::params![cat_id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }).await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(serde_json::json!({ "success": true })))
+}
+
 // ── Income ───────────────────────────────────────────────────────────────────
 
 pub async fn handle_income_list(

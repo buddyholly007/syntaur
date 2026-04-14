@@ -3711,6 +3711,8 @@ async fn main() {
         .route("/api/tax/expenses", get(tax::handle_expense_list))
         .route("/api/tax/summary", get(tax::handle_expense_summary))
         .route("/api/tax/categories", get(tax::handle_category_list))
+        .route("/api/tax/categories", post(tax::handle_category_create))
+        .route("/api/tax/categories/{id}", axum::routing::delete(tax::handle_category_delete))
         .route("/api/tax/documents", post(tax::handle_tax_doc_upload))
         .route("/api/tax/documents", get(tax::handle_tax_doc_list))
         .route("/api/tax/documents/{id}/image", get(tax::handle_tax_doc_image))

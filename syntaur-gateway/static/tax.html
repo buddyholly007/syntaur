@@ -2145,11 +2145,31 @@ async function saveProfile() {
       spouse_dob: document.getElementById('pf-sp-dob').value || null,
     };
     await authFetch('/api/tax/profile', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
-    result.textContent = 'Saved!'; result.className = 'text-xs self-center text-green-400';
-    toggleProfileEdit();
-    loadProfile();
+    result.textContent = 'Auto-saved'; result.className = 'text-xs self-center text-green-400';
+    setTimeout(() => { result.textContent = ''; }, 2000);
   } catch(e) { result.textContent = 'Error'; result.className = 'text-xs self-center text-red-400'; }
 }
+
+// Auto-save profile on field blur (so closing the app doesn't lose data)
+let _profileAutoSaveTimer = null;
+function autoSaveProfile() {
+  clearTimeout(_profileAutoSaveTimer);
+  _profileAutoSaveTimer = setTimeout(() => {
+    const result = document.getElementById('profile-save-result');
+    if (result) { result.textContent = 'Saving...'; result.className = 'text-xs self-center text-gray-400'; }
+    saveProfile();
+  }, 1000);
+}
+document.addEventListener('DOMContentLoaded', () => {
+  const fields = ['pf-first','pf-last','pf-ssn','pf-dob','pf-addr','pf-city','pf-state','pf-zip','pf-filing','pf-occupation','pf-sp-first','pf-sp-last','pf-sp-ssn','pf-sp-dob'];
+  fields.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.addEventListener('blur', autoSaveProfile);
+      if (el.tagName === 'SELECT') el.addEventListener('change', autoSaveProfile);
+    }
+  });
+});
 
 function showAddDependent() {
   const name = prompt('Dependent full name (First Last):');

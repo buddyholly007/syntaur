@@ -851,6 +851,50 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX IF NOT EXISTS idx_dep_user ON dependents(user_id, tax_year);
     "#,
+    // v24: expanded default expense categories + custom category support
+    r#"
+    INSERT OR IGNORE INTO expense_categories (name, entity, tax_deductible) VALUES
+        -- Business: common categories users need
+        ('Power Tools', 'business', 1),
+        ('Shop Maintenance', 'business', 1),
+        ('Fuel - Equipment', 'business', 1),
+        ('Furniture & Equipment', 'business', 1),
+        ('Hardware & Fasteners', 'business', 1),
+        ('Dust Collection', 'business', 1),
+        ('Backup Power', 'business', 1),
+        ('Home Office', 'business', 1),
+        ('Supplies - General', 'business', 1),
+        ('Contract Labor', 'business', 1),
+        ('Commissions & Fees', 'business', 1),
+        ('Depreciation (Sec 179)', 'business', 1),
+        ('Business Revenue', 'business', 0),
+        -- Personal: tax-relevant categories
+        ('Real Estate Taxes', 'personal', 1),
+        ('Mortgage Interest', 'personal', 1),
+        ('Construction Loan Interest', 'personal', 1),
+        ('Closing Costs', 'personal', 0),
+        ('Homeowner''s Insurance', 'personal', 0),
+        ('Student Loan Interest', 'personal', 1),
+        ('Health Insurance', 'personal', 1),
+        ('Childcare', 'personal', 1),
+        ('Retirement Contributions', 'personal', 1),
+        ('HSA Contributions', 'personal', 1),
+        -- Personal: tracking categories
+        ('FICA - Social Security', 'personal', 0),
+        ('FICA - Medicare', 'personal', 0),
+        ('Federal Income Tax Paid', 'personal', 0),
+        ('State/Local Tax Paid', 'personal', 0),
+        ('Bank Fees', 'personal', 0),
+        ('Personal Expenses', 'personal', 0),
+        ('Wages Income', 'personal', 0),
+        ('Interest Income', 'personal', 0),
+        ('Dividend Income', 'personal', 0),
+        ('Capital Gains', 'personal', 0);
+
+    -- Allow user_id-scoped custom categories (added flag)
+    ALTER TABLE expense_categories ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE expense_categories ADD COLUMN is_custom INTEGER NOT NULL DEFAULT 0;
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
