@@ -853,34 +853,53 @@ async fn scan_receipt_vision(state: &AppState, receipt_id: i64) -> Result<(), St
     use base64::Engine;
     let base64_image = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
 
-    // Call LLM with vision
+    // Call LLM with vision — try local GPU first (Qwen2.5-VL-7B), fall back to cloud
     let client = &state.client;
     let config = &state.config;
 
-    // Find a provider that supports vision. Use OpenRouter with a vision model.
-    // The user's configured model may not support images, so we override to a
-    // known vision-capable model on whatever cloud provider is available.
-    let provider = config.models.providers.iter()
-        .find(|(_, p)| p.base_url.contains("openrouter") || p.base_url.contains("openai") || p.base_url.contains("anthropic"))
-        .or_else(|| config.models.providers.iter().next());
-
-    let (provider_name, provider_config) = provider.ok_or("No LLM provider configured")?;
-
-    // Force a vision-capable model optimized for document OCR
-    let model = if provider_config.base_url.contains("openrouter") {
-        "nvidia/nemotron-nano-12b-v2-vl:free" // #1 on OCRBench, free, purpose-built for documents
-    } else if provider_config.base_url.contains("anthropic") {
-        "claude-sonnet-4-6"
-    } else if provider_config.base_url.contains("openai") {
-        "gpt-4o-mini"
-    } else {
-        provider_config.models.first()
-            .map(|m| m.id.as_str())
-            .or_else(|| provider_config.extra.get("model").and_then(|v| v.as_str()))
-            .unwrap_or("gpt-4o-mini")
+    // Local vision model on Gaming PC (hot-swap from chat model)
+    let local_gpu_host = "192.168.1.69";
+    let local_vision_port = 8900;
+    let use_local = {
+        // Check if local GPU is reachable, then swap to vision model
+        let swap_result = tokio::process::Command::new("ssh")
+            .args([&format!("sean@{}", local_gpu_host), "bash", "/home/sean/swap-to-vision.sh"])
+            .output().await;
+        match swap_result {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                if stdout.contains("READY") {
+                    info!("[tax] Local vision model ready on {}:{}", local_gpu_host, local_vision_port);
+                    true
+                } else {
+                    info!("[tax] Local vision swap failed: {}, falling back to cloud", stdout.trim());
+                    false
+                }
+            }
+            Err(e) => {
+                info!("[tax] Cannot reach local GPU ({}), falling back to cloud", e);
+                false
+            }
+        }
     };
 
-    let url = format!("{}/chat/completions", provider_config.base_url.trim_end_matches('/'));
+    let (url, model, api_key) = if use_local {
+        (
+            format!("http://{}:{}/v1/chat/completions", local_gpu_host, local_vision_port),
+            "qwen2.5-vl-7b".to_string(),
+            String::new(),
+        )
+    } else {
+        // Cloud fallback
+        let provider = config.models.providers.iter()
+            .find(|(_, p)| p.base_url.contains("openrouter") || p.base_url.contains("openai") || p.base_url.contains("anthropic"))
+            .or_else(|| config.models.providers.iter().next());
+        let (_, pc) = provider.ok_or("No LLM provider configured")?;
+        let m = if pc.base_url.contains("openrouter") { "nvidia/nemotron-nano-12b-v2-vl:free" }
+            else if pc.base_url.contains("anthropic") { "claude-sonnet-4-6" }
+            else { "gpt-4o-mini" };
+        (format!("{}/chat/completions", pc.base_url.trim_end_matches('/')), m.to_string(), pc.api_key.clone())
+    };
 
     let prompt = r#"Analyze this receipt/invoice image carefully. Read ALL text on the document.
 
@@ -910,14 +929,26 @@ Respond ONLY with valid JSON: {"vendor":"...","amount":"45.99","date":"2025-12-1
         "temperature": 0.1
     });
 
-    let resp = client.post(&url)
-        .header("Authorization", format!("Bearer {}", provider_config.api_key))
+    let mut req = client.post(&url)
         .header("Content-Type", "application/json")
         .json(&payload)
-        .timeout(std::time::Duration::from_secs(60))
-        .send()
-        .await
-        .map_err(|e| format!("LLM request: {}", e))?;
+        .timeout(std::time::Duration::from_secs(90));
+    if !api_key.is_empty() {
+        req = req.header("Authorization", format!("Bearer {}", api_key));
+    }
+
+    let resp = req.send().await.map_err(|e| format!("LLM request: {}", e))?;
+
+    // Swap back to chat model in background (don't block on it)
+    if use_local {
+        let host = local_gpu_host.to_string();
+        tokio::spawn(async move {
+            let _ = tokio::process::Command::new("ssh")
+                .args([&format!("sean@{}", host), "bash", "/home/sean/swap-to-chat.sh"])
+                .output().await;
+            info!("[tax] Restored chat model on {}", host);
+        });
+    }
 
     if !resp.status().is_success() {
         let status = resp.status();
