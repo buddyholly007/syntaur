@@ -30,6 +30,7 @@ struct SyncCreds {
     home_assistant: Option<(String, String)>,      // (url, token)
     ios_shortcut: Option<String>,                  // webhook url
     has_music_assistant: bool,
+    has_phone_pwa: bool,
 }
 
 fn load_sync_creds(db_path: &std::path::Path, user_id: i64) -> SyncCreds {
@@ -38,6 +39,7 @@ fn load_sync_creds(db_path: &std::path::Path, user_id: i64) -> SyncCreds {
         Err(_) => return SyncCreds {
             apple_music: None, home_assistant: None, ios_shortcut: None,
             has_music_assistant: false,
+        has_phone_pwa: false,
         },
     };
     let mut stmt = match conn.prepare(
@@ -48,6 +50,7 @@ fn load_sync_creds(db_path: &std::path::Path, user_id: i64) -> SyncCreds {
         Err(_) => return SyncCreds {
             apple_music: None, home_assistant: None, ios_shortcut: None,
             has_music_assistant: false,
+        has_phone_pwa: false,
         },
     };
     let rows = stmt.query_map(rusqlite::params![user_id], |r| Ok((
@@ -58,6 +61,7 @@ fn load_sync_creds(db_path: &std::path::Path, user_id: i64) -> SyncCreds {
     let mut home_assistant = None;
     let mut ios_shortcut = None;
     let mut has_music_assistant = false;
+    let mut has_phone_pwa = false;
 
     if let Some(rs) = rows {
         for row in rs.flatten() {
@@ -84,12 +88,13 @@ fn load_sync_creds(db_path: &std::path::Path, user_id: i64) -> SyncCreds {
                     if !url.is_empty() { ios_shortcut = Some(url); }
                 }
                 "music_assistant" => { has_music_assistant = true; }
+                "phone_music_pwa" => { has_phone_pwa = true; }
                 _ => {}
             }
         }
     }
 
-    SyncCreds { apple_music, home_assistant, ios_shortcut, has_music_assistant }
+    SyncCreds { apple_music, home_assistant, ios_shortcut, has_music_assistant, has_phone_pwa }
 }
 
 async fn apple_music_search_first(
@@ -290,7 +295,47 @@ impl Tool for MusicTool {
 
         // Step 2: route playback
 
-        // 2a. Home Assistant — preferred (HomePod/Apple TV seamless)
+        // 2a. Phone PWA — TOP priority for mobile users. Sends music:// URL
+        // through the bridge SSE channel; phone's Music.app opens and plays.
+        // No DRM workaround needed — phone has its own Apple Music subscription.
+        if creds.has_phone_pwa && !apple_music_url.is_empty() {
+            let pwa_url = if apple_music_url.starts_with("https://music.apple.com") {
+                apple_music_url.replacen("https://", "music://", 1)
+            } else {
+                apple_music_url.clone()
+            };
+            let cmd = serde_json::json!({
+                "type": "play_music",
+                "url": pwa_url,
+                "song": song_name,
+                "artist": artist_name,
+            });
+            let resp = client.post("http://127.0.0.1:18804/command")
+                .json(&cmd)
+                .timeout(std::time::Duration::from_secs(3))
+                .send().await;
+            match resp {
+                Ok(r) if r.status().is_success() => {
+                    let body: serde_json::Value = r.json().await.unwrap_or_default();
+                    let count = body.get("sent_to").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let phone_count = count.saturating_sub(1);
+                    if phone_count > 0 {
+                        info!("[play_music] sent to PWA ({} subscribers): {}", phone_count, song_name);
+                        return Ok(RichToolResult::text(format!(
+                            "Sending {}{} to your phone — Music app should open and play.",
+                            song_name,
+                            if artist_name.is_empty() { "".to_string() } else { format!(" by {}", artist_name) },
+                        )));
+                    } else {
+                        warn!("[play_music] PWA registered but no live subscribers — skipping");
+                    }
+                }
+                Ok(r) => warn!("[play_music] bridge returned {}", r.status()),
+                Err(e) => warn!("[play_music] bridge unreachable: {}", e),
+            }
+        }
+
+        // 2b. Home Assistant — preferred for whole-home playback (HomePod/Apple TV seamless)
         if let Some(ref ha) = creds.home_assistant {
             let target = match target_override.clone() {
                 Some(t) => Some(t),
@@ -318,7 +363,7 @@ impl Tool for MusicTool {
             }
         }
 
-        // 2b. iOS Shortcut fallback — plays on phone
+        // 2c. iOS Shortcut fallback — plays on phone
         if let Some(ref shortcut_url) = creds.ios_shortcut {
             match trigger_ios_shortcut(&client, shortcut_url, query).await {
                 Ok(_) => {
@@ -332,7 +377,7 @@ impl Tool for MusicTool {
             }
         }
 
-        // 2c. Browser fallback — return URL
+        // 2d. Browser fallback — return URL
         if !apple_music_url.is_empty() {
             return Ok(RichToolResult::text(format!(
                 "Found {}{}. Open this link on any Apple device to play: {}\n\

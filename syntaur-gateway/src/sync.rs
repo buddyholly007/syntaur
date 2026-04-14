@@ -37,6 +37,7 @@ pub enum FlowKind {
     MusicAssistant, // Detected via connected HA instance
     IosShortcut,  // User's personal Shortcut webhook URL
     AppleMusic,   // Bookmarklet-captured MusicKit tokens (dev + MUT)
+    PhonePwa,     // Pair with the Syntaur Voice PWA on user's phone
 }
 
 pub struct ProviderDef {
@@ -290,6 +291,15 @@ pub fn catalog() -> Vec<ProviderDef> {
             info_only: false,
         },
         ProviderDef {
+            id: "phone_music_pwa", name: "Phone (via Syntaur Voice PWA)", category: "Music",
+            flow: FlowKind::PhonePwa,
+            instructions: "If you have the Syntaur Voice PWA installed on your phone, Peter can launch Apple Music on it directly. No bookmarklet, no Shortcut — just install the PWA and tap Connect. Music plays through your phone's speakers, AirPods, or any device your phone is AirPlaying to.",
+            help_url: "",
+            scopes: &[],
+            unlocks: "Peter sends play commands straight to Music.app on your phone. Audio comes out wherever the phone is connected (speakers, AirPods, AirPlay HomePod).",
+            info_only: false,
+        },
+        ProviderDef {
             id: "apple_music", name: "Apple Music", category: "Music",
             flow: FlowKind::AppleMusic,
             instructions: "No developer account needed. Sign into Apple Music in your browser, then click the Syntaur bookmarklet — it captures your login tokens from the Apple Music page and sends them back here. After that, Peter can search, queue, and manage your library.",
@@ -469,6 +479,7 @@ pub async fn handle_sync_providers(
             FlowKind::MusicAssistant => "music_assistant",
             FlowKind::IosShortcut => "ios_shortcut",
             FlowKind::AppleMusic => "apple_music",
+            FlowKind::PhonePwa => "phone_pwa",
         };
         // Check if OAuth provider has config — gate "Connect" button if not
         let oauth_configured = matches!(p.flow, FlowKind::Oauth) &&
@@ -864,6 +875,26 @@ async fn test_credential(
         "music_assistant" => {
             // Validated indirectly by checking HA integration
             Ok("Saved".to_string())
+        }
+        "phone_music_pwa" => {
+            // Verify the bridge command port is reachable. SSE subscribers (PWA
+            // tabs) are checked at command-send time — here we only need to
+            // confirm the bridge itself is up.
+            let resp = client.post("http://127.0.0.1:18804/command")
+                .json(&serde_json::json!({"type":"info","message":"Syntaur paired"}))
+                .timeout(Duration::from_secs(3))
+                .send().await
+                .map_err(|e| format!("Bridge not reachable on 127.0.0.1:18804: {}. Make sure rust-limitless-bridge is running.", e))?;
+            if !resp.status().is_success() {
+                return Err(format!("Bridge returned {}", resp.status()));
+            }
+            let body: serde_json::Value = resp.json().await.unwrap_or_default();
+            let count = body.get("sent_to").and_then(|v| v.as_u64()).unwrap_or(0);
+            if count <= 1 {
+                Ok("Bridge ready. Open the Syntaur Voice PWA on your phone and keep it open to receive music commands.".to_string())
+            } else {
+                Ok(format!("Bridge ready. {} subscribers connected.", count.saturating_sub(1)))
+            }
         }
         // OAuth and pairing providers don't use this endpoint (they save via their own flows)
         _ => Ok("Saved".to_string()),
