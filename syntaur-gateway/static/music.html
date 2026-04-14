@@ -51,7 +51,10 @@
   <div class="card">
     <div class="flex items-center justify-between mb-3">
       <h3 class="text-xs uppercase tracking-wider text-gray-500">Now playing</h3>
-      <button id="apple-music-start-btn" onclick="startAppleMusicPlayer()" class="hidden text-xs bg-pink-700 hover:bg-pink-600 text-white px-3 py-1 rounded-lg" title="Pre-open the Apple Music player window so subsequent plays autoplay">🎵 Start Apple Music player</button>
+      <div class="flex items-center gap-2">
+        <span id="media-bridge-pill" class="hidden text-[10px] text-emerald-300 bg-emerald-900/40 px-2 py-0.5 rounded-full" title="Local Media Bridge is running — playback bypasses popups">⚡ Bridge on</span>
+        <button id="apple-music-start-btn" onclick="startAppleMusicPlayer()" class="hidden text-xs bg-pink-700 hover:bg-pink-600 text-white px-3 py-1 rounded-lg" title="Pre-open the Apple Music player window so subsequent plays autoplay">🎵 Start Apple Music player</button>
+      </div>
     </div>
     <div id="now-playing" class="flex items-center gap-4">
       <div class="w-20 h-20 rounded-lg bg-gray-900 flex-shrink-0 flex items-center justify-center overflow-hidden" id="np-art">
@@ -210,6 +213,48 @@
 <script>
 const token = sessionStorage.getItem('syntaur_token') || localStorage.getItem('syntaur_token') || '';
 if (!token) { window.location.href = '/'; }
+
+// ── Syntaur Media Bridge (optional local companion) ──────────────────────
+// Runs on the user's desktop at 127.0.0.1:18790. When alive, we prefer it
+// for apple_music/spotify/tidal/youtube_music playback — avoids the
+// popup entirely. Falls back to the existing Web Playback SDK / popup /
+// iframe paths below if the bridge isn't installed.
+const MEDIA_BRIDGE_URL = 'http://127.0.0.1:18790';
+let mediaBridgeAlive = false;
+let mediaBridgeAuthed = [];
+async function probeMediaBridge() {
+  try {
+    const r = await fetch(MEDIA_BRIDGE_URL + '/status', { method: 'GET' });
+    if (!r.ok) throw new Error('non-2xx');
+    const s = await r.json();
+    mediaBridgeAlive = true;
+    mediaBridgeAuthed = s.authed_providers || [];
+    const pill = document.getElementById('media-bridge-pill');
+    if (pill) {
+      pill.classList.remove('hidden');
+      pill.textContent = '⚡ Bridge on';
+      pill.title = 'Syntaur Media Bridge v' + s.version + ' — ' + s.audio_backend;
+    }
+  } catch (e) {
+    mediaBridgeAlive = false;
+    const pill = document.getElementById('media-bridge-pill');
+    if (pill) pill.classList.add('hidden');
+  }
+}
+async function mediaBridgePost(path, body) {
+  if (!mediaBridgeAlive) return null;
+  try {
+    const r = await fetch(MEDIA_BRIDGE_URL + path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : '{}',
+    });
+    return await r.json();
+  } catch (e) { return null; }
+}
+// Probe on boot + every 10s. Kicks in silently.
+probeMediaBridge();
+setInterval(probeMediaBridge, 10000);
 
 const selectedSpeakers = new Set();
 let lastNowPlaying = null;
@@ -861,9 +906,26 @@ window.onYouTubeIframeAPIReady = function() {
   });
 };
 
-function playOnThisComputer(provider, trackId, uri, name, artist) {
+async function playOnThisComputer(provider, trackId, uri, name, artist) {
   console.log('[local-play]', provider, trackId, name, '—', artist);
   showMusicNotice('▶ ' + (name || trackId) + (artist ? ' — ' + artist : ''), false);
+
+  // Prefer Syntaur Media Bridge when running — no popup, no SDK auth loop.
+  // Bridge drives a hidden Chromium that handles FairPlay/Widevine DRM.
+  if (mediaBridgeAlive && ['apple_music','spotify','tidal','youtube_music'].includes(provider)) {
+    const bridgeTrackId = (provider === 'spotify' && uri && uri.startsWith('spotify:track:'))
+      ? uri.slice('spotify:track:'.length)
+      : trackId;
+    const res = await mediaBridgePost('/play', {
+      provider, track_id: bridgeTrackId, name, artist,
+    });
+    if (res && res.ok) {
+      console.log('[local-play] routed through media bridge');
+      return;
+    }
+    console.warn('[local-play] bridge reachable but play failed, falling back', res);
+  }
+
   if (provider === 'spotify') {
     // Use the Spotify Connect API to play on this tab's registered device
     if (!spotifyDeviceId) {
@@ -914,6 +976,10 @@ function localPauseAll() {
 function applyLocalDuck(active) {
   localDuckingActive = active;
   const factor = active ? 0.2 : 1.0;
+  // Bridge owns Chromium audio — attenuate there too so bridge playback ducks.
+  if (mediaBridgeAlive) {
+    mediaBridgePost('/duck', { active, level: 0.2 });
+  }
   // Spotify Web Playback SDK
   if (spotifyPlayer && typeof spotifyPlayer.setVolume === 'function') {
     spotifyPlayer.setVolume(factor);

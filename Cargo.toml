@@ -13,6 +13,7 @@ members = [
     "syntaur-setup",
     "syntaur-license-server",
     "syntaur-viewer",
+    "rust-media-bridge",
 ]
 
 [workspace.package]
