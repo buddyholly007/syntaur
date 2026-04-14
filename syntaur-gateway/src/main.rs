@@ -30,6 +30,7 @@ mod license;
 mod tax;
 mod financial;
 mod calendar_reminder;
+mod sync;
 
 /// Brand name constant — used in user-facing messages.
 pub const BRAND: &str = "Syntaur";
@@ -3523,6 +3524,10 @@ async fn main() {
         info!("[calendar-reminder] spawned background reminder task");
     }
 
+    // Sync auto-renewal: OAuth refresh (5min), API-key health check (daily)
+    crate::sync::spawn_sync_renewal_task(Arc::clone(&state));
+    info!("[sync-renewal] spawned background renewal task");
+
     // Initialize the global Home Assistant REST client used by the
     // voice chat tools (control_light, set_thermostat, query_state,
     // call_ha_service). Skipped silently when no connector is configured.
@@ -3741,6 +3746,12 @@ async fn main() {
         .route("/api/calendar/{id}", axum::routing::delete(handle_calendar_delete))
         .route("/api/calendar/{id}", axum::routing::put(handle_calendar_update))
         .route("/api/calendar/import", post(handle_calendar_ics_import))
+        .route("/api/sync/providers", get(sync::handle_sync_providers))
+        .route("/api/sync/connect", post(sync::handle_sync_connect))
+        .route("/api/sync/test", post(sync::handle_sync_test))
+        .route("/api/sync/connections/{provider}", axum::routing::delete(sync::handle_sync_disconnect))
+        .route("/api/sync/telegram/pair", post(sync::handle_telegram_pair_create))
+        .route("/api/sync/telegram/status", get(sync::handle_telegram_pair_status))
         .with_state(Arc::clone(&state))
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),

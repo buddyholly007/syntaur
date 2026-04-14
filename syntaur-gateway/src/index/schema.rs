@@ -677,6 +677,39 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX IF NOT EXISTS idx_cal_rem_event ON calendar_reminders_sent(event_id);
     "#,
+    // v18: generic sync connections (Stripe, Bluesky, ICS subscriptions,
+    // generic providers) + Telegram pairing codes.
+    r#"
+    CREATE TABLE IF NOT EXISTS sync_connections (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id         INTEGER NOT NULL DEFAULT 0,
+        provider        TEXT NOT NULL,
+        display_name    TEXT,
+        credential      TEXT NOT NULL,
+        metadata        TEXT,
+        status          TEXT NOT NULL DEFAULT 'active',
+        last_sync_at    INTEGER,
+        last_check_at   INTEGER,
+        last_error      TEXT,
+        created_at      INTEGER NOT NULL,
+        updated_at      INTEGER,
+        UNIQUE(user_id, provider)
+    );
+    CREATE INDEX IF NOT EXISTS idx_sync_conn_user ON sync_connections(user_id);
+    CREATE INDEX IF NOT EXISTS idx_sync_conn_provider ON sync_connections(provider);
+
+    CREATE TABLE IF NOT EXISTS telegram_pairings (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id         INTEGER NOT NULL,
+        code            TEXT NOT NULL UNIQUE,
+        bot_token       TEXT NOT NULL,
+        expires_at      INTEGER NOT NULL,
+        created_at      INTEGER NOT NULL,
+        consumed_at     INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_tg_pair_code ON telegram_pairings(code);
+    CREATE INDEX IF NOT EXISTS idx_tg_pair_expires ON telegram_pairings(expires_at);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

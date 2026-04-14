@@ -49,6 +49,7 @@
   <!-- Tabs -->
   <div class="flex gap-1 mb-6 bg-gray-900 rounded-xl p-1 w-fit">
     <button class="tab active" onclick="showTab('general')">General</button>
+    <button class="tab" onclick="showTab('sync')">Sync</button>
     <button class="tab" onclick="showTab('llm')">LLM Backends</button>
     <button class="tab" onclick="showTab('system')">System</button>
   </div>
@@ -157,6 +158,37 @@
         </div>
       </div>
 
+    </div>
+  </div>
+
+  <!-- Sync tab -->
+  <div class="tab-content hidden" id="tab-sync">
+    <div class="space-y-4">
+      <div class="card">
+        <div class="flex items-center justify-between mb-3">
+          <div>
+            <h3 class="font-medium">Connect Your Accounts</h3>
+            <p class="text-xs text-gray-500 mt-1">Link email, calendars, banks, and more. OAuth connections auto-renew; API keys get daily health checks.</p>
+          </div>
+          <button onclick="loadSyncProviders()" class="text-xs text-gray-400 hover:text-gray-200">&#8634; Refresh</button>
+        </div>
+        <div id="sync-categories" class="space-y-4">
+          <p class="text-xs text-gray-500 italic">Loading providers…</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Sync connect modal (hidden by default) -->
+  <div id="sync-modal" class="hidden fixed inset-0 bg-black/75 z-50 flex items-center justify-center p-4">
+    <div class="bg-gray-800 rounded-xl border border-gray-700 max-w-md w-full max-h-[90vh] overflow-y-auto">
+      <div class="flex items-center justify-between p-4 border-b border-gray-700">
+        <h3 class="font-medium" id="sync-modal-title">Connect</h3>
+        <button onclick="closeSyncModal()" class="text-gray-500 hover:text-gray-300 text-2xl leading-none">&times;</button>
+      </div>
+      <div class="p-4" id="sync-modal-body">
+        <!-- populated per provider -->
+      </div>
     </div>
   </div>
 
@@ -586,6 +618,281 @@ async function installShortcut(target) {
     } catch(e) { fb.className='text-sm text-red-400'; fb.textContent='Network error: '+e.message; fb.classList.remove('hidden'); btn.disabled=false; btn.textContent='Submit'; }
   };
 })();
+
+
+// ── Sync tab ─────────────────────────────────────────────────────────────
+let syncProviders = [];
+let syncPairPollTimer = null;
+
+async function loadSyncProviders() {
+  const box = document.getElementById('sync-categories');
+  box.innerHTML = '<p class="text-xs text-gray-500 italic">Loading…</p>';
+  try {
+    const resp = await fetch(`/api/sync/providers?token=${token}`, { headers: { 'Authorization': 'Bearer ' + token } });
+    const data = await resp.json();
+    syncProviders = data.providers || [];
+    renderSyncProviders();
+  } catch(e) {
+    box.innerHTML = '<p class="text-xs text-red-400">Failed to load: ' + e.message + '</p>';
+  }
+}
+
+function renderSyncProviders() {
+  const box = document.getElementById('sync-categories');
+  if (!syncProviders.length) { box.innerHTML = '<p class="text-xs text-gray-500 italic">No providers.</p>'; return; }
+  const byCat = {};
+  for (const p of syncProviders) {
+    (byCat[p.category] = byCat[p.category] || []).push(p);
+  }
+  const catOrder = ['Email', 'Calendar', 'Messaging', 'Finance', 'Social'];
+  const ordered = catOrder.filter(c => byCat[c]).concat(Object.keys(byCat).filter(c => !catOrder.includes(c)));
+  box.innerHTML = ordered.map(cat => {
+    const cards = byCat[cat].map(p => renderProviderCard(p)).join('');
+    return `<div>
+      <h4 class="text-xs uppercase tracking-wider text-gray-500 mb-2">${escapeHtml(cat)}</h4>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">${cards}</div>
+    </div>`;
+  }).join('');
+}
+
+function renderProviderCard(p) {
+  const icons = {
+    gmail: '&#9993;', google_calendar: '&#128197;', ics_subscription: '&#128197;',
+    telegram: '&#128172;', stripe: '&#128179;', bluesky: '&#9729;',
+    plaid: '&#127974;', simplefin: '&#127974;', alpaca: '&#128200;', coinbase: '&#8383;',
+  };
+  const icon = icons[p.id] || '&#128279;';
+  const statusBadge = p.connected ? (
+    p.status === 'needs_reconnect' ?
+      '<span class="badge badge-red">Reconnect</span>' :
+      '<span class="badge badge-green">Connected</span>'
+  ) : '';
+  const sub = p.connected && p.display_name ? `<p class="text-[11px] text-gray-500 truncate">${escapeHtml(p.display_name)}</p>` : '';
+  const lastSync = p.last_sync_at ? `<p class="text-[10px] text-gray-600">synced ${relTime(p.last_sync_at)}</p>` : '';
+  return `<div class="bg-gray-900 border border-gray-700 hover:border-gray-600 rounded-lg p-3 transition-colors">
+    <div class="flex items-start gap-3">
+      <span class="text-2xl flex-shrink-0">${icon}</span>
+      <div class="flex-1 min-w-0">
+        <div class="flex items-center gap-2 justify-between">
+          <p class="font-medium text-sm truncate">${escapeHtml(p.name)}</p>
+          ${statusBadge}
+        </div>
+        ${sub}${lastSync}
+        <div class="mt-2 flex gap-2">
+          ${p.connected ?
+            `<button onclick="disconnectSync('${p.id}','${escapeHtml(p.name)}')" class="text-xs text-gray-400 hover:text-red-400">Disconnect</button>${p.status === 'needs_reconnect' ? `<button onclick="openSyncModal('${p.id}')" class="text-xs text-oc-500 hover:text-oc-400">Reconnect</button>` : ''}` :
+            `<button onclick="openSyncModal('${p.id}')" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-3 py-1 rounded-lg">Connect</button>`
+          }
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function relTime(ts) {
+  const sec = Math.floor(Date.now()/1000) - ts;
+  if (sec < 60) return 'just now';
+  if (sec < 3600) return Math.floor(sec/60) + 'm ago';
+  if (sec < 86400) return Math.floor(sec/3600) + 'h ago';
+  return Math.floor(sec/86400) + 'd ago';
+}
+
+function openSyncModal(providerId) {
+  const p = syncProviders.find(x => x.id === providerId);
+  if (!p) return;
+  document.getElementById('sync-modal-title').textContent = 'Connect ' + p.name;
+  const body = document.getElementById('sync-modal-body');
+  const helpLink = p.help_url ? `<a href="${p.help_url}" target="_blank" class="text-oc-500 hover:text-oc-400 text-xs underline">Get your ${p.name} credentials →</a>` : '';
+  let flowHtml = '';
+  if (p.flow === 'oauth') {
+    flowHtml = `<p class="text-sm text-gray-300 mb-3">${escapeHtml(p.instructions)}</p>
+      <button onclick="startOAuth('${p.id}')" class="w-full bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Continue with ${escapeHtml(p.name)}</button>`;
+  } else if (p.flow === 'url') {
+    flowHtml = `<p class="text-sm text-gray-300 mb-3">${escapeHtml(p.instructions)}</p>
+      ${helpLink}
+      <input type="url" id="sync-url-field" class="w-full mt-3 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="https://...ics or webcal://...">
+      <button onclick="submitUrl('${p.id}')" id="sync-submit-btn" class="w-full mt-3 bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Test & Save</button>
+      <p id="sync-error" class="text-xs text-red-400 mt-2 hidden"></p>`;
+  } else if (p.flow === 'api_key') {
+    // Different providers need different fields
+    let fields = '';
+    if (p.id === 'bluesky') {
+      fields = `<input id="sync-field-handle" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="Handle (e.g. you.bsky.social)">
+        <input id="sync-field-app_password" type="password" class="w-full mt-2 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="App password">`;
+    } else if (p.id === 'stripe') {
+      fields = `<input id="sync-field-api_key" type="password" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="sk_live_... or rk_live_...">`;
+    } else if (p.id === 'alpaca') {
+      fields = `<input id="sync-field-api_key" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="API Key ID">
+        <input id="sync-field-api_secret" type="password" class="w-full mt-2 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="API Secret">
+        <select id="sync-field-base_url" class="w-full mt-2 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm">
+          <option value="https://api.alpaca.markets">Live (api.alpaca.markets)</option>
+          <option value="https://paper-api.alpaca.markets">Paper (paper-api.alpaca.markets)</option>
+        </select>`;
+    } else if (p.id === 'coinbase') {
+      fields = `<input id="sync-field-api_key" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="API Key">
+        <input id="sync-field-api_secret" type="password" class="w-full mt-2 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="API Secret">`;
+    } else if (p.id === 'simplefin') {
+      fields = `<input id="sync-field-setup_token" type="password" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="Setup token">`;
+    } else {
+      fields = `<input id="sync-field-api_key" type="password" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="API key">`;
+    }
+    flowHtml = `<p class="text-sm text-gray-300 mb-3">${escapeHtml(p.instructions)}</p>
+      ${helpLink}
+      <div class="mt-3 space-y-2">${fields}</div>
+      <button onclick="submitApiKey('${p.id}')" id="sync-submit-btn" class="w-full mt-3 bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Test & Save</button>
+      <p id="sync-error" class="text-xs text-red-400 mt-2 hidden"></p>`;
+  } else if (p.flow === 'pairing') {
+    flowHtml = `<p class="text-sm text-gray-300 mb-3">${escapeHtml(p.instructions)}</p>
+      <div id="sync-qr-container" class="text-center py-4"><p class="text-xs text-gray-500">Generating code…</p></div>`;
+    setTimeout(() => startPairing(p.id), 100);
+  } else if (p.flow === 'link_sdk') {
+    flowHtml = `<p class="text-sm text-gray-300 mb-3">${escapeHtml(p.instructions)}</p>
+      <p class="text-xs text-gray-500 italic">Plaid Link requires the financial tab's setup flow. Coming soon to this panel.</p>`;
+  }
+  body.innerHTML = flowHtml;
+  document.getElementById('sync-modal').classList.remove('hidden');
+}
+
+function closeSyncModal() {
+  document.getElementById('sync-modal').classList.add('hidden');
+  if (syncPairPollTimer) { clearInterval(syncPairPollTimer); syncPairPollTimer = null; }
+}
+
+async function startOAuth(providerId) {
+  try {
+    const resp = await fetch('/api/oauth/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body: JSON.stringify({ token: token, provider: providerId, redirect_after: '/settings?tab=sync' })
+    });
+    if (!resp.ok) { alert('OAuth start failed'); return; }
+    const data = await resp.json();
+    if (data.auth_url) {
+      window.location.href = data.auth_url;
+    } else {
+      alert('No auth URL returned');
+    }
+  } catch(e) { alert('OAuth error: ' + e.message); }
+}
+
+async function submitUrl(providerId) {
+  const url = document.getElementById('sync-url-field').value.trim();
+  if (!url) { showSyncError('URL required'); return; }
+  const btn = document.getElementById('sync-submit-btn');
+  btn.textContent = 'Testing…'; btn.disabled = true;
+  try {
+    const resp = await fetch('/api/sync/connect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: token, provider: providerId, credential: { url: url } })
+    });
+    const data = await resp.json();
+    if (data.success) {
+      closeSyncModal();
+      await loadSyncProviders();
+    } else {
+      showSyncError(data.error || 'Failed');
+    }
+  } catch(e) { showSyncError(e.message); }
+  btn.textContent = 'Test & Save'; btn.disabled = false;
+}
+
+async function submitApiKey(providerId) {
+  const cred = {};
+  document.querySelectorAll('[id^=sync-field-]').forEach(el => {
+    const key = el.id.replace('sync-field-', '');
+    cred[key] = el.value.trim();
+  });
+  for (const k of Object.keys(cred)) {
+    if (!cred[k] && k !== 'base_url') { showSyncError(k + ' required'); return; }
+  }
+  const btn = document.getElementById('sync-submit-btn');
+  btn.textContent = 'Testing…'; btn.disabled = true;
+  try {
+    const resp = await fetch('/api/sync/connect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: token, provider: providerId, credential: cred })
+    });
+    const data = await resp.json();
+    if (data.success) {
+      closeSyncModal();
+      await loadSyncProviders();
+    } else {
+      showSyncError(data.error || 'Failed');
+    }
+  } catch(e) { showSyncError(e.message); }
+  btn.textContent = 'Test & Save'; btn.disabled = false;
+}
+
+async function startPairing(providerId) {
+  const container = document.getElementById('sync-qr-container');
+  try {
+    const resp = await fetch('/api/sync/telegram/pair', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: token })
+    });
+    if (!resp.ok) throw new Error('pair create failed');
+    const data = await resp.json();
+    container.innerHTML = `
+      <img src="${data.qr_url}" class="mx-auto rounded-lg bg-white p-2" width="200" height="200">
+      <p class="text-xs text-gray-500 mt-3">or <a href="${data.deep_link}" target="_blank" class="text-oc-500 underline">tap here on your phone</a></p>
+      <p class="text-[10px] text-gray-600 mt-1">Code: <code class="bg-gray-900 px-1">${data.code}</code> · expires 10min</p>
+      <p id="pair-status" class="text-xs text-gray-400 mt-3">Waiting for you to tap Start in Telegram…</p>
+    `;
+    syncPairPollTimer = setInterval(async () => {
+      try {
+        const s = await fetch(`/api/sync/telegram/status?token=${token}&code=${data.code}`).then(r => r.json());
+        if (s.paired || s.chat_count > 0) {
+          clearInterval(syncPairPollTimer);
+          syncPairPollTimer = null;
+          document.getElementById('pair-status').innerHTML = '<span class="text-green-400">Linked!</span>';
+          setTimeout(() => { closeSyncModal(); loadSyncProviders(); }, 1200);
+        }
+      } catch(e) {}
+    }, 2000);
+  } catch(e) {
+    container.innerHTML = '<p class="text-xs text-red-400">Failed to generate code: ' + e.message + '</p>';
+  }
+}
+
+async function disconnectSync(providerId, name) {
+  if (!confirm(`Disconnect ${name}?`)) return;
+  try {
+    await fetch(`/api/sync/connections/${providerId}?token=${token}`, {
+      method: 'DELETE',
+      headers: { 'Authorization': 'Bearer ' + token }
+    });
+    await loadSyncProviders();
+  } catch(e) { alert('Disconnect failed: ' + e.message); }
+}
+
+function showSyncError(msg) {
+  const el = document.getElementById('sync-error');
+  if (el) { el.textContent = msg; el.classList.remove('hidden'); }
+}
+
+function escapeHtml(s) {
+  if (s === null || s === undefined) return '';
+  return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+
+// Load on tab-switch to sync
+const _origShowTab = showTab;
+showTab = function(name) {
+  _origShowTab(name);
+  if (name === 'sync' && !syncProviders.length) loadSyncProviders();
+};
+
+// Auto-open Sync tab if redirected there (e.g., after OAuth callback)
+if (window.location.search.includes('tab=sync')) {
+  setTimeout(() => {
+    const btn = document.querySelector(`[onclick="showTab('sync')"]`);
+    if (btn) btn.click();
+  }, 100);
+}
+
 </script>
 </body>
 </html>
