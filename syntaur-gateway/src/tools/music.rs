@@ -273,37 +273,38 @@ impl Tool for MusicTool {
         let db_path = ctx.db_path.ok_or("no db_path in context")?;
         let creds = load_sync_creds(db_path, ctx.user_id);
 
-        // Step 1: search Apple Music if connected
-        let song = if let Some(ref am) = creds.apple_music {
+        // Step 1: search whatever music provider is connected (Apple Music preferred,
+        // then Spotify, then fall back to raw query if no provider available)
+        let (song_name, artist_name, play_url, provider_id) = if let Some(ref am) = creds.apple_music {
             match apple_music_search_first(&client, am, query).await {
-                Ok(Some(s)) => Some(s),
-                Ok(None) => None,
-                Err(e) => { warn!("[play_music] AM search failed: {}", e); None }
+                Ok(Some(s)) => {
+                    let attrs = s.get("attributes").cloned().unwrap_or(Value::Null);
+                    let name = attrs.get("name").and_then(|v| v.as_str()).unwrap_or(query).to_string();
+                    let artist = attrs.get("artistName").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let id = s.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let web_url = attrs.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let play = if !id.is_empty() {
+                        format!("music://music.apple.com/us/song/{}", id)
+                    } else if !web_url.is_empty() {
+                        web_url.replacen("https://", "music://", 1)
+                    } else { String::new() };
+                    (name, artist, play, "apple_music".to_string())
+                }
+                _ => (query.to_string(), String::new(), String::new(), "apple_music".to_string()),
             }
-        } else { None };
-
-        let (song_name, artist_name, apple_music_url) = match &song {
-            Some(s) => {
-                let attrs = s.get("attributes").cloned().unwrap_or(Value::Null);
-                let name = attrs.get("name").and_then(|v| v.as_str()).unwrap_or(query).to_string();
-                let artist = attrs.get("artistName").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let url = attrs.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                (name, artist, url)
-            }
-            None => (query.to_string(), String::new(), String::new()),
+        } else {
+            // No Apple Music — let the routing tiers pass the raw query to HA or Shortcut.
+            (query.to_string(), String::new(), String::new(), "none".to_string())
         };
+        let apple_music_url = if provider_id == "apple_music" { play_url.clone() } else { String::new() };
 
         // Step 2: route playback
 
         // 2a. Phone PWA — TOP priority for mobile users. Sends music:// URL
         // through the bridge SSE channel; phone's Music.app opens and plays.
         // No DRM workaround needed — phone has its own Apple Music subscription.
-        if creds.has_phone_pwa && !apple_music_url.is_empty() {
-            let pwa_url = if apple_music_url.starts_with("https://music.apple.com") {
-                apple_music_url.replacen("https://", "music://", 1)
-            } else {
-                apple_music_url.clone()
-            };
+        if creds.has_phone_pwa && !play_url.is_empty() {
+            let pwa_url = play_url.clone();
             let cmd = serde_json::json!({
                 "type": "play_music",
                 "url": pwa_url,

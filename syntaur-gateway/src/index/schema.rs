@@ -750,6 +750,19 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX IF NOT EXISTS idx_ded_cand_year ON deduction_candidates(tax_year);
     CREATE INDEX IF NOT EXISTS idx_ded_cand_source ON deduction_candidates(source_type, source_id);
     "#,
+    // v19: runtime-configured OAuth apps, keyed by IDENTITY PROVIDER
+    // (google/microsoft/spotify/etc) so one Google config unlocks Gmail,
+    // Calendar, YouTube Music, Drive without re-pasting credentials.
+    r#"
+    CREATE TABLE IF NOT EXISTS oauth_config (
+        identity_provider TEXT PRIMARY KEY,
+        client_id         TEXT NOT NULL,
+        client_secret     TEXT NOT NULL,
+        configured_at     INTEGER NOT NULL,
+        updated_at        INTEGER,
+        configured_by     INTEGER
+    );
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

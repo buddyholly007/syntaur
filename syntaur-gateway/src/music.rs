@@ -546,12 +546,26 @@ pub async fn handle_music_dj(
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let principal = crate::resolve_principal(&state, &req.token).await?;
     let uid = principal.user_id();
-    let Some((dev_token, mut_token, storefront)) = load_apple_music(&state, uid).await else {
-        return Ok(Json(serde_json::json!({
-            "error":"Apple Music not connected",
-            "hint":"Connect Apple Music in Sync settings for DJ mode."
-        })));
+    // Pick which music provider to search through (user preference)
+    let provider = match preferred_music_provider(&state, uid).await {
+        Some(p) => p,
+        None => return Ok(Json(serde_json::json!({
+            "error":"No music provider connected",
+            "hint":"Connect Apple Music, Spotify, YouTube Music, or Tidal in Sync settings to enable DJ mode."
+        }))),
     };
+
+    // Load auth credentials for the chosen provider
+    let apple_creds = if provider == "apple_music" { load_apple_music(&state, uid).await } else { None };
+    let spotify_token = if provider == "spotify" { load_oauth_access_token(&state, uid, "spotify").await } else { None };
+    let ytm_token = if provider == "youtube_music" { load_oauth_access_token(&state, uid, "youtube_music").await } else { None };
+
+    if provider == "apple_music" && apple_creds.is_none() {
+        return Ok(Json(serde_json::json!({"error":"Apple Music credentials expired","hint":"Reconnect in Sync"})));
+    }
+    if provider == "spotify" && spotify_token.is_none() {
+        return Ok(Json(serde_json::json!({"error":"Spotify not authorized","hint":"Complete the OAuth flow in Sync"})));
+    }
 
     let count = req.count.unwrap_or(15).min(30);
 
@@ -592,99 +606,156 @@ pub async fn handle_music_dj(
         return Ok(Json(serde_json::json!({"error":"LLM returned no tracks"})));
     }
 
-    // Step 2: search Apple Music for each idea in parallel
+    // Step 2: search the chosen provider for each idea in parallel
     let client = state.client.clone();
-    let dev = dev_token.clone();
-    let mut_ = mut_token.clone();
-    let sf = storefront.clone();
+    let mut tracks: Vec<serde_json::Value> = Vec::new();
     let mut search_handles = Vec::new();
     for idea in &ideas {
         let cli = client.clone();
-        let d = dev.clone();
-        let u = mut_.clone();
-        let s = sf.clone();
         let q = idea.clone();
+        let prov = provider.clone();
+        let apple = apple_creds.clone();
+        let sp_tok = spotify_token.clone();
         search_handles.push(tokio::spawn(async move {
-            let url = format!(
-                "https://api.music.apple.com/v1/catalog/{}/search?types=songs&limit=1&term={}",
-                s, url_encode_local(&q)
-            );
-            let resp = cli.get(&url)
-                .header("Authorization", format!("Bearer {}", d))
-                .header("Music-User-Token", u)
-                .header("Origin", "https://music.apple.com")
-                .timeout(Duration::from_secs(10))
-                .send().await.ok()?;
-            if !resp.status().is_success() { return None; }
-            let j: serde_json::Value = resp.json().await.ok()?;
-            let song = j.get("results")?
-                .get("songs")?.get("data")?
-                .as_array()?.first()?.clone();
-            Some((q, song))
+            match prov.as_str() {
+                "apple_music" => {
+                    let (dev, mut_, sf) = apple?;
+                    let url = format!(
+                        "https://api.music.apple.com/v1/catalog/{}/search?types=songs&limit=1&term={}",
+                        sf, url_encode_local(&q)
+                    );
+                    let resp = cli.get(&url)
+                        .header("Authorization", format!("Bearer {}", dev))
+                        .header("Music-User-Token", mut_)
+                        .header("Origin", "https://music.apple.com")
+                        .timeout(Duration::from_secs(10))
+                        .send().await.ok()?;
+                    if !resp.status().is_success() { return None; }
+                    let j: serde_json::Value = resp.json().await.ok()?;
+                    let song = j.get("results")?.get("songs")?.get("data")?
+                        .as_array()?.first()?.clone();
+                    let attrs = song.get("attributes").cloned().unwrap_or(serde_json::Value::Null);
+                    let id = song.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let q_clone = q.clone();
+                    Some((q, serde_json::json!({
+                        "query": q_clone,
+                        "id": id,
+                        "name": attrs.get("name"),
+                        "artist": attrs.get("artistName"),
+                        "album": attrs.get("albumName"),
+                        "url": attrs.get("url"),
+                        "play_url": build_play_url("apple_music", song.get("id").and_then(|v| v.as_str()).unwrap_or(""), attrs.get("url").and_then(|u| u.as_str())),
+                        "artwork": attrs.get("artwork").and_then(|a| a.get("url")),
+                        "provider": "apple_music",
+                    })))
+                }
+                "spotify" => {
+                    let tok = sp_tok?;
+                    let results = spotify_search(&cli, &tok, &q, 1).await.ok()?;
+                    let first = results.into_iter().next()?;
+                    Some((q.clone(), first))
+                }
+                _ => None,
+            }
         }));
     }
-
-    let mut tracks: Vec<serde_json::Value> = Vec::new();
     for h in search_handles {
-        if let Ok(Some((query, song))) = h.await {
-            let attrs = song.get("attributes").cloned().unwrap_or(serde_json::Value::Null);
-            tracks.push(serde_json::json!({
-                "query": query,
-                "id": song.get("id"),
-                "name": attrs.get("name"),
-                "artist": attrs.get("artistName"),
-                "album": attrs.get("albumName"),
-                "url": attrs.get("url"),
-                "artwork": attrs.get("artwork").and_then(|a| a.get("url")),
-            }));
+        if let Ok(Some((_, track))) = h.await {
+            tracks.push(track);
         }
     }
 
-    // Step 3 (optional): create an actual Apple Music playlist
+    // Step 3 (optional): create a playlist on the chosen provider
     let mut playlist_id: Option<String> = None;
     if req.create_playlist.unwrap_or(false) && !tracks.is_empty() {
-        let track_data: Vec<serde_json::Value> = tracks.iter().filter_map(|t| {
-            let id = t.get("id")?.as_str()?;
-            Some(serde_json::json!({"id": id, "type": "songs"}))
-        }).collect();
-        let body = serde_json::json!({
-            "attributes": {
-                "name": format!("Syntaur DJ: {}", req.prompt.chars().take(40).collect::<String>()),
-                "description": format!("Generated by Syntaur from prompt: {}", req.prompt),
-            },
-            "relationships": {
-                "tracks": {"data": track_data}
-            }
-        });
-        let url = format!("https://api.music.apple.com/v1/me/library/playlists");
-        let resp = state.client.post(&url)
-            .header("Authorization", format!("Bearer {}", dev_token))
-            .header("Music-User-Token", mut_token)
-            .header("Origin", "https://music.apple.com")
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .timeout(Duration::from_secs(15))
-            .send().await;
-        if let Ok(r) = resp {
-            if r.status().is_success() {
-                if let Ok(j) = r.json::<serde_json::Value>().await {
-                    playlist_id = j.get("data").and_then(|d| d.as_array())
-                        .and_then(|a| a.first())
-                        .and_then(|p| p.get("id"))
-                        .and_then(|i| i.as_str())
-                        .map(|s| s.to_string());
+        match provider.as_str() {
+            "apple_music" => {
+                if let Some((dev, mut_, _)) = &apple_creds {
+                    let track_data: Vec<serde_json::Value> = tracks.iter().filter_map(|t| {
+                        let id = t.get("id")?.as_str()?;
+                        Some(serde_json::json!({"id": id, "type": "songs"}))
+                    }).collect();
+                    let body = serde_json::json!({
+                        "attributes": {
+                            "name": format!("Syntaur DJ: {}", req.prompt.chars().take(40).collect::<String>()),
+                            "description": format!("Generated by Syntaur from prompt: {}", req.prompt),
+                        },
+                        "relationships": {"tracks": {"data": track_data}}
+                    });
+                    let url = "https://api.music.apple.com/v1/me/library/playlists";
+                    if let Ok(r) = state.client.post(url)
+                        .header("Authorization", format!("Bearer {}", dev))
+                        .header("Music-User-Token", mut_)
+                        .header("Origin", "https://music.apple.com")
+                        .json(&body).timeout(Duration::from_secs(15)).send().await {
+                        if r.status().is_success() {
+                            if let Ok(j) = r.json::<serde_json::Value>().await {
+                                playlist_id = j.get("data").and_then(|d| d.as_array())
+                                    .and_then(|a| a.first()).and_then(|p| p.get("id"))
+                                    .and_then(|i| i.as_str()).map(|s| s.to_string());
+                            }
+                        }
+                    }
                 }
-            } else {
-                warn!("[music-dj] playlist create failed: {}", r.status());
             }
+            "spotify" => {
+                if let Some(tok) = spotify_token.as_ref() {
+                    // Step 3a: get user id
+                    let sp_user_id: Option<String> = {
+                        let resp = state.client.get("https://api.spotify.com/v1/me")
+                            .header("Authorization", format!("Bearer {}", tok))
+                            .send().await;
+                        match resp {
+                            Ok(r) if r.status().is_success() => {
+                                r.json::<serde_json::Value>().await.ok()
+                                    .and_then(|b| b.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                            }
+                            _ => None,
+                        }
+                    };
+                    if let Some(user_id) = sp_user_id {
+                        let url = format!("https://api.spotify.com/v1/users/{}/playlists", user_id);
+                        let body = serde_json::json!({
+                            "name": format!("Syntaur DJ: {}", req.prompt.chars().take(40).collect::<String>()),
+                            "description": format!("Generated by Syntaur from prompt: {}", req.prompt),
+                            "public": false,
+                        });
+                        if let Ok(r) = state.client.post(&url)
+                            .header("Authorization", format!("Bearer {}", tok))
+                            .json(&body).timeout(Duration::from_secs(15)).send().await {
+                            if r.status().is_success() {
+                                if let Ok(j) = r.json::<serde_json::Value>().await {
+                                    if let Some(pid) = j.get("id").and_then(|v| v.as_str()) {
+                                        playlist_id = Some(pid.to_string());
+                                        // Add tracks
+                                        let uris: Vec<String> = tracks.iter()
+                                            .filter_map(|t| t.get("uri").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                                            .collect();
+                                        if !uris.is_empty() {
+                                            let add_url = format!("https://api.spotify.com/v1/playlists/{}/tracks", pid);
+                                            let add_body = serde_json::json!({"uris": uris});
+                                            let _ = state.client.post(&add_url)
+                                                .header("Authorization", format!("Bearer {}", tok))
+                                                .json(&add_body).send().await;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
-    info!("[music-dj] prompt=\"{}\" ideas={} tracks={} playlist={:?}",
+    info!("[music-dj] provider={} prompt=\"{}\" ideas={} tracks={} playlist={:?}",
+        provider,
         req.prompt.chars().take(50).collect::<String>(),
         ideas.len(), tracks.len(), playlist_id);
 
     Ok(Json(serde_json::json!({
+        "provider": provider,
         "prompt": req.prompt,
         "ideas": ideas,
         "tracks": tracks,
@@ -779,5 +850,97 @@ pub async fn load_preferred_target(state: &Arc<AppState>, uid: i64) -> Option<(S
         let name = v.get("preferred_name").and_then(|n| n.as_str()).unwrap_or(&target).to_string();
         Some((target, name))
     }).await.ok().flatten()
+}
+
+
+// ── Multi-provider music catalog helpers ────────────────────────────────────
+
+/// Returns the preferred music provider id for this user, preferring Apple
+/// Music → Spotify → YouTube Music → Tidal in that order. Only returns a
+/// provider whose credentials are actually in sync_connections.
+pub async fn preferred_music_provider(state: &Arc<AppState>, uid: i64) -> Option<String> {
+    let db = state.db_path.clone();
+    tokio::task::spawn_blocking(move || -> Option<String> {
+        let conn = rusqlite::Connection::open(&db).ok()?;
+        for pid in &["apple_music", "spotify", "youtube_music", "tidal"] {
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM sync_connections WHERE user_id = ? AND provider = ? AND status = 'active'",
+                rusqlite::params![uid, pid],
+                |r| r.get(0)
+            ).unwrap_or(0);
+            if count > 0 {
+                return Some(pid.to_string());
+            }
+        }
+        None
+    }).await.ok().flatten()
+}
+
+/// Load OAuth access_token for a user+provider from the oauth_tokens table.
+async fn load_oauth_access_token(state: &Arc<AppState>, uid: i64, provider: &str) -> Option<String> {
+    let db = state.db_path.clone();
+    let prov = provider.to_string();
+    tokio::task::spawn_blocking(move || -> Option<String> {
+        let conn = rusqlite::Connection::open(&db).ok()?;
+        conn.query_row(
+            "SELECT access_token FROM oauth_tokens WHERE user_id = ? AND provider = ?",
+            rusqlite::params![uid, prov],
+            |r| r.get::<_, String>(0),
+        ).ok().filter(|s| !s.is_empty())
+    }).await.ok().flatten()
+}
+
+/// Spotify search — returns list of Track objects similar to Apple Music's format.
+/// Each has: id, name, artist, album, url, artwork (spotify://track/ID usable as play URL).
+async fn spotify_search(
+    client: &reqwest::Client,
+    access_token: &str,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<serde_json::Value>, String> {
+    let url = format!(
+        "https://api.spotify.com/v1/search?q={}&type=track&limit={}",
+        url_encode_local(query), limit.min(50)
+    );
+    let resp = client.get(&url)
+        .header("Authorization", format!("Bearer {}", access_token))
+        .timeout(std::time::Duration::from_secs(15))
+        .send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("Spotify {}", resp.status()));
+    }
+    let j: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let tracks: Vec<serde_json::Value> = j.get("tracks")
+        .and_then(|t| t.get("items"))
+        .and_then(|i| i.as_array()).cloned().unwrap_or_default();
+    Ok(tracks.into_iter().map(|t| {
+        let id = t.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        serde_json::json!({
+            "id": id,
+            "name": t.get("name"),
+            "artist": t.get("artists").and_then(|a| a.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|a| a.get("name")),
+            "album": t.get("album").and_then(|a| a.get("name")),
+            "url": t.get("external_urls").and_then(|u| u.get("spotify")),
+            "uri": format!("spotify:track:{}", id),
+            "play_url": format!("spotify:track:{}", id),
+            "artwork": t.get("album").and_then(|a| a.get("images"))
+                .and_then(|i| i.as_array()).and_then(|imgs| imgs.first())
+                .and_then(|img| img.get("url")),
+            "provider": "spotify",
+        })
+    }).collect())
+}
+
+/// Build a provider-appropriate play URL that the PWA / browser can launch.
+pub fn build_play_url(provider: &str, track_id: &str, fallback_url: Option<&str>) -> String {
+    match provider {
+        "apple_music" => format!("music://music.apple.com/us/song/{}", track_id),
+        "spotify" => format!("spotify:track:{}", track_id),
+        "youtube_music" => format!("https://music.youtube.com/watch?v={}", track_id),
+        "tidal" => format!("tidal://track/{}", track_id),
+        _ => fallback_url.map(|s| s.to_string()).unwrap_or_default(),
+    }
 }
 

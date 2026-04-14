@@ -48,8 +48,77 @@ pub struct ProviderDef {
     pub instructions: &'static str,
     pub help_url: &'static str,
     pub scopes: &'static [(&'static str, &'static str)],
-    pub unlocks: &'static str,   // One line shown post-connect: "what can Syntaur do now?"
-    pub info_only: bool,         // Status-card style — no Connect button
+    pub unlocks: &'static str,
+    pub info_only: bool,
+    /// Identity provider for OAuth flows (e.g. "google" covers gmail,
+    /// google_calendar, youtube_music, drive — all sharing one OAuth app).
+    /// Only meaningful for flow=Oauth providers. None for others.
+    pub identity_provider: Option<&'static str>,
+    /// Per-sync-provider OAuth scopes. Google services share credentials
+    /// but request different scopes (calendar vs gmail vs youtube).
+    pub oauth_scopes: &'static str,
+}
+
+/// Known identity providers — their authorization + token URLs + where
+/// admins go to register the OAuth app. Users configure credentials
+/// ONCE per identity provider, not once per sync provider.
+pub struct IdentityProviderDef {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub authorization_url: &'static str,
+    pub token_url: &'static str,
+    pub register_url: &'static str,
+    pub register_steps: &'static str,
+}
+
+pub fn identity_providers() -> Vec<IdentityProviderDef> {
+    vec![
+        IdentityProviderDef {
+            id: "google",
+            name: "Google",
+            authorization_url: "https://accounts.google.com/o/oauth2/v2/auth",
+            token_url: "https://oauth2.googleapis.com/token",
+            register_url: "https://console.cloud.google.com/apis/credentials",
+            register_steps: "1. Open Google Cloud Console (link below).  2. Create a new OAuth 2.0 Client ID, type=Web Application.  3. Add this redirect URI: {redirect_uri}  4. Copy Client ID + Client Secret and paste here.  5. Enable the Google APIs you want (Gmail API, Calendar API, YouTube Data API). One credential unlocks all of them.",
+        },
+        IdentityProviderDef {
+            id: "microsoft",
+            name: "Microsoft",
+            authorization_url: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+            token_url: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+            register_url: "https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade",
+            register_steps: "1. Azure portal → App registrations → New registration.  2. Pick accounts-type: personal + work accounts.  3. Add redirect URI: {redirect_uri}  4. After creation, go to Certificates & Secrets → add a client secret, copy the value.  5. Copy Application (client) ID + the secret here.",
+        },
+        IdentityProviderDef {
+            id: "spotify",
+            name: "Spotify",
+            authorization_url: "https://accounts.spotify.com/authorize",
+            token_url: "https://accounts.spotify.com/api/token",
+            register_url: "https://developer.spotify.com/dashboard",
+            register_steps: "1. Spotify Developer Dashboard → Create app.  2. App name: Syntaur (or anything).  3. Redirect URI: {redirect_uri}  4. Check Web API + Web Playback SDK.  5. Settings → View client secret → copy both Client ID and Client Secret here.",
+        },
+        IdentityProviderDef {
+            id: "strava",
+            name: "Strava",
+            authorization_url: "https://www.strava.com/oauth/authorize",
+            token_url: "https://www.strava.com/oauth/token",
+            register_url: "https://www.strava.com/settings/api",
+            register_steps: "1. Go to Strava API settings.  2. Create a new application.  3. Authorization Callback Domain: your Syntaur domain (no https://).  4. Copy Client ID + Client Secret here.",
+        },
+        IdentityProviderDef {
+            id: "tidal",
+            name: "Tidal",
+            authorization_url: "https://login.tidal.com/authorize",
+            token_url: "https://auth.tidal.com/v1/oauth2/token",
+            register_url: "https://developer.tidal.com/apps",
+            register_steps: "1. Register at Tidal developer portal.  2. Create application.  3. Redirect URI: {redirect_uri}  4. Copy Client ID + Secret here.",
+        },
+    ]
+}
+
+pub fn identity_for(provider_id: &str) -> Option<&'static str> {
+    catalog().into_iter().find(|p| p.id == provider_id)
+        .and_then(|p| p.identity_provider)
 }
 
 pub fn catalog() -> Vec<ProviderDef> {
@@ -62,6 +131,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             scopes: &[("readonly", "Read-only"), ("modify", "Read + organize")],
             unlocks: "Syntaur scans your inbox for receipts and important messages.",
             info_only: false,
+            identity_provider: Some("google"),
+            oauth_scopes: "https://www.googleapis.com/auth/gmail.readonly",
         },
         ProviderDef {
             id: "google_calendar", name: "Google Calendar", category: "Calendar",
@@ -71,6 +142,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             scopes: &[("readonly", "Read-only"), ("events", "Read + write events")],
             unlocks: "Your Google events appear alongside Syntaur's calendar. Syntaur can add or move events.",
             info_only: false,
+            identity_provider: Some("google"),
+            oauth_scopes: "https://www.googleapis.com/auth/calendar",
         },
         ProviderDef {
             id: "ics_subscription", name: "ICS / Web Calendar", category: "Calendar",
@@ -80,6 +153,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             scopes: &[],
             unlocks: "Any .ics feed (work calendar, sports team schedule, holidays) shows in your dashboard.",
             info_only: false,
+            identity_provider: Some("spotify"),
+            oauth_scopes: "user-read-playback-state user-modify-playback-state user-read-private playlist-modify-private playlist-modify-public user-read-recently-played",
         },
         ProviderDef {
             id: "telegram", name: "Telegram", category: "Messaging",
@@ -89,6 +164,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             scopes: &[],
             unlocks: "Reminders, alerts, and approval requests come to Telegram. You can reply by text.",
             info_only: false,
+            identity_provider: Some("strava"),
+            oauth_scopes: "read,activity:read_all",
         },
         ProviderDef {
             id: "stripe", name: "Stripe", category: "Finance",
@@ -98,6 +175,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             scopes: &[],
             unlocks: "Automatic receipt capture from your Stripe account for the tax module.",
             info_only: false,
+            identity_provider: Some("tidal"),
+            oauth_scopes: "r_usr w_usr",
         },
         ProviderDef {
             id: "bluesky", name: "Bluesky", category: "Social",
@@ -107,6 +186,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             scopes: &[],
             unlocks: "Syntaur can post, reply, and monitor mentions on your Bluesky account.",
             info_only: false,
+            identity_provider: None,
+            oauth_scopes: "",
         },
         ProviderDef {
             id: "plaid", name: "Plaid (Banks)", category: "Finance",
@@ -116,6 +197,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             scopes: &[],
             unlocks: "Bank transactions flow into the tax module automatically.",
             info_only: false,
+            identity_provider: None,
+            oauth_scopes: "",
         },
         ProviderDef {
             id: "simplefin", name: "SimpleFIN", category: "Finance",
@@ -125,6 +208,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             scopes: &[],
             unlocks: "Aggregated bank feeds, lighter-weight alternative to Plaid.",
             info_only: false,
+            identity_provider: None,
+            oauth_scopes: "",
         },
         ProviderDef {
             id: "alpaca", name: "Alpaca (Broker)", category: "Finance",
@@ -134,6 +219,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             scopes: &[],
             unlocks: "Portfolio holdings + trade activity for tax reporting and performance tracking.",
             info_only: false,
+            identity_provider: None,
+            oauth_scopes: "",
         },
         ProviderDef {
             id: "coinbase", name: "Coinbase", category: "Finance",
@@ -143,6 +230,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             scopes: &[],
             unlocks: "Crypto holdings and transactions pulled automatically for taxes.",
             info_only: false,
+            identity_provider: None,
+            oauth_scopes: "",
         },
         // ── New Tier-1 providers ────────────────────────────────────────────
         ProviderDef {
@@ -153,6 +242,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             scopes: &[],
             unlocks: "Failing CI, open PRs, and unread notifications surface on your dashboard.",
             info_only: false,
+            identity_provider: None,
+            oauth_scopes: "",
         },
         ProviderDef {
             id: "home_assistant", name: "Home Assistant", category: "Smart Home",
@@ -162,6 +253,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             scopes: &[],
             unlocks: "Syntaur gets full control of every device you've paired in HA. Unlocks music-on-HomePod and smart-home voice commands.",
             info_only: false,
+            identity_provider: None,
+            oauth_scopes: "",
         },
         ProviderDef {
             id: "plex", name: "Plex", category: "Media",
@@ -171,6 +264,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             scopes: &[],
             unlocks: "Syntaur knows your library, recent watches, and what's currently playing.",
             info_only: false,
+            identity_provider: None,
+            oauth_scopes: "",
         },
         ProviderDef {
             id: "apple_calendar", name: "Apple Calendar (iCloud)", category: "Calendar",
@@ -180,6 +275,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             scopes: &[],
             unlocks: "iCloud calendars sync alongside your other calendars.",
             info_only: false,
+            identity_provider: None,
+            oauth_scopes: "",
         },
         ProviderDef {
             id: "crypto_wallet", name: "Crypto Wallet (public)", category: "Finance",
@@ -189,6 +286,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             scopes: &[],
             unlocks: "Cold-storage balances tracked on your finance dashboard.",
             info_only: false,
+            identity_provider: None,
+            oauth_scopes: "",
         },
         ProviderDef {
             id: "spotify", name: "Spotify", category: "Music",
@@ -198,6 +297,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             scopes: &[("read", "Read-only (recent plays, playlists)"), ("control", "Read + playback control")],
             unlocks: "Syntaur can play your Spotify library on any Spotify Connect device.",
             info_only: false,
+            identity_provider: None,
+            oauth_scopes: "",
         },
         ProviderDef {
             id: "youtube_music", name: "YouTube Music", category: "Music",
@@ -207,6 +308,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             scopes: &[("read", "Read-only"), ("control", "Read + playback control")],
             unlocks: "Search and play from YouTube Music on any supported device.",
             info_only: false,
+            identity_provider: Some("google"),
+            oauth_scopes: "https://www.googleapis.com/auth/youtube https://www.googleapis.com/auth/youtube.readonly",
         },
         ProviderDef {
             id: "tidal", name: "Tidal", category: "Music",
@@ -216,6 +319,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             scopes: &[("read", "Read-only"), ("control", "Read + playback control")],
             unlocks: "Search and play from Tidal's high-res catalog.",
             info_only: false,
+            identity_provider: None,
+            oauth_scopes: "",
         },
         ProviderDef {
             id: "youtube", name: "YouTube", category: "Social",
@@ -225,6 +330,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             scopes: &[("read", "Read analytics + comments"), ("upload", "Read + upload + reply")],
             unlocks: "Analytics + upload scheduling for Crimson Lantern.",
             info_only: false,
+            identity_provider: Some("google"),
+            oauth_scopes: "https://www.googleapis.com/auth/youtube https://www.googleapis.com/auth/youtube.upload",
         },
         ProviderDef {
             id: "strava", name: "Strava", category: "Health",
@@ -234,6 +341,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             scopes: &[("read_all", "Read all activity")],
             unlocks: "Syntaur can answer 'how was my run this week?' and log workouts.",
             info_only: false,
+            identity_provider: Some("strava"),
+            oauth_scopes: "read,activity:read_all",
         },
         ProviderDef {
             id: "oura", name: "Oura Ring", category: "Health",
@@ -243,6 +352,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             scopes: &[],
             unlocks: "Syntaur knows your sleep, readiness, and activity data for daily check-ins.",
             info_only: false,
+            identity_provider: None,
+            oauth_scopes: "",
         },
         ProviderDef {
             id: "anthropic_usage", name: "Anthropic API (usage)", category: "AI",
@@ -252,6 +363,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             scopes: &[],
             unlocks: "Your Claude API spend appears on the dashboard. Warn before rate limits.",
             info_only: false,
+            identity_provider: None,
+            oauth_scopes: "",
         },
         ProviderDef {
             id: "openrouter_usage", name: "OpenRouter (usage)", category: "AI",
@@ -261,6 +374,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             scopes: &[],
             unlocks: "Live balance + daily usage for OpenRouter keys.",
             info_only: false,
+            identity_provider: None,
+            oauth_scopes: "",
         },
         ProviderDef {
             id: "apple_health", name: "Apple Health", category: "Health",
@@ -270,6 +385,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             scopes: &[],
             unlocks: "Syntaur has full access to your sleep, heart rate, and workouts.",
             info_only: false,
+            identity_provider: None,
+            oauth_scopes: "",
         },
         ProviderDef {
             id: "notebooklm_status", name: "NotebookLM Auth", category: "AI",
@@ -279,6 +396,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             scopes: &[],
             unlocks: "Shows whether your NotebookLM auth is fresh. Not a setup card — just a status indicator.",
             info_only: true,
+            identity_provider: None,
+            oauth_scopes: "",
         },
         ProviderDef {
             id: "vault_health", name: "Vault Health", category: "Storage",
@@ -288,6 +407,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             scopes: &[],
             unlocks: "Monitors the NFS-mounted Obsidian vault. Not a setup card — just a status indicator.",
             info_only: true,
+            identity_provider: None,
+            oauth_scopes: "",
         },
         // ── Music layer ─────────────────────────────────────────────────────
         ProviderDef {
@@ -298,6 +419,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             scopes: &[],
             unlocks: "Syntaur can announce and play audio on any detected speaker (HomePod, Apple TV, AirPlay speakers).",
             info_only: false,
+            identity_provider: None,
+            oauth_scopes: "",
         },
         ProviderDef {
             id: "music_assistant", name: "Music Assistant (via Home Assistant)", category: "Music",
@@ -307,6 +430,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             scopes: &[],
             unlocks: "Full Apple Music / Spotify / YT Music control routed through Home Assistant.",
             info_only: false,
+            identity_provider: None,
+            oauth_scopes: "",
         },
         ProviderDef {
             id: "phone_music_pwa", name: "Phone (via Syntaur Voice PWA)", category: "Music",
@@ -316,6 +441,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             scopes: &[],
             unlocks: "Play commands go straight to Music.app on your phone. Audio comes out wherever the phone is connected (speakers, AirPods, AirPlay HomePod).",
             info_only: false,
+            identity_provider: None,
+            oauth_scopes: "",
         },
         ProviderDef {
             id: "apple_music", name: "Apple Music", category: "Music",
@@ -325,6 +452,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             scopes: &[],
             unlocks: "Syntaur can search your library, show what you've been listening to, and cue songs to HomePod (via HA).",
             info_only: false,
+            identity_provider: None,
+            oauth_scopes: "",
         },
         ProviderDef {
             id: "ios_shortcut_music", name: "iOS Shortcut (Music)", category: "Music",
@@ -334,6 +463,8 @@ pub fn catalog() -> Vec<ProviderDef> {
             scopes: &[],
             unlocks: "Syntaur can trigger music playback on your iPhone — works even when you're out of the house.",
             info_only: false,
+            identity_provider: None,
+            oauth_scopes: "",
         },
     ]
 }
@@ -480,6 +611,31 @@ pub async fn handle_sync_providers(
         }).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    // Build map of which identity providers have credentials configured
+    // (either from oauth_config table or static config.oauth.providers)
+    let db_configured: std::collections::HashSet<String> = {
+        let db = state.db_path.clone();
+        tokio::task::spawn_blocking(move || -> std::collections::HashSet<String> {
+            let mut out = std::collections::HashSet::new();
+            if let Ok(conn) = rusqlite::Connection::open(&db) {
+                if let Ok(mut stmt) = conn.prepare("SELECT identity_provider FROM oauth_config WHERE client_id != '' AND client_secret != ''") {
+                    if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
+                        for r in rows.flatten() { out.insert(r); }
+                    }
+                }
+            }
+            out
+        }).await.unwrap_or_default()
+    };
+    let mut oauth_configured_flags: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+    for id in identity_providers().iter().map(|i| i.id) {
+        // True if: DB has a row for this identity, OR static config has a provider tied to it
+        let from_db = db_configured.contains(id);
+        let from_static = state.config.oauth.providers.contains_key(id) &&
+            !state.config.oauth.providers.get(id).map(|c| c.client_id.is_empty()).unwrap_or(true);
+        oauth_configured_flags.insert(id.to_string(), from_db || from_static);
+    }
+
     // Merge with catalog
     let providers: Vec<serde_json::Value> = catalog().into_iter().map(|p| {
         let flow = match p.flow {
@@ -499,12 +655,14 @@ pub async fn handle_sync_providers(
             FlowKind::AppleMusic => "apple_music",
             FlowKind::PhonePwa => "phone_pwa",
         };
-        // Check if OAuth provider has config — gate "Connect" button if not
-        let oauth_configured = matches!(p.flow, FlowKind::Oauth) &&
-            state.config.oauth.providers.contains_key(p.id) &&
-            !state.config.oauth.providers.get(p.id)
-                .map(|c| c.client_id.is_empty())
-                .unwrap_or(true);
+        // OAuth providers are configured at the IDENTITY PROVIDER level (e.g.
+        // one Google config unlocks Gmail + Calendar + YouTube Music). Check
+        // the identity provider, looking at oauth_config table first, then
+        // static config.oauth.providers as fallback.
+        let oauth_configured = if matches!(p.flow, FlowKind::Oauth) {
+            let identity = p.identity_provider.unwrap_or(p.id);
+            oauth_configured_flags.get(identity).copied().unwrap_or(false)
+        } else { false };
         let mut entry = serde_json::json!({
             "id": p.id,
             "name": p.name,
@@ -2086,5 +2244,178 @@ pub async fn handle_ha_media_players(
         "count": players.len(),
         "players": players,
     })))
+}
+
+
+// ── OAuth config admin (runtime-configured client_id/secret per identity provider) ──
+
+#[derive(serde::Deserialize)]
+pub struct OauthConfigSaveRequest {
+    pub token: String,
+    pub identity_provider: String,
+    pub client_id: String,
+    pub client_secret: String,
+}
+
+pub async fn handle_oauth_config_save(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<OauthConfigSaveRequest>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let principal = crate::resolve_principal(&state, &req.token).await?;
+    let uid = principal.user_id();
+    // Validate identity_provider is known
+    if !identity_providers().iter().any(|i| i.id == req.identity_provider) {
+        return Ok(Json(serde_json::json!({"error": format!("Unknown identity provider: {}", req.identity_provider)})));
+    }
+    if req.client_id.is_empty() || req.client_secret.is_empty() {
+        return Ok(Json(serde_json::json!({"error": "client_id and client_secret required"})));
+    }
+
+    let db = state.db_path.clone();
+    let ip = req.identity_provider.clone();
+    let cid = req.client_id.clone();
+    let csec = req.client_secret.clone();
+    let now = chrono::Utc::now().timestamp();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO oauth_config (identity_provider, client_id, client_secret, configured_at, updated_at, configured_by)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(identity_provider) DO UPDATE SET
+               client_id = excluded.client_id,
+               client_secret = excluded.client_secret,
+               updated_at = excluded.updated_at,
+               configured_by = excluded.configured_by",
+            rusqlite::params![ip, cid, csec, now, now, uid],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    info!("[oauth-config] {} configured by user {}", req.identity_provider, uid);
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "identity_provider": req.identity_provider,
+    })))
+}
+
+pub async fn handle_oauth_config_list(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let _ = crate::resolve_principal(&state, token).await?;
+    let db = state.db_path.clone();
+    let rows: Vec<serde_json::Value> = tokio::task::spawn_blocking(move || -> Vec<serde_json::Value> {
+        let mut out = Vec::new();
+        if let Ok(conn) = rusqlite::Connection::open(&db) {
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT identity_provider, configured_at, updated_at FROM oauth_config"
+            ) {
+                if let Ok(rs) = stmt.query_map([], |r| Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, Option<i64>>(2)?,
+                ))) {
+                    for row in rs.flatten() {
+                        out.push(serde_json::json!({
+                            "identity_provider": row.0,
+                            "configured_at": row.1,
+                            "updated_at": row.2,
+                            "configured": true,
+                        }));
+                    }
+                }
+            }
+        }
+        out
+    }).await.unwrap_or_default();
+    // Also list which identity providers are known but NOT yet configured
+    let configured_set: std::collections::HashSet<String> = rows.iter()
+        .filter_map(|r| r.get("identity_provider").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .collect();
+    let all: Vec<serde_json::Value> = identity_providers().iter().map(|i| {
+        let already = configured_set.contains(i.id);
+        serde_json::json!({
+            "id": i.id, "name": i.name,
+            "register_url": i.register_url,
+            "register_steps": i.register_steps,
+            "configured": already,
+        })
+    }).collect();
+    Ok(Json(serde_json::json!({
+        "identity_providers": all,
+        "configured_count": rows.len(),
+    })))
+}
+
+pub async fn handle_oauth_config_delete(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(identity_provider): axum::extract::Path<String>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let _ = crate::resolve_principal(&state, token).await?;
+    let db = state.db_path.clone();
+    let ip = identity_provider.clone();
+    let _ = tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM oauth_config WHERE identity_provider = ?", rusqlite::params![ip])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }).await;
+    Ok(Json(serde_json::json!({"success": true, "identity_provider": identity_provider})))
+}
+
+/// Helper used by OAuth start: resolve client credentials for a sync provider
+/// by looking up its identity_provider, checking oauth_config table first,
+/// then falling back to static config.oauth.providers[id].
+pub async fn resolve_oauth_credentials(
+    state: &Arc<AppState>,
+    sync_provider_id: &str,
+) -> Option<(String, String, String, String, String)> {
+    // Returns (client_id, client_secret, authorization_url, token_url, scopes)
+    let identity = identity_for(sync_provider_id).unwrap_or(sync_provider_id).to_string();
+
+    // Check DB first
+    let db = state.db_path.clone();
+    let id_clone = identity.clone();
+    let db_creds: Option<(String, String)> = tokio::task::spawn_blocking(move || -> Option<(String, String)> {
+        let conn = rusqlite::Connection::open(&db).ok()?;
+        conn.query_row(
+            "SELECT client_id, client_secret FROM oauth_config WHERE identity_provider = ?",
+            rusqlite::params![id_clone],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        ).ok().filter(|(cid, csec)| !cid.is_empty() && !csec.is_empty())
+    }).await.ok().flatten();
+
+    // Get URLs from identity_providers catalog
+    let (auth_url, tok_url) = identity_providers().iter()
+        .find(|i| i.id == identity)
+        .map(|i| (i.authorization_url.to_string(), i.token_url.to_string()))?;
+
+    // Scopes come from the sync provider's oauth_scopes
+    let scopes = catalog().iter()
+        .find(|p| p.id == sync_provider_id)
+        .map(|p| p.oauth_scopes.to_string())
+        .unwrap_or_default();
+
+    if let Some((cid, csec)) = db_creds {
+        return Some((cid, csec, auth_url, tok_url, scopes));
+    }
+
+    // Fall back to static config (keyed by sync_provider_id)
+    if let Some(p) = state.config.oauth.providers.get(sync_provider_id) {
+        if !p.client_id.is_empty() && !p.client_secret.is_empty() {
+            return Some((p.client_id.clone(), p.client_secret.clone(), p.authorization_url.clone(), p.token_url.clone(), p.scopes.clone()));
+        }
+    }
+    // Or fallback keyed by identity (static config might use identity-level keys)
+    if let Some(p) = state.config.oauth.providers.get(&identity) {
+        if !p.client_id.is_empty() && !p.client_secret.is_empty() {
+            return Some((p.client_id.clone(), p.client_secret.clone(), p.authorization_url.clone(), p.token_url.clone(), scopes));
+        }
+    }
+    None
 }
 

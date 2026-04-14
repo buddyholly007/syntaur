@@ -2475,15 +2475,27 @@ async fn handle_oauth_start(
     Json(req): Json<OAuthStartRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let principal = resolve_principal(&state, &req.token).await?;
-    let provider_cfg = match state.config.oauth.providers.get(&req.provider) {
-        Some(p) => p,
-        None => {
-            return Ok(Json(serde_json::json!({
-                "error": format!("unknown oauth provider '{}'", req.provider),
-                "configured": state.config.oauth.providers.keys().collect::<Vec<_>>(),
-            })));
-        }
+
+    // Resolve credentials: check oauth_config table (runtime) first,
+    // then fall back to static config.oauth.providers. Identity-provider-aware:
+    // one Google config unlocks gmail/calendar/youtube_music/youtube.
+    let creds = sync::resolve_oauth_credentials(&state, &req.provider).await;
+    let Some((client_id, _client_secret, authorization_url, _token_url, scopes)) = creds else {
+        return Ok(Json(serde_json::json!({
+            "error": format!("OAuth not configured for '{}'. Go to Sync settings → find this provider → Setup OAuth.", req.provider),
+            "needs_config": true,
+            "identity_provider": sync::identity_for(&req.provider),
+        })));
     };
+
+    // Redirect URI: prefer static config if present, else compute from request origin.
+    // For simplicity, use the existing static config as the redirect URI source.
+    let redirect_uri = state.config.oauth.providers.get(&req.provider)
+        .map(|p| p.redirect_uri.clone())
+        .or_else(|| sync::identity_for(&req.provider)
+            .and_then(|i| state.config.oauth.providers.get(i))
+            .map(|p| p.redirect_uri.clone()))
+        .unwrap_or_else(|| format!("http://localhost:{}/api/oauth/callback", state.config.gateway.port));
 
     let pkce = oauth::PkcePair::generate();
     let state_value = oauth::pkce::generate_state();
@@ -2496,21 +2508,18 @@ async fn handle_oauth_start(
                 user_id: principal.user_id(),
                 provider: req.provider.clone(),
                 code_verifier: pkce.verifier.clone(),
-                redirect_uri: provider_cfg.redirect_uri.clone(),
+                redirect_uri: redirect_uri.clone(),
                 created_at: std::time::Instant::now(),
             },
         )
         .await;
 
-    // Build the authorization URL. We do query-string assembly manually so
-    // we don't need to pull in `url` as a new dep — every value is already
-    // a printable ASCII string we just need to URL-encode.
     let auth_url = format!(
         "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method=S256&access_type=offline&prompt=consent",
-        provider_cfg.authorization_url,
-        urlencode(&provider_cfg.client_id),
-        urlencode(&provider_cfg.redirect_uri),
-        urlencode(&provider_cfg.scopes),
+        authorization_url,
+        urlencode(&client_id),
+        urlencode(&redirect_uri),
+        urlencode(&scopes),
         urlencode(&state_value),
         urlencode(&pkce.challenge),
     );
@@ -3791,6 +3800,9 @@ async fn main() {
         .route("/api/music/dj", post(music::handle_music_dj))
         .route("/api/music/pwa_state", post(music::handle_pwa_state))
         .route("/api/music/set_preferred_target", post(music::handle_set_preferred_target))
+        .route("/api/admin/oauth_config", post(sync::handle_oauth_config_save))
+        .route("/api/admin/oauth_config", get(sync::handle_oauth_config_list))
+        .route("/api/admin/oauth_config/{identity_provider}", axum::routing::delete(sync::handle_oauth_config_delete))
         .route("/apple_music_capture", get(sync::handle_apple_music_capture_page))
         .with_state(Arc::clone(&state))
         .layer(axum::middleware::from_fn_with_state(
