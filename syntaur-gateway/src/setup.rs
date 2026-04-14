@@ -550,10 +550,6 @@ pub async fn handle_music_page() -> axum::response::Html<&'static str> {
     axum::response::Html(include_str!("../static/music.html"))
 }
 
-pub async fn handle_voice_setup_page() -> axum::response::Html<&'static str> {
-    axum::response::Html(include_str!("../static/voice-setup.html"))
-}
-
 /// GET /settings
 pub async fn handle_settings_page() -> axum::response::Html<&'static str> {
     axum::response::Html(include_str!("../static/settings.html"))
@@ -1577,12 +1573,6 @@ pub struct TailscaleStatus {
     pub hostname: Option<String>,
     pub url: Option<String>,
 }
-
-/// GET /landing
-pub async fn handle_landing_page() -> axum::response::Html<&'static str> {
-    axum::response::Html(include_str!("../static/landing.html"))
-}
-
 
 /// GET /api/setup/ssh-pubkey — return this machine's SSH public key for the GPU guide.
 pub async fn handle_ssh_pubkey(
