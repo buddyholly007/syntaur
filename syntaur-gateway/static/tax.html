@@ -2334,15 +2334,21 @@ function renderExtFile(method) {
     ['Reason for Payment', 'Extension'],
     ['SSN', '(enter yours)'],
   ];
-  document.getElementById('ext-copy-fields').innerHTML = fields.map(([label, value]) =>
-    `<div class="flex items-center justify-between py-1">
-      <span class="text-xs text-gray-500">${label}</span>
-      <div class="flex items-center gap-2">
-        <span class="text-sm text-white font-mono">${value}</span>
-        ${value !== '(enter yours)' ? `<button onclick="navigator.clipboard.writeText('${value.replace(/'/g,"\\'")}'); this.textContent='Copied!'; setTimeout(()=>this.textContent='Copy',1000)" class="text-[10px] text-oc-500 hover:text-oc-400 px-1.5 py-0.5 bg-gray-800 rounded">Copy</button>` : ''}
-      </div>
-    </div>`
-  ).join('');
+  const copyFieldsEl = document.getElementById('ext-copy-fields');
+  copyFieldsEl.innerHTML = '';
+  fields.forEach(([label, value]) => {
+    const row = document.createElement('div');
+    row.className = 'flex items-center justify-between py-1';
+    row.innerHTML = '<span class="text-xs text-gray-400">' + label + '</span><div class="flex items-center gap-2"><span class="text-sm text-white font-mono">' + value + '</span></div>';
+    if (value !== '(enter yours)') {
+      const btn = document.createElement('button');
+      btn.className = 'text-[10px] text-oc-500 hover:text-oc-400 px-1.5 py-0.5 bg-gray-800 rounded';
+      btn.textContent = 'Copy';
+      btn.onclick = function() { navigator.clipboard.writeText(value).then(() => { btn.textContent = 'Copied!'; setTimeout(() => btn.textContent = 'Copy', 1500); }); };
+      row.querySelector('div').appendChild(btn);
+    }
+    copyFieldsEl.appendChild(row);
+  });
 }
 
 async function confirmExtension() {
