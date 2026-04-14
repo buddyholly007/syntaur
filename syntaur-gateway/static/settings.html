@@ -1461,6 +1461,27 @@ function openSyncModal(providerId) {
       <input type="url" id="sync-field-url" class="w-full mt-3 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="https://www.icloud.com/shortcuts/...">
       <button onclick="submitShortcutUrl('${p.id}')" id="sync-submit-btn" class="w-full mt-3 bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Save</button>
       <p id="sync-error" class="text-xs text-red-400 mt-2 hidden"></p>`;
+  } else if (p.flow === 'phone_pwa') {
+    flowHtml = `${renderInstructions(p.instructions)}
+      <div class="mt-4 bg-gray-900 border border-gray-700 rounded-lg p-3 space-y-3">
+        <div class="flex items-start gap-2">
+          <span class="text-xl flex-shrink-0">🔉</span>
+          <div class="flex-1">
+            <p class="text-sm font-medium text-gray-200">Auto-duck music when AI voice speaks</p>
+            <p class="text-xs text-gray-400 mt-1">iOS doesn't let web pages programmatically lower another app's audio — but a one-time iOS Shortcut install lets the PWA auto-duck Apple Music every time Syntaur speaks. After setup it's fully automatic.</p>
+            <details class="mt-2">
+              <summary class="text-xs text-oc-500 cursor-pointer hover:text-oc-400">How to set it up (3 minutes, one time)</summary>
+              <div id="shortcut-setup-steps" class="mt-2 text-xs text-gray-300">Loading guide…</div>
+            </details>
+            <div class="mt-3 flex flex-wrap gap-2">
+              <button onclick="testDuckShortcut()" class="text-xs bg-oc-700 hover:bg-oc-600 text-white px-3 py-1.5 rounded-lg">Test the Shortcut</button>
+              <button onclick="connectPhonePwa()" class="text-xs bg-gray-800 hover:bg-gray-700 text-gray-200 px-3 py-1.5 rounded-lg">Save phone connection</button>
+            </div>
+            <p id="shortcut-test-status" class="text-xs text-gray-500 mt-2"></p>
+          </div>
+        </div>
+      </div>`;
+    setTimeout(() => loadShortcutSetup(), 100);
   } else if (p.flow === 'apple_music') {
     flowHtml = `${renderInstructions(p.instructions)}
       <div id="sync-am-container" class="mt-3">
@@ -1778,6 +1799,67 @@ async function submitShortcutUrl(providerId) {
     else { showSyncError(data.error || 'Failed'); }
   } catch(e) { showSyncError(e.message); }
   btn.textContent = 'Save'; btn.disabled = false;
+}
+
+async function loadShortcutSetup() {
+  const box = document.getElementById('shortcut-setup-steps');
+  if (!box) return;
+  try {
+    const r = await fetch('/api/music/shortcut_setup?token=' + token, { headers: { 'Authorization': 'Bearer ' + token } });
+    const d = await r.json();
+    let html = '<ol class="list-decimal list-inside space-y-1.5 leading-relaxed">';
+    for (const step of (d.manual_steps || [])) {
+      html += '<li>' + escapeHtml(step) + '</li>';
+    }
+    html += '</ol>';
+    if (d.duck_state_url) {
+      html += '<p class="mt-2 text-[11px] text-gray-500">Your duck-state URL: <code class="bg-gray-900 px-1">' + escapeHtml(d.duck_state_url) + '</code></p>';
+    }
+    if (d.note) html += '<p class="text-[11px] text-gray-500 italic mt-2">' + escapeHtml(d.note) + '</p>';
+    box.innerHTML = html;
+  } catch(e) {
+    box.innerHTML = '<p class="text-xs text-red-400">Could not load setup guide: ' + e.message + '</p>';
+  }
+}
+
+async function testDuckShortcut() {
+  const status = document.getElementById('shortcut-test-status');
+  status.textContent = 'Triggering duck for 5 seconds…';
+  try {
+    await fetch('/api/music/duck', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, state: 'on', duration_secs: 5 }),
+    });
+    status.textContent = 'Sent. If your iPhone PWA tab is open and the Shortcut named "Syntaur Music Volume" is installed, music volume should drop now and restore in 5s.';
+    setTimeout(async () => {
+      await fetch('/api/music/duck', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, state: 'off' }),
+      });
+      status.textContent += ' (restored)';
+    }, 5500);
+  } catch(e) {
+    status.textContent = 'Test failed: ' + e.message;
+  }
+}
+
+async function connectPhonePwa() {
+  try {
+    const resp = await fetch('/api/sync/connect', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, provider: 'phone_music_pwa', credential: {}, display_name: 'My Phone' }),
+    });
+    const d = await resp.json();
+    if (d.success) {
+      closeSyncModal();
+      showToast('Phone connected for music routing');
+      await loadSyncProviders();
+    } else {
+      showToast('Save failed: ' + (d.error || 'unknown'));
+    }
+  } catch(e) { showToast('Error: ' + e.message); }
 }
 
 function setupAppleMusic() {

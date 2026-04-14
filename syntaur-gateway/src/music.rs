@@ -1413,3 +1413,53 @@ pub async fn trigger_duck(active: bool, duration_secs: i64) {
         .send().await;
 }
 
+// ── iOS Shortcut integration for music ducking ──────────────────────────────
+//
+// iOS doesn't let web pages programmatically lower another app's volume.
+// The closest workaround: a one-time-installed Shortcut with the "Set Music
+// Volume" action (iOS 17+). The PWA fires the Shortcut via URL scheme
+// (shortcuts://run-shortcut?name=...) on every duck/unduck event.
+
+/// Returns simple {volume: 20|100} JSON suitable for an iOS Shortcut
+/// to consume via "Get Contents of URL" → "Get Dictionary Value".
+/// No auth required so the Shortcut can poll without managing tokens.
+pub async fn handle_duck_volume_simple() -> Json<serde_json::Value> {
+    let ds = get_duck_state().await;
+    let volume = if ds.active { 20 } else { 100 };
+    Json(serde_json::json!({
+        "volume": volume,
+        "ducking": ds.active,
+    }))
+}
+
+/// Returns the Shortcut setup guide — text steps for building or
+/// installing the Syntaur Music Volume Shortcut.
+pub async fn handle_shortcut_setup_guide(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let _ = crate::resolve_principal(&state, token).await?;
+    // The "host" from request would be ideal but we infer from config
+    let host = std::env::var("SYNTAUR_PUBLIC_HOST").unwrap_or_else(|_| "your-syntaur-host".to_string());
+    Ok(Json(serde_json::json!({
+        "shortcut_name": "Syntaur Music Volume",
+        "trigger_url_scheme": "shortcuts://run-shortcut?name=Syntaur+Music+Volume&input=text&text=duck",
+        "duck_state_url": format!("https://{}/api/music/duck/v", host),
+        "icloud_template_url": null,
+        "manual_steps": [
+            "Open the Shortcuts app on your iPhone.",
+            "Tap + (top-right) to create a new Shortcut.",
+            "Name it exactly: Syntaur Music Volume",
+            "Add action: Get Contents of URL — set URL to your Syntaur duck-state URL (shown above).",
+            "Add action: Get Dictionary Value — Get [volume] from [Contents of URL].",
+            "Add action: Set Music Volume — set to [Dictionary Value]/100 (e.g. drag the variable into the volume slider position).",
+            "Save the Shortcut.",
+            "(Optional) Open Settings → Shortcuts → toggle ON 'Allow Untrusted Shortcuts' if installing from a share link.",
+            "Test it: in the Shortcuts app, tap your new Shortcut. Music volume should drop to 20% if Syntaur is currently ducking.",
+            "Once installed and named exactly 'Syntaur Music Volume', the Syntaur PWA will automatically run it whenever the AI voice speaks — your music drops, then restores when the voice ends."
+        ],
+        "note": "iOS 17+ required for the Set Music Volume action. The PWA fires the Shortcut via URL scheme on every duck/unduck event from the gateway. After this one-time setup, ducking is fully automatic.",
+    })))
+}
+

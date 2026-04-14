@@ -3811,6 +3811,8 @@ async fn main() {
         .route("/api/music/prefs/{id}", axum::routing::delete(music::handle_music_pref_delete))
         .route("/api/music/duck", post(music::handle_music_duck))
         .route("/api/music/duck_state", get(music::handle_music_duck_state))
+        .route("/api/music/duck/v", get(music::handle_duck_volume_simple))
+        .route("/api/music/shortcut_setup", get(music::handle_shortcut_setup_guide))
         .route("/apple_music_capture", get(sync::handle_apple_music_capture_page))
         .with_state(Arc::clone(&state))
         .layer(axum::middleware::from_fn_with_state(
