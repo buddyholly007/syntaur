@@ -385,12 +385,6 @@ pub async fn first_run_redirect(
 }
 
 
-/// GET / — serve the dashboard HTML page.
-pub async fn handle_dashboard() -> axum::response::Html<&'static str> {
-    axum::response::Html(include_str!("../static/dashboard.html"))
-}
-
-
 /// POST /api/auth/login — exchange password or token for a valid API token.
 /// Tries: gateway password, gateway token, user API token.
 pub async fn handle_login(
@@ -863,12 +857,6 @@ fn remove_conditional(input: &str, flag: &str) -> String {
     result.push_str(remaining);
     result
 }
-
-/// GET /chat
-pub async fn handle_chat_page() -> axum::response::Html<&'static str> {
-    axum::response::Html(include_str!("../static/chat.html"))
-}
-
 
 /// GET /icon.svg
 pub async fn handle_icon() -> (axum::http::HeaderMap, &'static str) {

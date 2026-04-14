@@ -17,8 +17,8 @@
 //!   [done] voice-setup.html → pages::voice_setup
 //!   [done] landing.html     → pages::landing
 //!   [done] music.html      → pages::music
-//!   [todo] dashboard.html
-//!   [todo] chat.html
+//!   [done] dashboard.html  → pages::dashboard
+//!   [done] chat.html       → pages::chat
 //!   [todo] setup.html
 //!   [todo] settings.html
 //!   [HOLD] tax.html — parallel tax-module work, do NOT migrate
@@ -27,6 +27,8 @@ pub mod history;
 pub mod journal;
 pub mod landing;
 pub mod modules;
+pub mod chat;
+pub mod dashboard;
 pub mod music;
 pub mod shared;
 pub mod voice_setup;

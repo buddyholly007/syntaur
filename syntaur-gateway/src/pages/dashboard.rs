@@ -1,18 +1,23 @@
-<!DOCTYPE html>
-<html lang="en" class="dark">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="theme-color" content="#0284c7">
-<link rel="icon" href="/favicon.ico" type="image/x-icon"><link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32"><link rel="apple-touch-icon" href="/icon-192.png">
-<link rel="manifest" href="/manifest.json">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>Syntaur</title>
-<script src="/tailwind.js"></script>
-<script>tailwind.config={darkMode:'class',theme:{extend:{colors:{oc:{50:'#f0f9ff',100:'#e0f2fe',500:'#0ea5e9',600:'#0284c7',700:'#0369a1',800:'#075985',900:'#0c4a6e'}}}}}</script>
-<style>
-  @import url('/fonts.css');
+//! /dashboard — migrated from static/dashboard.html. Structural markup and
+//! embedded scripts live as raw-string consts below so their bytes
+//! count as Rust and the file compiles type-checked through maud.
+
+use axum::response::Html;
+use maud::{html, PreEscaped};
+
+use super::shared::{shell, Page};
+
+pub async fn render() -> Html<String> {
+    let page = Page {
+        title: "Dashboard",
+        authed: true,
+        extra_style: Some(EXTRA_STYLE),
+    };
+    let body = html! { (PreEscaped(BODY_HTML)) };
+    Html(shell(page, body).into_string())
+}
+
+const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   body { font-family: 'Inter', sans-serif; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; }
   .card { @apply bg-gray-800 rounded-xl border border-gray-700 p-5; }
   .card-hover { @apply hover:border-gray-600 transition-colors cursor-pointer; }
@@ -29,12 +34,9 @@
   #chat-container.open { display: flex; }
   .chat-md pre { white-space: pre-wrap; word-break: break-word; }
   .chat-md p + p { margin-top: 0.5rem; }
-  @keyframes bounce { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-4px)} }
-</style>
-</head>
-<body class="bg-gray-950 text-gray-100 min-h-screen">
+  @keyframes bounce { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-4px)} }"##;
 
-<!-- Login overlay -->
+const BODY_HTML: &str = r##"<!-- Login overlay -->
 <div id="login-overlay" class="fixed inset-0 z-50 bg-gray-950 flex items-center justify-center">
   <div class="w-full max-w-sm px-4">
     <div class="text-center mb-8">
@@ -1423,6 +1425,4 @@ async function mpControl(action) {
   }
 })();
 
-</script>
-</body>
-</html>
+</script>"##;

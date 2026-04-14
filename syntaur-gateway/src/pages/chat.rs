@@ -1,18 +1,23 @@
-<!DOCTYPE html>
-<html lang="en" class="dark">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="theme-color" content="#0284c7">
-<link rel="icon" href="/favicon.ico" type="image/x-icon"><link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32"><link rel="apple-touch-icon" href="/icon-192.png">
-<link rel="manifest" href="/manifest.json">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>Syntaur — Chat</title>
-<script src="/tailwind.js"></script>
-<script>tailwind.config={darkMode:'class',theme:{extend:{colors:{oc:{500:'#0ea5e9',600:'#0284c7',700:'#0369a1'}}}}}</script>
-<style>
-  @import url('/fonts.css');
+//! /chat — migrated from static/chat.html. Structural markup and
+//! embedded scripts live as raw-string consts below so their bytes
+//! count as Rust and the file compiles type-checked through maud.
+
+use axum::response::Html;
+use maud::{html, PreEscaped};
+
+use super::shared::{shell, Page};
+
+pub async fn render() -> Html<String> {
+    let page = Page {
+        title: "Chat",
+        authed: true,
+        extra_style: Some(EXTRA_STYLE),
+    };
+    let body = html! { (PreEscaped(BODY_HTML)) };
+    Html(shell(page, body).into_string())
+}
+
+const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   body { font-family: 'Inter', sans-serif; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; }
   pre, code { font-family: 'JetBrains Mono', monospace; }
   .chat-md pre { white-space: pre-wrap; word-break: break-word; }
@@ -27,12 +32,9 @@
   .vm-thinking #vm-ring { border-color: #8b5cf6; }
   .vm-thinking #vm-mic-icon { color: #8b5cf6; }
   .vm-playing #vm-ring { border-color: #10b981; }
-  .vm-playing #vm-mic-icon { color: #10b981; }
-</style>
-</head>
-<body class="bg-gray-950 text-gray-100 h-screen flex flex-col">
+  .vm-playing #vm-mic-icon { color: #10b981; }"##;
 
-<!-- Top bar -->
+const BODY_HTML: &str = r##"<!-- Top bar -->
 <div class="border-b border-gray-800 bg-gray-900/80 backdrop-blur flex-shrink-0">
   <div class="max-w-4xl mx-auto px-3 sm:px-4 py-2 sm:py-2.5 flex items-center justify-between">
     <div class="flex items-center gap-2 sm:gap-3 min-w-0">
@@ -1392,6 +1394,4 @@ async function playTts(text) {
     } catch(e) { fb.className='text-sm text-red-400'; fb.textContent='Network error: '+e.message; fb.classList.remove('hidden'); btn.disabled=false; btn.textContent='Submit'; }
   };
 })();
-</script>
-</body>
-</html>
+</script>"##;
