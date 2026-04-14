@@ -5,3 +5,4 @@ pub mod paperless;
 pub mod bluesky;
 pub mod github;
 pub mod email;
+pub mod uploaded_files;

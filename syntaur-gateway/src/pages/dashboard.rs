@@ -281,6 +281,12 @@ const BODY_HTML: &str = r##"<!-- Login overlay -->
         <a href="/voice-setup" class="flex items-center gap-2 p-2 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors text-sm">
           <span class="text-cyan-500">&#127899;</span> Voice Setup
         </a>
+        <a href="/knowledge" class="flex items-center gap-2 p-2 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors text-sm">
+          <span class="text-amber-500">&#128218;</span> Knowledge
+        </a>
+        <a href="/research" class="flex items-center gap-2 p-2 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors text-sm">
+          <span class="text-sky-500">&#128269;</span> Research
+        </a>
         <a href="/modules" class="flex items-center gap-2 p-2 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors text-sm">
           <span class="text-gray-500">&#9881;</span> All Modules
         </a>

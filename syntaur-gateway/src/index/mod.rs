@@ -28,7 +28,7 @@ pub trait StaleNotifier: Send + Sync {
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use log::{debug, info, warn};
 use rusqlite::{params, Connection};
 use serde_json::Value;
@@ -560,6 +560,135 @@ impl Indexer {
         .await
         .map_err(|e| format!("spawn_blocking: {}", e))?
     }
+
+    /// Per-source breakdown for the /knowledge page. Reads the cursor JSON
+    /// blob to surface the last refresh timestamp.
+    pub async fn stats_per_source(&self) -> Vec<PerSourceStat> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || -> Vec<PerSourceStat> {
+            let conn = db.blocking_lock();
+            let mut out = Vec::new();
+            let mut stmt = match conn.prepare(
+                "SELECT d.source, COUNT(*) as docs, COALESCE(MAX(d.indexed_at), 0) as last_indexed, cs.cursor
+                 FROM documents d
+                 LEFT JOIN connector_state cs ON cs.source = d.source
+                 GROUP BY d.source
+                 ORDER BY d.source",
+            ) {
+                Ok(s) => s,
+                Err(_) => return out,
+            };
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                ))
+            });
+            if let Ok(rows) = rows {
+                for row in rows.flatten() {
+                    let (name, docs, last_indexed, cursor) = row;
+                    let last_refresh = cursor
+                        .as_deref()
+                        .and_then(|c| serde_json::from_str::<Value>(c).ok())
+                        .and_then(|v| {
+                            v.get("last_refresh")
+                                .or_else(|| v.get("last_full_load"))
+                                .and_then(|s| s.as_str().map(String::from))
+                        });
+                    let last_indexed_iso = if last_indexed > 0 {
+                        Utc.timestamp_opt(last_indexed, 0)
+                            .single()
+                            .map(|dt| dt.to_rfc3339())
+                    } else {
+                        None
+                    };
+                    out.push(PerSourceStat {
+                        name,
+                        documents: docs,
+                        last_refresh,
+                        last_indexed: last_indexed_iso,
+                    });
+                }
+            }
+            out
+        })
+        .await
+        .unwrap_or_default()
+    }
+
+    /// List recently indexed documents, newest first. Used by the
+    /// /knowledge page's "recently indexed" card.
+    pub async fn list_recent_documents(
+        &self,
+        source_filter: Option<String>,
+        limit: usize,
+    ) -> Vec<DocSummary> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || -> Vec<DocSummary> {
+            let conn = db.blocking_lock();
+            let sql = if source_filter.is_some() {
+                "SELECT d.id, d.source, d.external_id, d.title, d.indexed_at,
+                        (SELECT COUNT(*) FROM chunks WHERE doc_id = d.id) AS chunks
+                 FROM documents d
+                 WHERE d.source = ?
+                 ORDER BY d.indexed_at DESC
+                 LIMIT ?"
+            } else {
+                "SELECT d.id, d.source, d.external_id, d.title, d.indexed_at,
+                        (SELECT COUNT(*) FROM chunks WHERE doc_id = d.id) AS chunks
+                 FROM documents d
+                 ORDER BY d.indexed_at DESC
+                 LIMIT ?"
+            };
+            let mut stmt = match conn.prepare(sql) {
+                Ok(s) => s,
+                Err(_) => return Vec::new(),
+            };
+            let map_row = |r: &rusqlite::Row| {
+                let indexed_at: i64 = r.get(4)?;
+                let indexed_iso = Utc
+                    .timestamp_opt(indexed_at, 0)
+                    .single()
+                    .map(|dt| dt.to_rfc3339());
+                Ok(DocSummary {
+                    id: r.get(0)?,
+                    source: r.get(1)?,
+                    external_id: r.get(2)?,
+                    title: r.get(3)?,
+                    indexed_at: indexed_iso,
+                    chunks: r.get(5)?,
+                })
+            };
+            let rows = if let Some(src) = source_filter {
+                stmt.query_map(params![src, limit as i64], map_row)
+            } else {
+                stmt.query_map(params![limit as i64], map_row)
+            };
+            rows.map(|iter| iter.flatten().collect::<Vec<_>>())
+                .unwrap_or_default()
+        })
+        .await
+        .unwrap_or_default()
+    }
+
+    /// Look up a document by numeric id. Returns (source, external_id) so
+    /// the caller can pass the pair to `delete_document`.
+    pub async fn get_document_ident(&self, doc_id: i64) -> Option<(String, String)> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || {
+            let conn = db.blocking_lock();
+            conn.query_row(
+                "SELECT source, external_id FROM documents WHERE id = ?",
+                params![doc_id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .ok()
+        })
+        .await
+        .unwrap_or(None)
+    }
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -567,6 +696,24 @@ pub struct IndexStats {
     pub documents: i64,
     pub chunks: i64,
     pub sources: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PerSourceStat {
+    pub name: String,
+    pub documents: i64,
+    pub last_refresh: Option<String>,
+    pub last_indexed: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DocSummary {
+    pub id: i64,
+    pub source: String,
+    pub external_id: String,
+    pub title: String,
+    pub indexed_at: Option<String>,
+    pub chunks: i64,
 }
 
 /// Simple fixed-size character chunker with overlap. Word-aware split: never

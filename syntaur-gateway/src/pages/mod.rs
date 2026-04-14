@@ -21,16 +21,21 @@
 //!   [done] chat.html       → pages::chat
 //!   [done] setup.html      → pages::setup
 //!   [done] settings.html   → pages::settings
-//!   [HOLD] tax.html — parallel tax-module work, do NOT migrate
+//!   [done] knowledge       → pages::knowledge (new, RAG UI)
+//!   [done] research        → pages::research (new, research UI)
+//!   [done] tax.html      → pages::tax
 
-pub mod history;
-pub mod journal;
-pub mod landing;
-pub mod modules;
 pub mod chat;
 pub mod dashboard;
+pub mod history;
+pub mod journal;
+pub mod knowledge;
+pub mod landing;
+pub mod modules;
 pub mod music;
+pub mod research;
 pub mod settings;
 pub mod setup;
 pub mod shared;
+pub mod tax;
 pub mod voice_setup;

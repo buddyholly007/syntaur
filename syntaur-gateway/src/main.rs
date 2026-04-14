@@ -122,6 +122,14 @@ pub struct AppState {
     /// External consumers (rust-social-manager bsky-approve) drain via
     /// GET /external-callbacks.
     pub external_callbacks: Arc<Mutex<Vec<serde_json::Value>>>,
+    /// Clones of every connector registered with the scheduler, keyed by
+    /// `connector.name()`. Lets the /knowledge UI trigger a manual re-sync
+    /// by calling `load_full()` + `indexer.put_document()` on demand.
+    /// Populated by the scheduler setup block; empty on boot failure.
+    pub connectors: Arc<std::sync::RwLock<HashMap<String, Arc<dyn connectors::FullConnector>>>>,
+    /// Uploaded-files connector specifically — held separately so upload
+    /// and delete handlers can reach its filesystem root.
+    pub uploaded_files: Option<Arc<connectors::sources::uploaded_files::UploadedFilesConnector>>,
 }
 
 /// Run the `bootstrap-admin` CLI subcommand. Parses `--name <name>` from
@@ -1774,6 +1782,348 @@ async fn handle_messages(
         .collect();
 
     Ok(Json(messages))
+}
+
+// ── Knowledge (RAG) API ────────────────────────────────────────────────────
+//
+// Exposes the `Indexer` + connector framework to the /knowledge UI:
+//   GET  /api/knowledge/stats               — overall + per-source counts
+//   GET  /api/knowledge/search?q&k&source   — hybrid search
+//   GET  /api/knowledge/docs?source&limit   — recent documents
+//   POST /api/knowledge/upload (multipart)  — upload one file, ingest now
+//   POST /api/knowledge/resync/{source}     — trigger a load_full refresh
+//   POST /api/knowledge/docs/delete         — remove a document
+
+async fn handle_knowledge_stats(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let _principal = resolve_principal(&state, token).await?;
+    let indexer = match &state.indexer {
+        Some(i) => i,
+        None => return Ok(Json(serde_json::json!({"error": "indexer not available"}))),
+    };
+    let overall = indexer.stats().await;
+    let per_source = indexer.stats_per_source().await;
+    Ok(Json(serde_json::json!({
+        "documents": overall.documents,
+        "chunks": overall.chunks,
+        "sources": overall.sources,
+        "per_source": per_source,
+    })))
+}
+
+async fn handle_knowledge_search(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let _principal = resolve_principal(&state, token).await?;
+    let indexer = match &state.indexer {
+        Some(i) => i,
+        None => return Ok(Json(serde_json::json!({"error": "indexer not available"}))),
+    };
+    let q_text = match params.get("q").filter(|s| !s.trim().is_empty()) {
+        Some(q) => q.clone(),
+        None => return Ok(Json(serde_json::json!({"error": "missing 'q'"}))),
+    };
+    let k: usize = params
+        .get("k")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10)
+        .clamp(1, 50);
+    let source = params
+        .get("source")
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    match indexer.search_hybrid(q_text.clone(), k, source).await {
+        Ok(hits) => Ok(Json(serde_json::json!({ "hits": hits }))),
+        Err(e) => Ok(Json(serde_json::json!({"error": e}))),
+    }
+}
+
+async fn handle_knowledge_docs(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let _principal = resolve_principal(&state, token).await?;
+    let indexer = match &state.indexer {
+        Some(i) => i,
+        None => return Ok(Json(serde_json::json!({"error": "indexer not available"}))),
+    };
+    let source = params
+        .get("source")
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let limit: usize = params
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(25)
+        .clamp(1, 200);
+    let docs = indexer.list_recent_documents(source, limit).await;
+    Ok(Json(serde_json::json!({ "documents": docs })))
+}
+
+#[derive(serde::Deserialize)]
+struct KnowledgeResyncReq {
+    token: String,
+}
+
+async fn handle_knowledge_resync(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(source): axum::extract::Path<String>,
+    Json(req): Json<KnowledgeResyncReq>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let _principal = resolve_principal(&state, &req.token).await?;
+    let indexer = match &state.indexer {
+        Some(i) => Arc::clone(i),
+        None => return Ok(Json(serde_json::json!({"error": "indexer not available"}))),
+    };
+    let connector = {
+        let map = match state.connectors.read() {
+            Ok(m) => m,
+            Err(_) => return Ok(Json(serde_json::json!({"error": "connector map poisoned"}))),
+        };
+        match map.get(&source) {
+            Some(c) => Arc::clone(c),
+            None => {
+                return Ok(Json(
+                    serde_json::json!({"error": format!("unknown source '{}'", source)}),
+                ))
+            }
+        }
+    };
+    let started = std::time::Instant::now();
+    let docs = match connector.load_full().await {
+        Ok(d) => d,
+        Err(e) => return Ok(Json(serde_json::json!({"error": format!("load_full: {}", e)}))),
+    };
+    let total = docs.len();
+    let mut errors = 0usize;
+    for d in docs {
+        if let Err(e) = indexer.put_document(d).await {
+            errors += 1;
+            warn!("[knowledge] resync {} put failed: {}", source, e);
+        }
+    }
+    // Prune stale entries that no longer exist in the source.
+    match connector.list_ids().await {
+        Ok(ids) => {
+            let keep: Vec<String> = ids.into_iter().map(|d| d.external_id).collect();
+            if let Err(e) = indexer.prune(&source, keep).await {
+                warn!("[knowledge] resync {} prune failed: {}", source, e);
+            }
+        }
+        Err(e) => warn!("[knowledge] resync {} list_ids failed: {}", source, e),
+    }
+    let _ = indexer
+        .set_connector_cursor(
+            &source,
+            &serde_json::json!({"last_refresh": chrono::Utc::now().to_rfc3339()}).to_string(),
+        )
+        .await;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "source": source,
+        "indexed": total,
+        "errors": errors,
+        "duration_ms": started.elapsed().as_millis() as u64,
+    })))
+}
+
+#[derive(serde::Deserialize)]
+struct KnowledgeDocDeleteReq {
+    token: String,
+    doc_id: i64,
+}
+
+async fn handle_knowledge_doc_delete(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<KnowledgeDocDeleteReq>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let _principal = resolve_principal(&state, &req.token).await?;
+    let indexer = match &state.indexer {
+        Some(i) => i,
+        None => return Ok(Json(serde_json::json!({"error": "indexer not available"}))),
+    };
+    let (source, external_id) = match indexer.get_document_ident(req.doc_id).await {
+        Some(p) => p,
+        None => {
+            return Ok(Json(
+                serde_json::json!({"error": format!("doc {} not found", req.doc_id)}),
+            ))
+        }
+    };
+    if let Err(e) = indexer.delete_document(&source, &external_id).await {
+        return Ok(Json(serde_json::json!({"error": e})));
+    }
+    // For uploaded_files, also remove the backing file from disk.
+    if source == connectors::sources::uploaded_files::SOURCE_NAME {
+        if let Some(uf) = &state.uploaded_files {
+            uf.delete_by_external_id(&external_id);
+        }
+    }
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+async fn handle_knowledge_upload(
+    State(state): State<Arc<AppState>>,
+    mut multipart: axum::extract::Multipart,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let uf = match &state.uploaded_files {
+        Some(u) => u,
+        None => return Ok(Json(serde_json::json!({"ok": false, "error": "uploads disabled"}))),
+    };
+    let indexer = match &state.indexer {
+        Some(i) => i,
+        None => return Ok(Json(serde_json::json!({"ok": false, "error": "indexer not available"}))),
+    };
+
+    // Pull the token field first (multipart field order isn't guaranteed,
+    // so we scan all fields and keep both token + file bytes).
+    let mut token: Option<String> = None;
+    let mut file_bytes: Option<(String, Vec<u8>)> = None; // (original filename, bytes)
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let name = field.name().unwrap_or("").to_string();
+        if name == "token" {
+            if let Ok(text) = field.text().await {
+                token = Some(text);
+            }
+        } else if name == "file" {
+            let filename = field
+                .file_name()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "upload".to_string());
+            match field.bytes().await {
+                Ok(b) => file_bytes = Some((filename, b.to_vec())),
+                Err(e) => {
+                    return Ok(Json(serde_json::json!({
+                        "ok": false,
+                        "error": format!("read upload: {}", e),
+                    })))
+                }
+            }
+        }
+    }
+
+    let token = match token {
+        Some(t) if !t.is_empty() => t,
+        _ => return Err(axum::http::StatusCode::UNAUTHORIZED),
+    };
+    let _principal = resolve_principal(&state, &token).await?;
+
+    let (orig_name, data) = match file_bytes {
+        Some(pair) => pair,
+        None => return Ok(Json(serde_json::json!({"ok": false, "error": "no file uploaded"}))),
+    };
+
+    let max_bytes = state.config.security.max_upload_size_mb.saturating_mul(1024 * 1024);
+    if (data.len() as u64) > max_bytes {
+        return Ok(Json(serde_json::json!({
+            "ok": false,
+            "error": format!("file exceeds {}MB limit", state.config.security.max_upload_size_mb),
+        })));
+    }
+
+    // Write to uploads/knowledge/<timestamp>-<uuid>-<sanitized>.
+    let ext = std::path::Path::new(&orig_name)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("bin")
+        .to_ascii_lowercase();
+    let stem = std::path::Path::new(&orig_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("upload");
+    let sanitized_stem: String = stem
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .take(40)
+        .collect();
+    let unique_name = format!(
+        "{}-{}-{}.{}",
+        chrono::Utc::now().format("%Y%m%d-%H%M%S"),
+        &uuid::Uuid::new_v4().to_string()[..8],
+        sanitized_stem,
+        ext,
+    );
+    let target = uf.root().join(&unique_name);
+    if let Err(e) = std::fs::write(&target, &data) {
+        return Ok(Json(serde_json::json!({
+            "ok": false,
+            "error": format!("write: {}", e),
+        })));
+    }
+    // Sidecar: preserves the original filename for display.
+    let sidecar = uf.root().join(format!("{}.meta.json", unique_name));
+    let _ = std::fs::write(
+        &sidecar,
+        serde_json::json!({
+            "original_filename": orig_name,
+            "uploaded_at": chrono::Utc::now().to_rfc3339(),
+            "bytes": data.len(),
+        })
+        .to_string(),
+    );
+
+    // Extract + ingest synchronously so the UI can report chunk count.
+    let doc = match connectors::sources::uploaded_files::file_to_doc(&target) {
+        Ok(Some(d)) => d,
+        Ok(None) => {
+            return Ok(Json(serde_json::json!({
+                "ok": false,
+                "error": format!("unsupported file type: .{}", ext),
+            })))
+        }
+        Err(e) => {
+            return Ok(Json(serde_json::json!({
+                "ok": false,
+                "error": format!("extract: {}", e),
+            })))
+        }
+    };
+    let body_len = doc.body.len();
+    // Rough chunk count: matches Indexer::chunk_text(800, 150).
+    let approx_chunks = (body_len / 650).max(1);
+    if let Err(e) = indexer.put_document(doc).await {
+        return Ok(Json(serde_json::json!({
+            "ok": false,
+            "error": format!("index: {}", e),
+        })));
+    }
+    info!(
+        "[knowledge] uploaded {} ({} bytes, ~{} chunks) -> {}",
+        orig_name, body_len, approx_chunks, unique_name
+    );
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "filename": orig_name,
+        "bytes": body_len,
+        "chunks": approx_chunks,
+        "external_id": unique_name,
+    })))
+}
+
+async fn handle_research_recent(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let _principal = resolve_principal(&state, token).await?;
+    let store = match &state.research_store {
+        Some(s) => s,
+        None => return Ok(Json(serde_json::json!({"error": "research store not available"}))),
+    };
+    let limit: usize = params
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(15)
+        .clamp(1, 100);
+    let rows = store.list_recent_all(limit).await;
+    Ok(Json(serde_json::json!({ "sessions": rows })))
 }
 
 // ── Admin endpoints (v5 Item 3 Stage 5) ────────────────────────────────────
@@ -3505,6 +3855,18 @@ async fn main() {
         }
     };
 
+    // Uploaded-files connector: reads `<data_dir>/uploads/knowledge/` and
+    // feeds the index. Held separately in AppState so the upload + delete
+    // handlers can write directly without going through the scheduler.
+    let uploaded_files_connector: Option<Arc<connectors::sources::uploaded_files::UploadedFilesConnector>> = {
+        let root = PathBuf::from(&data_dir_str).join("uploads").join("knowledge");
+        let c = Arc::new(
+            connectors::sources::uploaded_files::UploadedFilesConnector::new(root.clone()),
+        );
+        c.ensure_root();
+        Some(c)
+    };
+
     // Build shared state
     let state = Arc::new(AppState {
         config: config.clone(),
@@ -3553,6 +3915,8 @@ async fn main() {
         disabled_tools: config.modules.disabled_tools(),
         tool_router,
         external_callbacks: Arc::new(Mutex::new(Vec::new())),
+        connectors: Arc::new(std::sync::RwLock::new(HashMap::new())),
+        uploaded_files: uploaded_files_connector.clone(),
     });
 
     // Calendar reminder background task: checks for upcoming events every 60s.
@@ -3619,9 +3983,16 @@ async fn main() {
         .route("/api/message", post(handle_api_message))
         .route("/api/research", post(handle_research))
         .route("/api/research/start", post(handle_research_start))
+        .route("/api/research/recent", get(handle_research_recent))
         .route("/api/research/{id}", get(handle_research_get))
         .route("/api/research/{id}/stream", get(handle_research_stream))
         .route("/api/research/clarify", post(handle_research_clarify))
+        .route("/api/knowledge/stats", get(handle_knowledge_stats))
+        .route("/api/knowledge/search", get(handle_knowledge_search))
+        .route("/api/knowledge/docs", get(handle_knowledge_docs))
+        .route("/api/knowledge/docs/delete", post(handle_knowledge_doc_delete))
+        .route("/api/knowledge/upload", post(handle_knowledge_upload))
+        .route("/api/knowledge/resync/{source}", post(handle_knowledge_resync))
         .route("/api/message/start", post(handle_message_start))
         .route("/api/message/{id}/stream", get(handle_message_stream))
         .route("/api/conversations", post(handle_conv_create))
@@ -3705,9 +4076,11 @@ async fn main() {
         .route("/music", get(pages::music::render))
         .route("/voice-setup", get(pages::voice_setup::render))
         .route("/settings", get(pages::settings::render))
-        .route("/tax", get(setup::handle_tax_page))
+        .route("/tax", get(pages::tax::render))
         .route("/chat", get(pages::chat::render))
         .route("/history", get(pages::history::render))
+        .route("/knowledge", get(pages::knowledge::render))
+        .route("/research", get(pages::research::render))
         .route("/landing", get(pages::landing::render))
         .route("/api/auth/login", post(setup::handle_login))
         .route("/api/setup/status", get(setup::handle_setup_status))
@@ -4062,6 +4435,23 @@ async fn main() {
     // before the first agent turn. Refresh every 5 minutes, prune every hour.
     if let Some(idx) = &indexer {
         let mut sched = connectors::ConnectorScheduler::new(Arc::clone(idx));
+
+        // Registers a connector with the scheduler AND with state.connectors
+        // so the /knowledge page can trigger a manual re-sync.
+        let register = |sched: &mut connectors::ConnectorScheduler,
+                        conn: Arc<dyn connectors::FullConnector>,
+                        refresh_secs: u64,
+                        prune_secs: u64| {
+            if let Ok(mut map) = state.connectors.write() {
+                map.insert(conn.name().to_string(), Arc::clone(&conn));
+            }
+            sched.add(connectors::ConnectorEntry {
+                connector: conn,
+                refresh_secs,
+                prune_secs,
+            });
+        };
+
         let workspaces: Vec<(String, PathBuf)> = config
             .agents
             .list
@@ -4069,14 +4459,25 @@ async fn main() {
             .map(|a| (a.id.clone(), config.agent_workspace(&a.id)))
             .collect();
         info!("[connector] indexing {} workspace(s)", workspaces.len());
-        let workspace_connector = std::sync::Arc::new(
-            connectors::sources::workspace_files::WorkspaceFilesConnector::new(workspaces),
+        register(
+            &mut sched,
+            std::sync::Arc::new(
+                connectors::sources::workspace_files::WorkspaceFilesConnector::new(workspaces),
+            ),
+            300,
+            3600,
         );
-        sched.add(connectors::ConnectorEntry {
-            connector: workspace_connector,
-            refresh_secs: 300,
-            prune_secs: 3600,
-        });
+
+        // Uploaded files — user-uploaded documents from /knowledge. Refresh
+        // often (60s) so deletions and out-of-band drops show up quickly.
+        if let Some(uf) = &state.uploaded_files {
+            register(
+                &mut sched,
+                Arc::clone(uf) as Arc<dyn connectors::FullConnector>,
+                60,
+                3600,
+            );
+        }
 
         // execution_log connector — auto-detect from ~/bots/data
         let bots_base = config
@@ -4087,16 +4488,16 @@ async fn main() {
                 let home = std::env::var("HOME").unwrap_or_else(|_| "/home/sean".to_string());
                 format!("{}/bots/data", home)
             });
-        let exec_log = std::sync::Arc::new(
-            connectors::sources::execution_log::ExecutionLogConnector::auto_detect(
-                std::path::PathBuf::from(&bots_base),
+        register(
+            &mut sched,
+            std::sync::Arc::new(
+                connectors::sources::execution_log::ExecutionLogConnector::auto_detect(
+                    std::path::PathBuf::from(&bots_base),
+                ),
             ),
+            600,
+            86400,
         );
-        sched.add(connectors::ConnectorEntry {
-            connector: exec_log,
-            refresh_secs: 600,
-            prune_secs: 86400,
-        });
 
         if let Some(p) = &config.connectors.paperless {
             if p.enabled && !p.base_url.is_empty() && !p.token.is_empty() {
@@ -4104,18 +4505,18 @@ async fn main() {
                     .timeout(std::time::Duration::from_secs(60))
                     .build()
                     .unwrap_or_default();
-                let conn = std::sync::Arc::new(
-                    connectors::sources::paperless::PaperlessConnector::new(
-                        p.base_url.clone(),
-                        p.token.clone(),
-                        http,
+                register(
+                    &mut sched,
+                    std::sync::Arc::new(
+                        connectors::sources::paperless::PaperlessConnector::new(
+                            p.base_url.clone(),
+                            p.token.clone(),
+                            http,
+                        ),
                     ),
+                    1800,
+                    86400,
                 );
-                sched.add(connectors::ConnectorEntry {
-                    connector: conn,
-                    refresh_secs: 1800,
-                    prune_secs: 86400,
-                });
             }
         }
 
@@ -4125,14 +4526,14 @@ async fn main() {
                     .timeout(std::time::Duration::from_secs(30))
                     .build()
                     .unwrap_or_default();
-                let conn = std::sync::Arc::new(
-                    connectors::sources::bluesky::BlueskyConnector::new(b.actor.clone(), http),
+                register(
+                    &mut sched,
+                    std::sync::Arc::new(
+                        connectors::sources::bluesky::BlueskyConnector::new(b.actor.clone(), http),
+                    ),
+                    900,
+                    86400,
                 );
-                sched.add(connectors::ConnectorEntry {
-                    connector: conn,
-                    refresh_secs: 900,
-                    prune_secs: 86400,
-                });
             }
         }
 
@@ -4142,18 +4543,18 @@ async fn main() {
                     .timeout(std::time::Duration::from_secs(60))
                     .build()
                     .unwrap_or_default();
-                let conn = std::sync::Arc::new(
-                    connectors::sources::github::GithubConnector::new(
-                        g.user.clone(),
-                        g.token.clone(),
-                        http,
+                register(
+                    &mut sched,
+                    std::sync::Arc::new(
+                        connectors::sources::github::GithubConnector::new(
+                            g.user.clone(),
+                            g.token.clone(),
+                            http,
+                        ),
                     ),
+                    1800,
+                    86400,
                 );
-                sched.add(connectors::ConnectorEntry {
-                    connector: conn,
-                    refresh_secs: 1800,
-                    prune_secs: 86400,
-                });
             }
         }
 
@@ -4161,20 +4562,20 @@ async fn main() {
             if !ec.enabled || ec.host.is_empty() || ec.username.is_empty() {
                 continue;
             }
-            let conn = std::sync::Arc::new(
-                connectors::sources::email::EmailConnector::new(
-                    ec.account_id.clone(),
-                    ec.host.clone(),
-                    ec.port,
-                    ec.username.clone(),
-                    ec.password.clone(),
+            register(
+                &mut sched,
+                std::sync::Arc::new(
+                    connectors::sources::email::EmailConnector::new(
+                        ec.account_id.clone(),
+                        ec.host.clone(),
+                        ec.port,
+                        ec.username.clone(),
+                        ec.password.clone(),
+                    ),
                 ),
+                1800,
+                86400,
             );
-            sched.add(connectors::ConnectorEntry {
-                connector: conn,
-                refresh_secs: 1800,
-                prune_secs: 86400,
-            });
         }
 
         let scheduler_shutdown_rx = shutdown_tx.subscribe();

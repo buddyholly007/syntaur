@@ -25,7 +25,7 @@ use uuid::Uuid;
 
 use super::evidence::{EvidenceItem, Plan, PlanStep, ResearchReport};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionRow {
     pub id: String,
     pub agent: String,
@@ -297,6 +297,42 @@ impl SessionStore {
         .await
         .ok()
         .flatten()
+    }
+
+    /// List the N most recent sessions across every agent (any status).
+    /// Used by the /research page's "recent research" card.
+    pub async fn list_recent_all(&self, limit: usize) -> Vec<SessionRow> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || -> Vec<SessionRow> {
+            let conn = db.blocking_lock();
+            let mut stmt = match conn.prepare(
+                "SELECT id, agent, query, status, created_at, completed_at, duration_ms, error \
+                 FROM research_sessions ORDER BY created_at DESC LIMIT ?",
+            ) {
+                Ok(s) => s,
+                Err(_) => return Vec::new(),
+            };
+            let rows = stmt
+                .query_map(params![limit as i64], |r| {
+                    Ok(SessionRow {
+                        id: r.get(0)?,
+                        agent: r.get(1)?,
+                        query: r.get(2)?,
+                        status: r.get(3)?,
+                        created_at: r.get(4)?,
+                        completed_at: r.get(5)?,
+                        duration_ms: r.get(6)?,
+                        error: r.get(7)?,
+                    })
+                })
+                .ok();
+            match rows {
+                Some(iter) => iter.filter_map(Result::ok).collect(),
+                None => Vec::new(),
+            }
+        })
+        .await
+        .unwrap_or_default()
     }
 
     /// List the N most recent sessions for an agent (any status).
