@@ -159,61 +159,95 @@
       </details>
     </div>
 
-    <!-- File Extension (Form 4868) -->
+    <!-- File Extension (Form 4868) — Multi-step workflow -->
     <div class="card mb-4" id="extension-card">
       <div class="flex items-center justify-between mb-3">
         <div class="flex items-center gap-2">
           <span class="text-yellow-400">&#9200;</span>
           <h3 class="font-medium text-sm">File an Extension (Form 4868)</h3>
         </div>
-        <span class="badge badge-yellow text-[10px]">Free</span>
+        <div class="flex items-center gap-2">
+          <span id="ext-status-badge" class="badge badge-yellow text-[10px]">Not filed</span>
+          <span class="badge badge-green text-[10px]">Free</span>
+        </div>
       </div>
-      <p class="text-xs text-gray-400 mb-3">Get an automatic 6-month extension to file your return. This extends your <strong class="text-gray-300">filing deadline</strong> (April 15 &rarr; October 15) but does <strong class="text-red-400">not</strong> extend the payment deadline — taxes owed are still due April 15.</p>
 
-      <div id="ext-form" class="space-y-3">
-        <div class="grid grid-cols-2 gap-3 text-sm">
-          <div>
-            <label class="text-xs text-gray-500">Estimated total tax</label>
-            <input class="input text-sm" id="ext-total-tax" placeholder="$0.00" readonly>
-          </div>
-          <div>
-            <label class="text-xs text-gray-500">Total payments made</label>
-            <input class="input text-sm" id="ext-payments" placeholder="$0.00" readonly>
-          </div>
-          <div>
-            <label class="text-xs text-gray-500">Balance due</label>
-            <input class="input text-sm font-medium" id="ext-balance" placeholder="$0.00" readonly>
-          </div>
-          <div>
-            <label class="text-xs text-gray-500">Amount you're paying with extension</label>
-            <input class="input text-sm" id="ext-payment" placeholder="$0.00" value="0">
+      <!-- Step 1: Review + Choose Method -->
+      <div id="ext-step-review">
+        <p class="text-xs text-gray-400 mb-3">Review your estimated tax data, adjust if needed, then choose how to file. Extends filing deadline to <strong class="text-gray-300">October 15</strong>. Payment is still due <strong class="text-red-400">April 15</strong>.</p>
+        <div class="bg-gray-900 rounded-lg p-3 mb-3">
+          <div class="grid grid-cols-2 gap-3 text-sm">
+            <div><label class="text-xs text-gray-500">Estimated total tax</label><input class="input text-sm" id="ext-total-tax" placeholder="$0.00"></div>
+            <div><label class="text-xs text-gray-500">Payments made (withholding + estimated)</label><input class="input text-sm" id="ext-payments" placeholder="$0.00"></div>
+            <div><label class="text-xs text-gray-500">Balance due</label><input class="input text-sm font-medium" id="ext-balance" readonly></div>
+            <div><label class="text-xs text-gray-500">Paying with this extension</label><input class="input text-sm" id="ext-payment" value="0" oninput="updateExtBalance()"></div>
           </div>
         </div>
-        <div class="flex items-center gap-3">
-          <button onclick="generateExtension()" class="btn-primary text-xs">Download Form 4868 Data</button>
-          <span id="ext-result" class="text-xs text-gray-500"></span>
+        <div class="space-y-2">
+          <div class="p-3 rounded-lg bg-gray-900 border border-gray-700 hover:border-oc-600 cursor-pointer transition-colors" onclick="startExtFiling('direct_pay')">
+            <div class="flex items-center justify-between">
+              <div><p class="text-sm text-white font-medium">IRS Direct Pay</p><p class="text-[11px] text-gray-500">Payment auto-files your extension. Instant confirmation number.</p></div>
+              <span class="text-oc-500 text-xs font-medium">Recommended &rarr;</span>
+            </div>
+          </div>
+          <div class="p-3 rounded-lg bg-gray-900 border border-gray-700 hover:border-gray-600 cursor-pointer transition-colors" onclick="startExtFiling('free_file')">
+            <div class="flex items-center justify-between">
+              <div><p class="text-sm text-white font-medium">IRS Free File</p><p class="text-[11px] text-gray-500">E-file Form 4868 free. Confirmation via email within 24-48h.</p></div>
+              <span class="text-gray-500 text-xs">Free &rarr;</span>
+            </div>
+          </div>
+          <div class="p-3 rounded-lg bg-gray-900 border border-gray-700 hover:border-gray-600 cursor-pointer transition-colors" onclick="startExtFiling('mail')">
+            <div class="flex items-center justify-between">
+              <div><p class="text-sm text-white font-medium">Print &amp; Mail</p><p class="text-[11px] text-gray-500">Download form, print, mail by April 15. Use certified mail for proof.</p></div>
+              <span class="text-gray-500 text-xs">Download &rarr;</span>
+            </div>
+          </div>
         </div>
-        <details class="text-xs text-gray-500">
-          <summary class="cursor-pointer hover:text-gray-300">How to file your extension for free</summary>
-          <div class="mt-2 space-y-2 pl-2 border-l border-gray-700">
-            <p><strong class="text-gray-300">Option 1: IRS Free File</strong> (recommended) &mdash; Go to <a href="https://www.irs.gov/filing/free-file-do-your-federal-taxes-for-free" target="_blank" class="text-oc-500">irs.gov/freefile</a> &rarr; choose any partner &rarr; file Form 4868 electronically at no cost.</p>
-            <p class="text-gray-600 ml-3">Confirmation: You'll get an email with a submission ID. IRS sends acceptance/rejection within 24-48 hours.</p>
+        <span id="ext-result" class="text-xs mt-2 block"></span>
+      </div>
 
-            <p><strong class="text-gray-300">Option 2: IRS Direct Pay</strong> (fastest) &mdash; Make a payment at <a href="https://www.irs.gov/payments/direct-pay" target="_blank" class="text-oc-500">irs.gov/payments</a> and select "Extension" as the reason. This counts as filing your extension automatically.</p>
-            <p class="text-gray-600 ml-3">Confirmation: Immediate confirmation number on screen + email receipt. The payment receipt IS your proof of extension &mdash; no separate Form 4868 needed.</p>
+      <!-- Step 2: Copy-Assist + File -->
+      <div id="ext-step-file" class="hidden">
+        <div class="flex items-center gap-2 mb-3">
+          <button onclick="showExtStep('review')" class="text-xs text-gray-500 hover:text-gray-300">&larr; Back</button>
+          <span class="text-xs text-gray-400" id="ext-method-label">Filing via IRS Direct Pay</span>
+        </div>
+        <div class="bg-gray-900 rounded-lg p-3 mb-3 space-y-2" id="ext-copy-fields">
+          <!-- Populated by JS with copy buttons -->
+        </div>
+        <div class="flex gap-2 mb-3">
+          <a id="ext-irs-link" href="https://www.irs.gov/payments/direct-pay" target="_blank" class="btn-primary text-xs">Open IRS Website &rarr;</a>
+          <span class="text-xs text-gray-500 self-center">Opens in a new tab. Copy values above into the IRS form.</span>
+        </div>
+        <div class="bg-gray-800 rounded-lg p-3 border border-gray-700">
+          <p class="text-xs text-gray-300 mb-2">After you submit on the IRS website, enter your confirmation below:</p>
+          <div class="flex gap-2">
+            <input class="input text-sm flex-1" id="ext-confirm-input" placeholder="Confirmation number or submission ID">
+            <button onclick="confirmExtension()" class="btn-primary text-xs">Save &amp; Confirm</button>
+          </div>
+          <span id="ext-confirm-result" class="text-xs mt-1 block"></span>
+        </div>
+      </div>
 
-            <p><strong class="text-gray-300">Option 3: Print &amp; mail</strong> &mdash; Download the generated form, print it, and mail to your IRS service center by April 15.</p>
-            <p class="text-gray-600 ml-3">Confirmation: Use certified mail (USPS) to get a postmark receipt as proof of timely filing. No electronic confirmation for mailed forms.</p>
+      <!-- Step 3: Confirmed / Tracking -->
+      <div id="ext-step-confirmed" class="hidden">
+        <div class="bg-green-900/20 border border-green-800/30 rounded-lg p-4 mb-3">
+          <div class="flex items-center gap-2 mb-1">
+            <span class="text-green-400">&#10003;</span>
+            <p class="text-sm text-green-400 font-medium">Extension Confirmed</p>
           </div>
-        </details>
-        <details class="text-xs text-gray-500 mt-2">
-          <summary class="cursor-pointer hover:text-gray-300">After you file: tracking your extension</summary>
-          <div class="mt-2 space-y-1.5 pl-2 border-l border-gray-700">
-            <p><strong class="text-gray-300">Check status</strong>: Use <a href="https://www.irs.gov/refunds" target="_blank" class="text-oc-500">irs.gov/refunds</a> (Where's My Refund) or the <a href="https://www.irs.gov/newsroom/irs2goapp" target="_blank" class="text-oc-500">IRS2Go app</a> to verify your extension was received.</p>
-            <p><strong class="text-gray-300">Keep your confirmation</strong>: Save the submission ID, confirmation number, or certified mail receipt. This is your proof if the IRS questions your filing.</p>
-            <p><strong class="text-gray-300">New filing deadline</strong>: October 15. Syntaur will remind you as the deadline approaches.</p>
-          </div>
-        </details>
+          <p class="text-xs text-gray-400" id="ext-confirmed-detail">Filed via IRS Direct Pay</p>
+        </div>
+        <div class="grid grid-cols-2 gap-3 text-sm mb-3">
+          <div><label class="text-xs text-gray-500">Confirmation ID</label><p class="text-sm text-white font-mono" id="ext-confirmed-id">—</p></div>
+          <div><label class="text-xs text-gray-500">Filed on</label><p class="text-sm text-white" id="ext-confirmed-date">—</p></div>
+          <div><label class="text-xs text-gray-500">New filing deadline</label><p class="text-sm text-yellow-400 font-medium" id="ext-deadline">October 15</p></div>
+          <div><label class="text-xs text-gray-500">Balance due</label><p class="text-sm text-white" id="ext-confirmed-balance">—</p></div>
+        </div>
+        <div class="text-xs text-gray-500 space-y-1">
+          <p><a href="https://www.irs.gov/refunds" target="_blank" class="text-oc-500 hover:text-oc-400">Check status at irs.gov/refunds</a> or use the <a href="https://www.irs.gov/newsroom/irs2goapp" target="_blank" class="text-oc-500 hover:text-oc-400">IRS2Go app</a></p>
+          <p>This confirmation is saved with your tax documents.</p>
+        </div>
       </div>
     </div>
 
@@ -1944,68 +1978,176 @@ document.addEventListener('visibilitychange', async () => {
   }
 });
 
-// ── Extension (Form 4868) ───────────────────────────────────────────────
+// ── Extension Filing Workflow ────────────────────────────────────────────
+
+let extId = null;
+let extData = null;
+
+function formatDollar(n) { return '$' + n.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+function parseCents(s) { return Math.round(parseFloat(String(s).replace(/[$,]/g, '')) * 100) || 0; }
 
 async function loadExtensionData() {
   try {
     const yr = selectedYear || yearStart().slice(0,4);
-    const resp = await authFetch(`/api/tax/export/csv-irs?token=${token}&year=${yr}`);
-    const text = await resp.text();
-    // Parse CSV for total tax and payments
-    const lines = text.split('\n');
-    let totalTax = 0, totalPayments = 0;
-    for (const line of lines) {
-      if (line.startsWith('Tax,,Total Tax,')) totalTax = parseDollar(line.split(',')[3]);
-      if (line.startsWith('Payment,W-2 Box 2,')) totalPayments += parseDollar(line.split(',')[3]);
-      if (line.startsWith('Payment,1040-ES,')) totalPayments += parseDollar(line.split(',')[3]);
-      if (line.startsWith('Credit,')) totalPayments += parseDollar(line.split(',')[3]);
-    }
-    const balance = Math.max(totalTax - totalPayments, 0);
-    document.getElementById('ext-total-tax').value = formatDollar(totalTax);
-    document.getElementById('ext-payments').value = formatDollar(totalPayments);
-    document.getElementById('ext-balance').value = formatDollar(balance);
-    if (balance > 0) {
-      document.getElementById('ext-balance').className = 'input text-sm font-medium text-red-400';
-    } else {
-      document.getElementById('ext-balance').className = 'input text-sm font-medium text-green-400';
+    const resp = await authFetch(`/api/tax/extension/status?token=${token}&year=${yr}`);
+    const data = await resp.json();
+    extData = data;
+    if (data.extension) {
+      extId = data.extension.id;
+      const ext = data.extension;
+      if (ext.status === 'confirmed') { showExtStep('confirmed'); renderExtConfirmed(ext); }
+      else if (ext.status === 'filed') { showExtStep('file'); renderExtFile(ext.filing_method); }
+      else { showExtStep('review'); fillExtReview(ext.total_tax_cents, ext.total_paid_cents, ext.payment_cents); }
+      updateExtBadge(ext.status);
+    } else if (data.estimate) {
+      showExtStep('review');
+      fillExtReview(data.estimate.total_tax_cents, data.estimate.total_paid_cents, 0);
+      updateExtBadge('none');
     }
   } catch(e) {}
 }
 
-function parseDollar(s) {
-  if (!s) return 0;
-  return Math.round(parseFloat(s.replace(/[$,]/g, '')) * 100) / 100;
+function fillExtReview(taxCents, paidCents, payCents) {
+  document.getElementById('ext-total-tax').value = formatDollar(taxCents / 100);
+  document.getElementById('ext-payments').value = formatDollar(paidCents / 100);
+  document.getElementById('ext-payment').value = (payCents / 100).toFixed(2);
+  updateExtBalance();
 }
 
-function formatDollar(n) {
-  return '$' + n.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+function updateExtBalance() {
+  const tax = parseCents(document.getElementById('ext-total-tax').value);
+  const paid = parseCents(document.getElementById('ext-payments').value);
+  const bal = Math.max(tax - paid, 0);
+  const el = document.getElementById('ext-balance');
+  el.value = formatDollar(bal / 100);
+  el.className = 'input text-sm font-medium ' + (bal > 0 ? 'text-red-400' : 'text-green-400');
 }
 
-async function generateExtension() {
-  const result = document.getElementById('ext-result');
-  result.className = 'text-xs text-gray-400';
-  result.textContent = 'Generating...';
+function updateExtBadge(status) {
+  const b = document.getElementById('ext-status-badge');
+  if (status === 'confirmed') { b.className = 'badge badge-green text-[10px]'; b.textContent = 'Confirmed'; }
+  else if (status === 'filed') { b.className = 'badge badge-blue text-[10px]'; b.textContent = 'Filed'; }
+  else if (status === 'draft') { b.className = 'badge badge-yellow text-[10px]'; b.textContent = 'Draft'; }
+  else { b.className = 'badge badge-yellow text-[10px]'; b.textContent = 'Not filed'; }
+}
+
+function showExtStep(step) {
+  document.getElementById('ext-step-review').classList.toggle('hidden', step !== 'review');
+  document.getElementById('ext-step-file').classList.toggle('hidden', step !== 'file');
+  document.getElementById('ext-step-confirmed').classList.toggle('hidden', step !== 'confirmed');
+}
+
+async function startExtFiling(method) {
+  const yr = selectedYear || yearStart().slice(0,4);
+  // Create or update draft
   try {
+    const resp = await authFetch('/api/tax/extension/create', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        token, year: parseInt(yr),
+        total_tax_cents: parseCents(document.getElementById('ext-total-tax').value),
+        total_paid_cents: parseCents(document.getElementById('ext-payments').value),
+        payment_cents: parseCents(document.getElementById('ext-payment').value),
+      })
+    });
+    const data = await resp.json();
+    extId = data.extension?.id;
+  } catch(e) { return; }
+
+  if (method === 'mail') {
+    // Download form text and mark as filed
     const yr = selectedYear || yearStart().slice(0,4);
-    const payment = parseFloat(document.getElementById('ext-payment').value.replace(/[$,]/g, '')) || 0;
-    const resp = await authFetch(`/api/tax/extension?token=${token}&year=${yr}&payment=${Math.round(payment * 100)}`);
+    const payment = parseCents(document.getElementById('ext-payment').value);
+    const resp = await authFetch(`/api/tax/extension?token=${token}&year=${yr}&payment=${payment}`);
     if (resp.ok) {
       const blob = await resp.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url; a.download = `form-4868-${yr}.txt`; a.click();
-      URL.revokeObjectURL(url);
-      result.className = 'text-xs text-green-400';
-      result.textContent = 'Downloaded! File by April 15 via IRS Free File or mail.';
-    } else {
-      const data = await resp.json();
-      result.className = 'text-xs text-red-400';
-      result.textContent = data.error || 'Failed to generate extension.';
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+      a.download = `form-4868-${yr}.txt`; a.click(); URL.revokeObjectURL(a.href);
     }
-  } catch(e) {
-    result.className = 'text-xs text-red-400';
-    result.textContent = 'Error: ' + e.message;
+    if (extId) await authFetch(`/api/tax/extension/${extId}/file`, {
+      method:'PUT', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({token, method: 'mail'})
+    });
+    renderExtFile('mail');
+    showExtStep('file');
+    updateExtBadge('filed');
+    return;
   }
+
+  // Mark as filed
+  if (extId) await authFetch(`/api/tax/extension/${extId}/file`, {
+    method:'PUT', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({token, method})
+  });
+  renderExtFile(method);
+  showExtStep('file');
+  updateExtBadge('filed');
+}
+
+function renderExtFile(method) {
+  const labels = {direct_pay:'IRS Direct Pay', free_file:'IRS Free File', mail:'Print & Mail'};
+  const urls = {direct_pay:'https://www.irs.gov/payments/direct-pay', free_file:'https://www.irs.gov/filing/free-file-do-your-federal-taxes-for-free', mail:null};
+  document.getElementById('ext-method-label').textContent = 'Filing via ' + (labels[method]||method);
+  const link = document.getElementById('ext-irs-link');
+  if (urls[method]) { link.href = urls[method]; link.classList.remove('hidden'); }
+  else { link.classList.add('hidden'); }
+
+  // Build copy-assist fields
+  const yr = selectedYear || yearStart().slice(0,4);
+  const tax = document.getElementById('ext-total-tax').value;
+  const paid = document.getElementById('ext-payments').value;
+  const bal = document.getElementById('ext-balance').value;
+  const pay = document.getElementById('ext-payment').value;
+  const fields = [
+    ['Tax Year', yr],
+    ['Estimated Total Tax (Line 4)', tax],
+    ['Total Payments Made (Line 5)', paid],
+    ['Balance Due (Line 6)', bal],
+    ['Payment Amount (Line 7)', '$' + parseFloat(pay).toFixed(2)],
+    ['Reason for Payment', 'Extension'],
+    ['SSN', '(enter yours)'],
+  ];
+  document.getElementById('ext-copy-fields').innerHTML = fields.map(([label, value]) =>
+    `<div class="flex items-center justify-between py-1">
+      <span class="text-xs text-gray-500">${label}</span>
+      <div class="flex items-center gap-2">
+        <span class="text-sm text-white font-mono">${value}</span>
+        ${value !== '(enter yours)' ? `<button onclick="navigator.clipboard.writeText('${value.replace(/'/g,"\\'")}'); this.textContent='Copied!'; setTimeout(()=>this.textContent='Copy',1000)" class="text-[10px] text-oc-500 hover:text-oc-400 px-1.5 py-0.5 bg-gray-800 rounded">Copy</button>` : ''}
+      </div>
+    </div>`
+  ).join('');
+}
+
+async function confirmExtension() {
+  const confirmId = document.getElementById('ext-confirm-input').value.trim();
+  if (!confirmId) { document.getElementById('ext-confirm-result').textContent = 'Please enter your confirmation number.'; return; }
+  try {
+    const resp = await authFetch(`/api/tax/extension/${extId}/confirm`, {
+      method:'PUT', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({token, confirmation_id: confirmId})
+    });
+    const data = await resp.json();
+    if (data.success) {
+      renderExtConfirmed({confirmation_id: confirmId, filing_method: extData?.extension?.filing_method || 'direct_pay',
+        filed_at: Date.now()/1000, balance_due: document.getElementById('ext-balance').value,
+        ...data.extension});
+      showExtStep('confirmed');
+      updateExtBadge('confirmed');
+    } else {
+      document.getElementById('ext-confirm-result').className = 'text-xs mt-1 block text-red-400';
+      document.getElementById('ext-confirm-result').textContent = data.error || 'Failed to confirm.';
+    }
+  } catch(e) {}
+}
+
+function renderExtConfirmed(ext) {
+  const labels = {direct_pay:'IRS Direct Pay', free_file:'IRS Free File', mail:'Print & Mail'};
+  document.getElementById('ext-confirmed-id').textContent = ext.confirmation_id || '—';
+  document.getElementById('ext-confirmed-detail').textContent = 'Filed via ' + (labels[ext.filing_method]||ext.filing_method||'unknown');
+  document.getElementById('ext-confirmed-date').textContent = ext.filed_at ? new Date(ext.filed_at * 1000).toLocaleDateString() : new Date().toLocaleDateString();
+  document.getElementById('ext-confirmed-balance').textContent = ext.balance_due || document.getElementById('ext-balance')?.value || '—';
+  const yr = selectedYear || yearStart().slice(0,4);
+  document.getElementById('ext-deadline').textContent = `October 15, ${parseInt(yr)+1}`;
 }
 
 // ── Deductions Tab ──────────────────────────────────────────────────────

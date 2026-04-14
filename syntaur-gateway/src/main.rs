@@ -3723,6 +3723,10 @@ async fn main() {
         .route("/api/tax/export/txf", get(tax::handle_txf_export))
         .route("/api/tax/export/csv-irs", get(tax::handle_csv_irs_export))
         .route("/api/tax/extension", get(tax::handle_extension))
+        .route("/api/tax/extension/status", get(tax::handle_extension_status))
+        .route("/api/tax/extension/create", post(tax::handle_extension_create))
+        .route("/api/tax/extension/{id}/file", axum::routing::put(tax::handle_extension_file))
+        .route("/api/tax/extension/{id}/confirm", axum::routing::put(tax::handle_extension_confirm))
         // Items 10-16: smart routing, statements, property, deduction, insurance, wizard, brackets
         .route("/api/tax/upload", post(tax::handle_smart_upload))
         .route("/api/tax/statements/transactions", get(tax::handle_statement_transactions))

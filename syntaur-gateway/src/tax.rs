@@ -2334,6 +2334,251 @@ pub async fn handle_extension(
     Ok((headers, text))
 }
 
+// ── Extension Filing Workflow (stateful) ────────────────────────────────────
+
+pub async fn handle_extension_status(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let year: i64 = params.get("year").and_then(|y| y.parse().ok()).unwrap_or_else(|| default_tax_year());
+
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        match conn.query_row(
+            "SELECT id, tax_year, total_tax_cents, total_paid_cents, balance_due_cents, payment_cents, \
+             filing_method, status, confirmation_id, filed_at, confirmed_at, created_at FROM tax_extensions \
+             WHERE user_id = ? AND tax_year = ?",
+            rusqlite::params![uid, year],
+            |r| Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?,
+                "tax_year": r.get::<_, i64>(1)?,
+                "total_tax": cents_to_display(r.get::<_, i64>(2)?),
+                "total_tax_cents": r.get::<_, i64>(2)?,
+                "total_paid": cents_to_display(r.get::<_, i64>(3)?),
+                "total_paid_cents": r.get::<_, i64>(3)?,
+                "balance_due": cents_to_display(r.get::<_, i64>(4)?),
+                "balance_due_cents": r.get::<_, i64>(4)?,
+                "payment_cents": r.get::<_, i64>(5)?,
+                "payment": cents_to_display(r.get::<_, i64>(5)?),
+                "filing_method": r.get::<_, Option<String>>(6)?,
+                "status": r.get::<_, String>(7)?,
+                "confirmation_id": r.get::<_, Option<String>>(8)?,
+                "filed_at": r.get::<_, Option<i64>>(9)?,
+                "confirmed_at": r.get::<_, Option<i64>>(10)?,
+                "created_at": r.get::<_, i64>(11)?,
+            })),
+        ) {
+            Ok(ext) => Ok(serde_json::json!({ "extension": ext })),
+            Err(_) => {
+                // No extension yet — return estimate for pre-fill
+                let est = compute_tax_estimate(&conn, uid, year, "married_jointly")?;
+                let balance = std::cmp::max(est.total_tax - est.total_payments, 0);
+                Ok(serde_json::json!({
+                    "extension": null,
+                    "estimate": {
+                        "total_tax_cents": est.total_tax,
+                        "total_tax": cents_to_display(est.total_tax),
+                        "total_paid_cents": est.total_payments,
+                        "total_paid": cents_to_display(est.total_payments),
+                        "balance_due_cents": balance,
+                        "balance_due": cents_to_display(balance),
+                        "filing_status": "married_jointly",
+                    }
+                }))
+            }
+        }
+    }).await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(result))
+}
+
+#[derive(Deserialize)]
+pub struct ExtensionCreateRequest {
+    pub token: String,
+    pub year: Option<i64>,
+    pub total_tax_cents: Option<i64>,
+    pub total_paid_cents: Option<i64>,
+    pub payment_cents: Option<i64>,
+}
+
+pub async fn handle_extension_create(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ExtensionCreateRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &req.token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    require_tax_module(&state, principal.user_id()).await?;
+
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let year = req.year.unwrap_or_else(|| default_tax_year());
+    let override_tax = req.total_tax_cents;
+    let override_paid = req.total_paid_cents;
+    let payment = req.payment_cents.unwrap_or(0);
+    let now = chrono::Utc::now().timestamp();
+
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let est = compute_tax_estimate(&conn, uid, year, "married_jointly")?;
+
+        let total_tax = override_tax.unwrap_or(est.total_tax);
+        let total_paid = override_paid.unwrap_or(est.total_payments);
+        let balance_due = std::cmp::max(total_tax - total_paid, 0);
+
+        // Generate form text
+        let user_name = conn.query_row(
+            "SELECT COALESCE(display_name, username, 'Taxpayer') FROM users WHERE id = ?",
+            rusqlite::params![uid], |r| r.get::<_, String>(0),
+        ).unwrap_or_else(|_| "Taxpayer".to_string());
+
+        let d = |c: i64| cents_to_display(c);
+        let form_text = format!(
+            "FORM 4868 — Tax Year {}\nName: {}\nEstimated Tax: {}\nTotal Payments: {}\nBalance Due: {}\nPayment with Extension: {}\n\nGenerated by Syntaur on {}",
+            year, user_name, d(total_tax), d(total_paid), d(balance_due), d(payment),
+            chrono::Utc::now().format("%Y-%m-%d %H:%M UTC")
+        );
+
+        conn.execute(
+            "INSERT INTO tax_extensions (user_id, tax_year, total_tax_cents, total_paid_cents, balance_due_cents, \
+             payment_cents, status, form_text, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?) \
+             ON CONFLICT(user_id, tax_year) DO UPDATE SET \
+             total_tax_cents=excluded.total_tax_cents, total_paid_cents=excluded.total_paid_cents, \
+             balance_due_cents=excluded.balance_due_cents, payment_cents=excluded.payment_cents, \
+             form_text=excluded.form_text, updated_at=excluded.updated_at, status='draft'",
+            rusqlite::params![uid, year, total_tax, total_paid, balance_due, payment, &form_text, now, now],
+        ).map_err(|e| e.to_string())?;
+
+        let id = conn.query_row(
+            "SELECT id FROM tax_extensions WHERE user_id = ? AND tax_year = ?",
+            rusqlite::params![uid, year], |r| r.get::<_, i64>(0),
+        ).map_err(|e| e.to_string())?;
+
+        Ok(serde_json::json!({
+            "id": id,
+            "status": "draft",
+            "total_tax": d(total_tax),
+            "total_paid": d(total_paid),
+            "balance_due": d(balance_due),
+            "payment": d(payment),
+            "balance_due_cents": balance_due,
+        }))
+    }).await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(serde_json::json!({ "success": true, "extension": result })))
+}
+
+#[derive(Deserialize)]
+pub struct ExtensionFileRequest {
+    pub token: String,
+    pub method: String, // "direct_pay" | "free_file" | "mail"
+}
+
+pub async fn handle_extension_file(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(ext_id): axum::extract::Path<i64>,
+    Json(req): Json<ExtensionFileRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &req.token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let method = req.method.clone();
+    let method_ret = method.clone();
+    let now = chrono::Utc::now().timestamp();
+
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE tax_extensions SET status = 'filed', filing_method = ?, filed_at = ?, updated_at = ? \
+             WHERE id = ? AND user_id = ?",
+            rusqlite::params![&method, now, now, ext_id, uid],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }).await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(serde_json::json!({ "success": true, "status": "filed", "method": method_ret })))
+}
+
+#[derive(Deserialize)]
+pub struct ExtensionConfirmRequest {
+    pub token: String,
+    pub confirmation_id: String,
+}
+
+pub async fn handle_extension_confirm(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(ext_id): axum::extract::Path<i64>,
+    Json(req): Json<ExtensionConfirmRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &req.token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let confirm_id = req.confirmation_id.clone();
+    let now = chrono::Utc::now().timestamp();
+
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+
+        // Get the form text and year
+        let (form_text, year): (String, i64) = conn.query_row(
+            "SELECT form_text, tax_year FROM tax_extensions WHERE id = ? AND user_id = ?",
+            rusqlite::params![ext_id, uid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).map_err(|_| "Extension not found".to_string())?;
+
+        // Save form text as a tax document
+        let receipts_dir = receipts_dir();
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let file_path = receipts_dir.join(format!("form-4868-{}.txt", uuid));
+        std::fs::write(&file_path, &form_text).map_err(|e| e.to_string())?;
+
+        conn.execute(
+            "INSERT INTO tax_documents (user_id, doc_type, tax_year, issuer, extracted_fields, image_path, status, created_at) \
+             VALUES (?, 'extension_4868', ?, 'IRS', ?, ?, 'scanned', ?)",
+            rusqlite::params![
+                uid, year,
+                serde_json::json!({ "confirmation_id": &confirm_id, "filed_at": now }).to_string(),
+                file_path.to_string_lossy().to_string(),
+                now
+            ],
+        ).map_err(|e| e.to_string())?;
+        let doc_id = conn.last_insert_rowid();
+
+        // Update extension status
+        conn.execute(
+            "UPDATE tax_extensions SET status = 'confirmed', confirmation_id = ?, confirmed_at = ?, \
+             document_id = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+            rusqlite::params![&confirm_id, now, doc_id, now, ext_id, uid],
+        ).map_err(|e| e.to_string())?;
+
+        info!("[tax] Extension confirmed for user {} year {} (confirmation: {})", uid, year, confirm_id);
+
+        Ok(serde_json::json!({
+            "status": "confirmed",
+            "confirmation_id": confirm_id,
+            "document_id": doc_id,
+            "new_deadline": format!("October 15, {}", year + 1),
+        }))
+    }).await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(serde_json::json!({ "success": true, "extension": result })))
+}
+
 // ── Item 10: Smart Document Routing ─────────────────────────────────────────
 
 /// Unified upload: accept any file, auto-classify it, route to the right handler.

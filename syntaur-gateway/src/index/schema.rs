@@ -763,24 +763,45 @@ const MIGRATIONS: &[&str] = &[
         configured_by     INTEGER
     );
     "#,
-    // v20: music preferences — persistent memory for the AI DJ.
-    // Stores likes/dislikes at multiple granularities (track, artist, genre, free-form note).
-    // The DJ reads the most-recent N entries into its LLM prompt.
+    // v21: music preferences — persistent memory for the AI DJ.
     r#"
     CREATE TABLE IF NOT EXISTS user_music_preferences (
         id              INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id         INTEGER NOT NULL DEFAULT 0,
-        category        TEXT NOT NULL,  -- "like" | "dislike" | "note" | "context"
-        kind            TEXT,            -- "track" | "artist" | "genre" | "mood" | "general"
-        value           TEXT NOT NULL,   -- e.g. "Take Five — Dave Brubeck" or "chill jazz for coding"
-        track_id        TEXT,            -- optional provider-specific ID
-        provider        TEXT,            -- "apple_music" | "spotify" | etc
+        category        TEXT NOT NULL,
+        kind            TEXT,
+        value           TEXT NOT NULL,
+        track_id        TEXT,
+        provider        TEXT,
         weight          REAL NOT NULL DEFAULT 1.0,
-        source          TEXT,            -- "dj_ui" | "voice" | "manual"
+        source          TEXT,
         created_at      INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_mpref_user ON user_music_preferences(user_id);
     CREATE INDEX IF NOT EXISTS idx_mpref_created ON user_music_preferences(created_at);
+    "#,
+    // v22: tax extension filing workflow with state tracking
+    r#"
+    CREATE TABLE IF NOT EXISTS tax_extensions (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id           INTEGER NOT NULL DEFAULT 0,
+        tax_year          INTEGER NOT NULL,
+        total_tax_cents   INTEGER NOT NULL,
+        total_paid_cents  INTEGER NOT NULL,
+        balance_due_cents INTEGER NOT NULL,
+        payment_cents     INTEGER NOT NULL DEFAULT 0,
+        filing_method     TEXT,
+        status            TEXT NOT NULL DEFAULT 'draft',
+        confirmation_id   TEXT,
+        filed_at          INTEGER,
+        confirmed_at      INTEGER,
+        document_id       INTEGER,
+        form_text         TEXT NOT NULL,
+        created_at        INTEGER NOT NULL,
+        updated_at        INTEGER NOT NULL,
+        UNIQUE(user_id, tax_year)
+    );
+    CREATE INDEX IF NOT EXISTS idx_tax_ext_user ON tax_extensions(user_id);
     "#,
 ];
 
