@@ -31,6 +31,7 @@ mod tax;
 mod financial;
 mod calendar_reminder;
 mod sync;
+mod music;
 
 /// Brand name constant — used in user-facing messages.
 pub const BRAND: &str = "Syntaur";
@@ -3777,6 +3778,13 @@ async fn main() {
         .route("/api/sync/apple_music/search", get(sync::handle_apple_music_search))
         .route("/api/sync/apple_music/bookmarklet", get(sync::handle_apple_music_bookmarklet))
         .route("/api/sync/home_assistant/media_players", get(sync::handle_ha_media_players))
+        .route("/api/music/now_playing", get(music::handle_music_now_playing))
+        .route("/api/music/control", post(music::handle_music_control))
+        .route("/api/music/speakers", get(music::handle_music_speakers))
+        .route("/api/music/group", post(music::handle_music_group))
+        .route("/api/music/eq", post(music::handle_music_eq))
+        .route("/api/music/dj", post(music::handle_music_dj))
+        .route("/api/music/pwa_state", post(music::handle_pwa_state))
         .route("/apple_music_capture", get(sync::handle_apple_music_capture_page))
         .with_state(Arc::clone(&state))
         .layer(axum::middleware::from_fn_with_state(
