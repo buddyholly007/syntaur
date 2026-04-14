@@ -3722,6 +3722,7 @@ async fn main() {
         .route("/api/tax/export", get(tax::handle_expense_export))
         .route("/api/tax/export/txf", get(tax::handle_txf_export))
         .route("/api/tax/export/csv-irs", get(tax::handle_csv_irs_export))
+        .route("/api/tax/extension", get(tax::handle_extension))
         // Items 10-16: smart routing, statements, property, deduction, insurance, wizard, brackets
         .route("/api/tax/upload", post(tax::handle_smart_upload))
         .route("/api/tax/statements/transactions", get(tax::handle_statement_transactions))

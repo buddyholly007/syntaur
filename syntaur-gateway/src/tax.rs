@@ -2241,6 +2241,99 @@ pub async fn handle_csv_irs_export(
     Ok((headers, csv))
 }
 
+// ── Form 4868 Extension Generator ───────────────────────────────────────────
+
+pub async fn handle_extension(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<(axum::http::HeaderMap, String), (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let year: i64 = params.get("year").and_then(|y| y.parse().ok()).unwrap_or_else(|| default_tax_year());
+    let ext_payment: i64 = params.get("payment").and_then(|p| p.parse().ok()).unwrap_or(0);
+
+    let text = tokio::task::spawn_blocking(move || -> Result<String, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let est = compute_tax_estimate(&conn, uid, year, "married_jointly")?;
+        let d = |c: i64| cents_to_display(c);
+
+        // Get user name from principal or config
+        let user_name = conn.query_row(
+            "SELECT COALESCE(display_name, username, 'Taxpayer') FROM users WHERE id = ?",
+            rusqlite::params![uid], |r| r.get::<_, String>(0),
+        ).unwrap_or_else(|_| "Taxpayer".to_string());
+
+        let balance_due = std::cmp::max(est.total_tax - est.total_payments, 0);
+
+        let mut out = String::new();
+        out += "═══════════════════════════════════════════════════════════\n";
+        out += "     IRS FORM 4868 — Application for Automatic Extension\n";
+        out += "         of Time to File U.S. Individual Income Tax Return\n";
+        out += &format!("                      Tax Year {}\n", year);
+        out += "═══════════════════════════════════════════════════════════\n\n";
+
+        out += &format!("Name: {}\n", user_name);
+        out += &format!("Tax Year: {}\n\n", year);
+
+        out += "─── Part I: Identification ─────────────────────────────\n";
+        out += "  Line 1: Your name(s) and address: [fill in]\n";
+        out += "  Line 2: SSN: [fill in]\n";
+        out += "  Line 3: Filing status: [check appropriate box]\n\n";
+
+        out += "─── Part II: Individual Income Tax ─────────────────────\n";
+        out += &format!("  Line 4:  Estimate of total tax liability:    {}\n", d(est.total_tax));
+        out += &format!("  Line 5:  Total payments already made:        {}\n", d(est.total_payments));
+        out += &format!("  Line 6:  Balance due (line 4 - line 5):      {}\n", d(balance_due));
+        out += &format!("  Line 7:  Amount you're paying:               {}\n\n", d(ext_payment));
+
+        out += "─── Tax Estimate Breakdown ─────────────────────────────\n";
+        out += &format!("  Gross Income:                  {}\n", d(est.gross_income));
+        out += &format!("  Adjusted Gross Income:         {}\n", d(est.agi));
+        out += &format!("  Federal Income Tax:            {}\n", d(est.ordinary_tax));
+        if est.se_tax > 0 { out += &format!("  Self-Employment Tax:           {}\n", d(est.se_tax)); }
+        if est.ltcg_tax > 0 { out += &format!("  Capital Gains Tax:             {}\n", d(est.ltcg_tax)); }
+        out += &format!("  Total Tax:                     {}\n", d(est.total_tax));
+        out += &format!("  W-2 Withholding:              -{}\n", d(est.w2_withheld));
+        if est.fed_paid > 0 { out += &format!("  Estimated Payments:           -{}\n", d(est.fed_paid)); }
+        if est.child_credit > 0 { out += &format!("  Child Tax Credit:             -{}\n", d(est.child_credit)); }
+        out += &format!("  Total Payments:               -{}\n", d(est.total_payments));
+        out += &format!("  ─────────────────────────────────\n");
+        out += &format!("  {}\n\n", if balance_due > 0 { format!("Balance Due: {}", d(balance_due)) } else { format!("Refund Expected: {}", d(-est.owed)) });
+
+        out += "═══════════════════════════════════════════════════════════\n";
+        out += "HOW TO FILE THIS EXTENSION:\n\n";
+        out += "Option 1 (Fastest): IRS Free File\n";
+        out += "  → Go to irs.gov/freefile\n";
+        out += "  → Choose any partner → File Form 4868 electronically\n";
+        out += "  → Free for all taxpayers, no income limit\n\n";
+        out += "Option 2 (Auto-extension): IRS Direct Pay\n";
+        out += "  → Go to irs.gov/payments → Select 'Extension' as reason\n";
+        out += "  → Making a payment automatically files your extension\n\n";
+        out += "Option 3: Print & mail this form with your payment\n";
+        out += "  → Mail to your IRS service center by April 15\n";
+        out += "  → Download official Form 4868 at irs.gov/pub/irs-pdf/f4868.pdf\n\n";
+        out += "IMPORTANT DATES:\n";
+        out += &format!("  Filing deadline (with extension): October 15, {}\n", year + 1);
+        out += &format!("  Payment deadline (NOT extended):  April 15, {}\n", year + 1);
+        out += "  Interest/penalties accrue on unpaid tax after April 15.\n";
+        out += "═══════════════════════════════════════════════════════════\n";
+        out += &format!("\nGenerated by Syntaur Tax Module on {}\n", chrono::Utc::now().format("%Y-%m-%d"));
+
+        Ok(out)
+    }).await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("content-type", "text/plain; charset=utf-8".parse().unwrap());
+    headers.insert("content-disposition", format!("attachment; filename=\"form-4868-{}.txt\"", year).parse().unwrap());
+    Ok((headers, text))
+}
+
 // ── Item 10: Smart Document Routing ─────────────────────────────────────────
 
 /// Unified upload: accept any file, auto-classify it, route to the right handler.

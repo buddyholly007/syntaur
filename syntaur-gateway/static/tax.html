@@ -159,6 +159,51 @@
       </details>
     </div>
 
+    <!-- File Extension (Form 4868) -->
+    <div class="card mb-4" id="extension-card">
+      <div class="flex items-center justify-between mb-3">
+        <div class="flex items-center gap-2">
+          <span class="text-yellow-400">&#9200;</span>
+          <h3 class="font-medium text-sm">File an Extension (Form 4868)</h3>
+        </div>
+        <span class="badge badge-yellow text-[10px]">Free</span>
+      </div>
+      <p class="text-xs text-gray-400 mb-3">Get an automatic 6-month extension to file your return. This extends your <strong class="text-gray-300">filing deadline</strong> (April 15 &rarr; October 15) but does <strong class="text-red-400">not</strong> extend the payment deadline — taxes owed are still due April 15.</p>
+
+      <div id="ext-form" class="space-y-3">
+        <div class="grid grid-cols-2 gap-3 text-sm">
+          <div>
+            <label class="text-xs text-gray-500">Estimated total tax</label>
+            <input class="input text-sm" id="ext-total-tax" placeholder="$0.00" readonly>
+          </div>
+          <div>
+            <label class="text-xs text-gray-500">Total payments made</label>
+            <input class="input text-sm" id="ext-payments" placeholder="$0.00" readonly>
+          </div>
+          <div>
+            <label class="text-xs text-gray-500">Balance due</label>
+            <input class="input text-sm font-medium" id="ext-balance" placeholder="$0.00" readonly>
+          </div>
+          <div>
+            <label class="text-xs text-gray-500">Amount you're paying with extension</label>
+            <input class="input text-sm" id="ext-payment" placeholder="$0.00" value="0">
+          </div>
+        </div>
+        <div class="flex items-center gap-3">
+          <button onclick="generateExtension()" class="btn-primary text-xs">Generate Form 4868</button>
+          <span id="ext-result" class="text-xs text-gray-500"></span>
+        </div>
+        <details class="text-xs text-gray-500">
+          <summary class="cursor-pointer hover:text-gray-300">How to file your extension for free</summary>
+          <div class="mt-2 space-y-1.5 pl-2 border-l border-gray-700">
+            <p><strong class="text-gray-300">IRS Free File</strong> (recommended): Go to <a href="https://www.irs.gov/filing/free-file-do-your-federal-taxes-for-free" target="_blank" class="text-oc-500">irs.gov/freefile</a> &rarr; choose any partner &rarr; file Form 4868 electronically at no cost.</p>
+            <p><strong class="text-gray-300">IRS Direct Pay</strong>: Make a payment at <a href="https://www.irs.gov/payments/direct-pay" target="_blank" class="text-oc-500">irs.gov/payments</a> and select "Extension" as the reason. This counts as filing your extension automatically — no separate form needed.</p>
+            <p><strong class="text-gray-300">Print &amp; mail</strong>: Download the generated form below, print it, and mail to your IRS service center by April 15.</p>
+          </div>
+        </details>
+      </div>
+    </div>
+
     <!-- Category breakdown -->
     <div class="card">
       <div class="flex items-center justify-between mb-4">
@@ -834,6 +879,8 @@ async function loadOverview() {
     document.getElementById('export-csv-irs').href = `/api/tax/export/csv-irs?token=${token}&year=${yr}`;
     document.getElementById('export-csv-raw').href = `/api/tax/export?token=${token}&start=${yearStart()}&end=${yearEnd()}`;
     document.getElementById('export-year-label').textContent = `Tax Year ${yr}`;
+    // Pre-fill extension form from tax estimate
+    loadExtensionData();
 
     const cats = data.categories || [];
     const list = document.getElementById('category-list');
@@ -1883,6 +1930,70 @@ document.addEventListener('visibilitychange', async () => {
     await loadTaxMessages(taxConvId);
   }
 });
+
+// ── Extension (Form 4868) ───────────────────────────────────────────────
+
+async function loadExtensionData() {
+  try {
+    const yr = selectedYear || yearStart().slice(0,4);
+    const resp = await authFetch(`/api/tax/export/csv-irs?token=${token}&year=${yr}`);
+    const text = await resp.text();
+    // Parse CSV for total tax and payments
+    const lines = text.split('\n');
+    let totalTax = 0, totalPayments = 0;
+    for (const line of lines) {
+      if (line.startsWith('Tax,,Total Tax,')) totalTax = parseDollar(line.split(',')[3]);
+      if (line.startsWith('Payment,W-2 Box 2,')) totalPayments += parseDollar(line.split(',')[3]);
+      if (line.startsWith('Payment,1040-ES,')) totalPayments += parseDollar(line.split(',')[3]);
+      if (line.startsWith('Credit,')) totalPayments += parseDollar(line.split(',')[3]);
+    }
+    const balance = Math.max(totalTax - totalPayments, 0);
+    document.getElementById('ext-total-tax').value = formatDollar(totalTax);
+    document.getElementById('ext-payments').value = formatDollar(totalPayments);
+    document.getElementById('ext-balance').value = formatDollar(balance);
+    if (balance > 0) {
+      document.getElementById('ext-balance').className = 'input text-sm font-medium text-red-400';
+    } else {
+      document.getElementById('ext-balance').className = 'input text-sm font-medium text-green-400';
+    }
+  } catch(e) {}
+}
+
+function parseDollar(s) {
+  if (!s) return 0;
+  return Math.round(parseFloat(s.replace(/[$,]/g, '')) * 100) / 100;
+}
+
+function formatDollar(n) {
+  return '$' + n.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+async function generateExtension() {
+  const result = document.getElementById('ext-result');
+  result.className = 'text-xs text-gray-400';
+  result.textContent = 'Generating...';
+  try {
+    const yr = selectedYear || yearStart().slice(0,4);
+    const payment = parseFloat(document.getElementById('ext-payment').value.replace(/[$,]/g, '')) || 0;
+    const resp = await authFetch(`/api/tax/extension?token=${token}&year=${yr}&payment=${Math.round(payment * 100)}`);
+    if (resp.ok) {
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `form-4868-${yr}.txt`; a.click();
+      URL.revokeObjectURL(url);
+      result.className = 'text-xs text-green-400';
+      result.textContent = 'Downloaded! File by April 15 via IRS Free File or mail.';
+    } else {
+      const data = await resp.json();
+      result.className = 'text-xs text-red-400';
+      result.textContent = data.error || 'Failed to generate extension.';
+    }
+  } catch(e) {
+    result.className = 'text-xs text-red-400';
+    result.textContent = 'Error: ' + e.message;
+  }
+}
 
 // ── Deductions Tab ──────────────────────────────────────────────────────
 let dedQAnswers = {};
