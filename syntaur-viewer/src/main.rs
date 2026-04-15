@@ -236,9 +236,26 @@ fn run_viewer(url: &str) -> Result<(), String> {
         .build(&event_loop)
         .map_err(|e| format!("window: {}", e))?;
 
+    // CDP / remote debugging: opt-in via SYNTAUR_VIEWER_DEBUG_PORT env var.
+    // WebView2 respects these flags when passed through additional_browser_args.
+    // `--remote-allow-origins=*` is required because CDP uses a WebSocket and
+    // recent Chromium versions reject cross-origin WS handshakes by default.
+    let mut browser_args =
+        String::from("--disable-gpu --disable-software-rasterizer");
+    if let Ok(port) = std::env::var("SYNTAUR_VIEWER_DEBUG_PORT") {
+        browser_args.push_str(&format!(
+            " --remote-debugging-port={} --remote-allow-origins=*",
+            port
+        ));
+        eprintln!(
+            "[syntaur-viewer] CDP enabled — 127.0.0.1:{}/json",
+            port
+        );
+    }
+
     let _webview = WebViewBuilder::new()
         .with_url(url)
-        .with_additional_browser_args("--disable-gpu --disable-software-rasterizer")
+        .with_additional_browser_args(&browser_args)
         .with_navigation_handler(move |uri| {
             if is_external_url(&uri, &gateway_origin) {
                 open_in_system_browser(&uri);

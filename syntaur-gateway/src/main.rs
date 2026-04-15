@@ -4076,7 +4076,7 @@ async fn main() {
         .route("/music", get(pages::music::render))
         .route("/voice-setup", get(pages::voice_setup::render))
         .route("/settings", get(pages::settings::render))
-        .route("/tax", get(pages::tax::render))
+        .route("/tax", get(setup::handle_tax_page))
         .route("/chat", get(pages::chat::render))
         .route("/history", get(pages::history::render))
         .route("/knowledge", get(pages::knowledge::render))
