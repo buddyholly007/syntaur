@@ -190,6 +190,7 @@ impl LoadConnector for GithubConnector {
                             "url": repo.html_url,
                         }),
                         agent_id: "shared".to_string(),
+                    user_id: 0,
                     });
                 }
             }
@@ -226,6 +227,7 @@ impl LoadConnector for GithubConnector {
                         "state": issue.state,
                     }),
                     agent_id: "shared".to_string(),
+                    user_id: 0,
                 });
             }
         }

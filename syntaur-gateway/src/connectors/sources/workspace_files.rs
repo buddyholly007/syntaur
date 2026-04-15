@@ -162,6 +162,7 @@ impl WorkspaceFilesConnector {
                     "extension": ext,
                 }),
                 agent_id: agent_id.to_string(),
+                user_id: 0,
             });
         }
     }

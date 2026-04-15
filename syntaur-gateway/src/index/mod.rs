@@ -46,6 +46,7 @@ pub struct ExternalDoc {
     pub updated_at: DateTime<Utc>,
     pub metadata: Value,       // arbitrary JSON metadata
     pub agent_id: String,      // owning agent ("shared" = visible to all)
+    pub user_id: i64,          // owning user (0 = system/shared)
 }
 
 /// Single chunk of an indexed document.
@@ -185,7 +186,7 @@ impl Indexer {
                 tx.execute("DELETE FROM chunks WHERE doc_id = ?", params![id])
                     .map_err(|e| format!("delete chunks: {}", e))?;
                 tx.execute(
-                    "UPDATE documents SET title = ?, body = ?, updated_at = ?, indexed_at = ?, content_hash = ?, metadata = ?, agent_id = ? WHERE id = ?",
+                    "UPDATE documents SET title = ?, body = ?, updated_at = ?, indexed_at = ?, content_hash = ?, metadata = ?, agent_id = ?, user_id = ? WHERE id = ?",
                     params![
                         &doc.title,
                         &doc.body,
@@ -194,6 +195,7 @@ impl Indexer {
                         &hash,
                         &metadata_str,
                         &doc.agent_id,
+                        doc.user_id,
                         id
                     ],
                 )
@@ -201,7 +203,7 @@ impl Indexer {
                 id
             } else {
                 tx.execute(
-                    "INSERT INTO documents (source, external_id, title, body, updated_at, indexed_at, content_hash, metadata, agent_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO documents (source, external_id, title, body, updated_at, indexed_at, content_hash, metadata, agent_id, user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
                         &doc.source,
                         &doc.external_id,
@@ -212,6 +214,7 @@ impl Indexer {
                         &hash,
                         &metadata_str,
                         &doc.agent_id,
+                        doc.user_id,
                     ],
                 )
                 .map_err(|e| format!("insert doc: {}", e))?;

@@ -132,6 +132,7 @@ impl LoadConnector for ExecutionLogConnector {
                             "side": side,
                         }),
                         agent_id: "shared".to_string(),
+                    user_id: 0,
                     });
                 }
                 debug!(

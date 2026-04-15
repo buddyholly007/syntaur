@@ -114,6 +114,7 @@ impl PaperlessConnector {
                         "archive_serial_number": d.archive_serial_number,
                     }),
                     agent_id: "shared".to_string(),
+                    user_id: 0,
                 });
             }
             match parsed.next {

@@ -585,13 +585,21 @@ async fn handle_todo_list(
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
     let principal = resolve_principal(&state, token).await?;
-    let uid = principal.user_id();
+    let sharing_mode = state.sharing_mode.read().await.clone();
+    let scope = principal.scope_with_sharing(&sharing_mode);
     let db = state.db_path.clone();
     let todos = tokio::task::spawn_blocking(move || -> Result<Vec<serde_json::Value>, String> {
         let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
-        let mut stmt = conn.prepare("SELECT id, text, done, due_date, created_at, completed_at FROM todos WHERE user_id = ? ORDER BY done ASC, created_at DESC")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt.query_map(rusqlite::params![uid], |r| Ok(serde_json::json!({
+        let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(uid) = scope {
+            ("SELECT id, text, done, due_date, created_at, completed_at FROM todos WHERE user_id = ? ORDER BY done ASC, created_at DESC".to_string(),
+             vec![Box::new(uid)])
+        } else {
+            ("SELECT id, text, done, due_date, created_at, completed_at FROM todos ORDER BY done ASC, created_at DESC".to_string(),
+             vec![])
+        };
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt.query_map(params_refs.as_slice(), |r| Ok(serde_json::json!({
             "id": r.get::<_, i64>(0)?, "text": r.get::<_, String>(1)?,
             "done": r.get::<_, i64>(2)? != 0, "due_date": r.get::<_, Option<String>>(3)?,
             "created_at": r.get::<_, i64>(4)?, "completed_at": r.get::<_, Option<i64>>(5)?,
@@ -628,15 +636,21 @@ async fn handle_todo_update(
     Json(req): Json<TodoUpdateRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let principal = resolve_principal(&state, &req.token).await?;
-    let uid = principal.user_id();
+    let sharing_mode = state.sharing_mode.read().await.clone();
+    let scope = principal.scope_with_sharing(&sharing_mode);
     let db = state.db_path.clone();
     let done = req.done.unwrap_or(false);
     let now = chrono::Utc::now().timestamp();
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
         let completed = if done { Some(now) } else { None };
-        conn.execute("UPDATE todos SET done = ?, completed_at = ? WHERE id = ? AND user_id = ?",
-            rusqlite::params![done as i64, completed, id, uid]).map_err(|e| e.to_string())?;
+        if let Some(uid) = scope {
+            conn.execute("UPDATE todos SET done = ?, completed_at = ? WHERE id = ? AND user_id = ?",
+                rusqlite::params![done as i64, completed, id, uid]).map_err(|e| e.to_string())?;
+        } else {
+            conn.execute("UPDATE todos SET done = ?, completed_at = ? WHERE id = ?",
+                rusqlite::params![done as i64, completed, id]).map_err(|e| e.to_string())?;
+        }
         Ok(())
     }).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
     .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -649,12 +663,18 @@ async fn handle_todo_delete(
     Json(req): Json<TodoDeleteRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let principal = resolve_principal(&state, &req.token).await?;
-    let uid = principal.user_id();
+    let sharing_mode = state.sharing_mode.read().await.clone();
+    let scope = principal.scope_with_sharing(&sharing_mode);
     let db = state.db_path.clone();
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM todos WHERE id = ? AND user_id = ?",
-            rusqlite::params![id, uid]).map_err(|e| e.to_string())?;
+        if let Some(uid) = scope {
+            conn.execute("DELETE FROM todos WHERE id = ? AND user_id = ?",
+                rusqlite::params![id, uid]).map_err(|e| e.to_string())?;
+        } else {
+            conn.execute("DELETE FROM todos WHERE id = ?",
+                rusqlite::params![id]).map_err(|e| e.to_string())?;
+        }
         Ok(())
     }).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
     .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -782,16 +802,28 @@ async fn handle_calendar_list(
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
     let principal = resolve_principal(&state, token).await?;
-    let uid = principal.user_id();
+    let sharing_mode = state.sharing_mode.read().await.clone();
+    let scope = principal.scope_with_sharing(&sharing_mode);
     let db = state.db_path.clone();
     let start = params.get("start").cloned();
     let end = params.get("end").cloned();
     let events = tokio::task::spawn_blocking(move || -> Result<Vec<serde_json::Value>, String> {
         let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
         // Always fetch all user events (recurring ones may have start_time before range_start)
-        let sql = "SELECT id, title, description, start_time, end_time, all_day, source, created_at,                    recurrence_rule, recurrence_end_date, reminder_minutes, updated_at                    FROM calendar_events WHERE user_id = ? ORDER BY start_time";
-        let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
-        let rows = stmt.query_map(rusqlite::params![uid], |r| Ok(serde_json::json!({
+        let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(uid) = scope {
+            ("SELECT id, title, description, start_time, end_time, all_day, source, created_at, \
+              recurrence_rule, recurrence_end_date, reminder_minutes, updated_at \
+              FROM calendar_events WHERE user_id = ? ORDER BY start_time".to_string(),
+             vec![Box::new(uid)])
+        } else {
+            ("SELECT id, title, description, start_time, end_time, all_day, source, created_at, \
+              recurrence_rule, recurrence_end_date, reminder_minutes, updated_at \
+              FROM calendar_events ORDER BY start_time".to_string(),
+             vec![])
+        };
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt.query_map(params_refs.as_slice(), |r| Ok(serde_json::json!({
             "id": r.get::<_, i64>(0)?, "title": r.get::<_, String>(1)?,
             "description": r.get::<_, Option<String>>(2)?, "start_time": r.get::<_, String>(3)?,
             "end_time": r.get::<_, Option<String>>(4)?, "all_day": r.get::<_, i64>(5)? != 0,
@@ -857,18 +889,26 @@ async fn handle_calendar_update(
     Json(req): Json<CalendarEventUpdateRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let principal = resolve_principal(&state, &req.token).await?;
-    let uid = principal.user_id();
+    let sharing_mode = state.sharing_mode.read().await.clone();
+    let scope = principal.scope_with_sharing(&sharing_mode);
     let db = state.db_path.clone();
     let now = chrono::Utc::now().timestamp();
     let updated = tokio::task::spawn_blocking(move || -> Result<bool, String> {
         let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
         // Load current row, apply partial updates
-        let row: Option<(String, Option<String>, String, Option<String>, i64, Option<String>, Option<String>, Option<i64>)> =
+        let row: Option<(String, Option<String>, String, Option<String>, i64, Option<String>, Option<String>, Option<i64>)> = if let Some(uid) = scope {
             conn.query_row(
                 "SELECT title, description, start_time, end_time, all_day, recurrence_rule, recurrence_end_date, reminder_minutes FROM calendar_events WHERE id = ? AND user_id = ?",
                 rusqlite::params![event_id, uid],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?))
-            ).ok();
+            ).ok()
+        } else {
+            conn.query_row(
+                "SELECT title, description, start_time, end_time, all_day, recurrence_rule, recurrence_end_date, reminder_minutes FROM calendar_events WHERE id = ?",
+                rusqlite::params![event_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?))
+            ).ok()
+        };
         let Some((cur_title, cur_desc, cur_start, cur_end, cur_all_day, cur_rrule, cur_rend, cur_rmins)) = row else {
             return Ok(false);
         };
@@ -880,10 +920,17 @@ async fn handle_calendar_update(
         let new_rrule = req.recurrence_rule.map(|s| if s == "none" || s.is_empty() { None } else { Some(s) }).unwrap_or(cur_rrule);
         let new_rend = req.recurrence_end_date.map(|s| if s.is_empty() { None } else { Some(s) }).unwrap_or(cur_rend);
         let new_rmins = req.reminder_minutes.or(cur_rmins);
-        let count = conn.execute(
-            "UPDATE calendar_events SET title=?, description=?, start_time=?, end_time=?, all_day=?, recurrence_rule=?, recurrence_end_date=?, reminder_minutes=?, updated_at=? WHERE id=? AND user_id=?",
-            rusqlite::params![new_title, new_desc, new_start, new_end, new_all_day, new_rrule, new_rend, new_rmins, now, event_id, uid],
-        ).map_err(|e| e.to_string())?;
+        let count = if let Some(uid) = scope {
+            conn.execute(
+                "UPDATE calendar_events SET title=?, description=?, start_time=?, end_time=?, all_day=?, recurrence_rule=?, recurrence_end_date=?, reminder_minutes=?, updated_at=? WHERE id=? AND user_id=?",
+                rusqlite::params![new_title, new_desc, new_start, new_end, new_all_day, new_rrule, new_rend, new_rmins, now, event_id, uid],
+            ).map_err(|e| e.to_string())?
+        } else {
+            conn.execute(
+                "UPDATE calendar_events SET title=?, description=?, start_time=?, end_time=?, all_day=?, recurrence_rule=?, recurrence_end_date=?, reminder_minutes=?, updated_at=? WHERE id=?",
+                rusqlite::params![new_title, new_desc, new_start, new_end, new_all_day, new_rrule, new_rend, new_rmins, now, event_id],
+            ).map_err(|e| e.to_string())?
+        };
         Ok(count > 0)
     }).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
     .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -901,14 +948,22 @@ async fn handle_calendar_delete(
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
     let principal = resolve_principal(&state, token).await?;
-    let uid = principal.user_id();
+    let sharing_mode = state.sharing_mode.read().await.clone();
+    let scope = principal.scope_with_sharing(&sharing_mode);
     let db = state.db_path.clone();
     let deleted = tokio::task::spawn_blocking(move || -> Result<bool, String> {
         let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
-        let count = conn.execute(
-            "DELETE FROM calendar_events WHERE id = ? AND user_id = ?",
-            rusqlite::params![event_id, uid],
-        ).map_err(|e| e.to_string())?;
+        let count = if let Some(uid) = scope {
+            conn.execute(
+                "DELETE FROM calendar_events WHERE id = ? AND user_id = ?",
+                rusqlite::params![event_id, uid],
+            ).map_err(|e| e.to_string())?
+        } else {
+            conn.execute(
+                "DELETE FROM calendar_events WHERE id = ?",
+                rusqlite::params![event_id],
+            ).map_err(|e| e.to_string())?
+        };
         // Clean up reminder tracking
         let _ = conn.execute("DELETE FROM calendar_reminders_sent WHERE event_id = ?", rusqlite::params![event_id]);
         Ok(count > 0)
@@ -2126,7 +2181,7 @@ async fn handle_knowledge_upload(
         Some(t) if !t.is_empty() => t,
         _ => return Err(axum::http::StatusCode::UNAUTHORIZED),
     };
-    let _principal = resolve_principal(&state, &token).await?;
+    let principal = resolve_principal(&state, &token).await?;
 
     let (orig_name, data) = match file_bytes {
         Some(pair) => pair,
@@ -2199,6 +2254,7 @@ async fn handle_knowledge_upload(
         }
     };
     doc.agent_id = agent_id;
+    doc.user_id = principal.user_id();
     let body_len = doc.body.len();
     let extracted_text = if return_text { Some(doc.body.clone()) } else { None };
     // Rough chunk count: matches Indexer::chunk_text(800, 150).
@@ -2451,7 +2507,7 @@ async fn handle_register(
         }
     }
     // Mint a session token
-    let token = match state.users.mint_token(user.id, "registration").await {
+    let token = match state.users.mint_token_with_expiry(user.id, "registration", Some(48)).await {
         Ok(t) => t,
         Err(e) => return Ok(Json(serde_json::json!({"ok": false, "error": e}))),
     };
@@ -2524,11 +2580,15 @@ async fn handle_me(
     let user = state.users.get_user(user_id).await.ok().flatten();
     let agents = state.users.list_user_agents(user_id).await.unwrap_or_default();
     let sharing_mode = state.sharing_mode.read().await.clone();
+    let data_dir = resolve_data_dir().to_string_lossy().to_string();
+    let onboarding_complete = state.users.is_onboarding_complete(user_id).await;
     Ok(Json(serde_json::json!({
         "user": user,
         "role": principal.role(),
         "agents": agents,
         "sharing_mode": sharing_mode,
+        "data_dir": data_dir,
+        "onboarding_complete": onboarding_complete,
     })))
 }
 
@@ -2545,8 +2605,8 @@ async fn handle_change_password(
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let principal = resolve_principal(&state, &req.token).await?;
     let user_id = principal.user_id();
-    if req.new_password.len() < 8 {
-        return Ok(Json(serde_json::json!({"ok": false, "error": "Password must be at least 8 characters"})));
+    if req.new_password.len() < 4 {
+        return Ok(Json(serde_json::json!({"ok": false, "error": "Password must be at least 4 characters"})));
     }
     // If user already has a password, verify current
     if state.users.has_password(user_id).await.unwrap_or(false) {
@@ -4772,6 +4832,7 @@ async fn main() {
         .route("/landing", get(pages::landing::render))
         .route("/register", get(pages::register::render))
         .route("/onboarding", get(pages::onboarding::render))
+        .route("/profile", get(pages::profile::render))
         .route("/api/auth/login", post(setup::handle_login))
         .route("/api/setup/status", get(setup::handle_setup_status))
         .route("/api/setup/scan", get(setup::handle_hardware_scan))

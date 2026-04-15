@@ -79,6 +79,10 @@ const BODY_HTML: &str = r##"<!-- Login overlay -->
       <button onclick="showPanel('main')" class="text-gray-400 hover:text-white transition-colors" id="nav-main">Home</button>
       <button onclick="showPanel('more')" class="text-gray-400 hover:text-white transition-colors" id="nav-more">Modules &amp; System</button>
       <a href="/settings" class="text-gray-400 hover:text-gray-300">Settings</a>
+      <a href="/profile" class="text-gray-400 hover:text-gray-300" id="user-label" title="Profile"></a>
+      <button onclick="doLogout()" class="text-gray-500 hover:text-red-400 transition-colors" title="Sign out">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+      </button>
     </div>
   </div>
   <!-- Mini Player (hidden when nothing playing) -->
@@ -953,6 +957,11 @@ function getDashAgentId(name) {
   return dashAgentIdMap[name] || name.toLowerCase().replace(/\s+/g, '-');
 }
 
+function doLogout() {
+  sessionStorage.removeItem('syntaur_token');
+  window.location.href = '/';
+}
+
 // ── Tax Summary Widget ──
 async function loadTaxSummary() {
   try {
@@ -1339,13 +1348,26 @@ async function loadDashboard() {
     if (ag2) ag2.textContent = agentNames.join(', ');
     document.getElementById('sys-version').textContent = `v${health.version || '?'}`;
 
-    // Build agent switcher
+    // Build agent switcher — system agents + user's own agents
     const rawAgents = health.agents || [];
     dashAgentIdMap = {};
     dashAgents = rawAgents.map(a => {
       if (typeof a === 'object') { dashAgentIdMap[a.name] = a.id; return a.name; }
       return a;
     });
+    // Merge user agents
+    try {
+      const me = await (await authFetch('/api/me?token=' + encodeURIComponent(authToken))).json();
+      if (me.user && me.user.name) {
+        document.getElementById('user-label').textContent = me.user.name;
+      }
+      for (const ua of (me.agents || [])) {
+        if (!dashAgents.includes(ua.display_name)) {
+          dashAgentIdMap[ua.display_name] = ua.agent_id;
+          dashAgents.push(ua.display_name);
+        }
+      }
+    } catch {}
     if (dashAgents.length > 0 && !dashAgents.includes(dashCurrentAgent)) {
       dashCurrentAgent = dashAgents[0];
     }

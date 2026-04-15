@@ -649,21 +649,34 @@ bash install.sh   # systemd-user service / launchd agent</code></pre>
     </div>
   </div>
 
-  <!-- Invite dialog -->
+  <!-- Invite dialog (2 steps) -->
   <div id="invite-dialog" class="fixed inset-0 z-50 bg-black/60 flex items-center justify-center hidden">
-    <div class="bg-gray-800 rounded-xl border border-gray-700 p-6 w-full max-w-sm mx-4">
-      <h3 class="font-medium mb-4">Invite a User</h3>
-      <div class="space-y-3">
-        <input type="text" id="invite-name" placeholder="Name (optional hint)" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-2 text-sm text-white placeholder-gray-500 focus:border-oc-500 outline-none">
-        <select id="invite-role" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-2 text-sm text-gray-300">
-          <option value="user">User</option>
-          <option value="admin">Admin</option>
-        </select>
+    <div class="bg-gray-800 rounded-xl border border-gray-700 p-6 w-full max-w-md mx-4 max-h-[80vh] overflow-y-auto">
+      <!-- Step 1: Name + Role -->
+      <div id="invite-step1">
+        <h3 class="font-medium mb-4">Invite a User</h3>
+        <div class="space-y-3">
+          <input type="text" id="invite-name" placeholder="Name (optional hint)" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-2 text-sm text-white placeholder-gray-500 focus:border-oc-500 outline-none">
+          <select id="invite-role" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-2 text-sm text-gray-300">
+            <option value="user">User</option>
+            <option value="admin">Admin</option>
+          </select>
+          <div class="flex gap-2">
+            <button onclick="showInviteStep2()" class="flex-1 bg-oc-600 hover:bg-oc-700 text-white text-sm py-2 rounded-lg">Next: Configure Sharing</button>
+            <button onclick="document.getElementById('invite-dialog').classList.add('hidden')" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white text-sm py-2 rounded-lg">Cancel</button>
+          </div>
+        </div>
+      </div>
+      <!-- Step 2: Sharing categories -->
+      <div id="invite-step2" class="hidden">
+        <h3 class="font-medium mb-2">Data Sharing</h3>
+        <p class="text-xs text-gray-500 mb-3">Choose what to share with this user. They'll always have their own private data too.</p>
+        <div id="invite-sharing-cats" class="space-y-2 mb-4"></div>
         <div class="flex gap-2">
           <button onclick="sendInvite()" class="flex-1 bg-oc-600 hover:bg-oc-700 text-white text-sm py-2 rounded-lg" id="invite-btn">Create Invite</button>
-          <button onclick="document.getElementById('invite-dialog').classList.add('hidden')" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white text-sm py-2 rounded-lg">Cancel</button>
+          <button onclick="showInviteStep1()" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white text-sm py-2 rounded-lg">Back</button>
         </div>
-        <div id="invite-result" class="hidden text-sm"></div>
+        <div id="invite-result" class="hidden text-sm mt-3"></div>
       </div>
     </div>
   </div>
@@ -965,14 +978,50 @@ async function deleteUser(id, name) {
   loadUsers();
 }
 
+let inviteSharingOptions = [];
+
 function showInviteDialog() {
   document.getElementById('invite-result').classList.add('hidden');
+  document.getElementById('invite-step1').classList.remove('hidden');
+  document.getElementById('invite-step2').classList.add('hidden');
   document.getElementById('invite-dialog').classList.remove('hidden');
+}
+
+function showInviteStep1() {
+  document.getElementById('invite-step1').classList.remove('hidden');
+  document.getElementById('invite-step2').classList.add('hidden');
+}
+
+async function showInviteStep2() {
+  document.getElementById('invite-step1').classList.add('hidden');
+  document.getElementById('invite-step2').classList.remove('hidden');
+  // Load sharing options
+  try {
+    const data = await authFetch('/api/admin/sharing/options?token=' + encodeURIComponent(token)).then(r => r.json());
+    inviteSharingOptions = data.resource_types || [];
+    const container = document.getElementById('invite-sharing-cats');
+    container.innerHTML = inviteSharingOptions.map(rt => {
+      const isOauth = rt.type === 'oauth';
+      const warn = isOauth ? '<span class="text-amber-400 text-xs ml-1">(uses your connected account)</span>' : '';
+      return `<label class="flex items-center gap-3 p-3 rounded-lg bg-gray-900 cursor-pointer hover:bg-gray-800">
+        <input type="checkbox" class="sharing-check accent-sky-500" data-type="${esc(rt.type)}" data-id="*">
+        <div>
+          <span class="text-sm text-gray-300">${esc(rt.label)}</span>${warn}
+        </div>
+      </label>`;
+    }).join('');
+  } catch {}
 }
 
 async function sendInvite() {
   const btn = document.getElementById('invite-btn');
   btn.textContent = 'Creating...';
+  // Build sharing preset from checkboxes
+  const checks = document.querySelectorAll('.sharing-check:checked');
+  const preset = Array.from(checks).map(c => ({
+    resource_type: c.dataset.type,
+    resource_id: c.dataset.id || '*'
+  }));
   try {
     const data = await authFetch('/api/admin/invites', {
       method: 'POST',
@@ -981,6 +1030,7 @@ async function sendInvite() {
         token,
         name_hint: document.getElementById('invite-name').value.trim() || null,
         role: document.getElementById('invite-role').value,
+        sharing_preset: preset.length > 0 ? JSON.stringify(preset) : null,
       })
     }).then(r => r.json());
     if (data.ok) {

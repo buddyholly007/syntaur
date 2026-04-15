@@ -1253,16 +1253,25 @@ pub async fn handle_music_prefs_list(
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
     let principal = crate::resolve_principal(&state, token).await?;
-    let uid = principal.user_id();
+    let sharing_mode = state.sharing_mode.read().await.clone();
+    let scope = principal.scope_with_sharing(&sharing_mode);
     let limit: i64 = params.get("limit").and_then(|s| s.parse().ok()).unwrap_or(50);
     let db = state.db_path.clone();
     let rows: Vec<serde_json::Value> = tokio::task::spawn_blocking(move || -> Vec<serde_json::Value> {
         let mut out = Vec::new();
         if let Ok(conn) = rusqlite::Connection::open(&db) {
-            if let Ok(mut stmt) = conn.prepare(
-                "SELECT id, category, kind, value, track_id, provider, source, created_at                  FROM user_music_preferences WHERE user_id = ? ORDER BY created_at DESC LIMIT ?"
-            ) {
-                if let Ok(rs) = stmt.query_map(rusqlite::params![uid, limit], |r| Ok(serde_json::json!({
+            let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(uid) = scope {
+                ("SELECT id, category, kind, value, track_id, provider, source, created_at \
+                  FROM user_music_preferences WHERE user_id = ? ORDER BY created_at DESC LIMIT ?".to_string(),
+                 vec![Box::new(uid) as Box<dyn rusqlite::types::ToSql>, Box::new(limit)])
+            } else {
+                ("SELECT id, category, kind, value, track_id, provider, source, created_at \
+                  FROM user_music_preferences ORDER BY created_at DESC LIMIT ?".to_string(),
+                 vec![Box::new(limit) as Box<dyn rusqlite::types::ToSql>])
+            };
+            if let Ok(mut stmt) = conn.prepare(&sql) {
+                let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+                if let Ok(rs) = stmt.query_map(params_refs.as_slice(), |r| Ok(serde_json::json!({
                     "id": r.get::<_, i64>(0)?,
                     "category": r.get::<_, String>(1)?,
                     "kind": r.get::<_, Option<String>>(2)?,
@@ -1288,12 +1297,18 @@ pub async fn handle_music_pref_delete(
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
     let principal = crate::resolve_principal(&state, token).await?;
-    let uid = principal.user_id();
+    let sharing_mode = state.sharing_mode.read().await.clone();
+    let scope = principal.scope_with_sharing(&sharing_mode);
     let db = state.db_path.clone();
     let _ = tokio::task::spawn_blocking(move || -> Result<(), String> {
         let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM user_music_preferences WHERE id = ? AND user_id = ?",
-            rusqlite::params![pref_id, uid]).map_err(|e| e.to_string())?;
+        if let Some(uid) = scope {
+            conn.execute("DELETE FROM user_music_preferences WHERE id = ? AND user_id = ?",
+                rusqlite::params![pref_id, uid]).map_err(|e| e.to_string())?;
+        } else {
+            conn.execute("DELETE FROM user_music_preferences WHERE id = ?",
+                rusqlite::params![pref_id]).map_err(|e| e.to_string())?;
+        }
         Ok(())
     }).await;
     Ok(Json(serde_json::json!({"ok": true})))

@@ -1069,17 +1069,26 @@ pub async fn handle_receipt_list(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
     let principal = crate::resolve_principal(&state, token).await?;
-    let uid = principal.user_id();
+    let sharing_mode = state.sharing_mode.read().await.clone();
+    let scope = principal.scope_with_sharing(&sharing_mode);
     let db = state.db_path.clone();
 
     let receipts = tokio::task::spawn_blocking(move || -> Result<Vec<serde_json::Value>, String> {
         let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
-        let mut stmt = conn.prepare(
-            "SELECT r.id, r.vendor, r.amount_cents, r.receipt_date, r.description, r.status, r.created_at, c.name \
-             FROM receipts r LEFT JOIN expense_categories c ON r.category_id = c.id \
-             WHERE r.user_id = ? ORDER BY r.created_at DESC LIMIT 100"
-        ).map_err(|e| e.to_string())?;
-        let rows = stmt.query_map(rusqlite::params![uid], |r| {
+        let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(uid) = scope {
+            ("SELECT r.id, r.vendor, r.amount_cents, r.receipt_date, r.description, r.status, r.created_at, c.name \
+              FROM receipts r LEFT JOIN expense_categories c ON r.category_id = c.id \
+              WHERE r.user_id = ? ORDER BY r.created_at DESC LIMIT 100".to_string(),
+             vec![Box::new(uid) as Box<dyn rusqlite::types::ToSql>])
+        } else {
+            ("SELECT r.id, r.vendor, r.amount_cents, r.receipt_date, r.description, r.status, r.created_at, c.name \
+              FROM receipts r LEFT JOIN expense_categories c ON r.category_id = c.id \
+              ORDER BY r.created_at DESC LIMIT 100".to_string(),
+             vec![])
+        };
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt.query_map(params_refs.as_slice(), |r| {
             let cents: Option<i64> = r.get(2)?;
             Ok(serde_json::json!({
                 "id": r.get::<_, i64>(0)?,
@@ -1400,20 +1409,29 @@ pub async fn handle_tax_doc_list(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
     let principal = crate::resolve_principal(&state, token).await?;
-    let uid = principal.user_id();
+    let sharing_mode = state.sharing_mode.read().await.clone();
+    let scope = principal.scope_with_sharing(&sharing_mode);
     let db = state.db_path.clone();
     let year_filter = params.get("year").and_then(|y| y.parse::<i64>().ok());
 
     let docs = tokio::task::spawn_blocking(move || -> Result<Vec<serde_json::Value>, String> {
         let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
-        let (sql, p): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match year_filter {
-            Some(y) => (
+        let (sql, p): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match (scope, year_filter) {
+            (Some(uid), Some(y)) => (
                 "SELECT id, doc_type, tax_year, issuer, extracted_fields, status, created_at, image_path FROM tax_documents WHERE user_id = ? AND tax_year = ? AND status != 'discarded' ORDER BY doc_type, created_at DESC".to_string(),
                 vec![Box::new(uid) as Box<dyn rusqlite::types::ToSql>, Box::new(y)],
             ),
-            None => (
+            (Some(uid), None) => (
                 "SELECT id, doc_type, tax_year, issuer, extracted_fields, status, created_at, image_path FROM tax_documents WHERE user_id = ? AND status != 'discarded' ORDER BY doc_type, created_at DESC".to_string(),
                 vec![Box::new(uid) as Box<dyn rusqlite::types::ToSql>],
+            ),
+            (None, Some(y)) => (
+                "SELECT id, doc_type, tax_year, issuer, extracted_fields, status, created_at, image_path FROM tax_documents WHERE tax_year = ? AND status != 'discarded' ORDER BY doc_type, created_at DESC".to_string(),
+                vec![Box::new(y) as Box<dyn rusqlite::types::ToSql>],
+            ),
+            (None, None) => (
+                "SELECT id, doc_type, tax_year, issuer, extracted_fields, status, created_at, image_path FROM tax_documents WHERE status != 'discarded' ORDER BY doc_type, created_at DESC".to_string(),
+                vec![],
             ),
         };
         let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
@@ -1473,16 +1491,24 @@ pub async fn handle_tax_doc_update_status(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let principal = crate::resolve_principal(&state, &req.token).await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
-    let uid = principal.user_id();
+    let sharing_mode = state.sharing_mode.read().await.clone();
+    let scope = principal.scope_with_sharing(&sharing_mode);
     let db = state.db_path.clone();
     let new_status = req.status.clone();
 
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
-        conn.execute(
-            "UPDATE tax_documents SET status = ? WHERE id = ? AND user_id = ?",
-            rusqlite::params![&new_status, id, uid],
-        ).map_err(|e| e.to_string())?;
+        if let Some(uid) = scope {
+            conn.execute(
+                "UPDATE tax_documents SET status = ? WHERE id = ? AND user_id = ?",
+                rusqlite::params![&new_status, id, uid],
+            ).map_err(|e| e.to_string())?;
+        } else {
+            conn.execute(
+                "UPDATE tax_documents SET status = ? WHERE id = ?",
+                rusqlite::params![&new_status, id],
+            ).map_err(|e| e.to_string())?;
+        }
 
         // If discarding, also remove any income records created from this doc
         if new_status == "discarded" {
@@ -1517,7 +1543,8 @@ pub async fn handle_tax_doc_update_field(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let principal = crate::resolve_principal(&state, &req.token).await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
-    let uid = principal.user_id();
+    let sharing_mode = state.sharing_mode.read().await.clone();
+    let scope = principal.scope_with_sharing(&sharing_mode);
     let db = state.db_path.clone();
     let field = req.field.clone();
     let value = req.value.clone();
@@ -1526,10 +1553,17 @@ pub async fn handle_tax_doc_update_field(
         let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
 
         // Get current fields
-        let current: String = conn.query_row(
-            "SELECT COALESCE(extracted_fields, '{}') FROM tax_documents WHERE id = ? AND user_id = ?",
-            rusqlite::params![id, uid], |r| r.get(0)
-        ).map_err(|e| format!("Not found: {}", e))?;
+        let current: String = if let Some(uid) = scope {
+            conn.query_row(
+                "SELECT COALESCE(extracted_fields, '{}') FROM tax_documents WHERE id = ? AND user_id = ?",
+                rusqlite::params![id, uid], |r| r.get(0)
+            ).map_err(|e| format!("Not found: {}", e))?
+        } else {
+            conn.query_row(
+                "SELECT COALESCE(extracted_fields, '{}') FROM tax_documents WHERE id = ?",
+                rusqlite::params![id], |r| r.get(0)
+            ).map_err(|e| format!("Not found: {}", e))?
+        };
 
         let mut fields: serde_json::Value = serde_json::from_str(&current).unwrap_or(serde_json::json!({}));
 
@@ -1541,10 +1575,17 @@ pub async fn handle_tax_doc_update_field(
         }
 
         let updated = serde_json::to_string(&fields).unwrap_or("{}".to_string());
-        conn.execute(
-            "UPDATE tax_documents SET extracted_fields = ? WHERE id = ? AND user_id = ?",
-            rusqlite::params![&updated, id, uid],
-        ).map_err(|e| e.to_string())?;
+        if let Some(uid) = scope {
+            conn.execute(
+                "UPDATE tax_documents SET extracted_fields = ? WHERE id = ? AND user_id = ?",
+                rusqlite::params![&updated, id, uid],
+            ).map_err(|e| e.to_string())?;
+        } else {
+            conn.execute(
+                "UPDATE tax_documents SET extracted_fields = ? WHERE id = ?",
+                rusqlite::params![&updated, id],
+            ).map_err(|e| e.to_string())?;
+        }
 
         // If this is a W-2 field, also update income records
         let doc_type: String = conn.query_row(
@@ -1558,20 +1599,28 @@ pub async fn handle_tax_doc_update_field(
             let issuer: String = conn.query_row(
                 "SELECT COALESCE(issuer, '') FROM tax_documents WHERE id = ?", rusqlite::params![id], |r| r.get(0)
             ).unwrap_or_default();
+            // For W-2 income record updates, look up the doc's actual owner
+            let doc_owner: Option<i64> = conn.query_row(
+                "SELECT user_id FROM tax_documents WHERE id = ?", rusqlite::params![id], |r| r.get(0)
+            ).ok();
 
             if field == "box1_wages" {
                 if let Ok(cents) = value.parse::<f64>().map(|f| (f * 100.0) as i64) {
-                    conn.execute(
-                        "UPDATE tax_income SET amount_cents = ? WHERE user_id = ? AND tax_year = ? AND source = 'W-2 Wages' AND description LIKE ?",
-                        rusqlite::params![cents, uid, year, format!("%{}%", issuer)],
-                    ).ok();
+                    if let Some(owner) = doc_owner {
+                        conn.execute(
+                            "UPDATE tax_income SET amount_cents = ? WHERE user_id = ? AND tax_year = ? AND source = 'W-2 Wages' AND description LIKE ?",
+                            rusqlite::params![cents, owner, year, format!("%{}%", issuer)],
+                        ).ok();
+                    }
                 }
             } else if field == "box2_fed_withheld" {
                 if let Ok(cents) = value.parse::<f64>().map(|f| (f * 100.0) as i64) {
-                    conn.execute(
-                        "UPDATE tax_income SET amount_cents = ? WHERE user_id = ? AND tax_year = ? AND source = 'W-2 Withholding' AND description LIKE ?",
-                        rusqlite::params![cents, uid, year, format!("%{}%", issuer)],
-                    ).ok();
+                    if let Some(owner) = doc_owner {
+                        conn.execute(
+                            "UPDATE tax_income SET amount_cents = ? WHERE user_id = ? AND tax_year = ? AND source = 'W-2 Withholding' AND description LIKE ?",
+                            rusqlite::params![cents, owner, year, format!("%{}%", issuer)],
+                        ).ok();
+                    }
                 }
             }
         }
@@ -1672,7 +1721,8 @@ pub async fn handle_expense_list(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
     let principal = crate::resolve_principal(&state, token).await?;
-    let uid = principal.user_id();
+    let sharing_mode = state.sharing_mode.read().await.clone();
+    let scope = principal.scope_with_sharing(&sharing_mode);
     let db = state.db_path.clone();
     let entity_filter = params.get("entity").cloned();
     let start = params.get("start").cloned();
@@ -1682,8 +1732,12 @@ pub async fn handle_expense_list(
         let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
         let mut sql = "SELECT e.id, e.amount_cents, e.vendor, e.expense_date, e.description, e.entity, e.receipt_id, e.created_at, c.name \
                        FROM expenses e LEFT JOIN expense_categories c ON e.category_id = c.id \
-                       WHERE e.user_id = ?".to_string();
-        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(uid)];
+                       WHERE 1=1".to_string();
+        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = vec![];
+        if let Some(uid) = scope {
+            sql.push_str(" AND e.user_id = ?");
+            params_vec.push(Box::new(uid));
+        }
 
         if let Some(ref ent) = entity_filter {
             sql.push_str(" AND e.entity = ?");
@@ -1731,7 +1785,8 @@ pub async fn handle_expense_summary(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
     let principal = crate::resolve_principal(&state, token).await?;
-    let uid = principal.user_id();
+    let sharing_mode = state.sharing_mode.read().await.clone();
+    let scope = principal.scope_with_sharing(&sharing_mode);
     let db = state.db_path.clone();
 
     // Default to YTD
@@ -1742,15 +1797,23 @@ pub async fn handle_expense_summary(
     let summary = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
         let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
 
+        // Helper for user scope WHERE fragment
+        let uid_clause = |prefix: &str| -> String {
+            if let Some(uid) = scope { format!("{}.user_id = {} AND", prefix, uid) } else { String::new() }
+        };
+        let uid_clause_bare = || -> String {
+            if let Some(uid) = scope { format!("user_id = {} AND", uid) } else { String::new() }
+        };
+
         // By category
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT c.name, c.entity, c.tax_deductible, SUM(e.amount_cents), COUNT(*) \
              FROM expenses e JOIN expense_categories c ON e.category_id = c.id \
-             WHERE e.user_id = ? AND e.expense_date >= ? AND e.expense_date <= ? \
-             GROUP BY c.id ORDER BY SUM(e.amount_cents) DESC"
-        ).map_err(|e| e.to_string())?;
+             WHERE {} e.expense_date >= ? AND e.expense_date <= ? \
+             GROUP BY c.id ORDER BY SUM(e.amount_cents) DESC", uid_clause("e")
+        )).map_err(|e| e.to_string())?;
         let categories: Vec<serde_json::Value> = stmt.query_map(
-            rusqlite::params![uid, &start, &end],
+            rusqlite::params![&start, &end],
             |r| {
                 let total: i64 = r.get(3)?;
                 Ok(serde_json::json!({
@@ -1767,24 +1830,24 @@ pub async fn handle_expense_summary(
 
         // Totals
         let total_all: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(amount_cents), 0) FROM expenses WHERE user_id = ? AND expense_date >= ? AND expense_date <= ?",
-            rusqlite::params![uid, &start, &end], |r| r.get(0)
+            &format!("SELECT COALESCE(SUM(amount_cents), 0) FROM expenses WHERE {} expense_date >= ? AND expense_date <= ?", uid_clause_bare()),
+            rusqlite::params![&start, &end], |r| r.get(0)
         ).unwrap_or(0);
 
         let total_business: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(amount_cents), 0) FROM expenses WHERE user_id = ? AND entity = 'business' AND expense_date >= ? AND expense_date <= ?",
-            rusqlite::params![uid, &start, &end], |r| r.get(0)
+            &format!("SELECT COALESCE(SUM(amount_cents), 0) FROM expenses WHERE {} entity = 'business' AND expense_date >= ? AND expense_date <= ?", uid_clause_bare()),
+            rusqlite::params![&start, &end], |r| r.get(0)
         ).unwrap_or(0);
 
         let total_deductible: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(e.amount_cents), 0) FROM expenses e JOIN expense_categories c ON e.category_id = c.id \
-             WHERE e.user_id = ? AND c.tax_deductible = 1 AND e.expense_date >= ? AND e.expense_date <= ?",
-            rusqlite::params![uid, &start, &end], |r| r.get(0)
+            &format!("SELECT COALESCE(SUM(e.amount_cents), 0) FROM expenses e JOIN expense_categories c ON e.category_id = c.id \
+             WHERE {} c.tax_deductible = 1 AND e.expense_date >= ? AND e.expense_date <= ?", uid_clause("e")),
+            rusqlite::params![&start, &end], |r| r.get(0)
         ).unwrap_or(0);
 
         let receipt_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM receipts WHERE user_id = ? AND created_at >= ? AND created_at <= ?",
-            rusqlite::params![uid, chrono::NaiveDate::parse_from_str(&start, "%Y-%m-%d").map(|d| d.and_hms_opt(0,0,0).unwrap().and_utc().timestamp()).unwrap_or(0),
+            &format!("SELECT COUNT(*) FROM receipts WHERE {} created_at >= ? AND created_at <= ?", uid_clause_bare()),
+            rusqlite::params![chrono::NaiveDate::parse_from_str(&start, "%Y-%m-%d").map(|d| d.and_hms_opt(0,0,0).unwrap().and_utc().timestamp()).unwrap_or(0),
                 chrono::NaiveDate::parse_from_str(&end, "%Y-%m-%d").map(|d| d.and_hms_opt(23,59,59).unwrap().and_utc().timestamp()).unwrap_or(i64::MAX)],
             |r| r.get(0)
         ).unwrap_or(0);
@@ -1902,7 +1965,8 @@ pub async fn handle_income_list(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
     let principal = crate::resolve_principal(&state, token).await?;
-    let uid = principal.user_id();
+    let sharing_mode = state.sharing_mode.read().await.clone();
+    let scope = principal.scope_with_sharing(&sharing_mode);
     let db = state.db_path.clone();
     let year: i64 = params.get("year").and_then(|y| y.parse().ok()).unwrap_or(2025);
 
@@ -1919,10 +1983,22 @@ pub async fn handle_income_list(
             return Ok(serde_json::json!({ "income": [], "total_cents": 0, "total_display": "$0.00" }));
         }
 
-        let mut stmt = conn.prepare(
-            "SELECT source, amount_cents, category, description FROM tax_income WHERE user_id = ? AND tax_year = ? ORDER BY amount_cents DESC"
-        ).map_err(|e| e.to_string())?;
-        let rows: Vec<serde_json::Value> = stmt.query_map(rusqlite::params![uid, year], |r| {
+        let (list_sql, sum_sql_gross, sum_sql_with) = if let Some(uid) = scope {
+            (
+                format!("SELECT source, amount_cents, category, description FROM tax_income WHERE user_id = {} AND tax_year = ? ORDER BY amount_cents DESC", uid),
+                format!("SELECT COALESCE(SUM(amount_cents), 0) FROM tax_income WHERE user_id = {} AND tax_year = ? AND category != 'Federal Withholding'", uid),
+                format!("SELECT COALESCE(SUM(amount_cents), 0) FROM tax_income WHERE user_id = {} AND tax_year = ? AND category = 'Federal Withholding'", uid),
+            )
+        } else {
+            (
+                "SELECT source, amount_cents, category, description FROM tax_income WHERE tax_year = ? ORDER BY amount_cents DESC".to_string(),
+                "SELECT COALESCE(SUM(amount_cents), 0) FROM tax_income WHERE tax_year = ? AND category != 'Federal Withholding'".to_string(),
+                "SELECT COALESCE(SUM(amount_cents), 0) FROM tax_income WHERE tax_year = ? AND category = 'Federal Withholding'".to_string(),
+            )
+        };
+
+        let mut stmt = conn.prepare(&list_sql).map_err(|e| e.to_string())?;
+        let rows: Vec<serde_json::Value> = stmt.query_map(rusqlite::params![year], |r| {
             Ok(serde_json::json!({
                 "source": r.get::<_, String>(0)?,
                 "amount_cents": r.get::<_, i64>(1)?,
@@ -1931,14 +2007,8 @@ pub async fn handle_income_list(
             }))
         }).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
 
-        let gross: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(amount_cents), 0) FROM tax_income WHERE user_id = ? AND tax_year = ? AND category != 'Federal Withholding'",
-            rusqlite::params![uid, year], |r| r.get(0)
-        ).unwrap_or(0);
-        let withheld: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(amount_cents), 0) FROM tax_income WHERE user_id = ? AND tax_year = ? AND category = 'Federal Withholding'",
-            rusqlite::params![uid, year], |r| r.get(0)
-        ).unwrap_or(0);
+        let gross: i64 = conn.query_row(&sum_sql_gross, rusqlite::params![year], |r| r.get(0)).unwrap_or(0);
+        let withheld: i64 = conn.query_row(&sum_sql_with, rusqlite::params![year], |r| r.get(0)).unwrap_or(0);
 
         Ok(serde_json::json!({
             "income": rows,
@@ -3124,7 +3194,8 @@ pub async fn handle_statement_transactions(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
     let principal = crate::resolve_principal(&state, token).await?;
-    let uid = principal.user_id();
+    let sharing_mode = state.sharing_mode.read().await.clone();
+    let scope = principal.scope_with_sharing(&sharing_mode);
     let db = state.db_path.clone();
     let doc_id_filter = params.get("document_id").and_then(|v| v.parse::<i64>().ok());
     let start = params.get("start").cloned();
@@ -3136,8 +3207,12 @@ pub async fn handle_statement_transactions(
         let mut sql = "SELECT t.id, t.document_id, t.transaction_date, t.description, t.amount_cents, \
                         t.vendor, t.insurance_type, t.is_deductible, t.status, c.name \
                         FROM statement_transactions t LEFT JOIN expense_categories c ON t.category_id = c.id \
-                        WHERE t.user_id = ?".to_string();
-        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(uid)];
+                        WHERE 1=1".to_string();
+        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = vec![];
+        if let Some(uid) = scope {
+            sql.push_str(" AND t.user_id = ?");
+            params_vec.push(Box::new(uid));
+        }
 
         if let Some(did) = doc_id_filter {
             sql.push_str(" AND t.document_id = ?");
@@ -3215,7 +3290,8 @@ pub async fn handle_property_profile_get(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
     let principal = crate::resolve_principal(&state, token).await?;
-    let uid = principal.user_id();
+    let sharing_mode = state.sharing_mode.read().await.clone();
+    let scope = principal.scope_with_sharing(&sharing_mode);
     let db = state.db_path.clone();
 
     let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
@@ -3230,15 +3306,25 @@ pub async fn handle_property_profile_get(
             return Ok(serde_json::json!({ "profiles": [] }));
         }
 
-        let mut stmt = conn.prepare(
-            "SELECT id, address, total_sqft, workshop_sqft, purchase_price_cents, purchase_date, \
-             building_value_cents, land_value_cents, land_ratio, assessor_total_cents, assessor_land_cents, \
-             annual_property_tax_cents, annual_insurance_cents, mortgage_lender, mortgage_interest_cents, \
-             mortgage_principal_cents, depreciation_basis_cents, depreciation_annual_cents, notes \
-             FROM property_profiles WHERE user_id = ? ORDER BY id"
-        ).map_err(|e| e.to_string())?;
+        let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(uid) = scope {
+            ("SELECT id, address, total_sqft, workshop_sqft, purchase_price_cents, purchase_date, \
+              building_value_cents, land_value_cents, land_ratio, assessor_total_cents, assessor_land_cents, \
+              annual_property_tax_cents, annual_insurance_cents, mortgage_lender, mortgage_interest_cents, \
+              mortgage_principal_cents, depreciation_basis_cents, depreciation_annual_cents, notes \
+              FROM property_profiles WHERE user_id = ? ORDER BY id".to_string(),
+             vec![Box::new(uid) as Box<dyn rusqlite::types::ToSql>])
+        } else {
+            ("SELECT id, address, total_sqft, workshop_sqft, purchase_price_cents, purchase_date, \
+              building_value_cents, land_value_cents, land_ratio, assessor_total_cents, assessor_land_cents, \
+              annual_property_tax_cents, annual_insurance_cents, mortgage_lender, mortgage_interest_cents, \
+              mortgage_principal_cents, depreciation_basis_cents, depreciation_annual_cents, notes \
+              FROM property_profiles ORDER BY id".to_string(),
+             vec![])
+        };
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
 
-        let rows: Vec<serde_json::Value> = stmt.query_map(rusqlite::params![uid], |r| {
+        let rows: Vec<serde_json::Value> = stmt.query_map(params_refs.as_slice(), |r| {
             Ok(serde_json::json!({
                 "id": r.get::<_, i64>(0)?,
                 "address": r.get::<_, String>(1)?,
@@ -3594,7 +3680,8 @@ pub async fn handle_tax_prep_wizard(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
     let principal = crate::resolve_principal(&state, token).await?;
-    let uid = principal.user_id();
+    let sharing_mode = state.sharing_mode.read().await.clone();
+    let scope = principal.scope_with_sharing(&sharing_mode);
     let db = state.db_path.clone();
     let year: i64 = params.get("year").and_then(|y| y.parse().ok()).unwrap_or(2025);
 
@@ -3603,18 +3690,35 @@ pub async fn handle_tax_prep_wizard(
         let start = format!("{}-01-01", year);
         let end = format!("{}-12-31", year);
 
+        // Helper: build WHERE clause fragment for user scope
+        // When scope is None (shared mode / admin), omit user_id filter
+        let uid_filter = |prefix: &str| -> String {
+            if let Some(uid) = scope {
+                format!("{}.user_id = {} AND", prefix, uid)
+            } else {
+                String::new()
+            }
+        };
+        let uid_filter_bare = || -> String {
+            if let Some(uid) = scope {
+                format!("user_id = {} AND", uid)
+            } else {
+                String::new()
+            }
+        };
+
         // Step 1: Filing Status
         // We can infer from W-2 count
         let w2_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM tax_documents WHERE user_id = ? AND doc_type = 'w2' AND tax_year = ? AND status = 'scanned'",
-            rusqlite::params![uid, year], |r| r.get(0)
+            &format!("SELECT COUNT(*) FROM tax_documents WHERE {} doc_type = 'w2' AND tax_year = ? AND status = 'scanned'", uid_filter_bare()),
+            rusqlite::params![year], |r| r.get(0)
         ).unwrap_or(0);
 
         let w2_details: Vec<serde_json::Value> = {
             let mut stmt = conn.prepare(
-                "SELECT issuer, extracted_fields FROM tax_documents WHERE user_id = ? AND doc_type = 'w2' AND tax_year = ? AND status = 'scanned'"
+                &format!("SELECT issuer, extracted_fields FROM tax_documents WHERE {} doc_type = 'w2' AND tax_year = ? AND status = 'scanned'", uid_filter_bare())
             ).map_err(|e| e.to_string())?;
-            let rows = stmt.query_map(rusqlite::params![uid, year], |r| {
+            let rows = stmt.query_map(rusqlite::params![year], |r| {
                 let fields_str: Option<String> = r.get(1)?;
                 let fields: serde_json::Value = fields_str.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(serde_json::json!({}));
                 Ok(serde_json::json!({
@@ -3629,45 +3733,45 @@ pub async fn handle_tax_prep_wizard(
 
         // Step 2: Income summary
         let gross_income: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(amount_cents), 0) FROM tax_income WHERE user_id = ? AND tax_year = ? AND category != 'Federal Withholding'",
-            rusqlite::params![uid, year], |r| r.get(0)
+            &format!("SELECT COALESCE(SUM(amount_cents), 0) FROM tax_income WHERE {} tax_year = ? AND category != 'Federal Withholding'", uid_filter_bare()),
+            rusqlite::params![year], |r| r.get(0)
         ).unwrap_or(0);
         let withheld: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(amount_cents), 0) FROM tax_income WHERE user_id = ? AND tax_year = ? AND category = 'Federal Withholding'",
-            rusqlite::params![uid, year], |r| r.get(0)
+            &format!("SELECT COALESCE(SUM(amount_cents), 0) FROM tax_income WHERE {} tax_year = ? AND category = 'Federal Withholding'", uid_filter_bare()),
+            rusqlite::params![year], |r| r.get(0)
         ).unwrap_or(0);
 
         // Step 3: 1099s
         let form_1099_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM tax_documents WHERE user_id = ? AND doc_type LIKE '1099%' AND tax_year = ? AND status = 'scanned'",
-            rusqlite::params![uid, year], |r| r.get(0)
+            &format!("SELECT COUNT(*) FROM tax_documents WHERE {} doc_type LIKE '1099%' AND tax_year = ? AND status = 'scanned'", uid_filter_bare()),
+            rusqlite::params![year], |r| r.get(0)
         ).unwrap_or(0);
 
         // Step 4: 1098 mortgage statements
         let form_1098_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM tax_documents WHERE user_id = ? AND doc_type = 'mortgage_statement' AND tax_year = ? AND status = 'scanned'",
-            rusqlite::params![uid, year], |r| r.get(0)
+            &format!("SELECT COUNT(*) FROM tax_documents WHERE {} doc_type = 'mortgage_statement' AND tax_year = ? AND status = 'scanned'", uid_filter_bare()),
+            rusqlite::params![year], |r| r.get(0)
         ).unwrap_or(0);
 
         // Step 5: Expenses & deductions
         let total_expenses: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(amount_cents), 0) FROM expenses WHERE user_id = ? AND expense_date >= ? AND expense_date <= ?",
-            rusqlite::params![uid, &start, &end], |r| r.get(0)
+            &format!("SELECT COALESCE(SUM(amount_cents), 0) FROM expenses WHERE {} expense_date >= ? AND expense_date <= ?", uid_filter_bare()),
+            rusqlite::params![&start, &end], |r| r.get(0)
         ).unwrap_or(0);
         let business_expenses: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(amount_cents), 0) FROM expenses WHERE user_id = ? AND entity = 'business' AND expense_date >= ? AND expense_date <= ?",
-            rusqlite::params![uid, &start, &end], |r| r.get(0)
+            &format!("SELECT COALESCE(SUM(amount_cents), 0) FROM expenses WHERE {} entity = 'business' AND expense_date >= ? AND expense_date <= ?", uid_filter_bare()),
+            rusqlite::params![&start, &end], |r| r.get(0)
         ).unwrap_or(0);
         let deductible_expenses: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(e.amount_cents), 0) FROM expenses e JOIN expense_categories c ON e.category_id = c.id \
-             WHERE e.user_id = ? AND c.tax_deductible = 1 AND e.expense_date >= ? AND e.expense_date <= ?",
-            rusqlite::params![uid, &start, &end], |r| r.get(0)
+            &format!("SELECT COALESCE(SUM(e.amount_cents), 0) FROM expenses e JOIN expense_categories c ON e.category_id = c.id \
+             WHERE {} c.tax_deductible = 1 AND e.expense_date >= ? AND e.expense_date <= ?", uid_filter("e")),
+            rusqlite::params![&start, &end], |r| r.get(0)
         ).unwrap_or(0);
 
         // Step 6: Receipt count
         let receipt_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM receipts WHERE user_id = ?",
-            rusqlite::params![uid], |r| r.get(0)
+            &format!("SELECT COUNT(*) FROM receipts WHERE {} 1=1", uid_filter_bare()),
+            [], |r| r.get(0)
         ).unwrap_or(0);
 
         // Step 7: Property profile
@@ -3675,8 +3779,8 @@ pub async fn handle_tax_prep_wizard(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='property_profiles'",
             [], |r| r.get::<_, i64>(0)
         ).unwrap_or(0) > 0 && conn.query_row(
-            "SELECT COUNT(*) FROM property_profiles WHERE user_id = ?",
-            rusqlite::params![uid], |r| r.get::<_, i64>(0)
+            &format!("SELECT COUNT(*) FROM property_profiles WHERE {} 1=1", uid_filter_bare()),
+            [], |r| r.get::<_, i64>(0)
         ).unwrap_or(0) > 0;
 
         // Build completeness checklist
@@ -3932,43 +4036,60 @@ pub async fn handle_taxpayer_profile_get(
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
     let principal = crate::resolve_principal(&state, token).await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
-    let uid = principal.user_id();
+    let sharing_mode = state.sharing_mode.read().await.clone();
+    let scope = principal.scope_with_sharing(&sharing_mode);
     let db = state.db_path.clone();
     let year: i64 = params.get("year").and_then(|y| y.parse().ok()).unwrap_or_else(|| default_tax_year());
 
     let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
         let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
-        let profile = conn.query_row(
-            "SELECT first_name, last_name, ssn_encrypted, date_of_birth, address_line1, address_line2, \
-             city, state, zip, phone, email, filing_status, spouse_first, spouse_last, spouse_ssn_encrypted, \
-             spouse_dob, occupation, spouse_occupation FROM taxpayer_profiles WHERE user_id = ? AND tax_year = ?",
-            rusqlite::params![uid, year],
-            |r| {
-                let ssn_raw: Option<String> = r.get(2)?;
-                let spouse_ssn_raw: Option<String> = r.get(14)?;
-                Ok(serde_json::json!({
-                "first_name": r.get::<_, Option<String>>(0)?, "last_name": r.get::<_, Option<String>>(1)?,
-                "ssn": ssn_raw.clone(),
-                "ssn_last4": ssn_raw.map(|s| if s.len()>=4 { format!("***-**-{}", &s[s.len()-4..]) } else { s }),
-                "date_of_birth": r.get::<_, Option<String>>(3)?,
-                "address_line1": r.get::<_, Option<String>>(4)?, "address_line2": r.get::<_, Option<String>>(5)?,
-                "city": r.get::<_, Option<String>>(6)?, "state": r.get::<_, Option<String>>(7)?, "zip": r.get::<_, Option<String>>(8)?,
-                "phone": r.get::<_, Option<String>>(9)?, "email": r.get::<_, Option<String>>(10)?,
-                "filing_status": r.get::<_, String>(11)?,
-                "spouse_first": r.get::<_, Option<String>>(12)?, "spouse_last": r.get::<_, Option<String>>(13)?,
-                "spouse_ssn": spouse_ssn_raw.clone(),
-                "spouse_ssn_last4": spouse_ssn_raw.map(|s| if s.len()>=4 { format!("***-**-{}", &s[s.len()-4..]) } else { s }),
-                "spouse_dob": r.get::<_, Option<String>>(15)?,
-                "occupation": r.get::<_, Option<String>>(16)?, "spouse_occupation": r.get::<_, Option<String>>(17)?,
-                }))
-            },
-        ).ok();
+        let mapper = |r: &rusqlite::Row<'_>| {
+            let ssn_raw: Option<String> = r.get(2)?;
+            let spouse_ssn_raw: Option<String> = r.get(14)?;
+            Ok(serde_json::json!({
+            "first_name": r.get::<_, Option<String>>(0)?, "last_name": r.get::<_, Option<String>>(1)?,
+            "ssn": ssn_raw.clone(),
+            "ssn_last4": ssn_raw.map(|s| if s.len()>=4 { format!("***-**-{}", &s[s.len()-4..]) } else { s }),
+            "date_of_birth": r.get::<_, Option<String>>(3)?,
+            "address_line1": r.get::<_, Option<String>>(4)?, "address_line2": r.get::<_, Option<String>>(5)?,
+            "city": r.get::<_, Option<String>>(6)?, "state": r.get::<_, Option<String>>(7)?, "zip": r.get::<_, Option<String>>(8)?,
+            "phone": r.get::<_, Option<String>>(9)?, "email": r.get::<_, Option<String>>(10)?,
+            "filing_status": r.get::<_, String>(11)?,
+            "spouse_first": r.get::<_, Option<String>>(12)?, "spouse_last": r.get::<_, Option<String>>(13)?,
+            "spouse_ssn": spouse_ssn_raw.clone(),
+            "spouse_ssn_last4": spouse_ssn_raw.map(|s| if s.len()>=4 { format!("***-**-{}", &s[s.len()-4..]) } else { s }),
+            "spouse_dob": r.get::<_, Option<String>>(15)?,
+            "occupation": r.get::<_, Option<String>>(16)?, "spouse_occupation": r.get::<_, Option<String>>(17)?,
+            }))
+        };
+        let profile = if let Some(uid) = scope {
+            conn.query_row(
+                "SELECT first_name, last_name, ssn_encrypted, date_of_birth, address_line1, address_line2, \
+                 city, state, zip, phone, email, filing_status, spouse_first, spouse_last, spouse_ssn_encrypted, \
+                 spouse_dob, occupation, spouse_occupation FROM taxpayer_profiles WHERE user_id = ? AND tax_year = ?",
+                rusqlite::params![uid, year], mapper,
+            ).ok()
+        } else {
+            conn.query_row(
+                "SELECT first_name, last_name, ssn_encrypted, date_of_birth, address_line1, address_line2, \
+                 city, state, zip, phone, email, filing_status, spouse_first, spouse_last, spouse_ssn_encrypted, \
+                 spouse_dob, occupation, spouse_occupation FROM taxpayer_profiles WHERE tax_year = ?",
+                rusqlite::params![year], mapper,
+            ).ok()
+        };
 
-        let mut dep_stmt = conn.prepare(
-            "SELECT id, first_name, last_name, ssn_encrypted, date_of_birth, relationship, months_lived, \
-             qualifies_ctc, qualifies_odc, is_student, is_disabled FROM dependents WHERE user_id = ? AND tax_year = ?"
-        ).map_err(|e| e.to_string())?;
-        let deps: Vec<serde_json::Value> = dep_stmt.query_map(rusqlite::params![uid, year], |r| {
+        let (dep_sql, dep_params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(uid) = scope {
+            ("SELECT id, first_name, last_name, ssn_encrypted, date_of_birth, relationship, months_lived, \
+              qualifies_ctc, qualifies_odc, is_student, is_disabled FROM dependents WHERE user_id = ? AND tax_year = ?".to_string(),
+             vec![Box::new(uid) as Box<dyn rusqlite::types::ToSql>, Box::new(year)])
+        } else {
+            ("SELECT id, first_name, last_name, ssn_encrypted, date_of_birth, relationship, months_lived, \
+              qualifies_ctc, qualifies_odc, is_student, is_disabled FROM dependents WHERE tax_year = ?".to_string(),
+             vec![Box::new(year) as Box<dyn rusqlite::types::ToSql>])
+        };
+        let mut dep_stmt = conn.prepare(&dep_sql).map_err(|e| e.to_string())?;
+        let dep_refs: Vec<&dyn rusqlite::types::ToSql> = dep_params.iter().map(|p| p.as_ref()).collect();
+        let deps: Vec<serde_json::Value> = dep_stmt.query_map(dep_refs.as_slice(), |r| {
             Ok(serde_json::json!({
                 "id": r.get::<_, i64>(0)?, "first_name": r.get::<_, String>(1)?, "last_name": r.get::<_, String>(2)?,
                 "ssn_last4": r.get::<_, Option<String>>(3)?.map(|s| if s.len()>=4 { format!("***-**-{}", &s[s.len()-4..]) } else { s }),
@@ -3978,10 +4099,16 @@ pub async fn handle_taxpayer_profile_get(
             }))
         }).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
 
-        let mut inc_stmt = conn.prepare(
-            "SELECT category, source, SUM(amount_cents) FROM tax_income WHERE user_id = ? AND tax_year = ? GROUP BY category, source"
-        ).map_err(|e| e.to_string())?;
-        let income: Vec<serde_json::Value> = inc_stmt.query_map(rusqlite::params![uid, year], |r| {
+        let (inc_sql, inc_params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(uid) = scope {
+            ("SELECT category, source, SUM(amount_cents) FROM tax_income WHERE user_id = ? AND tax_year = ? GROUP BY category, source".to_string(),
+             vec![Box::new(uid) as Box<dyn rusqlite::types::ToSql>, Box::new(year)])
+        } else {
+            ("SELECT category, source, SUM(amount_cents) FROM tax_income WHERE tax_year = ? GROUP BY category, source".to_string(),
+             vec![Box::new(year) as Box<dyn rusqlite::types::ToSql>])
+        };
+        let mut inc_stmt = conn.prepare(&inc_sql).map_err(|e| e.to_string())?;
+        let inc_refs: Vec<&dyn rusqlite::types::ToSql> = inc_params.iter().map(|p| p.as_ref()).collect();
+        let income: Vec<serde_json::Value> = inc_stmt.query_map(inc_refs.as_slice(), |r| {
             Ok(serde_json::json!({ "category": r.get::<_, String>(0)?, "source": r.get::<_, Option<String>>(1)?, "amount": cents_to_display(r.get::<_, i64>(2)?) }))
         }).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
 

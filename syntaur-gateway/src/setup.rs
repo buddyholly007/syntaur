@@ -416,7 +416,7 @@ pub async fn handle_login(
                 }));
             }
             if state.users.verify_password(user.id, &req.password).await.unwrap_or(false) {
-                if let Ok(token) = state.users.mint_token(user.id, "dashboard-session").await {
+                if let Ok(token) = state.users.mint_token_with_expiry(user.id, "dashboard-session", Some(48)).await {
                     return Ok(Json(LoginResponse {
                         success: true,
                         token: Some(token),
@@ -451,7 +451,7 @@ pub async fn handle_login(
         // Mint a session token for the first user (admin)
         if let Ok(users) = state.users.list_users().await {
             if let Some(user) = users.first() {
-                if let Ok(token) = state.users.mint_token(user.id, "dashboard-session").await {
+                if let Ok(token) = state.users.mint_token_with_expiry(user.id, "dashboard-session", Some(48)).await {
                     return Ok(Json(LoginResponse {
                         success: true,
                         token: Some(token),

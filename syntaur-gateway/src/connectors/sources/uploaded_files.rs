@@ -287,6 +287,7 @@ pub fn file_to_doc(path: &Path) -> Result<Option<ExternalDoc>, String> {
             "path": path.display().to_string(),
         }),
         agent_id: "shared".to_string(),
+        user_id: 0,
     }))
 }
 
