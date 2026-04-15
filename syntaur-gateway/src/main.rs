@@ -1050,6 +1050,67 @@ async fn handle_calendar_ics_import(
     })))
 }
 
+// ── Agent resolution ────────────────────────────────────────────────────────
+
+/// Resolved agent context — everything needed to dispatch a message to an agent.
+/// Handles both system agents (from config) and user agents (from DB).
+struct ResolvedAgent {
+    /// The agent_id to use for LLM routing (base_agent for user agents).
+    llm_agent_id: String,
+    /// The workspace directory for system prompt files.
+    workspace: std::path::PathBuf,
+    /// Custom system prompt to prepend (from user agent, if any).
+    custom_prompt: Option<String>,
+    /// Script execution allowlist.
+    allowlist: Vec<String>,
+}
+
+/// Resolve an agent_id to its full context. Checks system agents first,
+/// then falls back to user_agents table for the given user.
+async fn resolve_agent(state: &AppState, agent_id: &str, user_id: i64) -> ResolvedAgent {
+    // Check if it's a system agent (defined in config)
+    let is_system = state.config.agents.list.iter().any(|a| a.id == agent_id);
+    if is_system {
+        return ResolvedAgent {
+            llm_agent_id: agent_id.to_string(),
+            workspace: state.config.agent_workspace(agent_id),
+            custom_prompt: None,
+            allowlist: state.config.agent_script_allowlist(agent_id),
+        };
+    }
+
+    // Check user_agents table
+    if let Ok(Some(ua)) = state.users.get_user_agent(user_id, agent_id).await {
+        let base = &ua.base_agent;
+        let workspace = if let Some(ref ws) = ua.workspace {
+            let expanded = ws.replace("~", &std::env::var("HOME").unwrap_or_default());
+            std::path::PathBuf::from(expanded)
+        } else {
+            // Default: ~/.syntaur/users/<user_id>/agents/<agent_id>/
+            let data_dir = resolve_data_dir();
+            let ws = data_dir.join(format!("users/{}/agents/{}", user_id, agent_id));
+            if let Err(e) = std::fs::create_dir_all(&ws) {
+                log::warn!("[agent] failed to create workspace {:?}: {}", ws, e);
+            }
+            ws
+        };
+        return ResolvedAgent {
+            llm_agent_id: base.clone(),
+            workspace,
+            custom_prompt: ua.system_prompt,
+            allowlist: state.config.agent_script_allowlist(base),
+        };
+    }
+
+    // Fallback: treat as system agent "main" with the requested id
+    ResolvedAgent {
+        llm_agent_id: agent_id.to_string(),
+        workspace: state.config.agent_workspace(agent_id),
+        custom_prompt: None,
+        allowlist: state.config.agent_script_allowlist(agent_id),
+    }
+}
+
 // ── Chat ────────────────────────────────────────────────────────────────────
 
 async fn handle_api_message(
@@ -1059,10 +1120,14 @@ async fn handle_api_message(
     let principal = resolve_principal(&state, &req.token).await?;
 
     let agent_id = req.agent.unwrap_or_else(|| "main".to_string());
-    let workspace = state.config.agent_workspace(&agent_id);
+    let resolved = resolve_agent(&state, &agent_id, principal.user_id()).await;
+    let workspace = resolved.workspace;
 
     // Load system prompt for agent
     let mut context_parts = Vec::new();
+    if let Some(custom) = &resolved.custom_prompt {
+        context_parts.push(custom.clone());
+    }
     for file in &["SOUL.md", "IDENTITY.md", "TOOLS.md", "USER.md", "BRIEF.md", "PLAN.md", "MEMORY.md"] {
         if let Ok(content) = std::fs::read_to_string(workspace.join(file)) {
             if !content.trim().is_empty() {
@@ -1076,20 +1141,18 @@ async fn handle_api_message(
         context_parts.join("\n\n---\n\n")
     };
 
-    // Build LLM chain
-    let llm_chain = std::sync::Arc::new(llm::LlmChain::from_config(&state.config, &agent_id, state.client.clone()));
+    // Build LLM chain — use llm_agent_id (base agent for user agents)
+    let llm_chain = std::sync::Arc::new(llm::LlmChain::from_config(&state.config, &resolved.llm_agent_id, state.client.clone()));
 
     // Build messages — start with system prompt, then optional conversation history
+    let sharing_mode = state.sharing_mode.read().await.clone();
+    let scope = principal.scope_with_sharing(&sharing_mode);
     let mut messages = vec![llm::ChatMessage::system(&system_prompt)];
     if let (Some(cid), Some(mgr)) = (req.conversation_id.as_deref(), &state.conversations) {
-        // Verify the caller owns (or is admin over) this conversation
-        // before loading its history into the LLM context. A failed
-        // ownership check returns 404 so we don't leak the existence of
-        // the conversation id.
-        if mgr.get(cid, principal.scope()).await.is_none() {
+        if mgr.get(cid, scope).await.is_none() {
             return Err(axum::http::StatusCode::NOT_FOUND);
         }
-        let prior = mgr.messages(cid, principal.scope()).await;
+        let prior = mgr.messages(cid, scope).await;
         for m in prior {
             match m.role.as_str() {
                 "user" => messages.push(llm::ChatMessage::user(&m.content)),
@@ -1099,23 +1162,20 @@ async fn handle_api_message(
         }
     }
     messages.push(llm::ChatMessage::user(&req.message));
-    // Persist the user message if we have a conversation
     if let (Some(cid), Some(mgr)) = (req.conversation_id.as_deref(), &state.conversations) {
         let _ = mgr.append(cid, "user", &req.message).await;
-        // LCM bridge: mirror to LCM so it can do summarization across the conversation
         if let Some(lcm) = &state.lcm {
             lcm.store_message(&agent_id, cid, "user", &req.message);
         }
     }
 
     // Call LLM with tools
-    let allowlist = state.config.agent_script_allowlist(&agent_id);
     let mut tool_registry = crate::tools::ToolRegistry::with_extensions_and_allowlist(
         workspace.clone(),
         agent_id.clone(),
         Some(state.mcp.clone()),
         state.indexer.clone(),
-        &allowlist,
+        &resolved.allowlist,
     );
     tool_registry.set_infra(
         Arc::clone(&state.tool_rate_limiter),
@@ -1316,14 +1376,13 @@ async fn handle_conv_get(
         Some(m) => m,
         None => return Ok(Json(serde_json::json!({"error": "conversations not available"}))),
     };
-    let conv = mgr.get(&id, principal.scope()).await;
+    let sharing_mode = state.sharing_mode.read().await.clone();
+    let scope = principal.scope_with_sharing(&sharing_mode);
+    let conv = mgr.get(&id, scope).await;
     if conv.is_none() {
-        // Either the conversation doesn't exist or it's owned by a
-        // different user. Return 404 either way so we don't leak the
-        // existence of ids.
         return Err(axum::http::StatusCode::NOT_FOUND);
     }
-    let messages = mgr.messages(&id, principal.scope()).await;
+    let messages = mgr.messages(&id, scope).await;
     Ok(Json(serde_json::json!({
         "conversation": conv,
         "messages": messages,
@@ -1342,7 +1401,8 @@ async fn handle_conv_list(
     };
     let agent = params.get("agent").map(|s| s.as_str()).unwrap_or("main");
     let limit: usize = params.get("limit").and_then(|s| s.parse().ok()).unwrap_or(20);
-    let convs = mgr.list_recent(agent, limit, principal.scope()).await;
+    let sharing_mode = state.sharing_mode.read().await.clone();
+    let convs = mgr.list_recent(agent, limit, principal.scope_with_sharing(&sharing_mode)).await;
     Ok(Json(serde_json::json!({"conversations": convs})))
 }
 
@@ -1368,13 +1428,17 @@ async fn handle_message_start(
         map.insert(turn_id.clone(), tx.clone());
     }
 
+    // Resolve agent BEFORE spawning (needs async DB lookup)
+    let resolved = resolve_agent(&state, &agent_id, principal.user_id()).await;
+    let sharing_mode = state.sharing_mode.read().await.clone();
+
     // Snapshot what the background task needs
     let state_clone = Arc::clone(&state);
     let turn_id_for_task = turn_id.clone();
     let agent_for_task = agent_id.clone();
     let message = req.message.clone();
     let conv_id = req.conversation_id.clone();
-    let principal_scope = principal.scope();
+    let principal_scope = principal.scope_with_sharing(&sharing_mode);
     let principal_user_id = principal.user_id();
 
     tokio::spawn(async move {
@@ -1385,9 +1449,11 @@ async fn handle_message_start(
             message: message.chars().take(200).collect(),
         });
 
-        // Run the same logic as handle_api_message but emitting events
-        let workspace = state_clone.config.agent_workspace(&agent_for_task);
+        let workspace = resolved.workspace;
         let mut context_parts = Vec::new();
+        if let Some(custom) = &resolved.custom_prompt {
+            context_parts.push(custom.clone());
+        }
         for file in &["SOUL.md", "IDENTITY.md", "TOOLS.md", "USER.md", "BRIEF.md", "PLAN.md", "MEMORY.md"] {
             if let Ok(content) = std::fs::read_to_string(workspace.join(file)) {
                 if !content.trim().is_empty() {
@@ -1402,13 +1468,11 @@ async fn handle_message_start(
         };
 
         let llm_chain = std::sync::Arc::new(
-            llm::LlmChain::from_config(&state_clone.config, &agent_for_task, state_clone.client.clone()),
+            llm::LlmChain::from_config(&state_clone.config, &resolved.llm_agent_id, state_clone.client.clone()),
         );
 
         let mut messages = vec![llm::ChatMessage::system(&system_prompt)];
         if let (Some(cid), Some(mgr)) = (conv_id.as_deref(), &state_clone.conversations) {
-            // Verify ownership via get(); if the caller doesn't own the
-            // conversation, skip history replay rather than exposing it.
             if mgr.get(cid, principal_scope).await.is_some() {
                 let prior = mgr.messages(cid, principal_scope).await;
                 for m in prior {
@@ -1420,7 +1484,7 @@ async fn handle_message_start(
                 }
             }
         }
-        let _ = principal_user_id; // reserved for future scoped writes
+        let _ = principal_user_id;
         messages.push(llm::ChatMessage::user(&message));
         if let (Some(cid), Some(mgr)) = (conv_id.as_deref(), &state_clone.conversations) {
             let _ = mgr.append(cid, "user", &message).await;
@@ -1429,13 +1493,12 @@ async fn handle_message_start(
             }
         }
 
-        let allowlist = state_clone.config.agent_script_allowlist(&agent_for_task);
         let mut tr = crate::tools::ToolRegistry::with_extensions_and_allowlist(
             workspace,
             agent_for_task.clone(),
             Some(state_clone.mcp.clone()),
             state_clone.indexer.clone(),
-            &allowlist,
+            &resolved.allowlist,
         );
         tr.add_extension_tools(&state_clone.openapi_tools);
         tr.set_infra(
@@ -1719,7 +1782,8 @@ async fn handle_research_get(
         Some(s) => s,
         None => return Ok(Json(serde_json::json!({"error": "research store not available"}))),
     };
-    match store.get(&id, principal.scope()).await {
+    let sharing_mode = state.sharing_mode.read().await.clone();
+    match store.get(&id, principal.scope_with_sharing(&sharing_mode)).await {
         Some(report) => Ok(Json(serde_json::to_value(report).unwrap_or_default())),
         None => Err(axum::http::StatusCode::NOT_FOUND),
     }
