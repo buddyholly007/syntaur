@@ -126,11 +126,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 async function seedDefaultHosts() {
     const defaults = [
-        { name: 'This Machine', hostname: '127.0.0.1', port: 22, username: 'sean', auth_method: 'key', is_local: true, group_name: 'LAN', color: '#22c55e' },
-        { name: 'openclawprod', hostname: '192.168.1.35', port: 22, username: 'sean', auth_method: 'key', group_name: 'LAN', color: '#0ea5e9' },
-        { name: 'claudevm', hostname: '192.168.1.150', port: 22, username: 'sean', auth_method: 'key', group_name: 'LAN', color: '#a855f7' },
-        { name: 'Gaming PC', hostname: '192.168.1.69', port: 22, username: 'sean', auth_method: 'key', group_name: 'LAN', color: '#f97316' },
-        { name: 'Mac Mini', hostname: '192.168.1.58', port: 22, username: 'sean', auth_method: 'key', group_name: 'LAN', color: '#eab308' },
+        { name: 'This Machine', hostname: '127.0.0.1', port: 22, username: 'sean', auth_method: 'key', is_local: true, group_name: 'Servers', color: '#22c55e' },
+        { name: 'openclawprod', hostname: '192.168.1.35', port: 22, username: 'sean', auth_method: 'key', group_name: 'Servers', color: '#0ea5e9' },
+        { name: 'claudevm', hostname: '192.168.1.150', port: 22, username: 'sean', auth_method: 'key', group_name: 'Servers', color: '#a855f7' },
+        { name: 'Gaming PC', hostname: '192.168.1.69', port: 22, username: 'sean', auth_method: 'key', group_name: 'Workstations', color: '#f97316' },
+        { name: 'Mac Mini', hostname: '192.168.1.58', port: 22, username: 'sean', auth_method: 'key', group_name: 'Workstations', color: '#eab308' },
+        { name: 'TrueNAS', hostname: '192.168.1.239', port: 22, username: 'root', auth_method: 'key', group_name: 'Infrastructure', color: '#06b6d4' },
+        { name: 'Home Assistant', hostname: '192.168.1.3', port: 22, username: 'root', auth_method: 'key', group_name: 'Infrastructure', color: '#10b981' },
     ];
     for (const h of defaults) {
         try { await apiFetch('/api/terminal/hosts', { method: 'POST', body: JSON.stringify(h) }); } catch(e) {}
@@ -492,47 +494,34 @@ async function addNewHost() {
 }
 
 // ======== RIGHT PANEL (always visible) ========
-function switchContextTab(panel) {
-    S.contextPanel = panel;
-    renderContext();
-}
-
 function renderContext() {
     const tabs = document.getElementById('context-tabs');
     const body = document.getElementById('context-body');
     if (!tabs || !body) return;
 
-    let tabHtml = '';
-    for (const [key, label] of [['ai','AI Chat'],['sftp','Files'],['health','Health']]) {
-        tabHtml += `<div class="context-tab${S.contextPanel===key?' active':''}" onclick="switchContextTab('${key}')">${label}</div>`;
-    }
-    tabs.innerHTML = tabHtml;
+    // Header — just Hex's identity, no tabs
+    tabs.innerHTML = `<div style="display:flex;align-items:center;gap:0.5rem;padding:0.5rem 0.75rem;width:100%">
+        <div style="width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,#22c55e,#0ea5e9);display:flex;align-items:center;justify-content:center;font-size:0.75rem;font-weight:700;color:#030712;flex-shrink:0">H</div>
+        <div style="flex:1">
+            <div style="font-size:0.8125rem;font-weight:600;color:#f3f4f6">Hex</div>
+            <div style="font-size:0.5625rem;color:#6b7280">Terminal &amp; DevOps AI</div>
+        </div>
+    </div>`;
 
-    if (S.contextPanel === 'ai') {
+    {
         body.innerHTML = `
             <div class="ai-messages" id="ai-messages">
-                <div class="ai-msg assistant">Ask me anything about the terminal — commands, errors, what to run next. I can see your terminal output for context.</div>
+                <div class="ai-msg assistant"><strong>Hex:</strong> I'm your terminal copilot. I can see what's on your screen — ask me to explain errors, suggest commands, debug issues, or walk you through any sysadmin task. What are you working on?</div>
             </div>
             <div class="ai-input-row">
-                <input id="ai-input" placeholder="Ask anything..." style="flex:1;padding:0.5rem 0.625rem;background:#030712;border:1px solid #374151;border-radius:0.375rem;color:#f3f4f6;font-size:0.8125rem;outline:none" onkeydown="if(event.key==='Enter')sendAiMsg()">
+                <input id="ai-input" placeholder="Ask Hex..." style="flex:1;padding:0.5rem 0.625rem;background:#030712;border:1px solid #374151;border-radius:0.375rem;color:#f3f4f6;font-size:0.8125rem;outline:none" onkeydown="if(event.key==='Enter')sendAiMsg()">
                 <button class="btn-primary" style="padding:0.5rem 0.75rem;font-size:0.75rem" onclick="sendAiMsg()">Send</button>
             </div>`;
-    } else if (S.contextPanel === 'sftp') {
-        body.innerHTML = `
-            <div style="display:flex;gap:0.375rem;margin-bottom:0.5rem">
-                <input id="sftp-path" value="${esc(S.sftpPath)}" style="flex:1;padding:0.25rem 0.5rem;background:#030712;border:1px solid #374151;border-radius:0.25rem;color:#f3f4f6;font-size:0.75rem;outline:none" onkeydown="if(event.key==='Enter')browseSftp()">
-                <button class="btn-secondary" style="padding:0.25rem 0.5rem;font-size:0.6875rem" onclick="browseSftp()">Go</button>
-            </div>
-            <div id="sftp-tree" style="font-size:0.75rem"></div>`;
-        browseSftp();
-    } else if (S.contextPanel === 'health') {
-        body.innerHTML = '<div style="color:#6b7280;font-size:0.8125rem">Loading health metrics...</div>';
-        loadHealth();
     }
 }
 
-// Init right panel on load — AI chat is default
-setTimeout(() => { S.contextPanel = 'ai'; renderContext(); }, 100);
+// Init right panel on load
+setTimeout(() => { renderContext(); }, 100);
 
 async function browseSftp() {
     const tab = S.tabs.find(t => t.id === S.activeTab);
@@ -605,24 +594,29 @@ async function sendAiMsg() {
         termContext = lines.join('\n');
     }
 
-    msgs.innerHTML += `<div style="margin-top:0.5rem;color:#f3f4f6;font-size:0.8125rem"><strong>You:</strong> ${esc(text)}</div>`;
-    msgs.innerHTML += `<div id="ai-response" style="margin-top:0.25rem;color:#9ca3af;font-size:0.8125rem">Thinking...</div>`;
+    msgs.innerHTML += `<div class="ai-msg user">${esc(text)}</div>`;
+    const thinkId = 'think-' + Date.now();
+    msgs.innerHTML += `<div class="ai-msg assistant" id="${thinkId}"><em style="color:#6b7280">Hex is thinking...</em></div>`;
     msgs.scrollTop = msgs.scrollHeight;
+
+    const hexSystem = `You are Hex, a sharp and concise DevOps/terminal AI assistant inside the Syntaur Coders module. You help with shell commands, debugging, system administration, networking, and infrastructure. Be direct and technical — no fluff. When you suggest commands, format them as code. You can see the user's recent terminal output below for context.`;
 
     try {
         const r = await apiFetch('/api/message', {
             method: 'POST',
             body: JSON.stringify({
-                message: `Terminal context (last output):\n\`\`\`\n${termContext}\n\`\`\`\n\nUser question: ${text}`,
+                message: `${hexSystem}\n\nTerminal context (last output):\n\`\`\`\n${termContext}\n\`\`\`\n\nUser: ${text}`,
                 agent: 'main',
             }),
         });
-        const resp = document.getElementById('ai-response');
-        if (resp) resp.innerHTML = `<strong>AI:</strong> ${esc(r.response || r.text || JSON.stringify(r))}`;
+        const resp = document.getElementById(thinkId);
+        const answer = r.response || r.text || JSON.stringify(r);
+        if (resp) resp.innerHTML = `<strong>Hex:</strong> ${esc(answer)}`;
     } catch(e) {
-        const resp = document.getElementById('ai-response');
-        if (resp) resp.innerHTML = `<span style="color:#ef4444">Error: ${esc(e.message||e)}</span>`;
+        const resp = document.getElementById(thinkId);
+        if (resp) resp.innerHTML = `<strong>Hex:</strong> <span style="color:#ef4444">Error — ${esc(e.message||e)}</span>`;
     }
+    msgs.scrollTop = msgs.scrollHeight;
 }
 
 // ======== HEALTH ========
