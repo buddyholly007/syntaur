@@ -90,34 +90,49 @@ const EXTRA_STYLE: &str = r##"
 const PAGE_JS: &str = r###"
 // ======== STATE ========
 const S = {
-    token: localStorage.getItem('syntaur_token') || '',
-    tabs: [],           // [{id, hostId, hostName, ws, term, fitAddon, status, panes}]
+    token: sessionStorage.getItem('syntaur_token') || '',
+    tabs: [],
     activeTab: null,
     hosts: [],
     snippets: [],
-    sidebarSection: 'hosts',  // hosts | snippets | recordings
-    contextPanel: 'hidden',   // hidden | ai | sftp | health
+    sidebarSection: 'hosts',
+    contextPanel: 'hidden',
     sftpPath: '/home/sean',
     sftpEntries: [],
 };
 
 // ======== INIT ========
 document.addEventListener('DOMContentLoaded', async () => {
-    // Get auth token from cookie or localStorage
     if (!S.token) {
-        const r = await fetch('/api/setup/status');
-        // If we can reach the API, we're on the same origin — try to get token
-        S.token = document.cookie.split(';').map(c=>c.trim()).find(c=>c.startsWith('token='))?.split('=')[1] || '';
+        window.location.href = '/';
+        return;
     }
     await loadHosts();
+    if (S.hosts.length === 0) {
+        await seedDefaultHosts();
+        await loadHosts();
+    }
     await loadSnippets();
     renderSidebar();
-    // Auto-create local session if no tabs
     if (S.tabs.length === 0 && S.hosts.length > 0) {
         const local = S.hosts.find(h => h.is_local);
         if (local) addTab(local.id, local.name);
+        else addTab(S.hosts[0].id, S.hosts[0].name);
     }
 });
+
+async function seedDefaultHosts() {
+    const defaults = [
+        { name: 'This Machine', hostname: '127.0.0.1', port: 22, username: 'sean', auth_method: 'key', is_local: true, group_name: 'LAN', color: '#22c55e' },
+        { name: 'openclawprod', hostname: '192.168.1.35', port: 22, username: 'sean', auth_method: 'key', group_name: 'LAN', color: '#0ea5e9' },
+        { name: 'claudevm', hostname: '192.168.1.150', port: 22, username: 'sean', auth_method: 'key', group_name: 'LAN', color: '#a855f7' },
+        { name: 'Gaming PC', hostname: '192.168.1.69', port: 22, username: 'sean', auth_method: 'key', group_name: 'LAN', color: '#f97316' },
+        { name: 'Mac Mini', hostname: '192.168.1.58', port: 22, username: 'sean', auth_method: 'key', group_name: 'LAN', color: '#eab308' },
+    ];
+    for (const h of defaults) {
+        try { await apiFetch('/api/terminal/hosts', { method: 'POST', body: JSON.stringify(h) }); } catch(e) {}
+    }
+}
 
 // ======== HOST MANAGEMENT ========
 async function loadHosts() {
