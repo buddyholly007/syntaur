@@ -68,7 +68,7 @@ pub struct LiveSession {
 
 pub enum SessionBackend {
     LocalPty {
-        master_fd: std::os::unix::io::RawFd,
+        master_fd: pty::RawFd,
         child_pid: u32,
     },
     Ssh {
@@ -77,7 +77,7 @@ pub enum SessionBackend {
 }
 
 impl SessionBackend {
-    pub fn master_fd(&self) -> Option<std::os::unix::io::RawFd> {
+    pub fn master_fd(&self) -> Option<pty::RawFd> {
         match self {
             Self::LocalPty { master_fd, .. } => Some(*master_fd),
             Self::Ssh { .. } => None,
