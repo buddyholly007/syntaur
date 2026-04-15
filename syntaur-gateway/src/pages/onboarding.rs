@@ -64,14 +64,39 @@ pub async fn render() -> Html<String> {
                             button onclick="savePersonality()"
                                 class="flex-1 bg-oc-600 hover:bg-oc-700 text-white font-medium py-2.5 rounded-lg transition-colors"
                                 id="ob-save-btn" { "Save & Continue" }
-                            button onclick="skipToFinish()"
+                            button onclick="goToDataStep()"
                                 class="flex-1 bg-gray-700 hover:bg-gray-600 text-white font-medium py-2.5 rounded-lg transition-colors" { "Skip" }
                         }
                     }
                 }
 
-                // Step 3: Done
-                div id="step-3" class="hidden text-center" {
+                // Step 3: Data location
+                div id="step-3" class="hidden" {
+                    div class="text-center mb-6" {
+                        h1 class="text-2xl font-bold" { "Where to Save Your Data" }
+                        p class="text-gray-400 text-sm mt-2" { "Choose where documents, uploads, and agent files are stored." }
+                    }
+                    div class="bg-gray-800 rounded-xl border border-gray-700 p-6 space-y-4" {
+                        div {
+                            label class="block text-sm font-medium text-gray-300 mb-1.5" { "Data Directory" }
+                            input type="text" id="ob-data-dir"
+                                class="w-full bg-gray-900 border border-gray-600 rounded-lg px-4 py-2.5 text-white placeholder-gray-400 focus:border-oc-500 outline-none"
+                                placeholder="Leave blank for default (~/.syntaur)";
+                            p class="text-xs text-gray-500 mt-1" {
+                                "Must be an absolute path. Your agent workspaces and uploaded documents will be stored here."
+                            }
+                        }
+                        div class="flex gap-3" {
+                            button onclick="saveDataLocation()"
+                                class="flex-1 bg-oc-600 hover:bg-oc-700 text-white font-medium py-2.5 rounded-lg transition-colors" { "Save & Finish" }
+                            button onclick="skipToFinal()"
+                                class="flex-1 bg-gray-700 hover:bg-gray-600 text-white font-medium py-2.5 rounded-lg transition-colors" { "Use Default" }
+                        }
+                    }
+                }
+
+                // Step 4: Done
+                div id="step-4" class="hidden text-center" {
                     div class="text-5xl mb-4" { "✓" }
                     h1 class="text-2xl font-bold" { "You're all set!" }
                     p class="text-gray-400 text-sm mt-2 mb-6" { "Your agent is ready. Start chatting on the dashboard." }
@@ -144,13 +169,30 @@ async function savePersonality() {
       body: JSON.stringify({ token, agent_id: aid, doc_type: 'preferences', title: 'Communication Preferences', content: prefs })
     });
   }
-  skipToFinish();
+  goToDataStep();
 }
 
-async function skipToFinish() {
-  await fetch('/api/me/onboarding/complete?token=' + encodeURIComponent(token), { method: 'POST' });
+function goToDataStep() {
   document.getElementById('step-2').classList.add('hidden');
   document.getElementById('step-3').classList.remove('hidden');
+}
+
+async function saveDataLocation() {
+  const dir = document.getElementById('ob-data-dir').value.trim();
+  if (dir) {
+    await fetch('/api/me/data-location', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, path: dir })
+    });
+  }
+  skipToFinal();
+}
+
+async function skipToFinal() {
+  await fetch('/api/me/onboarding/complete?token=' + encodeURIComponent(token), { method: 'POST' });
+  document.getElementById('step-3').classList.add('hidden');
+  document.getElementById('step-4').classList.remove('hidden');
 }
 
 // Check if already onboarded

@@ -1066,6 +1066,13 @@ const MIGRATIONS: &[&str] = &[
     -- Existing users are already onboarded
     UPDATE users SET onboarding_complete = 1;
     "#,
+
+    // Migration 30: Per-user data directory.
+    // Allows each user to choose where their uploads, agent workspaces,
+    // and personality docs are stored on disk.
+    r#"
+    ALTER TABLE users ADD COLUMN data_dir TEXT;
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

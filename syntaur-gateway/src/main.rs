@@ -1141,9 +1141,12 @@ async fn resolve_agent(state: &AppState, agent_id: &str, user_id: i64) -> Resolv
             let expanded = ws.replace("~", &std::env::var("HOME").unwrap_or_default());
             std::path::PathBuf::from(expanded)
         } else {
-            // Default: ~/.syntaur/users/<user_id>/agents/<agent_id>/
-            let data_dir = resolve_data_dir();
-            let ws = data_dir.join(format!("users/{}/agents/{}", user_id, agent_id));
+            // Use per-user data_dir if set, otherwise default
+            let base_dir = match state.users.get_data_dir(user_id).await {
+                Some(d) => std::path::PathBuf::from(d),
+                None => resolve_data_dir().join(format!("users/{}", user_id)),
+            };
+            let ws = base_dir.join(format!("agents/{}", agent_id));
             if let Err(e) = std::fs::create_dir_all(&ws) {
                 log::warn!("[agent] failed to create workspace {:?}: {}", ws, e);
             }
@@ -2580,7 +2583,8 @@ async fn handle_me(
     let user = state.users.get_user(user_id).await.ok().flatten();
     let agents = state.users.list_user_agents(user_id).await.unwrap_or_default();
     let sharing_mode = state.sharing_mode.read().await.clone();
-    let data_dir = resolve_data_dir().to_string_lossy().to_string();
+    let user_data_dir = state.users.get_data_dir(user_id).await;
+    let data_dir = user_data_dir.unwrap_or_else(|| resolve_data_dir().to_string_lossy().to_string());
     let onboarding_complete = state.users.is_onboarding_complete(user_id).await;
     Ok(Json(serde_json::json!({
         "user": user,
@@ -2906,6 +2910,118 @@ async fn handle_onboarding_complete(
     let principal = resolve_principal(&state, token).await?;
     let _ = state.users.set_onboarding_complete(principal.user_id()).await;
     Ok(Json(serde_json::json!({"ok": true})))
+}
+
+// ── Data location migration ───────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct DataLocationRequest {
+    token: String,
+    path: String,
+}
+
+async fn handle_data_location_change(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<DataLocationRequest>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let principal = resolve_principal(&state, &req.token).await?;
+    let user_id = principal.user_id();
+    let new_dir = std::path::PathBuf::from(&req.path);
+
+    // Validate: path must be absolute
+    if !new_dir.is_absolute() {
+        return Ok(Json(serde_json::json!({"ok": false, "error": "Path must be absolute"})));
+    }
+
+    // Create the new directory
+    if let Err(e) = std::fs::create_dir_all(&new_dir) {
+        return Ok(Json(serde_json::json!({"ok": false, "error": format!("Cannot create directory: {e}")})));
+    }
+
+    // Determine old data location
+    let system_data_dir = resolve_data_dir();
+    let old_user_dir = state.users.get_data_dir(user_id).await
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| system_data_dir.join(format!("users/{user_id}")));
+
+    let mut migrated_count = 0u64;
+
+    // Migrate user agent workspaces
+    let old_agents = old_user_dir.join("agents");
+    let new_agents = new_dir.join("agents");
+    if old_agents.is_dir() {
+        if let Err(e) = std::fs::create_dir_all(&new_agents) {
+            log::warn!("[data-location] create agents dir: {e}");
+        } else {
+            migrated_count += migrate_dir_contents(&old_agents, &new_agents);
+        }
+    }
+
+    // Migrate user uploads (knowledge files)
+    let old_uploads = system_data_dir.join("uploads/knowledge");
+    let new_uploads = new_dir.join("uploads/knowledge");
+    // Only migrate if user had their own upload dir, not the shared one
+    let user_upload_dir = old_user_dir.join("uploads/knowledge");
+    if user_upload_dir.is_dir() {
+        if let Err(e) = std::fs::create_dir_all(&new_uploads) {
+            log::warn!("[data-location] create uploads dir: {e}");
+        } else {
+            migrated_count += migrate_dir_contents(&user_upload_dir, &new_uploads);
+        }
+    }
+
+    // Save new data_dir
+    if let Err(e) = state.users.set_data_dir(user_id, &req.path).await {
+        return Ok(Json(serde_json::json!({"ok": false, "error": e})));
+    }
+
+    info!(
+        "[data-location] user {} moved data to {} ({} files migrated)",
+        user_id, req.path, migrated_count
+    );
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "migrated": migrated_count > 0,
+        "files_moved": migrated_count,
+        "new_path": req.path,
+    })))
+}
+
+/// Move all files and subdirectories from src to dst. Returns count of files moved.
+fn migrate_dir_contents(src: &std::path::Path, dst: &std::path::Path) -> u64 {
+    let mut count = 0u64;
+    let entries = match std::fs::read_dir(src) {
+        Ok(e) => e,
+        Err(_) => return 0,
+    };
+    for entry in entries.flatten() {
+        let src_path = entry.path();
+        let name = match entry.file_name().into_string() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        let dst_path = dst.join(&name);
+
+        if src_path.is_dir() {
+            let _ = std::fs::create_dir_all(&dst_path);
+            count += migrate_dir_contents(&src_path, &dst_path);
+            // Remove empty source dir after migration
+            let _ = std::fs::remove_dir(&src_path);
+        } else {
+            // Copy then remove (safer than rename across filesystems)
+            match std::fs::copy(&src_path, &dst_path) {
+                Ok(_) => {
+                    let _ = std::fs::remove_file(&src_path);
+                    count += 1;
+                }
+                Err(e) => {
+                    log::warn!("[data-location] copy {:?} -> {:?}: {}", src_path, dst_path, e);
+                }
+            }
+        }
+    }
+    count
 }
 
 // ── Tool hooks endpoints (4features Stage 2) ──────────────────────────────
@@ -4733,6 +4849,7 @@ async fn main() {
         // Onboarding
         .route("/api/me/onboarding", get(handle_onboarding_status))
         .route("/api/me/onboarding/complete", post(handle_onboarding_complete))
+        .route("/api/me/data-location", axum::routing::put(handle_data_location_change))
         // v5 Item 4: OAuth2 authorization_code endpoints
         .route("/api/oauth/start", post(handle_oauth_start))
         .route("/api/oauth/callback", get(handle_oauth_callback))

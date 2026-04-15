@@ -633,6 +633,29 @@ impl UserStore {
         Ok(())
     }
 
+    // ── data location ─────────────────────────────────────────────────
+
+    pub async fn get_data_dir(&self, user_id: i64) -> Option<String> {
+        let db = self.db.lock().await;
+        db.query_row(
+            "SELECT data_dir FROM users WHERE id = ?",
+            params![user_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+    }
+
+    pub async fn set_data_dir(&self, user_id: i64, path: &str) -> Result<(), String> {
+        let db = self.db.lock().await;
+        db.execute(
+            "UPDATE users SET data_dir = ? WHERE id = ?",
+            params![path, user_id],
+        )
+        .map_err(|e| format!("set_data_dir: {e}"))?;
+        Ok(())
+    }
+
     // ── sharing grants ─────────────────────────────────────────────────
 
     /// Get the list of user_ids whose data `requesting_user_id` can see
