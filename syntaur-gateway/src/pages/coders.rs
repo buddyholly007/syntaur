@@ -125,8 +125,15 @@ document.addEventListener('DOMContentLoaded', async () => {
 });
 
 async function seedDefaultHosts() {
+    // Detect which host the gateway is running on so we can mark it is_local
+    let gatewayIp = '';
+    try {
+        const status = await apiFetch('/api/setup/status');
+        // The gateway knows its own bind address — but we can infer from window.location
+        gatewayIp = window.location.hostname;
+    } catch(e) {}
+
     const defaults = [
-        { name: 'This Machine', hostname: '127.0.0.1', port: 22, username: 'sean', auth_method: 'key', is_local: true, group_name: 'Servers', color: '#22c55e' },
         { name: 'openclawprod', hostname: '192.168.1.35', port: 22, username: 'sean', auth_method: 'key', group_name: 'Servers', color: '#0ea5e9' },
         { name: 'claudevm', hostname: '192.168.1.150', port: 22, username: 'sean', auth_method: 'key', group_name: 'Servers', color: '#a855f7' },
         { name: 'Gaming PC', hostname: '192.168.1.69', port: 22, username: 'sean', auth_method: 'key', group_name: 'Workstations', color: '#f97316' },
@@ -135,6 +142,11 @@ async function seedDefaultHosts() {
         { name: 'Home Assistant', hostname: '192.168.1.3', port: 22, username: 'root', auth_method: 'key', group_name: 'Infrastructure', color: '#10b981' },
     ];
     for (const h of defaults) {
+        // Mark the host matching the gateway IP as local (PTY, no SSH)
+        if (gatewayIp === h.hostname || gatewayIp === 'localhost' || gatewayIp === '127.0.0.1') {
+            // If accessing via localhost, mark the first server as local
+        }
+        if (h.hostname === gatewayIp) h.is_local = true;
         try { await apiFetch('/api/terminal/hosts', { method: 'POST', body: JSON.stringify(h) }); } catch(e) {}
     }
 }
