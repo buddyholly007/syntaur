@@ -45,6 +45,7 @@ pub struct ExternalDoc {
     pub body: String,          // full text content
     pub updated_at: DateTime<Utc>,
     pub metadata: Value,       // arbitrary JSON metadata
+    pub agent_id: String,      // owning agent ("shared" = visible to all)
 }
 
 /// Single chunk of an indexed document.
@@ -184,7 +185,7 @@ impl Indexer {
                 tx.execute("DELETE FROM chunks WHERE doc_id = ?", params![id])
                     .map_err(|e| format!("delete chunks: {}", e))?;
                 tx.execute(
-                    "UPDATE documents SET title = ?, body = ?, updated_at = ?, indexed_at = ?, content_hash = ?, metadata = ? WHERE id = ?",
+                    "UPDATE documents SET title = ?, body = ?, updated_at = ?, indexed_at = ?, content_hash = ?, metadata = ?, agent_id = ? WHERE id = ?",
                     params![
                         &doc.title,
                         &doc.body,
@@ -192,6 +193,7 @@ impl Indexer {
                         Utc::now().timestamp(),
                         &hash,
                         &metadata_str,
+                        &doc.agent_id,
                         id
                     ],
                 )
@@ -199,7 +201,7 @@ impl Indexer {
                 id
             } else {
                 tx.execute(
-                    "INSERT INTO documents (source, external_id, title, body, updated_at, indexed_at, content_hash, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO documents (source, external_id, title, body, updated_at, indexed_at, content_hash, metadata, agent_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
                         &doc.source,
                         &doc.external_id,
@@ -209,6 +211,7 @@ impl Indexer {
                         Utc::now().timestamp(),
                         &hash,
                         &metadata_str,
+                        &doc.agent_id,
                     ],
                 )
                 .map_err(|e| format!("insert doc: {}", e))?;
@@ -349,14 +352,18 @@ impl Indexer {
     /// Run hybrid search: BM25 (FTS5) + brute-force cosine on embeddings,
     /// fused with Reciprocal Rank Fusion. Falls back to BM25-only if no
     /// embedder is wired or query embedding fails.
+    ///
+    /// `agent_ids`: if `Some`, restrict results to documents owned by any of
+    /// these agents. Pass `None` to search everything (main agent default).
     pub async fn search_hybrid(
         &self,
         query: String,
         top_k: usize,
         source_filter: Option<String>,
+        agent_ids: Option<Vec<String>>,
     ) -> Result<Vec<SearchHit>, String> {
         // Always run BM25 first — needed for snippets and as fallback
-        let bm25_hits = self.search(query.clone(), top_k * 3, source_filter.clone()).await?;
+        let bm25_hits = self.search(query.clone(), top_k * 3, source_filter.clone(), agent_ids.clone()).await?;
 
         // If no embedder, just return BM25 (truncated)
         let embedder = match &self.embedder {
@@ -386,9 +393,10 @@ impl Indexer {
         // Brute-force cosine search
         let db = Arc::clone(&self.db);
         let src_filter = source_filter.clone();
+        let agent_filter = agent_ids.clone();
         let cosine_hits: Vec<embed::VectorHit> = match tokio::task::spawn_blocking(move || -> Result<Vec<embed::VectorHit>, String> {
             let conn = db.blocking_lock();
-            embed::brute_force_search(&conn, &query_vec, top_k * 3, src_filter.as_deref())
+            embed::brute_force_search(&conn, &query_vec, top_k * 3, src_filter.as_deref(), agent_filter.as_deref())
                 .map_err(|e| format!("vec search: {}", e))
         })
         .await
@@ -483,36 +491,55 @@ impl Indexer {
     /// Run a full-text search across the index. Returns up to `top_k` hits
     /// ordered by FTS5 BM25 (lower raw score = better match; we negate so
     /// higher returned `rank` is better).
+    ///
+    /// `agent_ids`: if `Some`, restrict to documents owned by those agents.
     pub async fn search(
         &self,
         query: String,
         top_k: usize,
         source_filter: Option<String>,
+        agent_ids: Option<Vec<String>>,
     ) -> Result<Vec<SearchHit>, String> {
         let db = Arc::clone(&self.db);
         tokio::task::spawn_blocking(move || -> Result<Vec<SearchHit>, String> {
             let conn = db.blocking_lock();
-            search::query(&conn, &query, top_k, source_filter.as_deref())
+            search::query(&conn, &query, top_k, source_filter.as_deref(), agent_ids.as_deref())
         })
         .await
         .map_err(|e| format!("spawn_blocking: {}", e))?
     }
 
     /// Quick stats for the /stats endpoint and startup logging.
-    pub async fn stats(&self) -> IndexStats {
+    /// `agent_ids`: if `Some`, restrict counts to those agents.
+    pub async fn stats(&self, agent_ids: Option<Vec<String>>) -> IndexStats {
         let db = Arc::clone(&self.db);
         tokio::task::spawn_blocking(move || -> IndexStats {
             let conn = db.blocking_lock();
-            let documents: i64 = conn
-                .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
-                .unwrap_or(0);
-            let chunks: i64 = conn
-                .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
-                .unwrap_or(0);
-            let sources: i64 = conn
-                .query_row("SELECT COUNT(DISTINCT source) FROM documents", [], |r| r.get(0))
-                .unwrap_or(0);
-            IndexStats { documents, chunks, sources }
+            if let Some(ref ids) = agent_ids {
+                let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                let params_dyn: Vec<&dyn rusqlite::ToSql> = ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+                let documents: i64 = conn
+                    .query_row(&format!("SELECT COUNT(*) FROM documents WHERE agent_id IN ({placeholders})"), params_dyn.as_slice(), |r| r.get(0))
+                    .unwrap_or(0);
+                let chunks: i64 = conn
+                    .query_row(&format!("SELECT COUNT(*) FROM chunks WHERE doc_id IN (SELECT id FROM documents WHERE agent_id IN ({placeholders}))"), params_dyn.as_slice(), |r| r.get(0))
+                    .unwrap_or(0);
+                let sources: i64 = conn
+                    .query_row(&format!("SELECT COUNT(DISTINCT source) FROM documents WHERE agent_id IN ({placeholders})"), params_dyn.as_slice(), |r| r.get(0))
+                    .unwrap_or(0);
+                IndexStats { documents, chunks, sources }
+            } else {
+                let documents: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
+                    .unwrap_or(0);
+                let chunks: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
+                    .unwrap_or(0);
+                let sources: i64 = conn
+                    .query_row("SELECT COUNT(DISTINCT source) FROM documents", [], |r| r.get(0))
+                    .unwrap_or(0);
+                IndexStats { documents, chunks, sources }
+            }
         })
         .await
         .unwrap_or_default()
@@ -563,22 +590,39 @@ impl Indexer {
 
     /// Per-source breakdown for the /knowledge page. Reads the cursor JSON
     /// blob to surface the last refresh timestamp.
-    pub async fn stats_per_source(&self) -> Vec<PerSourceStat> {
+    /// `agent_ids`: if `Some`, restrict to documents owned by those agents.
+    pub async fn stats_per_source(&self, agent_ids: Option<Vec<String>>) -> Vec<PerSourceStat> {
         let db = Arc::clone(&self.db);
         tokio::task::spawn_blocking(move || -> Vec<PerSourceStat> {
             let conn = db.blocking_lock();
             let mut out = Vec::new();
-            let mut stmt = match conn.prepare(
-                "SELECT d.source, COUNT(*) as docs, COALESCE(MAX(d.indexed_at), 0) as last_indexed, cs.cursor
+            let (sql, dyn_params) = if let Some(ref ids) = agent_ids {
+                let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                (format!(
+                    "SELECT d.source, COUNT(*) as docs, COALESCE(MAX(d.indexed_at), 0) as last_indexed, cs.cursor
+                     FROM documents d
+                     LEFT JOIN connector_state cs ON cs.source = d.source
+                     WHERE d.agent_id IN ({placeholders})
+                     GROUP BY d.source
+                     ORDER BY d.source"),
+                 ids.iter().map(|s| s.clone()).collect::<Vec<String>>())
+            } else {
+                ("SELECT d.source, COUNT(*) as docs, COALESCE(MAX(d.indexed_at), 0) as last_indexed, cs.cursor
                  FROM documents d
                  LEFT JOIN connector_state cs ON cs.source = d.source
                  GROUP BY d.source
-                 ORDER BY d.source",
-            ) {
+                 ORDER BY d.source".to_string(),
+                 Vec::new())
+            };
+            let mut stmt = match conn.prepare(&sql) {
                 Ok(s) => s,
                 Err(_) => return out,
             };
-            let rows = stmt.query_map([], |r| {
+            let params_dyn: Vec<&dyn rusqlite::ToSql> = dyn_params
+                .iter()
+                .map(|s| s as &dyn rusqlite::ToSql)
+                .collect();
+            let rows = stmt.query_map(params_dyn.as_slice(), |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, i64>(1)?,
@@ -620,29 +664,43 @@ impl Indexer {
 
     /// List recently indexed documents, newest first. Used by the
     /// /knowledge page's "recently indexed" card.
+    /// `agent_ids`: if `Some`, restrict to documents owned by those agents.
     pub async fn list_recent_documents(
         &self,
         source_filter: Option<String>,
         limit: usize,
+        agent_ids: Option<Vec<String>>,
     ) -> Vec<DocSummary> {
         let db = Arc::clone(&self.db);
         tokio::task::spawn_blocking(move || -> Vec<DocSummary> {
             let conn = db.blocking_lock();
-            let sql = if source_filter.is_some() {
-                "SELECT d.id, d.source, d.external_id, d.title, d.indexed_at,
-                        (SELECT COUNT(*) FROM chunks WHERE doc_id = d.id) AS chunks
-                 FROM documents d
-                 WHERE d.source = ?
-                 ORDER BY d.indexed_at DESC
-                 LIMIT ?"
+
+            // Build WHERE clauses dynamically
+            let mut conditions: Vec<String> = Vec::new();
+            let mut bind_values: Vec<String> = Vec::new();
+            if let Some(ref src) = source_filter {
+                conditions.push("d.source = ?".to_string());
+                bind_values.push(src.clone());
+            }
+            if let Some(ref ids) = agent_ids {
+                let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                conditions.push(format!("d.agent_id IN ({placeholders})"));
+                bind_values.extend(ids.iter().cloned());
+            }
+            let where_clause = if conditions.is_empty() {
+                String::new()
             } else {
+                format!("WHERE {}", conditions.join(" AND "))
+            };
+            let sql = format!(
                 "SELECT d.id, d.source, d.external_id, d.title, d.indexed_at,
                         (SELECT COUNT(*) FROM chunks WHERE doc_id = d.id) AS chunks
                  FROM documents d
+                 {where_clause}
                  ORDER BY d.indexed_at DESC
                  LIMIT ?"
-            };
-            let mut stmt = match conn.prepare(sql) {
+            );
+            let mut stmt = match conn.prepare(&sql) {
                 Ok(s) => s,
                 Err(_) => return Vec::new(),
             };
@@ -661,11 +719,21 @@ impl Indexer {
                     chunks: r.get(5)?,
                 })
             };
-            let rows = if let Some(src) = source_filter {
-                stmt.query_map(params![src, limit as i64], map_row)
-            } else {
-                stmt.query_map(params![limit as i64], map_row)
-            };
+            bind_values.push((limit as i64).to_string());
+            // We need to bind as the correct types. Since all our binds are strings
+            // except limit (which is stringified), we use rusqlite::types::Value.
+            let mut params_dyn: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+            if let Some(ref src) = source_filter {
+                params_dyn.push(Box::new(src.clone()));
+            }
+            if let Some(ref ids) = agent_ids {
+                for id in ids {
+                    params_dyn.push(Box::new(id.clone()));
+                }
+            }
+            params_dyn.push(Box::new(limit as i64));
+            let params_ref: Vec<&dyn rusqlite::ToSql> = params_dyn.iter().map(|b| b.as_ref()).collect();
+            let rows = stmt.query_map(params_ref.as_slice(), map_row);
             rows.map(|iter| iter.flatten().collect::<Vec<_>>())
                 .unwrap_or_default()
         })

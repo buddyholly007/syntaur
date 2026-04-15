@@ -113,6 +113,7 @@ impl PaperlessConnector {
                         "document_type": d.document_type,
                         "archive_serial_number": d.archive_serial_number,
                     }),
+                    agent_id: "shared".to_string(),
                 });
             }
             match parsed.next {

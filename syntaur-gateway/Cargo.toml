@@ -39,6 +39,12 @@ serde_yaml = "0.9"
 # PDF text extraction for the uploaded_files RAG connector.
 pdf-extract = "0.7"
 
+# Document format extractors for RAG knowledge indexing.
+calamine = "0.26"       # XLSX/XLS/ODS spreadsheets
+quick-xml = "0.37"      # DOCX/PPTX/ODT/EPUB XML parsing
+zip = "2"               # OOXML/ODF/EPUB are ZIP archives
+mailparse = "0.15"      # RFC 5322 .eml email parsing
+
 # Phase 0 voice skill router: pure-Rust ONNX embeddings for find_tool dispatch.
 # BGE-small-en-v1.5 (~30MB) is downloaded into the cache dir on first init.
 # Uses CPU; 384-dim embeddings; ~50ms per query on a desktop Intel.

@@ -1,7 +1,8 @@
 //! `internal_search` — query the indexed knowledge base.
 //!
-//! First trait-based tool. Uses the FTS5 index built by the connector
-//! framework to return cited results from across all indexed sources.
+//! Per-agent scoping: non-main agents search only their own knowledge +
+//! shared documents. The main agent searches everything by default but can
+//! restrict to a specific agent's knowledge via the `agent` parameter.
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -13,6 +14,7 @@ pub struct InternalSearchTool;
 const TOOL_NAME: &str = "internal_search";
 const DEFAULT_TOP_K: usize = 8;
 const MAX_TOP_K: usize = 25;
+const MAIN_AGENT_ID: &str = "main";
 
 #[async_trait]
 impl Tool for InternalSearchTool {
@@ -25,18 +27,18 @@ impl Tool for InternalSearchTool {
             "type": "function",
             "function": {
                 "name": TOOL_NAME,
-                "description": "Search the local knowledge index across all indexed sources \
-                    (agent workspaces, etc.). Returns ranked snippets with citations. \
-                    Use this BEFORE asking the user about something they may have already \
-                    written down. Prefer this over the basic `memory_read` tool when you \
-                    need cross-workspace or cross-source recall.",
+                "description": "Search the local knowledge index. Each agent has its own \
+                    knowledge base plus access to shared documents. The main agent can \
+                    search across all agents' knowledge. Returns ranked snippets with \
+                    citations. Use this BEFORE asking the user about something they may \
+                    have already written down.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
                             "description": "Free-text search query. Will be tokenized; \
-                                supports multi-word AND search."
+                                supports multi-word OR search."
                         },
                         "top_k": {
                             "type": "integer",
@@ -46,6 +48,11 @@ impl Tool for InternalSearchTool {
                             "type": "string",
                             "description": "Optional: restrict results to a single connector \
                                 source (e.g. 'workspace_files'). Omit to search everything."
+                        },
+                        "agent": {
+                            "type": "string",
+                            "description": "Optional (main agent only): restrict to a \
+                                specific agent's knowledge. Omit to search all agents."
                         }
                     },
                     "required": ["query"]
@@ -81,8 +88,22 @@ impl Tool for InternalSearchTool {
             .and_then(|v| v.as_str())
             .map(String::from);
 
+        // Per-agent scoping:
+        // - Main agent: searches all by default, or a specific agent if requested
+        // - Other agents: always scoped to own agent_id + "shared"
+        let agent_ids = if ctx.agent_id == MAIN_AGENT_ID {
+            // Main agent can optionally restrict to a specific agent
+            args.get("agent")
+                .and_then(|v| v.as_str())
+                .map(|a| vec![a.to_string(), "shared".to_string()])
+            // None = search everything
+        } else {
+            // Non-main agents: own knowledge + shared
+            Some(vec![ctx.agent_id.to_string(), "shared".to_string()])
+        };
+
         let hits = indexer
-            .search_hybrid(query.clone(), top_k, source_filter.clone())
+            .search_hybrid(query.clone(), top_k, source_filter.clone(), agent_ids.clone())
             .await?;
 
         if hits.is_empty() {
@@ -92,8 +113,6 @@ impl Tool for InternalSearchTool {
             )));
         }
 
-        // Format hits as markdown for the LLM. Citations duplicate this in
-        // structured form so future renderers can show them properly.
         let mut content = format!(
             "# Search results for: {}\n\n{} hit(s)\n\n",
             query,
@@ -126,6 +145,7 @@ impl Tool for InternalSearchTool {
             structured: Some(json!({
                 "query": query,
                 "source_filter": source_filter,
+                "agent_scope": agent_ids,
                 "hit_count": hits.len(),
             })),
         })

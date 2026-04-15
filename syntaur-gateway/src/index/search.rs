@@ -1,6 +1,6 @@
 //! FTS5 query execution and result shaping.
 
-use rusqlite::{params, Connection};
+use rusqlite::Connection;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -14,26 +14,38 @@ pub struct SearchHit {
     pub chunk_ord: i64,
 }
 
-/// Run an FTS5 query. We use the BM25 default ranking and `snippet()` to
-/// produce a highlighted excerpt around the match.
+/// Run an FTS5 query with optional source and agent filtering.
 ///
-/// FTS5 BM25 returns more-negative values for better matches (it's a relevance
-/// score, not a similarity). We negate so the returned `rank` is monotonically
-/// "higher = better" which is more conventional for callers.
+/// `agent_ids`: if `Some`, restrict to documents owned by those agents.
 pub fn query(
     conn: &Connection,
     user_query: &str,
     top_k: usize,
     source_filter: Option<&str>,
+    agent_ids: Option<&[String]>,
 ) -> Result<Vec<SearchHit>, String> {
-    // Sanitize user query for FTS5: escape double quotes and wrap in quotes
-    // to make it a phrase query (avoids syntax errors from arbitrary user input).
-    // Power users can pass FTS5 syntax by setting source_filter to "raw:" prefix
-    // (not implemented for now — keep simple).
     let sanitized = sanitize_fts_query(user_query);
 
-    let sql = if source_filter.is_some() {
-        // Join filter on documents.source
+    // Build WHERE clause dynamically
+    let mut conditions = vec!["chunks_fts MATCH ?".to_string()];
+    let mut bind_values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    bind_values.push(Box::new(sanitized));
+
+    if let Some(src) = source_filter {
+        conditions.push("d.source = ?".to_string());
+        bind_values.push(Box::new(src.to_string()));
+    }
+    if let Some(ids) = agent_ids {
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        conditions.push(format!("d.agent_id IN ({placeholders})"));
+        for id in ids {
+            bind_values.push(Box::new(id.clone()));
+        }
+    }
+    bind_values.push(Box::new(top_k as i64));
+
+    let where_clause = conditions.join(" AND ");
+    let sql = format!(
         r#"
         SELECT
             d.source,
@@ -46,71 +58,32 @@ pub fn query(
         FROM chunks_fts
         JOIN chunks c ON c.id = chunks_fts.rowid
         JOIN documents d ON d.id = c.doc_id
-        WHERE chunks_fts MATCH ?
-          AND d.source = ?
+        WHERE {where_clause}
         ORDER BY rank
         LIMIT ?
         "#
-    } else {
-        r#"
-        SELECT
-            d.source,
-            d.external_id,
-            d.title,
-            snippet(chunks_fts, 0, '<<', '>>', '...', 32) AS excerpt,
-            chunks_fts.rank AS rank,
-            c.doc_id AS doc_id,
-            c.ord AS chunk_ord
-        FROM chunks_fts
-        JOIN chunks c ON c.id = chunks_fts.rowid
-        JOIN documents d ON d.id = c.doc_id
-        WHERE chunks_fts MATCH ?
-        ORDER BY rank
-        LIMIT ?
-        "#
-    };
+    );
 
     let mut stmt = conn
-        .prepare(sql)
+        .prepare(&sql)
         .map_err(|e| format!("prepare search: {}", e))?;
 
-    let rows: Vec<SearchHit> = if let Some(src) = source_filter {
-        stmt.query_map(
-            params![&sanitized, src, top_k as i64],
-            |r| {
-                Ok(SearchHit {
-                    source: r.get(0)?,
-                    external_id: r.get(1)?,
-                    title: r.get(2)?,
-                    snippet: r.get(3)?,
-                    rank: -r.get::<_, f64>(4)?, // negate so higher = better
-                    doc_id: r.get(5)?,
-                    chunk_ord: r.get(6)?,
-                })
-            },
-        )
+    let params_ref: Vec<&dyn rusqlite::ToSql> = bind_values.iter().map(|b| b.as_ref()).collect();
+    let rows: Vec<SearchHit> = stmt
+        .query_map(params_ref.as_slice(), |r| {
+            Ok(SearchHit {
+                source: r.get(0)?,
+                external_id: r.get(1)?,
+                title: r.get(2)?,
+                snippet: r.get(3)?,
+                rank: -r.get::<_, f64>(4)?, // negate so higher = better
+                doc_id: r.get(5)?,
+                chunk_ord: r.get(6)?,
+            })
+        })
         .map_err(|e| format!("query: {}", e))?
         .filter_map(Result::ok)
-        .collect()
-    } else {
-        stmt.query_map(
-            params![&sanitized, top_k as i64],
-            |r| {
-                Ok(SearchHit {
-                    source: r.get(0)?,
-                    external_id: r.get(1)?,
-                    title: r.get(2)?,
-                    snippet: r.get(3)?,
-                    rank: -r.get::<_, f64>(4)?,
-                    doc_id: r.get(5)?,
-                    chunk_ord: r.get(6)?,
-                })
-            },
-        )
-        .map_err(|e| format!("query: {}", e))?
-        .filter_map(Result::ok)
-        .collect()
-    };
+        .collect();
 
     Ok(rows)
 }
@@ -121,9 +94,7 @@ pub fn query(
 /// the cleaned tokens in double quotes, and OR-join them. The OR semantics
 /// (vs FTS5 default AND) is intentional: with BM25 ranking, OR returns
 /// documents that match ANY term ordered by how many terms match and how
-/// rare those terms are. That is the right behavior for an LLM-callable
-/// search tool — strict AND fails when one of the LLM's words happens not
-/// to appear, even if the rest of the query is highly relevant.
+/// rare those terms are.
 ///
 /// Tokens shorter than 2 chars are dropped.
 fn sanitize_fts_query(input: &str) -> String {

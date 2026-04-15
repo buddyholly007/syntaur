@@ -156,6 +156,7 @@ impl BlueskyConnector {
                         "is_reply": item.reply.is_some(),
                         "is_repost": item.reason.is_some(),
                     }),
+                    agent_id: "shared".to_string(),
                 });
             }
             cursor = parsed.cursor;

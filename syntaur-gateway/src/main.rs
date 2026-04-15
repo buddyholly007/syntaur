@@ -1812,8 +1812,12 @@ async fn handle_knowledge_stats(
         Some(i) => i,
         None => return Ok(Json(serde_json::json!({"error": "indexer not available"}))),
     };
-    let overall = indexer.stats().await;
-    let per_source = indexer.stats_per_source().await;
+    let agent_ids = params
+        .get("agent")
+        .filter(|s| !s.is_empty())
+        .map(|a| vec![a.clone(), "shared".to_string()]);
+    let overall = indexer.stats(agent_ids.clone()).await;
+    let per_source = indexer.stats_per_source(agent_ids).await;
     Ok(Json(serde_json::json!({
         "documents": overall.documents,
         "chunks": overall.chunks,
@@ -1845,7 +1849,11 @@ async fn handle_knowledge_search(
         .get("source")
         .filter(|s| !s.is_empty())
         .map(String::from);
-    match indexer.search_hybrid(q_text.clone(), k, source).await {
+    let agent_ids = params
+        .get("agent")
+        .filter(|s| !s.is_empty())
+        .map(|a| vec![a.clone(), "shared".to_string()]);
+    match indexer.search_hybrid(q_text.clone(), k, source, agent_ids).await {
         Ok(hits) => Ok(Json(serde_json::json!({ "hits": hits }))),
         Err(e) => Ok(Json(serde_json::json!({"error": e}))),
     }
@@ -1870,7 +1878,11 @@ async fn handle_knowledge_docs(
         .and_then(|v| v.parse().ok())
         .unwrap_or(25)
         .clamp(1, 200);
-    let docs = indexer.list_recent_documents(source, limit).await;
+    let agent_ids = params
+        .get("agent")
+        .filter(|s| !s.is_empty())
+        .map(|a| vec![a.clone(), "shared".to_string()]);
+    let docs = indexer.list_recent_documents(source, limit, agent_ids).await;
     Ok(Json(serde_json::json!({ "documents": docs })))
 }
 
@@ -1989,9 +2001,11 @@ async fn handle_knowledge_upload(
         None => return Ok(Json(serde_json::json!({"ok": false, "error": "indexer not available"}))),
     };
 
-    // Pull the token field first (multipart field order isn't guaranteed,
-    // so we scan all fields and keep both token + file bytes).
+    // Pull the token, agent_id, and return_text fields (multipart field order
+    // isn't guaranteed, so we scan all fields).
     let mut token: Option<String> = None;
+    let mut agent_id: String = "shared".to_string();
+    let mut return_text = false;
     let mut file_bytes: Option<(String, Vec<u8>)> = None; // (original filename, bytes)
 
     while let Ok(Some(field)) = multipart.next_field().await {
@@ -1999,6 +2013,16 @@ async fn handle_knowledge_upload(
         if name == "token" {
             if let Ok(text) = field.text().await {
                 token = Some(text);
+            }
+        } else if name == "agent_id" {
+            if let Ok(text) = field.text().await {
+                if !text.is_empty() {
+                    agent_id = text;
+                }
+            }
+        } else if name == "return_text" {
+            if let Ok(text) = field.text().await {
+                return_text = text == "1" || text == "true";
             }
         } else if name == "file" {
             let filename = field
@@ -2078,7 +2102,7 @@ async fn handle_knowledge_upload(
     );
 
     // Extract + ingest synchronously so the UI can report chunk count.
-    let doc = match connectors::sources::uploaded_files::file_to_doc(&target) {
+    let mut doc = match connectors::sources::uploaded_files::file_to_doc(&target) {
         Ok(Some(d)) => d,
         Ok(None) => {
             return Ok(Json(serde_json::json!({
@@ -2093,7 +2117,9 @@ async fn handle_knowledge_upload(
             })))
         }
     };
+    doc.agent_id = agent_id;
     let body_len = doc.body.len();
+    let extracted_text = if return_text { Some(doc.body.clone()) } else { None };
     // Rough chunk count: matches Indexer::chunk_text(800, 150).
     let approx_chunks = (body_len / 650).max(1);
     if let Err(e) = indexer.put_document(doc).await {
@@ -2106,13 +2132,17 @@ async fn handle_knowledge_upload(
         "[knowledge] uploaded {} ({} bytes, ~{} chunks) -> {}",
         orig_name, body_len, approx_chunks, unique_name
     );
-    Ok(Json(serde_json::json!({
+    let mut resp = serde_json::json!({
         "ok": true,
         "filename": orig_name,
         "bytes": body_len,
         "chunks": approx_chunks,
         "external_id": unique_name,
-    })))
+    });
+    if let Some(text) = extracted_text {
+        resp["extracted_text"] = serde_json::Value::String(text);
+    }
+    Ok(Json(resp))
 }
 
 async fn handle_research_recent(
@@ -3198,7 +3228,7 @@ async fn main() {
     let index_path = PathBuf::from(format!("{}/index.db", data_dir_str));
     let indexer: Option<Arc<index::Indexer>> = match index::Indexer::open(index_path.clone()) {
         Ok(idx) => {
-            let stats = idx.stats().await;
+            let stats = idx.stats(None).await;
             info!(
                 "  Indexer: {} docs, {} chunks across {} sources",
                 stats.documents, stats.chunks, stats.sources
@@ -4135,7 +4165,7 @@ async fn main() {
         .route("/music", get(pages::music::render))
         .route("/voice-setup", get(pages::voice_setup::render))
         .route("/settings", get(pages::settings::render))
-        .route("/tax", get(setup::handle_tax_page))
+        .route("/tax", get(pages::tax::render))
         .route("/chat", get(pages::chat::render))
         .route("/history", get(pages::history::render))
         .route("/knowledge", get(pages::knowledge::render))

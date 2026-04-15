@@ -149,7 +149,12 @@ const BODY_HTML: &str = r##"<!-- Login overlay -->
     </div>
     <!-- Input (hidden when viewing Telegram) -->
     <div class="p-3 border-t border-gray-800" id="chat-input-area">
+      <div id="chat-attachments" class="hidden mb-2 space-y-1"></div>
       <div class="flex gap-2 items-end">
+        <button onclick="document.getElementById('chat-file-input').click()" class="text-gray-400 hover:text-gray-200 p-2.5 flex-shrink-0 transition-colors" title="Attach file">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+        </button>
+        <input type="file" id="chat-file-input" multiple class="hidden" onchange="attachFiles(this.files)">
         <textarea id="chat-input" rows="1" class="flex-1 bg-gray-800 border border-gray-700 rounded-xl px-4 py-2.5 text-white placeholder-gray-400 focus:border-oc-500 focus:ring-1 focus:ring-oc-500 outline-none resize-none text-sm" placeholder="Message..." onkeydown="chatKeydown(event)" oninput="autoResize(this)" style="max-height:120px"></textarea>
         <button onclick="sendMessage()" class="bg-oc-600 hover:bg-oc-700 text-white rounded-xl p-2.5 transition-colors flex-shrink-0" id="send-btn">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13"/><path d="M22 2L15 22L11 13L2 9L22 2Z"/></svg>
@@ -1053,6 +1058,81 @@ function autoResize(el) {
   el.style.height = Math.min(el.scrollHeight, 120) + 'px';
 }
 
+// ── File attachments in chat ──────────────────────────────────────────
+let pendingFiles = []; // {name, text, chunks, status}
+
+function attachFiles(fileList) {
+  for (const file of fileList) {
+    const entry = { name: file.name, text: null, chunks: 0, status: 'uploading', file };
+    pendingFiles.push(entry);
+    renderAttachments();
+    uploadChatFile(entry);
+  }
+  // Reset input so same file can be re-selected
+  document.getElementById('chat-file-input').value = '';
+}
+
+async function uploadChatFile(entry) {
+  const fd = new FormData();
+  fd.append('token', authToken);
+  fd.append('agent_id', getDashAgentId(dashCurrentAgent));
+  fd.append('file', entry.file);
+  fd.append('return_text', '1');
+  try {
+    const r = await fetch('/api/knowledge/upload', { method: 'POST', body: fd });
+    const data = await r.json();
+    if (data.ok) {
+      entry.status = 'ready';
+      entry.chunks = data.chunks || 0;
+      entry.text = data.extracted_text || null;
+    } else {
+      entry.status = 'error';
+      entry.error = data.error || 'Upload failed';
+    }
+  } catch (e) {
+    entry.status = 'error';
+    entry.error = e.message;
+  }
+  renderAttachments();
+}
+
+function removeAttachment(idx) {
+  pendingFiles.splice(idx, 1);
+  renderAttachments();
+}
+
+function renderAttachments() {
+  const c = document.getElementById('chat-attachments');
+  if (pendingFiles.length === 0) { c.classList.add('hidden'); c.innerHTML = ''; return; }
+  c.classList.remove('hidden');
+  c.innerHTML = pendingFiles.map((f, i) => {
+    const icon = f.status === 'uploading' ? '<span class="animate-pulse">...</span>'
+      : f.status === 'error' ? '<span class="text-red-400">!</span>'
+      : '<span class="text-green-400">OK</span>';
+    return '<div class="flex items-center gap-2 text-xs bg-gray-800 rounded-lg px-3 py-1.5">'
+      + '<span class="truncate flex-1 text-gray-300">' + escapeHtml(f.name) + '</span>'
+      + '<span class="flex-shrink-0">' + icon + '</span>'
+      + (f.chunks ? '<span class="text-gray-500">' + f.chunks + ' chunks</span>' : '')
+      + '<button onclick="removeAttachment(' + i + ')" class="text-gray-500 hover:text-red-400 ml-1">x</button>'
+      + '</div>';
+  }).join('');
+}
+
+// Drag & drop on chat area
+(function() {
+  const chatArea = document.getElementById('chat-messages');
+  if (!chatArea) return;
+  chatArea.addEventListener('dragover', e => { e.preventDefault(); chatArea.style.outline = '2px dashed #0ea5e9'; });
+  chatArea.addEventListener('dragleave', e => { e.preventDefault(); chatArea.style.outline = ''; });
+  chatArea.addEventListener('drop', e => {
+    e.preventDefault();
+    chatArea.style.outline = '';
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+      attachFiles(e.dataTransfer.files);
+    }
+  });
+})();
+
 function quickChat(msg) {
   document.getElementById('chat-input').value = msg;
   sendMessage();
@@ -1074,7 +1154,22 @@ let isSending = false;
 async function sendMessage() {
   if (isSending) return;
   const input = document.getElementById('chat-input');
-  const msg = input.value.trim();
+  let msg = input.value.trim();
+  if (!msg && pendingFiles.length === 0) return;
+
+  // Prepend attached file content to the message
+  const readyFiles = pendingFiles.filter(f => f.status === 'ready' && f.text);
+  if (readyFiles.length > 0) {
+    let prefix = '';
+    for (const f of readyFiles) {
+      const preview = f.text.length > 50000 ? f.text.slice(0, 50000) + '\n\n[truncated — full content indexed, use internal_search for more]' : f.text;
+      prefix += '[Attached file: ' + f.name + ']\n' + preview + '\n\n';
+    }
+    msg = prefix + (msg || 'Please review the attached file(s).');
+  }
+  pendingFiles = [];
+  renderAttachments();
+
   if (!msg) return;
   input.value = '';
   input.style.height = 'auto';

@@ -1,4 +1,5 @@
 //! Connector implementations.
+pub mod extractors;
 pub mod workspace_files;
 pub mod execution_log;
 pub mod paperless;

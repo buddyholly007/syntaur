@@ -967,6 +967,14 @@ const MIGRATIONS: &[&str] = &[
         created_at    INTEGER NOT NULL
     );
     "#,
+
+    // Migration 27: Per-agent knowledge scoping.
+    // Each document belongs to an agent (or 'shared' for cross-agent access).
+    // Main agent can search all; other agents see only their own + shared.
+    r#"
+    ALTER TABLE documents ADD COLUMN agent_id TEXT NOT NULL DEFAULT 'shared';
+    CREATE INDEX IF NOT EXISTS idx_documents_agent ON documents(agent_id);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

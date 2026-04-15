@@ -90,35 +90,47 @@ pub struct VectorHit {
 /// dot product against the query (caller pre-normalizes the query). For our
 /// scale (~10K vectors × 768 dim) this completes in single-digit ms.
 ///
-/// Optionally filtered by source via the JOIN to documents.
+/// Optionally filtered by source and/or agent_ids via JOIN to documents.
 pub fn brute_force_search(
     conn: &Connection,
     query: &[f32],
     top_k: usize,
     source_filter: Option<&str>,
+    agent_ids: Option<&[String]>,
 ) -> rusqlite::Result<Vec<VectorHit>> {
-    // Stream every (chunk_id, vector) pair through the dot-product loop and
-    // keep a small min-heap of the top_k highest scores.
-    let sql = if source_filter.is_some() {
-        "SELECT ce.chunk_id, ce.vector FROM chunk_embeddings ce \
-         JOIN chunks c ON c.id = ce.chunk_id \
-         JOIN documents d ON d.id = c.doc_id \
-         WHERE d.source = ?"
+    let has_filter = source_filter.is_some() || agent_ids.is_some();
+    let mut conditions: Vec<String> = Vec::new();
+    let mut bind_values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(src) = source_filter {
+        conditions.push("d.source = ?".to_string());
+        bind_values.push(Box::new(src.to_string()));
+    }
+    if let Some(ids) = agent_ids {
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        conditions.push(format!("d.agent_id IN ({placeholders})"));
+        for id in ids {
+            bind_values.push(Box::new(id.clone()));
+        }
+    }
+
+    let sql = if has_filter {
+        let where_clause = conditions.join(" AND ");
+        format!(
+            "SELECT ce.chunk_id, ce.vector FROM chunk_embeddings ce \
+             JOIN chunks c ON c.id = ce.chunk_id \
+             JOIN documents d ON d.id = c.doc_id \
+             WHERE {where_clause}"
+        )
     } else {
-        "SELECT chunk_id, vector FROM chunk_embeddings"
+        "SELECT chunk_id, vector FROM chunk_embeddings".to_string()
     };
 
-    let mut stmt = conn.prepare(sql)?;
-
-    // Use a Vec sorted at the end — for top_k <= 100 this is faster than a
-    // BinaryHeap due to small constants.
+    let mut stmt = conn.prepare(&sql)?;
     let mut all: Vec<VectorHit> = Vec::with_capacity(1024);
 
-    let mut rows = if let Some(src) = source_filter {
-        stmt.query(params![src])?
-    } else {
-        stmt.query([])?
-    };
+    let params_ref: Vec<&dyn rusqlite::ToSql> = bind_values.iter().map(|b| b.as_ref()).collect();
+    let mut rows = stmt.query(params_ref.as_slice())?;
 
     while let Some(row) = rows.next()? {
         let chunk_id: i64 = row.get(0)?;

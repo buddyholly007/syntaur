@@ -23,6 +23,7 @@
 //!   [done] settings.html   → pages::settings
 //!   [done] knowledge       → pages::knowledge (new, RAG UI)
 //!   [done] research        → pages::research (new, research UI)
+//!   [done] tax.html        → pages::tax
 
 pub mod chat;
 pub mod coders;
@@ -37,4 +38,5 @@ pub mod research;
 pub mod settings;
 pub mod setup;
 pub mod shared;
+pub mod tax;
 pub mod voice_setup;

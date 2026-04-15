@@ -161,6 +161,7 @@ impl WorkspaceFilesConnector {
                     "rel_path": rel,
                     "extension": ext,
                 }),
+                agent_id: agent_id.to_string(),
             });
         }
     }

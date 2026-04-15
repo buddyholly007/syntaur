@@ -63,7 +63,7 @@ impl ConnectorScheduler {
                             warn!("[connector:{}] put failed: {}", name, e);
                         }
                     }
-                    let stats = indexer.stats().await;
+                    let stats = indexer.stats(None).await;
                     info!(
                         "[connector:{}] initial load done: {} docs, {} errors. Index: {} docs / {} chunks total",
                         name, n, errors, stats.documents, stats.chunks

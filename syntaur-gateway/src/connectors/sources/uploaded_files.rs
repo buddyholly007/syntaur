@@ -8,8 +8,15 @@
 //! stem.
 //!
 //! Extraction strategy:
-//!   - `.pdf` → `pdf_extract::extract_text`
-//!   - everything else → `std::fs::read_to_string` (UTF-8, skip on error)
+//!   - `.pdf`  → `pdf_extract::extract_text`
+//!   - `.docx` → ZIP + XML `<w:t>` extraction
+//!   - `.pptx` → ZIP + XML `<a:t>` extraction
+//!   - `.odt`  → ZIP + ODF `content.xml` extraction
+//!   - `.xlsx` / `.xls` / `.ods` → calamine spreadsheet reader
+//!   - `.epub` → ZIP + XHTML spine extraction
+//!   - `.rtf`  → control-word stripping
+//!   - `.eml`  → MIME text/plain (fallback: stripped text/html)
+//!   - text-based formats → `std::fs::read_to_string` (UTF-8)
 //!
 //! Binary files with no extractor are skipped silently.
 
@@ -29,11 +36,32 @@ const MAX_BODY_BYTES: usize = 4_000_000;
 /// Extensions we handle as plain text (UTF-8). Anything else needs a
 /// dedicated extractor branch below.
 const TEXT_EXTS: &[&str] = &[
-    "md", "txt", "rst", "log", "csv", "tsv",
-    "json", "yaml", "yml", "toml", "ini", "conf",
-    "html", "htm", "xml",
-    "rs", "py", "go", "js", "ts", "tsx", "jsx", "c", "cpp", "h", "hpp",
-    "java", "rb", "sh", "fish", "zsh", "sql",
+    // Prose / docs
+    "md", "txt", "rst", "log", "adoc", "tex", "org",
+    // Data / config
+    "csv", "tsv", "json", "jsonl", "ndjson",
+    "yaml", "yml", "toml", "ini", "conf", "cfg", "env", "properties",
+    // Markup
+    "html", "htm", "xml", "svg", "xsl", "xslt",
+    // Source code
+    "rs", "py", "go", "js", "ts", "tsx", "jsx", "mjs", "cjs",
+    "c", "cpp", "cc", "cxx", "h", "hpp", "hxx",
+    "java", "kt", "kts", "scala", "groovy",
+    "cs", "fs", "vb",
+    "rb", "php", "pl", "pm", "lua", "r",
+    "swift", "m", "mm",
+    "ex", "exs", "erl", "hrl", "hs", "ml", "mli", "clj", "cljs",
+    "dart", "zig", "nim", "v", "d",
+    // Shell / scripting
+    "sh", "bash", "fish", "zsh", "ps1", "psm1", "bat", "cmd",
+    // Query / schema
+    "sql", "graphql", "gql", "proto",
+    // Build / infra
+    "tf", "hcl", "dockerfile", "cmake",
+    "makefile", "mk", "gradle",
+    // Other
+    "diff", "patch", "gitignore", "gitattributes",
+    "editorconfig", "prettierrc",
 ];
 
 pub struct UploadedFilesConnector {
@@ -258,21 +286,30 @@ pub fn file_to_doc(path: &Path) -> Result<Option<ExternalDoc>, String> {
             "ext": ext,
             "path": path.display().to_string(),
         }),
+        agent_id: "shared".to_string(),
     }))
 }
 
 fn extract_text(path: &Path, ext: &str) -> Result<Option<String>, String> {
-    if ext == "pdf" {
-        return pdf_extract::extract_text(path)
+    use super::extractors;
+    match ext {
+        "pdf" => pdf_extract::extract_text(path)
             .map(Some)
-            .map_err(|e| format!("pdf_extract: {}", e));
+            .map_err(|e| format!("pdf_extract: {e}")),
+        "docx" => extractors::extract_docx(path).map(Some),
+        "pptx" => extractors::extract_pptx(path).map(Some),
+        "odt" => extractors::extract_odt(path).map(Some),
+        "xlsx" | "xls" | "ods" => extractors::extract_spreadsheet(path).map(Some),
+        "epub" => extractors::extract_epub(path).map(Some),
+        "rtf" => extractors::extract_rtf(path).map(Some),
+        "eml" => extractors::extract_eml(path).map(Some),
+        _ if TEXT_EXTS.iter().any(|e| *e == ext) || ext.is_empty() => {
+            std::fs::read_to_string(path)
+                .map(Some)
+                .map_err(|e| format!("read_to_string: {e}"))
+        }
+        _ => Ok(None),
     }
-    if TEXT_EXTS.iter().any(|e| *e == ext) || ext.is_empty() {
-        return std::fs::read_to_string(path)
-            .map(Some)
-            .map_err(|e| format!("read_to_string: {}", e));
-    }
-    Ok(None)
 }
 
 fn load_sidecar_title(sidecar: &Path) -> Option<String> {

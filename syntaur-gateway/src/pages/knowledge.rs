@@ -26,11 +26,21 @@ pub async fn render() -> Html<String> {
 fn page_body() -> Markup {
     html! {
         div class="max-w-5xl mx-auto px-4 py-6 space-y-6" {
-            div {
-                h1 class="text-2xl font-bold" { "Knowledge" }
-                p class="text-gray-400 mt-1 text-sm" {
-                    "Search and manage the documents Syntaur has indexed. "
-                    "Connectors run in the background; uploads are ingested immediately."
+            div class="flex items-center justify-between" {
+                div {
+                    h1 class="text-2xl font-bold" { "Knowledge" }
+                    p class="text-gray-400 mt-1 text-sm" {
+                        "Search and manage the documents Syntaur has indexed. "
+                        "Connectors run in the background; uploads are ingested immediately."
+                    }
+                }
+                div class="flex items-center gap-2" {
+                    label class="text-xs text-gray-500" { "Agent:" }
+                    select id="agent-filter"
+                        class="bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-300"
+                        onchange="onAgentChange()" {
+                        option value="" { "All agents" }
+                    }
                 }
             }
 
@@ -73,8 +83,16 @@ fn page_body() -> Markup {
             div class="card p-5" {
                 h2 class="text-sm font-medium text-gray-300 mb-1" { "Upload a document" }
                 p class="text-xs text-gray-500 mb-3" {
-                    "PDF, Markdown, plain text, and common code / config files. "
-                    "Extracted text is chunked, embedded, and added to the index immediately."
+                    "Supported: PDF, DOCX, XLSX, PPTX, ODT, ODS, EPUB, RTF, EML, "
+                    "CSV, JSON, YAML, Markdown, HTML, source code (60+ languages), "
+                    "and plain text. Extracted text is chunked, embedded, and added to the index immediately."
+                }
+                div class="flex items-center gap-2 mb-3" {
+                    label class="text-xs text-gray-500" { "Upload to:" }
+                    select id="upload-agent"
+                        class="bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-gray-300" {
+                        option value="shared" { "Shared (all agents)" }
+                    }
                 }
                 div id="drop-zone"
                     class="border-2 border-dashed border-gray-700 rounded-xl p-6 text-center cursor-pointer hover:border-oc-600 transition-colors"
@@ -136,8 +154,12 @@ const fmtRelative = (iso) => {
   } catch { return iso; }
 };
 
+function getAgent() { return q('#agent-filter').value; }
+
 async function apiGet(path) {
-  const url = path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(token);
+  let url = path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(token);
+  const agent = getAgent();
+  if (agent) url += '&agent=' + encodeURIComponent(agent);
   const r = await fetch(url);
   if (r.status === 401) { sessionStorage.removeItem('syntaur_token'); window.location.href = '/'; return null; }
   return r.json();
@@ -150,6 +172,11 @@ async function apiPost(path, body) {
     body: JSON.stringify({ token, ...body }),
   });
   return r.json();
+}
+
+function onAgentChange() {
+  loadStats();
+  loadDocs();
 }
 
 async function loadStats() {
@@ -294,6 +321,7 @@ async function handleFiles(files) {
     status.prepend(row);
     const fd = new FormData();
     fd.append('token', token);
+    fd.append('agent_id', q('#upload-agent').value || 'shared');
     fd.append('file', file);
     try {
       const r = await fetch('/api/knowledge/upload', { method: 'POST', body: fd });
@@ -326,6 +354,23 @@ async function handleFiles(files) {
   });
 })();
 
-loadStats();
-loadDocs();
+// Populate agent dropdowns from /health
+(async function() {
+  try {
+    const h = await (await fetch('/health')).json();
+    const agents = (h.agents || []).map(a => a.id);
+    for (const selId of ['#agent-filter', '#upload-agent']) {
+      const sel = q(selId);
+      const isUpload = selId === '#upload-agent';
+      const base = isUpload
+        ? '<option value="shared">Shared (all agents)</option>'
+        : '<option value="">All agents</option>';
+      sel.innerHTML = base + agents.map(a =>
+        `<option value="${esc(a)}">${esc(a)}</option>`
+      ).join('');
+    }
+  } catch {}
+  loadStats();
+  loadDocs();
+})();
 "#;

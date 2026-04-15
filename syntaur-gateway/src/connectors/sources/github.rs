@@ -189,6 +189,7 @@ impl LoadConnector for GithubConnector {
                             "kind": "readme",
                             "url": repo.html_url,
                         }),
+                        agent_id: "shared".to_string(),
                     });
                 }
             }
@@ -224,6 +225,7 @@ impl LoadConnector for GithubConnector {
                         "number": issue.number,
                         "state": issue.state,
                     }),
+                    agent_id: "shared".to_string(),
                 });
             }
         }

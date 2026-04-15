@@ -1,27 +1,32 @@
-<!DOCTYPE html>
-<html lang="en" class="dark">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<link rel="icon" href="/favicon.ico" type="image/x-icon"><link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32"><link rel="apple-touch-icon" href="/icon-192.png">
-<link rel="manifest" href="/manifest.json">
-<title>Syntaur — Tax & Expenses</title>
-<script src="/tailwind.js"></script>
-<script>tailwind.config={darkMode:'class',theme:{extend:{colors:{oc:{500:'#0ea5e9',600:'#0284c7',700:'#0369a1'}}}}}</script>
-<style>
-  @import url('/fonts.css');
+//! /tax — migrated from static/tax.html. Structural markup and
+//! embedded scripts live as raw-string consts below so their bytes
+//! count as Rust and the file compiles type-checked through maud.
+
+use axum::response::Html;
+use maud::{html, PreEscaped};
+
+use super::shared::{shell, Page};
+
+pub async fn render() -> Html<String> {
+    let page = Page {
+        title: "Tax & Expenses",
+        authed: true,
+        extra_style: Some(EXTRA_STYLE),
+    };
+    let body = html! { (PreEscaped(BODY_HTML)) };
+    Html(shell(page, body).into_string())
+}
+
+const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   body { font-family: 'Inter', sans-serif; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; }
   .card { @apply bg-gray-800 rounded-xl border border-gray-700 p-5; }
   .btn-primary { @apply bg-oc-600 hover:bg-oc-700 text-white font-medium py-2 px-4 rounded-lg transition-colors text-sm; }
   .input { @apply w-full bg-gray-900 border border-gray-600 rounded-lg px-3 py-2 text-white placeholder-gray-500 focus:border-oc-500 focus:ring-1 focus:ring-oc-500 outline-none text-sm; }
   select, select.input { color-scheme: dark; }
   select option { background-color: #111827; color: #e5e7eb; }
-  .label { @apply block text-xs font-medium text-gray-400 mb-1; }
-</style>
-</head>
-<body class="bg-gray-950 text-gray-100 min-h-screen">
+  .label { @apply block text-xs font-medium text-gray-400 mb-1; }"##;
 
-<!-- Module paywall overlay (hidden by default, shown if module is locked) -->
+const BODY_HTML: &str = r##"<!-- Module paywall overlay (hidden by default, shown if module is locked) -->
 <div id="module-paywall" class="hidden fixed inset-0 z-50 bg-gray-950/95 backdrop-blur-sm flex items-center justify-center">
   <div class="max-w-md w-full mx-4">
     <div class="card text-center">
@@ -277,7 +282,11 @@
           <span class="text-xs text-gray-400" id="ext-method-label">Filing via IRS Direct Pay</span>
         </div>
         <div class="bg-gray-900 rounded-lg p-3 mb-3 space-y-2" id="ext-copy-fields">
-          <!-- Populated by JS: steps + identity + spouse + payment + IRS link -->
+          <!-- Populated by JS: steps + identity + spouse + payment -->
+        </div>
+        <div id="ext-form-link" class="mb-3 flex items-center gap-3">
+          <a id="ext-form-anchor" href="#" onclick="openForm4868(); return false;" class="bg-oc-600 hover:bg-oc-700 text-white font-medium py-2 px-4 rounded-lg transition-colors text-sm inline-block no-underline cursor-pointer">Generate Form 4868 &rarr;</a>
+          <span class="text-xs text-gray-500">Pre-filled from your documents. Print or save as PDF.</span>
         </div>
         <div class="bg-gray-800 rounded-lg p-3 border border-gray-700">
           <p class="text-xs text-gray-300 mb-2">After you submit on the IRS website, enter your confirmation below:</p>
@@ -2219,7 +2228,7 @@ async function loadExtensionData() {
       extId = data.extension.id;
       const ext = data.extension;
       if (ext.status === 'confirmed') { showExtStep('confirmed'); renderExtConfirmed(ext); }
-      else if (ext.status === 'filed') { showExtStep('file'); renderExtFile(ext.filing_method); }
+      else if (ext.status === 'filed') { fillExtReview(ext.total_tax_cents, ext.total_paid_cents, ext.payment_cents); showExtStep('file'); await renderExtFile(ext.filing_method); }
       else { showExtStep('review'); fillExtReview(ext.total_tax_cents, ext.total_paid_cents, ext.payment_cents); }
       updateExtBadge(ext.status);
     } else if (data.estimate) {
@@ -2326,14 +2335,11 @@ async function renderExtFile(method) {
   if (method === 'direct_pay') {
     const steps = document.createElement('div');
     steps.className = 'mb-3 text-xs text-gray-400 space-y-1';
-    steps.innerHTML = '<p class="text-gray-300 font-medium mb-1">IRS Direct Pay steps:</p>' +
-      '<p>1. Click "Open IRS Website" below &rarr; click <strong class="text-white">Pay individual tax</strong></p>' +
-      '<p>2. Reason for Payment: select <strong class="text-white">Extension</strong></p>' +
-      '<p>3. Apply Payment To: select <strong class="text-white">4868 (for filing extension)</strong></p>' +
-      '<p>4. Tax Period for Payment: select <strong class="text-white">' + yr + '</strong> &rarr; click Continue</p>' +
-      '<p>5. Verify your identity (SSN, date of birth, address, filing status)</p>' +
-      '<p>6. Enter payment amount &rarr; review &rarr; submit</p>' +
-      '<p>7. Save your <strong class="text-green-400">confirmation number</strong> &rarr; enter it below</p>';
+    steps.innerHTML = '<p class="text-gray-300 font-medium mb-1">How to file your extension:</p>' +
+      '<p>1. Review your information below — pre-filled from your uploaded documents</p>' +
+      '<p>2. Click <strong class="text-white">Generate Form 4868</strong> to create your completed form</p>' +
+      '<p>3. Print or save as PDF &rarr; mail to the IRS address shown on the form</p>' +
+      '<p>4. Enter your <strong class="text-green-400">confirmation details</strong> below for your records</p>';
     copyFieldsEl.appendChild(steps);
   } else if (method === 'free_file') {
     const steps = document.createElement('div');
@@ -2356,7 +2362,19 @@ async function renderExtFile(method) {
     // Identity section
     addSection(copyFieldsEl, 'Identity verification');
     addCopyRow(copyFieldsEl, 'SSN', p.ssn || '(set in Tax Profile above)');
-    addCopyRow(copyFieldsEl, 'Date of Birth', p.date_of_birth || '(set in Tax Profile)');
+    if (p.date_of_birth) {
+      addCopyRow(copyFieldsEl, 'Date of Birth', p.date_of_birth);
+    } else {
+      // DOB not on any uploaded doc — let user enter it inline
+      const dobRow = document.createElement('div');
+      dobRow.className = 'flex items-center justify-between py-0.5';
+      dobRow.innerHTML = '<span class="text-xs text-gray-400">Date of Birth</span>' +
+        '<div class="flex items-center gap-2">' +
+        '<input type="date" id="ext-dob-input" class="bg-gray-800 border border-gray-600 rounded px-2 py-0.5 text-sm text-white" style="color-scheme:dark">' +
+        '<button onclick="saveExtDob()" class="text-[10px] text-oc-500 hover:text-oc-400 px-1.5 py-0.5 bg-gray-800 rounded">Save</button>' +
+        '</div>';
+      copyFieldsEl.appendChild(dobRow);
+    }
     addCopyRow(copyFieldsEl, 'Filing Status', filingLabels[p.filing_status] || p.filing_status || 'Single');
     if (p.first_name) addCopyRow(copyFieldsEl, 'Name', p.first_name + ' ' + (p.last_name || ''));
     if (p.address_line1) addCopyRow(copyFieldsEl, 'Street Address', p.address_line1);
@@ -2382,14 +2400,29 @@ async function renderExtFile(method) {
   addCopyRow(copyFieldsEl, 'Balance Due', bal);
   addCopyRow(copyFieldsEl, 'Payment Amount', '$' + parseFloat(pay).toFixed(2));
 
-  // IRS link at the bottom
-  if (irsUrl) {
-    const linkDiv = document.createElement('div');
-    linkDiv.className = 'border-t border-gray-700 pt-3 mt-3 flex items-center gap-3';
-    linkDiv.innerHTML = '<a href="' + irsUrl + '" class="btn-primary text-xs inline-block no-underline">Open IRS Website &rarr;</a>' +
-      '<span class="text-xs text-gray-500">Opens in companion panel. Fill in the form using the values above.</span>';
-    copyFieldsEl.appendChild(linkDiv);
-  }
+  // Show the form generation button
+  const formLink = document.getElementById('ext-form-link');
+  if (formLink) formLink.style.display = '';
+}
+
+async function saveExtDob() {
+  const dob = document.getElementById('ext-dob-input')?.value;
+  if (!dob) return;
+  const yr = selectedYear || yearStart().slice(0,4);
+  try {
+    await authFetch('/api/tax/profile', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({token, year: parseInt(yr), date_of_birth: dob})
+    });
+    // Replace the input with a copy row
+    const row = document.getElementById('ext-dob-input').closest('.flex');
+    row.innerHTML = '<span class="text-xs text-gray-400">Date of Birth</span><div class="flex items-center gap-2"><span class="text-sm text-white font-mono">' + dob + '</span></div>';
+    const btn = document.createElement('button');
+    btn.className = 'text-[10px] text-oc-500 hover:text-oc-400 px-1.5 py-0.5 bg-gray-800 rounded';
+    btn.textContent = 'Copy';
+    btn.onclick = function() { navigator.clipboard.writeText(dob).then(() => { btn.textContent = 'Copied!'; setTimeout(() => btn.textContent = 'Copy', 1500); }); };
+    row.querySelector('div').appendChild(btn);
+  } catch(e) { console.error('saveExtDob:', e); }
 }
 
 function addSection(parent, title) {
@@ -2413,32 +2446,10 @@ function addCopyRow(parent, label, value) {
   parent.appendChild(row);
 }
 
-let _irsUrl = 'https://www.irs.gov/payments/direct-pay';
-function openIrsLink() {
-  const msg = document.getElementById('ext-irs-msg');
-  // Try opening via backend (works from webview)
-  fetch('/api/open-url?url=' + encodeURIComponent(_irsUrl) + '&token=' + token)
-    .then(r => r.json())
-    .then(d => {
-      if (d.success) {
-        msg.textContent = 'Opened in your default browser. Paste the values from above.';
-        msg.className = 'text-xs text-green-400 self-center';
-      } else {
-        // Fallback: try window.open
-        const w = window.open(_irsUrl, '_blank');
-        if (!w) {
-          // Last resort: copy URL to clipboard
-          navigator.clipboard.writeText(_irsUrl);
-          msg.innerHTML = 'URL copied to clipboard! Paste in your browser: <span class="text-oc-400 font-mono text-[10px] select-all">' + _irsUrl + '</span>';
-          msg.className = 'text-xs text-yellow-400 self-center';
-        }
-      }
-    })
-    .catch(() => {
-      navigator.clipboard.writeText(_irsUrl);
-      msg.innerHTML = 'URL copied to clipboard! Open in your browser: <span class="text-oc-400 font-mono text-[10px] select-all">' + _irsUrl + '</span>';
-      msg.className = 'text-xs text-yellow-400 self-center';
-    });
+function openForm4868() {
+  const yr = selectedYear || yearStart().slice(0,4);
+  const payment = parseCents(document.getElementById('ext-payment').value);
+  window.location.href = '/api/tax/extension?token=' + token + '&year=' + yr + '&payment=' + payment;
 }
 
 async function confirmExtension() {
@@ -2794,6 +2805,4 @@ loadProfile();
 loadOverview();
 loadCategories();
 loadTaxConversation();
-</script>
-</body>
-</html>
+</script>"##;
