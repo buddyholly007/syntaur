@@ -31,8 +31,9 @@ const EXTRA_STYLE: &str = r##"
 .splitter.vertical { width: 4px; cursor: col-resize; }
 
 /* Host sidebar */
-.host-sidebar { width: 240px; flex-shrink: 0; background: #111827; border-right: 1px solid #1f2937; display: flex; flex-direction: column; overflow-y: auto; }
-.host-sidebar.collapsed { width: 48px; }
+.host-sidebar { min-width: 140px; max-width: 500px; flex-shrink: 0; background: #111827; border-right: none; display: flex; flex-direction: column; overflow-y: auto; overflow-x: hidden; }
+.sidebar-resize { width: 5px; flex-shrink: 0; background: #1f2937; cursor: col-resize; transition: background 0.15s; }
+.sidebar-resize:hover, .sidebar-resize.dragging { background: #0ea5e9; }
 .host-item { display: flex; align-items: center; gap: 0.5rem; padding: 0.375rem 0.75rem; font-size: 0.8125rem; border-radius: 0.375rem; cursor: pointer; color: #d1d5db; }
 .host-item:hover { background: #1f2937; }
 .host-item.active { background: #1e3a5f; color: #fff; }
@@ -77,13 +78,8 @@ const EXTRA_STYLE: &str = r##"
 .xterm-viewport::-webkit-scrollbar { width: 6px; }
 .xterm-viewport::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
 
-@media (max-width: 1279px) {
-    .host-sidebar { width: 48px; }
-    .host-sidebar .host-label, .host-sidebar .sidebar-section, .host-sidebar .sidebar-search { display: none; }
-    .context-panel { display: none; }
-}
 @media (max-width: 767px) {
-    .host-sidebar { display: none; }
+    .host-sidebar { min-width: 100px; }
 }
 "##;
 
@@ -679,6 +675,38 @@ function showSnippetDialog() {
     }).then(() => { loadSnippets().then(renderSidebar); }).catch(e => alert('Failed: ' + e.message));
 }
 
+// ======== SIDEBAR RESIZE ========
+(function() {
+    const handle = document.getElementById('sidebar-resize');
+    const sidebar = document.getElementById('host-sidebar');
+    if (!handle || !sidebar) return;
+    let dragging = false;
+    handle.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        dragging = true;
+        handle.classList.add('dragging');
+        document.body.style.cursor = 'col-resize';
+        document.body.style.userSelect = 'none';
+    });
+    document.addEventListener('mousemove', (e) => {
+        if (!dragging) return;
+        const rect = sidebar.parentElement.getBoundingClientRect();
+        let w = e.clientX - rect.left;
+        w = Math.max(140, Math.min(500, w));
+        sidebar.style.width = w + 'px';
+    });
+    document.addEventListener('mouseup', () => {
+        if (!dragging) return;
+        dragging = false;
+        handle.classList.remove('dragging');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        // Refit active terminal
+        const tab = S.tabs.find(t => t.id === S.activeTab);
+        if (tab && tab.fitAddon) setTimeout(() => tab.fitAddon.fit(), 50);
+    });
+})();
+
 // ======== KEYBOARD SHORTCUTS ========
 document.addEventListener('keydown', (e) => {
     if (e.ctrlKey && e.shiftKey) {
@@ -740,9 +768,11 @@ pub async fn render() -> Html<String> {
         // Main layout: sidebar + terminal + context panel
         div style="display:flex; height:calc(100vh - 57px); overflow:hidden" {
             // Host sidebar
-            div class="host-sidebar" {
+            div class="host-sidebar" id="host-sidebar" style="width:220px" {
                 div id="sidebar-content" {}
             }
+            // Resize handle
+            div class="sidebar-resize" id="sidebar-resize" {}
 
             // Terminal area
             div style="flex:1; display:flex; flex-direction:column; min-width:0" {
