@@ -82,6 +82,50 @@ jobs:
             chmod +x dist/*
           fi
 
+      # Runtime smoke test on every platform: launch the freshly-built gateway,
+      # wait for /health, kill it. Catches STATUS_DLL_NOT_FOUND-class startup
+      # failures that compilation alone can't see (missing CRT on Windows,
+      # missing dylib on macOS, path-resolution bugs, etc.).
+      - name: Smoke test (non-Windows)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -e
+          ./dist/${{ matrix.artifact }} &
+          PID=$!
+          for i in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:18789/health >/tmp/health.json 2>/dev/null; then
+              echo "health:"
+              cat /tmp/health.json
+              kill $PID 2>/dev/null || true
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "gateway failed to become healthy in 20s"
+          kill $PID 2>/dev/null || true
+          exit 1
+
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\${{ matrix.artifact }}" -PassThru -WindowStyle Hidden
+          for ($i = 0; $i -lt 20; $i++) {
+            try {
+              $r = Invoke-WebRequest -Uri http://127.0.0.1:18789/health -UseBasicParsing -TimeoutSec 2
+              if ($r.StatusCode -eq 200) {
+                Write-Host "health: $($r.Content)"
+                Stop-Process -Id $p.Id -Force
+                exit 0
+              }
+            } catch {}
+            Start-Sleep -Seconds 1
+          }
+          Write-Host "gateway failed to become healthy in 20s"
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          exit 1
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
