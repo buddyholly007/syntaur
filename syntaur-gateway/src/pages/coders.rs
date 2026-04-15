@@ -1,0 +1,764 @@
+//! /coders page — web-based terminal with xterm.js.
+
+use axum::response::Html;
+use maud::{html, PreEscaped};
+
+use super::shared::{shell, top_bar_standard, Page};
+
+const EXTRA_STYLE: &str = r##"
+/* Terminal chrome */
+.term-container { background: #030712; border-radius: 0.5rem; overflow: hidden; border: 1px solid #1f2937; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.tab-bar { display: flex; align-items: center; background: #111827; border-bottom: 1px solid #1f2937; padding: 0 0.5rem; height: 2.25rem; gap: 2px; overflow-x: auto; flex-shrink: 0; }
+.tab { display: flex; align-items: center; gap: 0.375rem; padding: 0.25rem 0.75rem; font-size: 0.75rem; border-radius: 0.375rem 0.375rem 0 0; cursor: pointer; user-select: none; white-space: nowrap; color: #9ca3af; transition: all 0.15s; }
+.tab:hover { color: #d1d5db; background: #1f2937; }
+.tab.active { background: #030712; color: #fff; border-top: 2px solid #0ea5e9; }
+.tab .close-btn { margin-left: 0.25rem; color: #4b5563; font-size: 0.625rem; line-height: 1; cursor: pointer; }
+.tab .close-btn:hover { color: #ef4444; }
+.tab .status-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+.tab .status-dot.connected { background: #4ade80; }
+.tab .status-dot.connecting { background: #fbbf24; }
+.tab .status-dot.error { background: #ef4444; }
+.add-tab { color: #6b7280; cursor: pointer; padding: 0 0.5rem; font-size: 1rem; }
+.add-tab:hover { color: #d1d5db; }
+
+/* Split panes */
+.pane-container { display: flex; flex: 1; min-height: 0; min-width: 0; }
+.pane-container.horizontal { flex-direction: column; }
+.pane-container.vertical { flex-direction: row; }
+.splitter { flex-shrink: 0; background: #1f2937; transition: background 0.15s; }
+.splitter:hover { background: #0ea5e9; }
+.splitter.horizontal { height: 4px; cursor: row-resize; }
+.splitter.vertical { width: 4px; cursor: col-resize; }
+
+/* Host sidebar */
+.host-sidebar { width: 240px; flex-shrink: 0; background: #111827; border-right: 1px solid #1f2937; display: flex; flex-direction: column; overflow-y: auto; }
+.host-sidebar.collapsed { width: 48px; }
+.host-item { display: flex; align-items: center; gap: 0.5rem; padding: 0.375rem 0.75rem; font-size: 0.8125rem; border-radius: 0.375rem; cursor: pointer; color: #d1d5db; }
+.host-item:hover { background: #1f2937; }
+.host-item.active { background: #1e3a5f; color: #fff; }
+.sidebar-section { padding: 0.5rem 0.75rem; font-size: 0.6875rem; text-transform: uppercase; color: #6b7280; letter-spacing: 0.05em; }
+
+/* Context panel */
+.context-panel { width: 320px; flex-shrink: 0; background: #111827; border-left: 1px solid #1f2937; display: flex; flex-direction: column; overflow: hidden; }
+.context-panel.hidden { width: 0; overflow: hidden; border: none; }
+.context-tabs { display: flex; border-bottom: 1px solid #1f2937; }
+.context-tab { flex: 1; text-align: center; padding: 0.5rem; font-size: 0.75rem; color: #6b7280; cursor: pointer; }
+.context-tab:hover { color: #d1d5db; }
+.context-tab.active { color: #0ea5e9; border-bottom: 2px solid #0ea5e9; }
+.context-body { flex: 1; overflow-y: auto; padding: 0.75rem; }
+
+/* Connect dialog */
+.connect-dialog { position: fixed; inset: 0; z-index: 50; display: flex; align-items: flex-start; justify-content: center; padding-top: 15vh; }
+.connect-bg { position: absolute; inset: 0; background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); }
+.connect-box { position: relative; background: #1f2937; border: 1px solid #374151; border-radius: 0.75rem; width: 100%; max-width: 28rem; padding: 1.5rem; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5); }
+.connect-box input, .connect-box select { width: 100%; padding: 0.5rem 0.75rem; background: #111827; border: 1px solid #374151; border-radius: 0.375rem; color: #f3f4f6; font-size: 0.875rem; outline: none; margin-top: 0.25rem; }
+.connect-box input:focus, .connect-box select:focus { border-color: #0ea5e9; }
+.connect-box label { font-size: 0.75rem; color: #9ca3af; }
+.btn-primary { padding: 0.5rem 1rem; background: #0ea5e9; color: #fff; border-radius: 0.375rem; font-size: 0.875rem; cursor: pointer; border: none; }
+.btn-primary:hover { background: #0284c7; }
+.btn-secondary { padding: 0.5rem 1rem; background: #374151; color: #d1d5db; border-radius: 0.375rem; font-size: 0.875rem; cursor: pointer; border: none; }
+.btn-secondary:hover { background: #4b5563; }
+
+/* SFTP tree */
+.sftp-item { display: flex; align-items: center; gap: 0.375rem; padding: 0.25rem 0.5rem; font-size: 0.75rem; cursor: pointer; border-radius: 0.25rem; }
+.sftp-item:hover { background: #1f2937; }
+.sftp-item.dir { color: #60a5fa; }
+.sftp-item.file { color: #d1d5db; }
+
+/* Snippet items */
+.snippet-item { padding: 0.5rem; background: #1f2937; border-radius: 0.375rem; cursor: pointer; margin-bottom: 0.375rem; }
+.snippet-item:hover { background: #374151; }
+.snippet-item .name { font-size: 0.8125rem; color: #f3f4f6; }
+.snippet-item .cmd { font-size: 0.6875rem; color: #6b7280; font-family: monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* xterm overrides */
+.xterm { padding: 4px; }
+.xterm-viewport { scrollbar-width: thin; scrollbar-color: #374151 transparent; }
+.xterm-viewport::-webkit-scrollbar { width: 6px; }
+.xterm-viewport::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
+
+@media (max-width: 1279px) {
+    .host-sidebar { width: 48px; }
+    .host-sidebar .host-label, .host-sidebar .sidebar-section, .host-sidebar .sidebar-search { display: none; }
+    .context-panel { display: none; }
+}
+@media (max-width: 767px) {
+    .host-sidebar { display: none; }
+}
+"##;
+
+const PAGE_JS: &str = r###"
+// ======== STATE ========
+const S = {
+    token: localStorage.getItem('syntaur_token') || '',
+    tabs: [],           // [{id, hostId, hostName, ws, term, fitAddon, status, panes}]
+    activeTab: null,
+    hosts: [],
+    snippets: [],
+    sidebarSection: 'hosts',  // hosts | snippets | recordings
+    contextPanel: 'hidden',   // hidden | ai | sftp | health
+    sftpPath: '/home/sean',
+    sftpEntries: [],
+};
+
+// ======== INIT ========
+document.addEventListener('DOMContentLoaded', async () => {
+    // Get auth token from cookie or localStorage
+    if (!S.token) {
+        const r = await fetch('/api/setup/status');
+        // If we can reach the API, we're on the same origin — try to get token
+        S.token = document.cookie.split(';').map(c=>c.trim()).find(c=>c.startsWith('token='))?.split('=')[1] || '';
+    }
+    await loadHosts();
+    await loadSnippets();
+    renderSidebar();
+    // Auto-create local session if no tabs
+    if (S.tabs.length === 0 && S.hosts.length > 0) {
+        const local = S.hosts.find(h => h.is_local);
+        if (local) addTab(local.id, local.name);
+    }
+});
+
+// ======== HOST MANAGEMENT ========
+async function loadHosts() {
+    try {
+        const r = await apiFetch('/api/terminal/hosts');
+        S.hosts = r.hosts || [];
+    } catch(e) { console.error('loadHosts:', e); }
+}
+
+async function loadSnippets() {
+    try {
+        const r = await apiFetch('/api/terminal/snippets');
+        S.snippets = r.snippets || [];
+    } catch(e) { S.snippets = []; }
+}
+
+function renderSidebar() {
+    const sb = document.getElementById('sidebar-content');
+    if (!sb) return;
+    let html = '';
+
+    // Section tabs
+    html += '<div style="display:flex;border-bottom:1px solid #1f2937;margin-bottom:0.5rem">';
+    for (const sec of ['hosts','snippets','recordings']) {
+        const active = S.sidebarSection === sec;
+        html += `<div onclick="S.sidebarSection='${sec}';renderSidebar()" style="flex:1;text-align:center;padding:0.375rem;font-size:0.6875rem;cursor:pointer;color:${active?'#0ea5e9':'#6b7280'};border-bottom:${active?'2px solid #0ea5e9':'none'};text-transform:uppercase">${sec}</div>`;
+    }
+    html += '</div>';
+
+    if (S.sidebarSection === 'hosts') {
+        // Search
+        html += '<div style="padding:0 0.5rem 0.5rem"><input id="host-search" placeholder="Search hosts..." oninput="filterHosts(this.value)" style="width:100%;padding:0.375rem 0.5rem;background:#030712;border:1px solid #374151;border-radius:0.25rem;color:#f3f4f6;font-size:0.75rem;outline:none"></div>';
+        // Group by group_name
+        const groups = {};
+        for (const h of S.hosts) {
+            const g = h.group_name || 'Ungrouped';
+            if (!groups[g]) groups[g] = [];
+            groups[g].push(h);
+        }
+        for (const [g, hosts] of Object.entries(groups)) {
+            html += `<div class="sidebar-section">${esc(g)}</div>`;
+            for (const h of hosts) {
+                const color = h.color || '#0ea5e9';
+                html += `<div class="host-item" ondblclick="addTab(${h.id},'${esc(h.name)}')" title="${esc(h.hostname)}">`;
+                html += `<span style="width:8px;height:8px;border-radius:50%;background:${h.is_local?'#4ade80':'#6b7280'};flex-shrink:0"></span>`;
+                html += `<span class="host-label" style="flex:1;overflow:hidden;text-overflow:ellipsis">${esc(h.name)}</span>`;
+                html += '</div>';
+            }
+        }
+        // Add host button
+        html += '<div style="padding:0.5rem"><button onclick="showConnectDialog()" class="btn-secondary" style="width:100%;font-size:0.75rem">+ Add Host</button></div>';
+    } else if (S.sidebarSection === 'snippets') {
+        for (const sn of S.snippets) {
+            html += `<div class="snippet-item" onclick="insertSnippet(${sn.id})">`;
+            html += `<div class="name">${esc(sn.name)}</div>`;
+            html += `<div class="cmd">${esc(sn.command)}</div>`;
+            html += '</div>';
+        }
+        html += '<div style="padding:0.5rem"><button onclick="showSnippetDialog()" class="btn-secondary" style="width:100%;font-size:0.75rem">+ Add Snippet</button></div>';
+    } else {
+        html += '<div style="padding:0.75rem;color:#6b7280;font-size:0.75rem">Session recordings will appear here.</div>';
+    }
+
+    sb.innerHTML = html;
+}
+
+function filterHosts(query) {
+    // Simple client-side filter
+    const items = document.querySelectorAll('.host-item');
+    const q = query.toLowerCase();
+    items.forEach(el => {
+        el.style.display = el.textContent.toLowerCase().includes(q) ? '' : 'none';
+    });
+}
+
+// ======== TAB MANAGEMENT ========
+function addTab(hostId, hostName) {
+    const tabId = 'tab-' + Date.now();
+    const tab = { id: tabId, hostId, hostName, ws: null, term: null, fitAddon: null, status: 'connecting' };
+    S.tabs.push(tab);
+    renderTabs();
+    switchTab(tabId);
+    connectSession(tab);
+}
+
+function closeTab(tabId) {
+    const idx = S.tabs.findIndex(t => t.id === tabId);
+    if (idx < 0) return;
+    const tab = S.tabs[idx];
+    if (tab.ws) tab.ws.close();
+    if (tab.term) tab.term.dispose();
+    if (tab.sessionId) {
+        apiFetch('/api/terminal/sessions/' + tab.sessionId, { method: 'DELETE' }).catch(() => {});
+    }
+    S.tabs.splice(idx, 1);
+    if (S.activeTab === tabId) {
+        S.activeTab = S.tabs.length > 0 ? S.tabs[Math.max(0, idx-1)].id : null;
+    }
+    renderTabs();
+    if (S.activeTab) switchTab(S.activeTab);
+}
+
+function switchTab(tabId) {
+    S.activeTab = tabId;
+    renderTabs();
+    // Show/hide terminal containers
+    document.querySelectorAll('.term-pane').forEach(el => {
+        el.style.display = el.dataset.tab === tabId ? 'flex' : 'none';
+    });
+    const tab = S.tabs.find(t => t.id === tabId);
+    if (tab && tab.term && tab.fitAddon) {
+        setTimeout(() => tab.fitAddon.fit(), 50);
+        tab.term.focus();
+    }
+}
+
+function renderTabs() {
+    const bar = document.getElementById('tab-bar');
+    if (!bar) return;
+    let html = '';
+    for (const t of S.tabs) {
+        const active = t.id === S.activeTab;
+        const dotClass = t.status === 'connected' ? 'connected' : t.status === 'connecting' ? 'connecting' : 'error';
+        html += `<div class="tab${active?' active':''}" onclick="switchTab('${t.id}')">`;
+        html += `<span class="status-dot ${dotClass}"></span>`;
+        html += `<span>${esc(t.hostName)}</span>`;
+        html += `<span class="close-btn" onclick="event.stopPropagation();closeTab('${t.id}')">&times;</span>`;
+        html += '</div>';
+    }
+    html += `<span class="add-tab" onclick="showConnectDialog()" title="New tab">+</span>`;
+    bar.innerHTML = html;
+}
+
+// ======== TERMINAL + WEBSOCKET ========
+async function connectSession(tab) {
+    try {
+        const r = await apiFetch('/api/terminal/sessions', {
+            method: 'POST',
+            body: JSON.stringify({ host_id: tab.hostId, cols: 80, rows: 24 }),
+        });
+        tab.sessionId = r.session_id;
+    } catch(e) {
+        tab.status = 'error';
+        renderTabs();
+        console.error('create session:', e);
+        return;
+    }
+
+    // Create xterm instance
+    const container = document.createElement('div');
+    container.className = 'term-pane';
+    container.dataset.tab = tab.id;
+    container.style.display = tab.id === S.activeTab ? 'flex' : 'none';
+    container.style.flex = '1';
+    container.style.minHeight = '0';
+    document.getElementById('terminal-area').appendChild(container);
+
+    const term = new Terminal({
+        fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+        fontSize: 14,
+        theme: {
+            background: '#030712',
+            foreground: '#f3f4f6',
+            cursor: '#0ea5e9',
+            selectionBackground: 'rgba(14,165,233,0.3)',
+            black: '#030712', red: '#ef4444', green: '#22c55e', yellow: '#eab308',
+            blue: '#3b82f6', magenta: '#a855f7', cyan: '#06b6d4', white: '#f3f4f6',
+            brightBlack: '#6b7280', brightRed: '#f87171', brightGreen: '#4ade80', brightYellow: '#facc15',
+            brightBlue: '#60a5fa', brightMagenta: '#c084fc', brightCyan: '#22d3ee', brightWhite: '#ffffff',
+        },
+        cursorBlink: true,
+        scrollback: 10000,
+        allowProposedApi: true,
+    });
+
+    const fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+
+    const searchAddon = new SearchAddon.SearchAddon();
+    term.loadAddon(searchAddon);
+
+    const webLinksAddon = new WebLinksAddon.WebLinksAddon();
+    term.loadAddon(webLinksAddon);
+
+    term.open(container);
+    fitAddon.fit();
+    tab.term = term;
+    tab.fitAddon = fitAddon;
+    tab.searchAddon = searchAddon;
+
+    // ResizeObserver
+    const ro = new ResizeObserver(() => {
+        if (tab.id === S.activeTab) fitAddon.fit();
+    });
+    ro.observe(container);
+
+    // WebSocket
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${proto}//${location.host}/ws/terminal/${tab.sessionId}?token=${encodeURIComponent(S.token)}`;
+    const ws = new WebSocket(wsUrl);
+    ws.binaryType = 'arraybuffer';
+    tab.ws = ws;
+
+    ws.onopen = () => {
+        tab.status = 'connected';
+        renderTabs();
+        // Send initial size
+        const dims = fitAddon.proposeDimensions();
+        if (dims) {
+            ws.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
+        }
+    };
+
+    ws.onmessage = (ev) => {
+        if (typeof ev.data === 'string') {
+            try {
+                const msg = JSON.parse(ev.data);
+                if (msg.type === 'scrollback' && msg.data) {
+                    const bytes = Uint8Array.from(atob(msg.data), c => c.charCodeAt(0));
+                    term.write(bytes);
+                } else if (msg.type === 'exit') {
+                    term.write('\r\n\x1b[33m[Process exited with code ' + (msg.code||0) + ']\x1b[0m\r\n');
+                    tab.status = 'error';
+                    renderTabs();
+                } else if (msg.type === 'error') {
+                    term.write('\r\n\x1b[31m[Error: ' + (msg.message||'unknown') + ']\x1b[0m\r\n');
+                }
+            } catch(e) {}
+        } else {
+            term.write(new Uint8Array(ev.data));
+        }
+    };
+
+    ws.onclose = () => {
+        tab.status = 'error';
+        renderTabs();
+        term.write('\r\n\x1b[33m[Connection closed]\x1b[0m\r\n');
+    };
+
+    // Terminal input → WebSocket
+    term.onData(data => {
+        if (ws.readyState === WebSocket.OPEN) {
+            const enc = new TextEncoder();
+            ws.send(enc.encode(data));
+        }
+    });
+
+    // Resize events
+    term.onResize(({cols, rows}) => {
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+        }
+    });
+}
+
+// ======== SPLIT PANES ========
+function splitPane(direction) {
+    const tab = S.tabs.find(t => t.id === S.activeTab);
+    if (!tab) return;
+    // Create a new tab connected to the same host in a split
+    addTab(tab.hostId, tab.hostName);
+}
+
+// ======== CONNECT DIALOG ========
+function showConnectDialog() {
+    let d = document.getElementById('connect-dialog');
+    if (d) { d.style.display = 'flex'; return; }
+
+    d = document.createElement('div');
+    d.id = 'connect-dialog';
+    d.className = 'connect-dialog';
+    d.innerHTML = `
+        <div class="connect-bg" onclick="hideConnectDialog()"></div>
+        <div class="connect-box">
+            <h3 style="font-size:1rem;font-weight:600;margin-bottom:1rem">Connect to Host</h3>
+            <div style="display:grid;gap:0.75rem">
+                <div>
+                    <label>Host</label>
+                    <select id="cd-host" style="margin-top:0.25rem">
+                        ${S.hosts.map(h => `<option value="${h.id}">${esc(h.name)} (${esc(h.hostname)})</option>`).join('')}
+                    </select>
+                </div>
+                <div style="display:flex;gap:0.5rem;justify-content:flex-end;margin-top:0.5rem">
+                    <button class="btn-secondary" onclick="hideConnectDialog()">Cancel</button>
+                    <button class="btn-primary" onclick="connectFromDialog()">Connect</button>
+                </div>
+                <div style="border-top:1px solid #374151;padding-top:0.75rem;margin-top:0.25rem">
+                    <h4 style="font-size:0.8125rem;font-weight:500;margin-bottom:0.5rem">Add New Host</h4>
+                    <div style="display:grid;gap:0.5rem">
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem">
+                            <div><label>Name</label><input id="cd-name" placeholder="My Server"></div>
+                            <div><label>Hostname / IP</label><input id="cd-hostname" placeholder="192.168.1.x"></div>
+                        </div>
+                        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.5rem">
+                            <div><label>Username</label><input id="cd-user" value="sean"></div>
+                            <div><label>Port</label><input id="cd-port" type="number" value="22"></div>
+                            <div><label>Auth</label><select id="cd-auth"><option value="key">SSH Key</option><option value="password">Password</option></select></div>
+                        </div>
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem">
+                            <div><label>Group</label><input id="cd-group" placeholder="LAN"></div>
+                            <div><label>Color</label><input id="cd-color" type="color" value="#0ea5e9"></div>
+                        </div>
+                        <label style="display:flex;align-items:center;gap:0.5rem;font-size:0.8125rem"><input type="checkbox" id="cd-local"> This is the local gateway host</label>
+                        <button class="btn-primary" onclick="addNewHost()" style="width:100%">Save & Connect</button>
+                    </div>
+                </div>
+            </div>
+        </div>`;
+    document.body.appendChild(d);
+}
+
+function hideConnectDialog() {
+    const d = document.getElementById('connect-dialog');
+    if (d) d.style.display = 'none';
+}
+
+function connectFromDialog() {
+    const sel = document.getElementById('cd-host');
+    if (!sel) return;
+    const hostId = parseInt(sel.value);
+    const host = S.hosts.find(h => h.id === hostId);
+    if (host) {
+        hideConnectDialog();
+        addTab(host.id, host.name);
+    }
+}
+
+async function addNewHost() {
+    const name = document.getElementById('cd-name').value.trim();
+    const hostname = document.getElementById('cd-hostname').value.trim();
+    if (!name || !hostname) return alert('Name and hostname required');
+
+    try {
+        const r = await apiFetch('/api/terminal/hosts', {
+            method: 'POST',
+            body: JSON.stringify({
+                name,
+                hostname,
+                port: parseInt(document.getElementById('cd-port').value) || 22,
+                username: document.getElementById('cd-user').value || 'sean',
+                auth_method: document.getElementById('cd-auth').value,
+                group_name: document.getElementById('cd-group').value,
+                color: document.getElementById('cd-color').value,
+                is_local: document.getElementById('cd-local').checked,
+            }),
+        });
+        await loadHosts();
+        renderSidebar();
+        hideConnectDialog();
+        addTab(r.id, name);
+    } catch(e) {
+        alert('Failed: ' + e.message);
+    }
+}
+
+// ======== CONTEXT PANEL ========
+function toggleContext(panel) {
+    S.contextPanel = S.contextPanel === panel ? 'hidden' : panel;
+    const cp = document.getElementById('context-panel');
+    if (!cp) return;
+    cp.className = 'context-panel' + (S.contextPanel === 'hidden' ? ' hidden' : '');
+    renderContext();
+    // Refit terminals after panel toggle
+    setTimeout(() => {
+        const tab = S.tabs.find(t => t.id === S.activeTab);
+        if (tab && tab.fitAddon) tab.fitAddon.fit();
+    }, 100);
+}
+
+function renderContext() {
+    const tabs = document.getElementById('context-tabs');
+    const body = document.getElementById('context-body');
+    if (!tabs || !body) return;
+
+    let tabHtml = '';
+    for (const p of ['ai','sftp','health']) {
+        tabHtml += `<div class="context-tab${S.contextPanel===p?' active':''}" onclick="toggleContext('${p}')">${p.toUpperCase()}</div>`;
+    }
+    tabs.innerHTML = tabHtml;
+
+    if (S.contextPanel === 'ai') {
+        body.innerHTML = `
+            <div style="flex:1;overflow-y:auto" id="ai-messages"><div style="color:#6b7280;font-size:0.8125rem">Ask about commands, errors, or what to do next.</div></div>
+            <div style="display:flex;gap:0.375rem;margin-top:0.5rem">
+                <input id="ai-input" placeholder="Ask anything..." style="flex:1;padding:0.375rem 0.5rem;background:#030712;border:1px solid #374151;border-radius:0.25rem;color:#f3f4f6;font-size:0.8125rem;outline:none" onkeydown="if(event.key==='Enter')sendAiMsg()">
+                <button class="btn-primary" style="padding:0.375rem 0.75rem;font-size:0.75rem" onclick="sendAiMsg()">Send</button>
+            </div>`;
+    } else if (S.contextPanel === 'sftp') {
+        body.innerHTML = `
+            <div style="display:flex;gap:0.375rem;margin-bottom:0.5rem">
+                <input id="sftp-path" value="${esc(S.sftpPath)}" style="flex:1;padding:0.25rem 0.5rem;background:#030712;border:1px solid #374151;border-radius:0.25rem;color:#f3f4f6;font-size:0.75rem;outline:none" onkeydown="if(event.key==='Enter')browseSftp()">
+                <button class="btn-secondary" style="padding:0.25rem 0.5rem;font-size:0.6875rem" onclick="browseSftp()">Go</button>
+            </div>
+            <div id="sftp-tree" style="font-size:0.75rem"></div>`;
+        browseSftp();
+    } else if (S.contextPanel === 'health') {
+        body.innerHTML = '<div style="color:#6b7280;font-size:0.8125rem">Select a host to view health metrics.</div>';
+        loadHealth();
+    }
+}
+
+async function browseSftp() {
+    const tab = S.tabs.find(t => t.id === S.activeTab);
+    if (!tab) return;
+    const pathInput = document.getElementById('sftp-path');
+    const path = pathInput ? pathInput.value : S.sftpPath;
+    S.sftpPath = path;
+
+    try {
+        const r = await apiFetch(`/api/terminal/sftp/${tab.hostId}/ls?path=${encodeURIComponent(path)}`);
+        S.sftpEntries = r.entries || [];
+        const tree = document.getElementById('sftp-tree');
+        if (!tree) return;
+        let html = `<div class="sftp-item dir" onclick="sftpNav('..')" style="color:#fbbf24">..</div>`;
+        // Sort: dirs first, then files
+        const sorted = [...S.sftpEntries].sort((a,b) => (b.is_dir?1:0) - (a.is_dir?1:0) || a.name.localeCompare(b.name));
+        for (const e of sorted) {
+            const icon = e.is_dir ? '&#128193;' : '&#128196;';
+            const cls = e.is_dir ? 'dir' : 'file';
+            const size = e.is_dir ? '' : ` <span style="color:#6b7280">${formatSize(e.size)}</span>`;
+            const onclick = e.is_dir ? `sftpNav('${esc(e.name)}')` : `sftpDownload('${esc(e.name)}')`;
+            html += `<div class="sftp-item ${cls}" onclick="${onclick}">${icon} ${esc(e.name)}${size}</div>`;
+        }
+        tree.innerHTML = html;
+    } catch(e) {
+        const tree = document.getElementById('sftp-tree');
+        if (tree) tree.innerHTML = `<div style="color:#ef4444;font-size:0.75rem">Error: ${esc(e.message||e)}</div>`;
+    }
+}
+
+function sftpNav(name) {
+    if (name === '..') {
+        const parts = S.sftpPath.split('/').filter(Boolean);
+        parts.pop();
+        S.sftpPath = '/' + parts.join('/');
+    } else {
+        S.sftpPath = S.sftpPath.replace(/\/+$/, '') + '/' + name;
+    }
+    const pathInput = document.getElementById('sftp-path');
+    if (pathInput) pathInput.value = S.sftpPath;
+    browseSftp();
+}
+
+function sftpDownload(name) {
+    const tab = S.tabs.find(t => t.id === S.activeTab);
+    if (!tab) return;
+    const path = S.sftpPath.replace(/\/+$/, '') + '/' + name;
+    window.open(`/api/terminal/sftp/${tab.hostId}/read?path=${encodeURIComponent(path)}&token=${encodeURIComponent(S.token)}`);
+}
+
+// ======== AI ASSIST ========
+async function sendAiMsg() {
+    const input = document.getElementById('ai-input');
+    const msgs = document.getElementById('ai-messages');
+    if (!input || !msgs) return;
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = '';
+
+    // Get last N lines of terminal output for context
+    const tab = S.tabs.find(t => t.id === S.activeTab);
+    let termContext = '';
+    if (tab && tab.term) {
+        const buf = tab.term.buffer.active;
+        const lines = [];
+        for (let i = Math.max(0, buf.cursorY - 20); i <= buf.cursorY; i++) {
+            const line = buf.getLine(i);
+            if (line) lines.push(line.translateToString(true));
+        }
+        termContext = lines.join('\n');
+    }
+
+    msgs.innerHTML += `<div style="margin-top:0.5rem;color:#f3f4f6;font-size:0.8125rem"><strong>You:</strong> ${esc(text)}</div>`;
+    msgs.innerHTML += `<div id="ai-response" style="margin-top:0.25rem;color:#9ca3af;font-size:0.8125rem">Thinking...</div>`;
+    msgs.scrollTop = msgs.scrollHeight;
+
+    try {
+        const r = await apiFetch('/api/message', {
+            method: 'POST',
+            body: JSON.stringify({
+                message: `Terminal context (last output):\n\`\`\`\n${termContext}\n\`\`\`\n\nUser question: ${text}`,
+                agent: 'main',
+            }),
+        });
+        const resp = document.getElementById('ai-response');
+        if (resp) resp.innerHTML = `<strong>AI:</strong> ${esc(r.response || r.text || JSON.stringify(r))}`;
+    } catch(e) {
+        const resp = document.getElementById('ai-response');
+        if (resp) resp.innerHTML = `<span style="color:#ef4444">Error: ${esc(e.message||e)}</span>`;
+    }
+}
+
+// ======== HEALTH ========
+async function loadHealth() {
+    const tab = S.tabs.find(t => t.id === S.activeTab);
+    if (!tab) return;
+    const body = document.getElementById('context-body');
+    if (!body) return;
+
+    try {
+        const r = await apiFetch(`/api/terminal/health/${tab.hostId}`);
+        body.innerHTML = `<div style="display:grid;gap:0.5rem">
+            <div style="background:#1f2937;padding:0.5rem;border-radius:0.375rem">
+                <div style="font-size:0.6875rem;color:#6b7280">CPU</div>
+                <div style="font-size:1.25rem;font-weight:600">${r.cpu || 'N/A'}</div>
+            </div>
+            <div style="background:#1f2937;padding:0.5rem;border-radius:0.375rem">
+                <div style="font-size:0.6875rem;color:#6b7280">Memory</div>
+                <div style="font-size:1.25rem;font-weight:600">${r.memory || 'N/A'}</div>
+            </div>
+            <div style="background:#1f2937;padding:0.5rem;border-radius:0.375rem">
+                <div style="font-size:0.6875rem;color:#6b7280">Disk</div>
+                <div style="font-size:1.25rem;font-weight:600">${r.disk || 'N/A'}</div>
+            </div>
+            <div style="background:#1f2937;padding:0.5rem;border-radius:0.375rem">
+                <div style="font-size:0.6875rem;color:#6b7280">Uptime</div>
+                <div style="font-size:1.25rem;font-weight:600">${r.uptime || 'N/A'}</div>
+            </div>
+        </div>`;
+    } catch(e) {
+        body.innerHTML = `<div style="color:#6b7280;font-size:0.8125rem">Health metrics unavailable.</div>`;
+    }
+}
+
+// ======== SNIPPETS ========
+function insertSnippet(id) {
+    const sn = S.snippets.find(s => s.id === id);
+    if (!sn) return;
+    const tab = S.tabs.find(t => t.id === S.activeTab);
+    if (!tab || !tab.ws || tab.ws.readyState !== WebSocket.OPEN) return;
+    const enc = new TextEncoder();
+    tab.ws.send(enc.encode(sn.command + '\n'));
+}
+
+function showSnippetDialog() {
+    // Simple prompt-based for now
+    const name = prompt('Snippet name:');
+    if (!name) return;
+    const command = prompt('Command:');
+    if (!command) return;
+    apiFetch('/api/terminal/snippets', {
+        method: 'POST',
+        body: JSON.stringify({ name, command }),
+    }).then(() => { loadSnippets().then(renderSidebar); }).catch(e => alert('Failed: ' + e.message));
+}
+
+// ======== KEYBOARD SHORTCUTS ========
+document.addEventListener('keydown', (e) => {
+    if (e.ctrlKey && e.shiftKey) {
+        switch(e.key) {
+            case 'T': e.preventDefault(); showConnectDialog(); break;
+            case 'W': e.preventDefault(); if (S.activeTab) closeTab(S.activeTab); break;
+            case 'D': e.preventDefault(); splitPane('horizontal'); break;
+            case 'E': e.preventDefault(); splitPane('vertical'); break;
+            case 'F': e.preventDefault(); {
+                const tab = S.tabs.find(t => t.id === S.activeTab);
+                if (tab && tab.searchAddon) {
+                    const q = prompt('Search terminal:');
+                    if (q) tab.searchAddon.findNext(q);
+                }
+            } break;
+            case 'P': e.preventDefault(); toggleContext('ai'); break;
+        }
+    }
+    // Ctrl+Tab to cycle
+    if (e.ctrlKey && e.key === 'Tab') {
+        e.preventDefault();
+        const idx = S.tabs.findIndex(t => t.id === S.activeTab);
+        const next = e.shiftKey ? (idx - 1 + S.tabs.length) % S.tabs.length : (idx + 1) % S.tabs.length;
+        if (S.tabs[next]) switchTab(S.tabs[next].id);
+    }
+});
+
+// ======== UTILITIES ========
+async function apiFetch(url, opts = {}) {
+    const headers = { 'Content-Type': 'application/json' };
+    if (S.token) headers['Authorization'] = 'Bearer ' + S.token;
+    const r = await fetch(url, { ...opts, headers: { ...headers, ...(opts.headers||{}) } });
+    if (!r.ok) {
+        const text = await r.text().catch(() => r.statusText);
+        throw new Error(text);
+    }
+    return r.json();
+}
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s||''; return d.innerHTML; }
+function formatSize(bytes) {
+    if (bytes < 1024) return bytes + 'B';
+    if (bytes < 1048576) return (bytes/1024).toFixed(1) + 'KB';
+    if (bytes < 1073741824) return (bytes/1048576).toFixed(1) + 'MB';
+    return (bytes/1073741824).toFixed(1) + 'GB';
+}
+"###;
+
+pub async fn render() -> Html<String> {
+    let page = Page {
+        title: "Coders",
+        authed: true,
+        extra_style: Some(EXTRA_STYLE),
+    };
+
+    let body = html! {
+        (top_bar_standard("Coders"))
+
+        // Main layout: sidebar + terminal + context panel
+        div style="display:flex; height:calc(100vh - 57px); overflow:hidden" {
+            // Host sidebar
+            div class="host-sidebar" {
+                div id="sidebar-content" {}
+            }
+
+            // Terminal area
+            div style="flex:1; display:flex; flex-direction:column; min-width:0" {
+                // Tab bar
+                div class="tab-bar" id="tab-bar" {}
+                // Terminal panes
+                div id="terminal-area" class="pane-container" style="flex:1;min-height:0" {}
+            }
+
+            // Context panel (right)
+            div class="context-panel hidden" id="context-panel" {
+                div class="context-tabs" id="context-tabs" {}
+                div class="context-body" id="context-body" {}
+            }
+        }
+
+        // Context panel toggle buttons (floating)
+        div style="position:fixed;right:0.5rem;top:4rem;display:flex;flex-direction:column;gap:0.25rem;z-index:30" {
+            button onclick="toggleContext('ai')" title="AI Assist" style="background:#1f2937;border:1px solid #374151;color:#9ca3af;padding:0.375rem;border-radius:0.375rem;cursor:pointer;font-size:0.75rem" { "AI" }
+            button onclick="toggleContext('sftp')" title="Files" style="background:#1f2937;border:1px solid #374151;color:#9ca3af;padding:0.375rem;border-radius:0.375rem;cursor:pointer;font-size:0.75rem" { "FS" }
+            button onclick="toggleContext('health')" title="Health" style="background:#1f2937;border:1px solid #374151;color:#9ca3af;padding:0.375rem;border-radius:0.375rem;cursor:pointer;font-size:0.75rem" { "HP" }
+        }
+
+        // xterm.js + addons
+        link rel="stylesheet" href="/coders/xterm.css";
+        script src="/coders/xterm.min.js" {}
+        script src="/coders/xterm-addon-fit.js" {}
+        script src="/coders/xterm-addon-search.js" {}
+        script src="/coders/xterm-addon-web-links.js" {}
+        script { (PreEscaped(PAGE_JS)) }
+    };
+
+    Html(shell(page, body).into_string())
+}

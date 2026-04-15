@@ -900,6 +900,73 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE user_api_tokens ADD COLUMN expires_at INTEGER;
     "#,
+
+    // Migration 26: Terminal / Coders module tables
+    r#"
+    CREATE TABLE IF NOT EXISTS terminal_hosts (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        name          TEXT NOT NULL UNIQUE,
+        hostname      TEXT NOT NULL,
+        port          INTEGER NOT NULL DEFAULT 22,
+        username      TEXT NOT NULL DEFAULT 'sean',
+        auth_method   TEXT NOT NULL DEFAULT 'key',
+        private_key   TEXT,
+        password      TEXT,
+        jump_host_id  INTEGER REFERENCES terminal_hosts(id),
+        default_shell TEXT DEFAULT '/bin/bash',
+        group_name    TEXT DEFAULT '',
+        tags          TEXT DEFAULT '[]',
+        color         TEXT DEFAULT '#0ea5e9',
+        sort_order    INTEGER NOT NULL DEFAULT 0,
+        is_local      INTEGER NOT NULL DEFAULT 0,
+        favorite      INTEGER NOT NULL DEFAULT 0,
+        created_at    INTEGER NOT NULL,
+        updated_at    INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS terminal_sessions (
+        id            TEXT PRIMARY KEY,
+        host_id       INTEGER NOT NULL REFERENCES terminal_hosts(id),
+        title         TEXT NOT NULL DEFAULT 'bash',
+        cols          INTEGER NOT NULL DEFAULT 80,
+        rows          INTEGER NOT NULL DEFAULT 24,
+        status        TEXT NOT NULL DEFAULT 'alive',
+        recording     INTEGER NOT NULL DEFAULT 0,
+        created_at    INTEGER NOT NULL,
+        last_active   INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS terminal_snippets (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        name          TEXT NOT NULL,
+        command       TEXT NOT NULL,
+        variables     TEXT DEFAULT '[]',
+        tags          TEXT DEFAULT '[]',
+        folder        TEXT DEFAULT '',
+        created_at    INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS terminal_recordings (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id    TEXT NOT NULL REFERENCES terminal_sessions(id),
+        started_at    INTEGER NOT NULL,
+        ended_at      INTEGER,
+        size_bytes    INTEGER NOT NULL DEFAULT 0,
+        file_path     TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS terminal_port_forwards (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        host_id       INTEGER NOT NULL REFERENCES terminal_hosts(id),
+        direction     TEXT NOT NULL,
+        bind_host     TEXT NOT NULL DEFAULT '127.0.0.1',
+        bind_port     INTEGER NOT NULL,
+        target_host   TEXT NOT NULL,
+        target_port   INTEGER NOT NULL,
+        auto_start    INTEGER NOT NULL DEFAULT 0,
+        created_at    INTEGER NOT NULL
+    );
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

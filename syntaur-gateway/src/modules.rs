@@ -100,6 +100,13 @@ pub static CORE_MODULES: &[CoreModule] = &[
         default_enabled: true,
     },
     CoreModule {
+        id: "mod-coders",
+        name: "Terminal / SSH",
+        description: "Web-based terminal with SSH, SFTP, port forwarding, and AI assist",
+        tools: &[],
+        default_enabled: false,
+    },
+    CoreModule {
         id: "mod-voice-journal",
         name: "Voice Journal",
         description: "Record, transcribe, and search spoken conversations from wearables, phone, or desktop mic. \

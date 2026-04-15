@@ -26,6 +26,7 @@ pub const PRO_MODULES: &[&str] = &[
     "social-manager", "office", "filesystem", "search",
     // Future premium: home, camera, finance
     "mod-voice-journal",
+    "mod-coders",
 ];
 
 /// License status for the current installation.

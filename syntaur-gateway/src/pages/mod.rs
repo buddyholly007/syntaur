@@ -25,6 +25,7 @@
 //!   [done] research        → pages::research (new, research UI)
 
 pub mod chat;
+pub mod coders;
 pub mod dashboard;
 pub mod history;
 pub mod journal;

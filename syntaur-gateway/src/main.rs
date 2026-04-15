@@ -34,6 +34,7 @@ mod calendar_reminder;
 mod sync;
 mod music;
 pub mod crypto;
+pub mod terminal;
 
 /// Brand name constant — used in user-facing messages.
 pub const BRAND: &str = "Syntaur";
@@ -131,6 +132,8 @@ pub struct AppState {
     /// Uploaded-files connector specifically — held separately so upload
     /// and delete handlers can reach its filesystem root.
     pub uploaded_files: Option<Arc<connectors::sources::uploaded_files::UploadedFilesConnector>>,
+    /// Terminal module manager (mod-coders). None when module is disabled.
+    pub terminal: Option<Arc<terminal::TerminalManager>>,
 }
 
 /// Run the `bootstrap-admin` CLI subcommand. Parses `--name <name>` from
@@ -3932,6 +3935,22 @@ async fn main() {
         external_callbacks: Arc::new(Mutex::new(Vec::new())),
         connectors: Arc::new(std::sync::RwLock::new(HashMap::new())),
         uploaded_files: uploaded_files_connector.clone(),
+        terminal: {
+            let is_enabled = config.modules.entries.get("mod-coders")
+                .map(|e| e.enabled).unwrap_or(false);
+            if is_enabled {
+                let tc = config.modules.entries.get("mod-coders")
+                    .and_then(|e| serde_json::from_value::<terminal::TerminalConfig>(e.config.clone()).ok())
+                    .unwrap_or_default();
+                Some(Arc::new(terminal::TerminalManager::new(
+                    PathBuf::from(format!("{}/index.db", data_dir_str)),
+                    master_key.clone(),
+                    tc,
+                )))
+            } else {
+                None
+            }
+        },
     });
 
     // Calendar reminder background task: checks for upcoming events every 60s.
@@ -4068,6 +4087,26 @@ async fn main() {
         .route("/api/journal/search", get(voice_api::search_journal))
         .route("/api/journal/sessions", get(voice_api::get_sessions))
         .route("/api/tts", post(voice_api::synthesize_speech))
+        // Terminal / Coders module routes
+        .route("/coders", get(pages::coders::render))
+        .route("/ws/terminal/{session_id}", get(terminal::ws::ws_terminal_handler))
+        .route("/api/terminal/sessions", get(terminal::session::list_sessions))
+        .route("/api/terminal/sessions", post(terminal::session::create_session))
+        .route("/api/terminal/sessions/{id}", axum::routing::delete(terminal::session::kill_session))
+        .route("/api/terminal/hosts", get(terminal::hosts::list_hosts))
+        .route("/api/terminal/hosts", post(terminal::hosts::create_host))
+        .route("/api/terminal/hosts/{id}", axum::routing::put(terminal::hosts::update_host))
+        .route("/api/terminal/hosts/{id}", axum::routing::delete(terminal::hosts::delete_host))
+        .route("/api/terminal/hosts/{id}/test", post(terminal::hosts::test_connection))
+        .route("/api/terminal/sftp/{host_id}/ls", get(terminal::sftp::list_dir))
+        .route("/api/terminal/sftp/{host_id}/read", get(terminal::sftp::read_file))
+        .route("/api/terminal/sftp/{host_id}/upload", post(terminal::sftp::upload_file))
+        .route("/api/terminal/sftp/{host_id}/mkdir", post(terminal::sftp::mkdir))
+        .route("/api/terminal/sftp/{host_id}/rm", axum::routing::delete(terminal::sftp::rm))
+        .route("/api/terminal/snippets", get(terminal::hosts::list_hosts)) // placeholder — snippet CRUD
+        .route("/api/terminal/forwards", get(terminal::forwarding::list_forwards))
+        .route("/api/terminal/forwards", post(terminal::forwarding::create_forward))
+        .route("/api/terminal/forwards/{id}", axum::routing::delete(terminal::forwarding::delete_forward))
         // Setup wizard endpoints (installer + dashboard)
         .route("/", get(pages::dashboard::render))
         .route("/icon.svg", get(setup::handle_icon))
@@ -4083,6 +4122,11 @@ async fn main() {
         .route("/api/agent-avatar/{agent_id}", post(setup::handle_agent_avatar_upload))
         .route("/manifest.json", get(setup::handle_manifest))
         .route("/tailwind.js", get(setup::handle_tailwind))
+        .route("/coders/xterm.min.js", get(setup::handle_xterm_js))
+        .route("/coders/xterm.css", get(setup::handle_xterm_css))
+        .route("/coders/xterm-addon-fit.js", get(setup::handle_xterm_fit))
+        .route("/coders/xterm-addon-search.js", get(setup::handle_xterm_search))
+        .route("/coders/xterm-addon-web-links.js", get(setup::handle_xterm_weblinks))
         .route("/fonts.css", get(setup::handle_fonts_css))
         .route("/fonts/{filename}", get(setup::handle_font_file))
         .route("/setup", get(pages::setup::render))

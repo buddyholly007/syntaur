@@ -363,6 +363,7 @@ pub async fn first_run_redirect(
         || path.starts_with("/agent-avatar/")
         || path == "/manifest.json"
         || path == "/tailwind.js"
+        || path.starts_with("/coders/xterm")
         || path == "/fonts.css"
         || path.starts_with("/fonts/")
         || path.starts_with("/static/")
@@ -1033,6 +1034,42 @@ pub async fn handle_tailwind() -> (axum::http::HeaderMap, &'static str) {
     headers.insert("content-type", "application/javascript".parse().unwrap());
     headers.insert("cache-control", "public, max-age=604800".parse().unwrap());
     (headers, include_str!("../static/tailwind.js"))
+}
+
+/// GET /coders/xterm.min.js
+pub async fn handle_xterm_js() -> (axum::http::HeaderMap, &'static str) {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("content-type", "application/javascript".parse().unwrap());
+    headers.insert("cache-control", "public, max-age=604800".parse().unwrap());
+    (headers, include_str!("../static/xterm.min.js"))
+}
+/// GET /coders/xterm.css
+pub async fn handle_xterm_css() -> (axum::http::HeaderMap, &'static str) {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("content-type", "text/css".parse().unwrap());
+    headers.insert("cache-control", "public, max-age=604800".parse().unwrap());
+    (headers, include_str!("../static/xterm.css"))
+}
+/// GET /coders/xterm-addon-fit.js
+pub async fn handle_xterm_fit() -> (axum::http::HeaderMap, &'static str) {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("content-type", "application/javascript".parse().unwrap());
+    headers.insert("cache-control", "public, max-age=604800".parse().unwrap());
+    (headers, include_str!("../static/xterm-addon-fit.js"))
+}
+/// GET /coders/xterm-addon-search.js
+pub async fn handle_xterm_search() -> (axum::http::HeaderMap, &'static str) {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("content-type", "application/javascript".parse().unwrap());
+    headers.insert("cache-control", "public, max-age=604800".parse().unwrap());
+    (headers, include_str!("../static/xterm-addon-search.js"))
+}
+/// GET /coders/xterm-addon-web-links.js
+pub async fn handle_xterm_weblinks() -> (axum::http::HeaderMap, &'static str) {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("content-type", "application/javascript".parse().unwrap());
+    headers.insert("cache-control", "public, max-age=604800".parse().unwrap());
+    (headers, include_str!("../static/xterm-addon-web-links.js"))
 }
 
 /// GET /fonts.css — bundled font definitions (no CDN dependency)
