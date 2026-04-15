@@ -39,14 +39,21 @@ const EXTRA_STYLE: &str = r##"
 .host-item.active { background: #1e3a5f; color: #fff; }
 .sidebar-section { padding: 0.5rem 0.75rem; font-size: 0.6875rem; text-transform: uppercase; color: #6b7280; letter-spacing: 0.05em; }
 
-/* Context panel */
-.context-panel { width: 320px; flex-shrink: 0; background: #111827; border-left: 1px solid #1f2937; display: flex; flex-direction: column; overflow: hidden; }
-.context-panel.hidden { width: 0; overflow: hidden; border: none; }
+/* Right panel — always visible AI chat + tabs */
+.right-panel { min-width: 200px; max-width: 600px; flex-shrink: 0; background: #111827; display: flex; flex-direction: column; overflow: hidden; }
+.right-resize { width: 5px; flex-shrink: 0; background: #1f2937; cursor: col-resize; transition: background 0.15s; }
+.right-resize:hover, .right-resize.dragging { background: #0ea5e9; }
 .context-tabs { display: flex; border-bottom: 1px solid #1f2937; }
 .context-tab { flex: 1; text-align: center; padding: 0.5rem; font-size: 0.75rem; color: #6b7280; cursor: pointer; }
 .context-tab:hover { color: #d1d5db; }
 .context-tab.active { color: #0ea5e9; border-bottom: 2px solid #0ea5e9; }
-.context-body { flex: 1; overflow-y: auto; padding: 0.75rem; }
+.context-body { flex: 1; overflow-y: auto; padding: 0.75rem; display: flex; flex-direction: column; }
+/* AI chat messages */
+.ai-messages { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem; padding-bottom: 0.5rem; }
+.ai-msg { padding: 0.5rem 0.625rem; border-radius: 0.5rem; font-size: 0.8125rem; line-height: 1.4; max-width: 95%; word-wrap: break-word; }
+.ai-msg.user { background: #1e3a5f; color: #e0f2fe; align-self: flex-end; }
+.ai-msg.assistant { background: #1f2937; color: #d1d5db; align-self: flex-start; }
+.ai-input-row { display: flex; gap: 0.375rem; padding-top: 0.5rem; border-top: 1px solid #1f2937; flex-shrink: 0; }
 
 /* Connect dialog */
 .connect-dialog { position: fixed; inset: 0; z-index: 50; display: flex; align-items: flex-start; justify-content: center; padding-top: 15vh; }
@@ -172,7 +179,7 @@ function renderSidebar() {
             html += `<div class="sidebar-section">${esc(g)}</div>`;
             for (const h of hosts) {
                 const color = h.color || '#0ea5e9';
-                html += `<div class="host-item" ondblclick="addTab(${h.id},'${esc(h.name)}')" title="${esc(h.hostname)}">`;
+                html += `<div class="host-item" onclick="addTab(${h.id},'${esc(h.name)}')" title="${esc(h.hostname)}">`;
                 html += `<span style="width:8px;height:8px;border-radius:50%;background:${h.is_local?'#4ade80':'#6b7280'};flex-shrink:0"></span>`;
                 html += `<span class="host-label" style="flex:1;overflow:hidden;text-overflow:ellipsis">${esc(h.name)}</span>`;
                 html += '</div>';
@@ -484,18 +491,10 @@ async function addNewHost() {
     }
 }
 
-// ======== CONTEXT PANEL ========
-function toggleContext(panel) {
-    S.contextPanel = S.contextPanel === panel ? 'hidden' : panel;
-    const cp = document.getElementById('context-panel');
-    if (!cp) return;
-    cp.className = 'context-panel' + (S.contextPanel === 'hidden' ? ' hidden' : '');
+// ======== RIGHT PANEL (always visible) ========
+function switchContextTab(panel) {
+    S.contextPanel = panel;
     renderContext();
-    // Refit terminals after panel toggle
-    setTimeout(() => {
-        const tab = S.tabs.find(t => t.id === S.activeTab);
-        if (tab && tab.fitAddon) tab.fitAddon.fit();
-    }, 100);
 }
 
 function renderContext() {
@@ -504,17 +503,19 @@ function renderContext() {
     if (!tabs || !body) return;
 
     let tabHtml = '';
-    for (const p of ['ai','sftp','health']) {
-        tabHtml += `<div class="context-tab${S.contextPanel===p?' active':''}" onclick="toggleContext('${p}')">${p.toUpperCase()}</div>`;
+    for (const [key, label] of [['ai','AI Chat'],['sftp','Files'],['health','Health']]) {
+        tabHtml += `<div class="context-tab${S.contextPanel===key?' active':''}" onclick="switchContextTab('${key}')">${label}</div>`;
     }
     tabs.innerHTML = tabHtml;
 
     if (S.contextPanel === 'ai') {
         body.innerHTML = `
-            <div style="flex:1;overflow-y:auto" id="ai-messages"><div style="color:#6b7280;font-size:0.8125rem">Ask about commands, errors, or what to do next.</div></div>
-            <div style="display:flex;gap:0.375rem;margin-top:0.5rem">
-                <input id="ai-input" placeholder="Ask anything..." style="flex:1;padding:0.375rem 0.5rem;background:#030712;border:1px solid #374151;border-radius:0.25rem;color:#f3f4f6;font-size:0.8125rem;outline:none" onkeydown="if(event.key==='Enter')sendAiMsg()">
-                <button class="btn-primary" style="padding:0.375rem 0.75rem;font-size:0.75rem" onclick="sendAiMsg()">Send</button>
+            <div class="ai-messages" id="ai-messages">
+                <div class="ai-msg assistant">Ask me anything about the terminal — commands, errors, what to run next. I can see your terminal output for context.</div>
+            </div>
+            <div class="ai-input-row">
+                <input id="ai-input" placeholder="Ask anything..." style="flex:1;padding:0.5rem 0.625rem;background:#030712;border:1px solid #374151;border-radius:0.375rem;color:#f3f4f6;font-size:0.8125rem;outline:none" onkeydown="if(event.key==='Enter')sendAiMsg()">
+                <button class="btn-primary" style="padding:0.5rem 0.75rem;font-size:0.75rem" onclick="sendAiMsg()">Send</button>
             </div>`;
     } else if (S.contextPanel === 'sftp') {
         body.innerHTML = `
@@ -525,10 +526,13 @@ function renderContext() {
             <div id="sftp-tree" style="font-size:0.75rem"></div>`;
         browseSftp();
     } else if (S.contextPanel === 'health') {
-        body.innerHTML = '<div style="color:#6b7280;font-size:0.8125rem">Select a host to view health metrics.</div>';
+        body.innerHTML = '<div style="color:#6b7280;font-size:0.8125rem">Loading health metrics...</div>';
         loadHealth();
     }
 }
+
+// Init right panel on load — AI chat is default
+setTimeout(() => { S.contextPanel = 'ai'; renderContext(); }, 100);
 
 async function browseSftp() {
     const tab = S.tabs.find(t => t.id === S.activeTab);
@@ -707,6 +711,37 @@ function showSnippetDialog() {
     });
 })();
 
+// ======== RIGHT PANEL RESIZE ========
+(function() {
+    const handle = document.getElementById('right-resize');
+    const panel = document.getElementById('right-panel');
+    if (!handle || !panel) return;
+    let dragging = false;
+    handle.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        dragging = true;
+        handle.classList.add('dragging');
+        document.body.style.cursor = 'col-resize';
+        document.body.style.userSelect = 'none';
+    });
+    document.addEventListener('mousemove', (e) => {
+        if (!dragging) return;
+        const parentRect = panel.parentElement.getBoundingClientRect();
+        let w = parentRect.right - e.clientX;
+        w = Math.max(200, Math.min(600, w));
+        panel.style.width = w + 'px';
+    });
+    document.addEventListener('mouseup', () => {
+        if (!dragging) return;
+        dragging = false;
+        handle.classList.remove('dragging');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        const tab = S.tabs.find(t => t.id === S.activeTab);
+        if (tab && tab.fitAddon) setTimeout(() => tab.fitAddon.fit(), 50);
+    });
+})();
+
 // ======== KEYBOARD SHORTCUTS ========
 document.addEventListener('keydown', (e) => {
     if (e.ctrlKey && e.shiftKey) {
@@ -782,18 +817,14 @@ pub async fn render() -> Html<String> {
                 div id="terminal-area" class="pane-container" style="flex:1;min-height:0" {}
             }
 
-            // Context panel (right)
-            div class="context-panel hidden" id="context-panel" {
+            // Right panel resize handle
+            div class="right-resize" id="right-resize" {}
+
+            // Right panel — always visible
+            div class="right-panel" id="right-panel" style="width:340px" {
                 div class="context-tabs" id="context-tabs" {}
                 div class="context-body" id="context-body" {}
             }
-        }
-
-        // Context panel toggle buttons (floating)
-        div style="position:fixed;right:0.5rem;top:4rem;display:flex;flex-direction:column;gap:0.25rem;z-index:30" {
-            button onclick="toggleContext('ai')" title="AI Assist" style="background:#1f2937;border:1px solid #374151;color:#9ca3af;padding:0.375rem;border-radius:0.375rem;cursor:pointer;font-size:0.75rem" { "AI" }
-            button onclick="toggleContext('sftp')" title="Files" style="background:#1f2937;border:1px solid #374151;color:#9ca3af;padding:0.375rem;border-radius:0.375rem;cursor:pointer;font-size:0.75rem" { "FS" }
-            button onclick="toggleContext('health')" title="Health" style="background:#1f2937;border:1px solid #374151;color:#9ca3af;padding:0.375rem;border-radius:0.375rem;cursor:pointer;font-size:0.75rem" { "HP" }
         }
 
         // xterm.js + addons
