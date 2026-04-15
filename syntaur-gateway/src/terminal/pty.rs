@@ -35,14 +35,15 @@ mod imp {
         let mut master: libc::c_int = 0;
         let mut slave: libc::c_int = 0;
 
-        let ws = libc::winsize {
+        // macOS libc::openpty takes *mut winsize; Linux takes *const. &mut works on both.
+        let mut ws = libc::winsize {
             ws_row: rows,
             ws_col: cols,
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
 
-        let ret = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null(), &ws) };
+        let ret = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), &mut ws) };
         if ret != 0 {
             return Err(format!("openpty failed: {}", std::io::Error::last_os_error()));
         }
@@ -66,6 +67,10 @@ mod imp {
                         libc::close(slave);
                     }
 
+                    // prctl(PR_SET_PDEATHSIG) is Linux-only. macOS has no
+                    // equivalent one-liner; the parent-death cascade there
+                    // relies on SIGHUP being delivered when the pty closes.
+                    #[cfg(target_os = "linux")]
                     libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGHUP);
 
                     let term = CString::new("TERM=xterm-256color").unwrap();
@@ -158,14 +163,14 @@ mod imp {
     }
 
     pub fn resize_pty(fd: RawFd, cols: u16, rows: u16) {
-        let ws = libc::winsize {
+        let mut ws = libc::winsize {
             ws_row: rows,
             ws_col: cols,
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
         unsafe {
-            libc::ioctl(fd, libc::TIOCSWINSZ, &ws);
+            libc::ioctl(fd, libc::TIOCSWINSZ, &mut ws);
         }
     }
 

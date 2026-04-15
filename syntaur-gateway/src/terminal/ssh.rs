@@ -46,14 +46,15 @@ pub async fn connect_ssh(
     let mut master: libc::c_int = 0;
     let mut slave: libc::c_int = 0;
 
-    let ws = libc::winsize {
+    // macOS libc::openpty takes *mut winsize; Linux takes *const. &mut works on both.
+    let mut ws = libc::winsize {
         ws_row: rows,
         ws_col: cols,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
 
-    let ret = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null(), &ws) };
+    let ret = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), &mut ws) };
     if ret != 0 {
         return Err(format!("openpty failed: {}", std::io::Error::last_os_error()));
     }
@@ -78,6 +79,8 @@ pub async fn connect_ssh(
                 libc::dup2(slave, 1);
                 libc::dup2(slave, 2);
                 if slave > 2 { libc::close(slave); }
+                // Linux-only — macOS has no equivalent.
+                #[cfg(target_os = "linux")]
                 libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGHUP);
 
                 let term = std::ffi::CString::new("TERM=xterm-256color").unwrap();
