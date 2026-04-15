@@ -104,7 +104,7 @@ pub static CORE_MODULES: &[CoreModule] = &[
         name: "Terminal / SSH",
         description: "Web-based terminal with SSH, SFTP, port forwarding, and AI assist",
         tools: &[],
-        default_enabled: false,
+        default_enabled: true,
     },
     CoreModule {
         id: "mod-voice-journal",

@@ -3936,8 +3936,8 @@ async fn main() {
         connectors: Arc::new(std::sync::RwLock::new(HashMap::new())),
         uploaded_files: uploaded_files_connector.clone(),
         terminal: {
-            let is_enabled = config.modules.entries.get("mod-coders")
-                .map(|e| e.enabled).unwrap_or(false);
+            let coders_module = modules::CORE_MODULES.iter().find(|m| m.id == "mod-coders");
+            let is_enabled = coders_module.map(|m| config.modules.is_enabled(m)).unwrap_or(false);
             if is_enabled {
                 let tc = config.modules.entries.get("mod-coders")
                     .and_then(|e| serde_json::from_value::<terminal::TerminalConfig>(e.config.clone()).ok())
