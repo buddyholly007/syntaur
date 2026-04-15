@@ -73,7 +73,10 @@ let pendingChanges = false;
 
 async function loadModules() {
   try {
-    const resp = await fetch('/api/setup/modules');
+    const resp = await fetch('/api/setup/modules', {
+      headers: { 'Authorization': 'Bearer ' + token }
+    });
+    if (resp.status === 401) { sessionStorage.removeItem('syntaur_token'); window.location.href = '/'; return; }
     const data = await resp.json();
     const allMods = [...data.core_modules, ...data.extension_modules];
     const enabled = allMods.filter(m => m.enabled);
@@ -121,8 +124,8 @@ async function toggleModule(id, enable, btn) {
   try {
     const resp = await fetch('/api/modules/toggle', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ module_id: id, enabled: enable })
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body: JSON.stringify({ token, module_id: id, enabled: enable })
     });
     const data = await resp.json();
     if (data.restart_required) {
