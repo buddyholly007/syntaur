@@ -33,6 +33,7 @@ mod financial;
 mod calendar_reminder;
 mod sync;
 mod music;
+pub mod crypto;
 
 /// Brand name constant — used in user-facing messages.
 pub const BRAND: &str = "Syntaur";
@@ -444,12 +445,16 @@ struct BugReportRequest {
 }
 
 async fn handle_open_url(
+    State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    resolve_principal(&state, token).await?;
+
     let url = params.get("url").cloned().unwrap_or_default();
-    // Validate URL starts with https:// to prevent command injection
-    if !url.starts_with("https://") && !url.starts_with("http://") {
-        return Json(serde_json::json!({"success": false, "error": "Invalid URL"}));
+    // Only allow https:// URLs — block file://, javascript://, etc.
+    if !url.starts_with("https://") {
+        return Ok(Json(serde_json::json!({"success": false, "error": "Only https:// URLs allowed"})));
     }
     let result = {
         #[cfg(target_os = "linux")]
@@ -462,8 +467,8 @@ async fn handle_open_url(
         { Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "unsupported")) }
     };
     match result {
-        Ok(_) => Json(serde_json::json!({"success": true})),
-        Err(e) => Json(serde_json::json!({"success": false, "error": e.to_string()})),
+        Ok(_) => Ok(Json(serde_json::json!({"success": true}))),
+        Err(e) => Ok(Json(serde_json::json!({"success": false, "error": e.to_string()}))),
     }
 }
 
@@ -3370,12 +3375,22 @@ async fn main() {
         .build()
         .unwrap_or_default();
     let oauth_tokens_path = PathBuf::from(format!("{}/index.db", data_dir_str));
-    let oauth_tokens = oauth::AuthCodeTokenCache::open(oauth_tokens_path, oauth_tokens_http)
+
+    // Master key for encrypting OAuth tokens at rest (F9)
+    let master_key = crypto::load_or_create_key(Path::new(&data_dir_str))
+        .unwrap_or_else(|e| {
+            warn!("Failed to load/create master key ({}); generating ephemeral key", e);
+            use aes_gcm::aead::KeyInit;
+            aes_gcm::Aes256Gcm::generate_key(aes_gcm::aead::OsRng)
+        });
+
+    let oauth_tokens = oauth::AuthCodeTokenCache::open(oauth_tokens_path, oauth_tokens_http, master_key.clone())
         .unwrap_or_else(|e| {
             warn!("AuthCodeTokenCache open failed ({}); /connect disabled", e);
             oauth::AuthCodeTokenCache::open(
                 PathBuf::from(":memory:"),
                 reqwest::Client::new(),
+                master_key,
             )
             .expect("in-memory AuthCodeTokenCache")
         });
@@ -4231,6 +4246,24 @@ async fn main() {
             Arc::clone(&state),
             setup::first_run_redirect,
         ))
+        .layer({
+            use tower_http::cors::{CorsLayer, AllowOrigin};
+            use axum::http::{header, HeaderValue, Method};
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::list([
+                    "http://localhost:18789".parse::<HeaderValue>().unwrap(),
+                    "http://127.0.0.1:18789".parse::<HeaderValue>().unwrap(),
+                    "http://localhost:18790".parse::<HeaderValue>().unwrap(),
+                    "http://127.0.0.1:18790".parse::<HeaderValue>().unwrap(),
+                ]))
+                .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
+                .allow_headers([
+                    header::AUTHORIZATION,
+                    header::CONTENT_TYPE,
+                    header::ACCEPT,
+                ])
+                .allow_credentials(true)
+        })
         .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)); // 16 MB
 
     // Security warnings before server start

@@ -137,10 +137,12 @@ impl UserStore {
     /// ~256 bits of entropy, uniform random, SHA256 of it as the storage
     /// key is indistinguishable from random to any attacker.
     pub async fn mint_token(&self, user_id: i64, name: &str) -> Result<String, String> {
+        self.mint_token_with_expiry(user_id, name, None).await
+    }
+
+    pub async fn mint_token_with_expiry(&self, user_id: i64, name: &str, expiry_hours: Option<u64>) -> Result<String, String> {
         use rand::RngCore;
 
-        // Verify the user exists first; we'd rather fail loudly than
-        // insert an orphaned token that can't be used.
         if self.get_user(user_id).await?.is_none() {
             return Err(format!("user {} does not exist", user_id));
         }
@@ -156,12 +158,13 @@ impl UserStore {
         );
         let hash = hash_token(&raw);
         let now = Utc::now().timestamp();
+        let expires_at = expiry_hours.map(|h| now + (h as i64) * 3600);
 
         let db = self.db.lock().await;
         db.execute(
-            "INSERT INTO user_api_tokens (user_id, token_hash, name, created_at) \
-             VALUES (?, ?, ?, ?)",
-            params![user_id, hash, name, now],
+            "INSERT INTO user_api_tokens (user_id, token_hash, name, created_at, expires_at) \
+             VALUES (?, ?, ?, ?, ?)",
+            params![user_id, hash, name, now, expires_at],
         )
         .map_err(|e| format!("mint_token: {}", e))?;
 
@@ -176,10 +179,10 @@ impl UserStore {
         let db = self.db.lock().await;
         let row = db
             .query_row(
-                "SELECT t.id, t.user_id, u.name, t.revoked_at \
+                "SELECT t.id, t.user_id, u.name, t.revoked_at, t.expires_at \
                  FROM user_api_tokens t \
                  JOIN users u ON u.id = t.user_id \
-                 WHERE t.token_hash = ?",
+                 WHERE t.token_hash = ? AND u.disabled = 0",
                 params![hash],
                 |r| {
                     Ok((
@@ -187,17 +190,24 @@ impl UserStore {
                         r.get::<_, i64>(1)?,
                         r.get::<_, String>(2)?,
                         r.get::<_, Option<i64>>(3)?,
+                        r.get::<_, Option<i64>>(4)?,
                     ))
                 },
             )
             .optional()
             .map_err(|e| format!("resolve_token: {}", e))?;
 
-        let Some((token_id, user_id, user_name, revoked_at)) = row else {
+        let Some((token_id, user_id, user_name, revoked_at, expires_at)) = row else {
             return Ok(None);
         };
         if revoked_at.is_some() {
             return Ok(None);
+        }
+        // Check token expiry
+        if let Some(exp) = expires_at {
+            if Utc::now().timestamp() > exp {
+                return Ok(None);
+            }
         }
         let now = Utc::now().timestamp();
         let _ = db.execute(

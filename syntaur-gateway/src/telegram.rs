@@ -452,15 +452,34 @@ pub async fn run_bot(
                     if let Ok(parsed_id) = id_str.parse::<i64>() {
                         let (approved, ack_text) = match verb {
                             "approve" => {
-                                let resolved = approval_registry.resolve(parsed_id, true).await;
+                                let resolved = approval_registry.resolve_bool(parsed_id, true).await;
                                 info!(
                                     "[tg:{}] callback approve:{} resolved={}",
                                     bot.account_id, parsed_id, resolved
                                 );
-                                (true, "Approved")
+                                (true, "Approved (once)")
+                            }
+                            "approve_session" => {
+                                use crate::approval::ApprovalScope;
+                                let resolved = approval_registry.resolve(parsed_id, ApprovalScope::Session).await;
+                                info!(
+                                    "[tg:{}] callback approve_session:{} resolved={}",
+                                    bot.account_id, parsed_id, resolved
+                                );
+                                (true, "Approved for session")
+                            }
+                            "approve_always" => {
+                                use crate::approval::ApprovalScope;
+                                let resolved = approval_registry.resolve(parsed_id, ApprovalScope::Always).await;
+                                info!(
+                                    "[tg:{}] callback approve_always:{} resolved={}",
+                                    bot.account_id, parsed_id, resolved
+                                );
+                                (true, "Always allowed")
                             }
                             "deny" => {
-                                let resolved = approval_registry.resolve(parsed_id, false).await;
+                                use crate::approval::ApprovalScope;
+                                let resolved = approval_registry.resolve(parsed_id, ApprovalScope::Denied).await;
                                 info!(
                                     "[tg:{}] callback deny:{} resolved={}",
                                     bot.account_id, parsed_id, resolved
@@ -665,6 +684,7 @@ pub async fn run_bot(
                     chat_id,
                     http_client: client.clone(),
                     user_id: chat_user_id,
+                    conversation_id: None, // set per-conversation when available
                 }
             });
             let response = run_llm_with_tools(

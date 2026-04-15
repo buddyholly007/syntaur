@@ -126,6 +126,8 @@ pub struct ApprovalContext {
     /// Owning user_id for pending actions created from this context.
     /// 0 = legacy admin. v5 Item 3.
     pub user_id: i64,
+    /// Conversation ID for session-scoped approvals.
+    pub conversation_id: Option<String>,
 }
 
 impl ToolRegistry {
@@ -383,67 +385,100 @@ impl ToolRegistry {
         // AND we have an approval context wired in, queue a pending action and wait.
         let requires_approval =
             (approval::REQUIRES_APPROVAL.contains(&call.name.as_str())
-                || self.custom_requires_approval.iter().any(|s| s == &call.name))
+                || self.custom_requires_approval.iter().any(|s| s == &call.name)
+                || McpRegistry::is_mcp_tool(&call.name)) // MCP tools require approval by default
                 && !self.custom_never_approval.iter().any(|s| s == &call.name);
         if requires_approval {
             if let Some(ctx) = &self.approval {
-                let args_json = serde_json::to_string(&call.arguments).unwrap_or_default();
-                let action_id = match ctx
-                    .store
-                    .create(&self.agent_id, &call.name, &args_json, ctx.user_id)
-                    .await
-                {
-                    Ok(id) => id,
-                    Err(e) => {
+                // Check session cache first — skip prompt if already approved this session
+                let conv_id = ctx.conversation_id.as_deref().unwrap_or("");
+                if !conv_id.is_empty() && ctx.registry.is_session_approved(conv_id, &call.name).await {
+                    // Session-approved — skip prompt, fall through
+                } else {
+                    let args_json = serde_json::to_string(&call.arguments).unwrap_or_default();
+                    let action_id = match ctx
+                        .store
+                        .create(&self.agent_id, &call.name, &args_json, ctx.user_id)
+                        .await
+                    {
+                        Ok(id) => id,
+                        Err(e) => {
+                            return ToolResult {
+                                tool_call_id: call.id.clone(),
+                                success: false,
+                                output: format!("Error: failed to queue approval: {}", e),
+                            };
+                        }
+                    };
+                    let result = approval::request_approval(
+                        &ctx.bot_token,
+                        ctx.chat_id,
+                        action_id,
+                        call,
+                        Arc::clone(&ctx.registry),
+                        &ctx.http_client,
+                    )
+                    .await;
+                    let (resolved_status, allow) = match &result {
+                        Ok(approval::ApprovalScope::Once) => (approval::PendingStatus::Approved, true),
+                        Ok(approval::ApprovalScope::Session) => (approval::PendingStatus::Approved, true),
+                        Ok(approval::ApprovalScope::Always) => (approval::PendingStatus::Approved, true),
+                        Ok(approval::ApprovalScope::Denied) => (approval::PendingStatus::Denied, false),
+                        Err(_) => (approval::PendingStatus::TimedOut, false),
+                    };
+
+                    // Handle session and always scopes
+                    if let Ok(scope) = &result {
+                        match scope {
+                            approval::ApprovalScope::Session => {
+                                if !conv_id.is_empty() {
+                                    ctx.registry.grant_session(conv_id, &call.name).await;
+                                }
+                            }
+                            approval::ApprovalScope::Always => {
+                                // Add to custom_never_approval so it persists
+                                // (this modifies in-memory; persisting to config is a future step)
+                                if !conv_id.is_empty() {
+                                    ctx.registry.grant_session(conv_id, &call.name).await;
+                                }
+                                info!("[approval] '{}' permanently allowed by user", call.name);
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    let user_scope = if ctx.user_id == 0 { None } else { Some(ctx.user_id) };
+                    let _ = ctx
+                        .store
+                        .resolve(action_id, resolved_status, Some("telegram".to_string()), user_scope)
+                        .await;
+                    if !allow {
                         return ToolResult {
                             tool_call_id: call.id.clone(),
                             success: false,
-                            output: format!("Error: failed to queue approval: {}", e),
+                            output: format!(
+                                "Error: tool '{}' was not approved (status: {:?})",
+                                call.name, resolved_status
+                            ),
                         };
                     }
-                };
-                let approved = approval::request_approval(
-                    &ctx.bot_token,
-                    ctx.chat_id,
-                    action_id,
-                    call,
-                    Arc::clone(&ctx.registry),
-                    &ctx.http_client,
-                )
-                .await;
-                let (resolved_status, allow) = match approved {
-                    Ok(true) => (approval::PendingStatus::Approved, true),
-                    Ok(false) => (approval::PendingStatus::Denied, false),
-                    Err(_) => (approval::PendingStatus::TimedOut, false),
-                };
-                // Resolve is scoped to the same user that created the
-                // action. Legacy admin (user_id=0) uses None for no
-                // filter; any positive user_id enforces ownership.
-                let scope = if ctx.user_id == 0 {
-                    None
-                } else {
-                    Some(ctx.user_id)
-                };
-                let _ = ctx
-                    .store
-                    .resolve(action_id, resolved_status, Some("telegram".to_string()), scope)
-                    .await;
-                if !allow {
-                    return ToolResult {
-                        tool_call_id: call.id.clone(),
-                        success: false,
-                        output: format!(
-                            "Error: tool '{}' was not approved (status: {:?})",
-                            call.name, resolved_status
-                        ),
-                    };
                 }
                 // Approved — fall through to normal dispatch
             } else {
+                // Fail closed: no approval context means we can't get approval
                 warn!(
-                    "Tool '{}' requires approval but no approval context is wired",
+                    "Tool '{}' requires approval but no approval context is wired — BLOCKED",
                     call.name
                 );
+                return ToolResult {
+                    tool_call_id: call.id.clone(),
+                    success: false,
+                    output: format!(
+                        "Error: tool '{}' requires approval but no approval channel is configured. \
+                         Set up Telegram integration to enable tool approvals.",
+                        call.name
+                    ),
+                };
             }
         }
 

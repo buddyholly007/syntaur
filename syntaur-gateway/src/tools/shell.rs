@@ -63,14 +63,13 @@ pub async fn exec_sandboxed(
                     .await
             }
             _ => {
-                // "shell" mode — legacy sh -c pass-through
-                Command::new("sh")
-                    .arg("-c")
-                    .arg(command)
-                    .current_dir(workspace)
-                    .env("HOME", std::env::var("HOME").unwrap_or_default())
-                    .output()
-                    .await
+                // "shell" mode is blocked — sh -c bypasses allowlist controls.
+                // All execution must go through argv mode.
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "Shell mode (sh -c) is disabled for security. \
+                     All commands must use argv mode.",
+                ));
             }
         }
     }).await;

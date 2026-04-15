@@ -895,6 +895,11 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE expense_categories ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE expense_categories ADD COLUMN is_custom INTEGER NOT NULL DEFAULT 0;
     "#,
+
+    // Migration 25: Token expiry support
+    r#"
+    ALTER TABLE user_api_tokens ADD COLUMN expires_at INTEGER;
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

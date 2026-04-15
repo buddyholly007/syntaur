@@ -385,6 +385,16 @@ pub async fn handle_login(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, StatusCode> {
+    // Rate limit login attempts
+    let limit = state.config.security.rate_limit_login_per_minute;
+    if limit > 0 {
+        let mut rl = state.tool_rate_limiter.lock().await;
+        if let Err(_wait) = rl.check("login_global", limit, 60) {
+            log::warn!("[auth] Login rate limit exceeded ({}/min)", limit);
+            return Err(StatusCode::TOO_MANY_REQUESTS);
+        }
+    }
+
     // Try 1: check if it's a valid user API token (ocp_*)
     if let Ok(Some(resolved)) = state.users.resolve_token(&req.password).await {
         return Ok(Json(LoginResponse {
@@ -926,10 +936,28 @@ pub async fn handle_logo_mark() -> (axum::http::HeaderMap, &'static [u8]) {
     (h, include_bytes!("../static/logo-mark.jpg"))
 }
 
+/// Sanitize agent_id to prevent path traversal — alphanumeric, hyphens, underscores only.
+fn sanitize_agent_id(id: &str) -> Result<&str, (StatusCode, String)> {
+    if id.is_empty() || id.len() > 64 || !id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        return Err((StatusCode::BAD_REQUEST, "Invalid agent ID".to_string()));
+    }
+    Ok(id)
+}
+
 /// GET /agent-avatar/{agent_id} — serve custom agent avatar or default
 pub async fn handle_agent_avatar(
+    State(state): State<Arc<AppState>>,
     axum::extract::Path(agent_id): axum::extract::Path<String>,
-) -> (axum::http::HeaderMap, Vec<u8>) {
+    headers: axum::http::HeaderMap,
+) -> Result<(axum::http::HeaderMap, Vec<u8>), StatusCode> {
+    // Auth: require valid token
+    let token = headers.get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .unwrap_or("");
+    crate::resolve_principal(&state, token).await?;
+
+    let agent_id = sanitize_agent_id(&agent_id).map_err(|_| StatusCode::BAD_REQUEST)?;
     let mut h = axum::http::HeaderMap::new();
     h.insert("cache-control", "public, max-age=300".parse().unwrap());
 
@@ -938,25 +966,38 @@ pub async fn handle_agent_avatar(
     let custom_path = format!("{}/.syntaur/avatars/{}.jpg", home, agent_id);
     if let Ok(data) = std::fs::read(&custom_path) {
         h.insert("content-type", "image/jpeg".parse().unwrap());
-        return (h, data);
+        return Ok((h, data));
     }
     let custom_png = format!("{}/.syntaur/avatars/{}.png", home, agent_id);
     if let Ok(data) = std::fs::read(&custom_png) {
         h.insert("content-type", "image/png".parse().unwrap());
-        return (h, data);
+        return Ok((h, data));
     }
 
     // Default: serve the app icon
     h.insert("content-type", "image/png".parse().unwrap());
-    (h, include_bytes!("../static/avatar.png").to_vec())
+    Ok((h, include_bytes!("../static/avatar.png").to_vec()))
 }
 
-/// POST /api/agent-avatar/{agent_id} — upload custom agent avatar
+/// POST /api/agent-avatar/{agent_id} — upload custom agent avatar (admin only)
 pub async fn handle_agent_avatar_upload(
+    State(state): State<Arc<AppState>>,
     axum::extract::Path(agent_id): axum::extract::Path<String>,
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<axum::Json<serde_json::Value>, (StatusCode, String)> {
+    // Auth: require admin
+    let token = headers.get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await
+        .map_err(|s| (s, "Unauthorized".to_string()))?;
+    crate::require_admin(&principal)
+        .map_err(|s| (s, "Admin required".to_string()))?;
+
+    let agent_id = sanitize_agent_id(&agent_id)?;
+
     if body.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "No image data".to_string()));
     }

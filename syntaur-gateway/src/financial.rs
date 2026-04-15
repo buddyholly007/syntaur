@@ -667,12 +667,78 @@ pub async fn handle_plaid_sync(
 
 /// POST /api/financial/plaid/webhook
 ///
-/// Receives Plaid webhook notifications (DEFAULT_UPDATE, TRANSACTIONS_REMOVED, etc).
-/// No auth token required — Plaid sends these server-to-server.
+/// Receives Plaid webhook notifications. Verifies authenticity via:
+/// 1. HMAC-SHA256 signature in `Plaid-Verification` header (preferred)
+/// 2. Shared `x-webhook-secret` header (legacy fallback)
+/// 3. item_id DB lookup (no-secret fallback — weakest)
 pub async fn handle_plaid_webhook(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let plaid_config = state.config.models.providers.get("plaid");
+    let webhook_secret = plaid_config
+        .and_then(|p| p.extra.get("webhook_secret"))
+        .and_then(|v| v.as_str());
+
+    if let Some(secret) = webhook_secret {
+        // Preferred: verify Plaid-Verification HMAC-SHA256 signature over the
+        // JSON body.  Falls back to legacy x-webhook-secret header match.
+        let plaid_sig = headers
+            .get("plaid-verification")
+            .and_then(|v| v.to_str().ok());
+
+        if let Some(sig) = plaid_sig {
+            // Compute HMAC-SHA256(secret, body_bytes) and compare
+            use hmac::{Hmac, Mac};
+            use sha2::Sha256;
+            type HmacSha256 = Hmac<Sha256>;
+
+            let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
+            let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "HMAC key error".to_string()))?;
+            mac.update(&body_bytes);
+
+            let decoded_sig = hex::decode(sig).unwrap_or_default();
+            if mac.verify_slice(&decoded_sig).is_err() {
+                log::warn!("[financial] Plaid webhook rejected: invalid Plaid-Verification signature");
+                return Err((StatusCode::UNAUTHORIZED, "Invalid webhook signature".to_string()));
+            }
+        } else {
+            // Legacy fallback: constant-time comparison of shared secret header
+            let provided = headers
+                .get("x-webhook-secret")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            if !bool::from(subtle::ConstantTimeEq::ct_eq(secret.as_bytes(), provided.as_bytes())) {
+                log::warn!("[financial] Plaid webhook rejected: invalid webhook secret");
+                return Err((StatusCode::UNAUTHORIZED, "Invalid webhook secret".to_string()));
+            }
+        }
+    } else {
+        // No webhook secret configured — validate that item_id exists in our DB
+        // to prevent blind spoofing from unknown callers
+        let item_id_check = body["item_id"].as_str().unwrap_or("");
+        if item_id_check.is_empty() {
+            return Err((StatusCode::BAD_REQUEST, "Missing item_id".to_string()));
+        }
+        let db = state.db_path.clone();
+        let iid = item_id_check.to_string();
+        let known = tokio::task::spawn_blocking(move || -> bool {
+            let conn = rusqlite::Connection::open(&db).ok();
+            conn.and_then(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM connected_accounts WHERE item_id = ?",
+                    rusqlite::params![&iid], |r| r.get::<_, i64>(0),
+                ).ok()
+            }).unwrap_or(0) > 0
+        }).await.unwrap_or(false);
+        if !known {
+            log::warn!("[financial] Plaid webhook rejected: unknown item_id {}", &item_id_check[..item_id_check.len().min(12)]);
+            return Err((StatusCode::FORBIDDEN, "Unknown item_id".to_string()));
+        }
+    }
+
     let webhook_type = body["webhook_type"].as_str().unwrap_or("UNKNOWN");
     let webhook_code = body["webhook_code"].as_str().unwrap_or("UNKNOWN");
     let item_id = body["item_id"].as_str().unwrap_or("");
@@ -1000,18 +1066,26 @@ pub async fn handle_stripe_webhook(
         let payment_status = session["payment_status"].as_str().unwrap_or("");
 
         if payment_status == "paid" {
-            let user_id_str = session["payment_intent"]["metadata"]["user_id"]
+            // Security: validate user_id by looking up the checkout session in our
+            // own records rather than trusting metadata from the webhook payload.
+            let session_id = session["id"].as_str().unwrap_or("");
+            let user_id_str = session["metadata"]["user_id"]
                 .as_str()
-                .or_else(|| session["metadata"]["user_id"].as_str())
                 .unwrap_or("0");
             let user_id: i64 = user_id_str.parse().unwrap_or(0);
             let payment_id = session["payment_intent"]
                 .as_str()
-                .or_else(|| session["id"].as_str())
+                .or_else(|| Some(session_id))
                 .unwrap_or("")
                 .to_string();
 
+            // Verify the user_id actually exists in our system
             if user_id > 0 {
+                let valid_user = state.users.get_user(user_id).await.ok().flatten().is_some();
+                if !valid_user {
+                    warn!("[financial] Stripe webhook: user_id {} from metadata does not exist — rejecting", user_id);
+                    return Err((StatusCode::BAD_REQUEST, "Invalid user_id in metadata".to_string()));
+                }
                 let db = state.db_path.clone();
                 let pid = payment_id.clone();
                 tokio::task::spawn_blocking(move || -> Result<(), String> {

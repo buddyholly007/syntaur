@@ -120,6 +120,7 @@ pub async fn legacy_admin_enabled(users: &UserStore) -> bool {
 pub struct AuthContext {
     pub users: Arc<UserStore>,
     pub legacy_token: Option<String>,
+    pub allow_query_string_tokens: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -157,6 +158,12 @@ where
         };
 
         if via_query_string {
+            if !ctx.allow_query_string_tokens {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    "Query string tokens are disabled. Use Authorization: Bearer header.".to_string(),
+                ));
+            }
             log::warn!(
                 "[auth] DEPRECATED: token passed via ?token= query string. \
                  Use Authorization: Bearer <token> header instead. \

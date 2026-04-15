@@ -14,10 +14,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use aes_gcm::Key;
+use aes_gcm::Aes256Gcm;
 use chrono::Utc;
 use log::{info, warn};
 use rusqlite::{params, Connection, OptionalExtension};
 use tokio::sync::Mutex;
+
+use crate::crypto;
 
 #[derive(Debug, Clone)]
 pub struct OAuthTokenRow {
@@ -33,18 +37,20 @@ pub struct OAuthTokenRow {
 pub struct AuthCodeTokenCache {
     db: Arc<Mutex<Connection>>,
     http: reqwest::Client,
+    master_key: Key<Aes256Gcm>,
 }
 
 impl AuthCodeTokenCache {
-    pub fn open(db_path: PathBuf, http: reqwest::Client) -> Result<Arc<Self>, String> {
+    pub fn open(db_path: PathBuf, http: reqwest::Client, master_key: Key<Aes256Gcm>) -> Result<Arc<Self>, String> {
         let conn = Connection::open(&db_path)
             .map_err(|e| format!("open oauth_tokens store {}: {}", db_path.display(), e))?;
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(|e| format!("WAL: {}", e))?;
-        info!("[oauth:tokens] opened {}", db_path.display());
+        info!("[oauth:tokens] opened {} (encryption at rest enabled)", db_path.display());
         Ok(Arc::new(Self {
             db: Arc::new(Mutex::new(conn)),
             http,
+            master_key,
         }))
     }
 
@@ -59,6 +65,13 @@ impl AuthCodeTokenCache {
         expires_at: Option<i64>,
         scope: &str,
     ) -> Result<(), String> {
+        // Encrypt tokens before storing
+        let enc_access = crypto::encrypt(&self.master_key, access_token)?;
+        let enc_refresh = match refresh_token {
+            Some(rt) => Some(crypto::encrypt(&self.master_key, rt)?),
+            None => None,
+        };
+
         let db = self.db.lock().await;
         let now = Utc::now().timestamp();
         db.execute(
@@ -74,8 +87,8 @@ impl AuthCodeTokenCache {
             params![
                 user_id,
                 provider,
-                access_token,
-                refresh_token,
+                enc_access,
+                enc_refresh,
                 expires_at,
                 scope,
                 now,
@@ -87,13 +100,15 @@ impl AuthCodeTokenCache {
     }
 
     /// Fetch the raw row (no refresh attempt). Used by /api/oauth/status.
+    /// Decrypts tokens transparently; auto-migrates legacy plaintext tokens
+    /// to encrypted form on first read.
     pub async fn peek(
         &self,
         user_id: i64,
         provider: &str,
     ) -> Result<Option<OAuthTokenRow>, String> {
         let db = self.db.lock().await;
-        db.query_row(
+        let row = db.query_row(
             "SELECT user_id, provider, access_token, refresh_token, expires_at, scope, updated_at \
              FROM oauth_tokens WHERE user_id = ? AND provider = ?",
             params![user_id, provider],
@@ -110,7 +125,37 @@ impl AuthCodeTokenCache {
             },
         )
         .optional()
-        .map_err(|e| format!("peek oauth_tokens: {}", e))
+        .map_err(|e| format!("peek oauth_tokens: {}", e))?;
+
+        let Some(mut row) = row else { return Ok(None) };
+
+        // Decrypt tokens (crypto::decrypt handles legacy plaintext transparently)
+        let needs_migration = !crypto::is_encrypted(&row.access_token);
+        row.access_token = crypto::decrypt(&self.master_key, &row.access_token)?;
+        row.refresh_token = match row.refresh_token {
+            Some(rt) => Some(crypto::decrypt(&self.master_key, &rt)?),
+            None => None,
+        };
+
+        // Auto-migrate legacy plaintext → encrypted on first read
+        if needs_migration {
+            let enc_access = crypto::encrypt(&self.master_key, &row.access_token)?;
+            let enc_refresh = match &row.refresh_token {
+                Some(rt) => Some(crypto::encrypt(&self.master_key, rt)?),
+                None => None,
+            };
+            let _ = db.execute(
+                "UPDATE oauth_tokens SET access_token = ?, refresh_token = ? \
+                 WHERE user_id = ? AND provider = ?",
+                params![enc_access, enc_refresh, user_id, provider],
+            );
+            info!(
+                "[oauth:tokens] migrated plaintext tokens to encrypted for user {} provider {}",
+                user_id, provider
+            );
+        }
+
+        Ok(Some(row))
     }
 
     /// Delete the row. Used by /api/oauth/disconnect.
