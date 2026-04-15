@@ -38,6 +38,7 @@ pub mod research;
 pub mod settings;
 pub mod setup;
 pub mod shared;
+pub mod onboarding;
 pub mod register;
 pub mod tax;
 pub mod voice_setup;

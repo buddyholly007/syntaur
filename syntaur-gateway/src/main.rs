@@ -1135,24 +1135,30 @@ async fn handle_api_message(
             }
         }
     }
-    let system_prompt = if context_parts.is_empty() {
+    let mut system_prompt = if context_parts.is_empty() {
         format!("You are agent {}", agent_id)
     } else {
         context_parts.join("\n\n---\n\n")
     };
+    // Inject per-user personality docs (bio, preferences, writing style)
+    let personality = state.users.personality_prompt(principal.user_id(), &agent_id, 4000).await;
+    if !personality.is_empty() {
+        system_prompt.push_str("\n\n---\n\n");
+        system_prompt.push_str(&personality);
+    }
 
     // Build LLM chain — use llm_agent_id (base agent for user agents)
     let llm_chain = std::sync::Arc::new(llm::LlmChain::from_config(&state.config, &resolved.llm_agent_id, state.client.clone()));
 
     // Build messages — start with system prompt, then optional conversation history
     let sharing_mode = state.sharing_mode.read().await.clone();
-    let scope = principal.scope_with_sharing(&sharing_mode);
+    let scope = state.users.visible_user_ids(principal.user_id(), &sharing_mode, "conversations", Some(&agent_id)).await;
     let mut messages = vec![llm::ChatMessage::system(&system_prompt)];
     if let (Some(cid), Some(mgr)) = (req.conversation_id.as_deref(), &state.conversations) {
-        if mgr.get(cid, scope).await.is_none() {
+        if mgr.get(cid, scope.clone()).await.is_none() {
             return Err(axum::http::StatusCode::NOT_FOUND);
         }
-        let prior = mgr.messages(cid, scope).await;
+        let prior = mgr.messages(cid, scope.clone()).await;
         for m in prior {
             match m.role.as_str() {
                 "user" => messages.push(llm::ChatMessage::user(&m.content)),
@@ -1377,8 +1383,8 @@ async fn handle_conv_get(
         None => return Ok(Json(serde_json::json!({"error": "conversations not available"}))),
     };
     let sharing_mode = state.sharing_mode.read().await.clone();
-    let scope = principal.scope_with_sharing(&sharing_mode);
-    let conv = mgr.get(&id, scope).await;
+    let scope = state.users.visible_user_ids(principal.user_id(), &sharing_mode, "conversations", None).await;
+    let conv = mgr.get(&id, scope.clone()).await;
     if conv.is_none() {
         return Err(axum::http::StatusCode::NOT_FOUND);
     }
@@ -1402,7 +1408,8 @@ async fn handle_conv_list(
     let agent = params.get("agent").map(|s| s.as_str()).unwrap_or("main");
     let limit: usize = params.get("limit").and_then(|s| s.parse().ok()).unwrap_or(20);
     let sharing_mode = state.sharing_mode.read().await.clone();
-    let convs = mgr.list_recent(agent, limit, principal.scope_with_sharing(&sharing_mode)).await;
+    let scope = state.users.visible_user_ids(principal.user_id(), &sharing_mode, "conversations", Some(agent)).await;
+    let convs = mgr.list_recent(agent, limit, scope).await;
     Ok(Json(serde_json::json!({"conversations": convs})))
 }
 
@@ -1438,7 +1445,7 @@ async fn handle_message_start(
     let agent_for_task = agent_id.clone();
     let message = req.message.clone();
     let conv_id = req.conversation_id.clone();
-    let principal_scope = principal.scope_with_sharing(&sharing_mode);
+    let principal_scope = state.users.visible_user_ids(principal.user_id(), &sharing_mode, "conversations", Some(&agent_id)).await;
     let principal_user_id = principal.user_id();
 
     tokio::spawn(async move {
@@ -1461,11 +1468,17 @@ async fn handle_message_start(
                 }
             }
         }
-        let system_prompt = if context_parts.is_empty() {
+        let mut system_prompt = if context_parts.is_empty() {
             format!("You are agent {}", agent_for_task)
         } else {
             context_parts.join("\n\n---\n\n")
         };
+        // Inject per-user personality docs
+        let personality = state_clone.users.personality_prompt(principal_user_id, &agent_for_task, 4000).await;
+        if !personality.is_empty() {
+            system_prompt.push_str("\n\n---\n\n");
+            system_prompt.push_str(&personality);
+        }
 
         let llm_chain = std::sync::Arc::new(
             llm::LlmChain::from_config(&state_clone.config, &resolved.llm_agent_id, state_clone.client.clone()),
@@ -1473,8 +1486,8 @@ async fn handle_message_start(
 
         let mut messages = vec![llm::ChatMessage::system(&system_prompt)];
         if let (Some(cid), Some(mgr)) = (conv_id.as_deref(), &state_clone.conversations) {
-            if mgr.get(cid, principal_scope).await.is_some() {
-                let prior = mgr.messages(cid, principal_scope).await;
+            if mgr.get(cid, principal_scope.clone()).await.is_some() {
+                let prior = mgr.messages(cid, principal_scope.clone()).await;
                 for m in prior {
                     match m.role.as_str() {
                         "user" => messages.push(llm::ChatMessage::user(&m.content)),
@@ -1783,7 +1796,8 @@ async fn handle_research_get(
         None => return Ok(Json(serde_json::json!({"error": "research store not available"}))),
     };
     let sharing_mode = state.sharing_mode.read().await.clone();
-    match store.get(&id, principal.scope_with_sharing(&sharing_mode)).await {
+    let scope = state.users.visible_user_ids(principal.user_id(), &sharing_mode, "research", None).await;
+    match store.get(&id, scope).await {
         Some(report) => Ok(Json(serde_json::to_value(report).unwrap_or_default())),
         None => Err(axum::http::StatusCode::NOT_FOUND),
     }
@@ -2356,6 +2370,7 @@ struct AdminInviteRequest {
     role: String,
     #[serde(default = "default_invite_hours")]
     expires_hours: u64,
+    sharing_preset: Option<String>,
 }
 fn default_user_role() -> String { "user".to_string() }
 fn default_invite_hours() -> u64 { 72 }
@@ -2371,6 +2386,7 @@ async fn handle_admin_invite(
         req.name_hint.as_deref(),
         &req.role,
         req.expires_hours,
+        req.sharing_preset.as_deref(),
     ).await {
         Ok(invite) => Ok(Json(serde_json::json!({
             "ok": true,
@@ -2428,6 +2444,12 @@ async fn handle_register(
     };
     // Update invite with the actual user_id
     let _ = state.users.consume_invite(&req.code, user.id).await;
+    // Apply sharing preset if the invite had one
+    if let Some(ref preset) = invite.sharing_preset {
+        if !preset.is_empty() {
+            let _ = state.users.apply_sharing_preset(invite.created_by, user.id, preset).await;
+        }
+    }
     // Mint a session token
     let token = match state.users.mint_token(user.id, "registration").await {
         Ok(t) => t,
@@ -2437,6 +2459,7 @@ async fn handle_register(
         "ok": true,
         "user": user,
         "token": token,
+        "needs_onboarding": true,
     })))
 }
 
@@ -2647,6 +2670,182 @@ async fn handle_delete_user_agent(
         Ok(()) => Ok(Json(serde_json::json!({"ok": true}))),
         Err(e) => Ok(Json(serde_json::json!({"error": e}))),
     }
+}
+
+// ── Sharing grants API ────────────────────────────────────────────────────
+
+async fn handle_admin_sharing_options(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    require_admin(&principal)?;
+    // Collect available resource types and their resource_ids
+    let agents: Vec<String> = state.config.agents.list.iter().map(|a| a.id.clone()).collect();
+    let modules: Vec<&str> = crate::modules::CORE_MODULES.iter().map(|m| m.id).collect();
+    Ok(Json(serde_json::json!({
+        "resource_types": [
+            {"type": "oauth", "label": "OAuth Connections", "ids": ["*"]},
+            {"type": "sync_connection", "label": "Sync Connectors", "ids": ["*"]},
+            {"type": "music", "label": "Music", "ids": ["*"]},
+            {"type": "knowledge", "label": "Knowledge Bases", "ids": agents},
+            {"type": "conversations", "label": "Conversations", "ids": agents},
+            {"type": "tax", "label": "Tax Data", "ids": ["*"]},
+            {"type": "calendar", "label": "Calendar", "ids": ["*"]},
+            {"type": "todos", "label": "Todos", "ids": ["*"]},
+            {"type": "research", "label": "Research", "ids": ["*"]},
+        ],
+        "agents": agents,
+        "modules": modules,
+    })))
+}
+
+async fn handle_admin_sharing_grants_list(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    require_admin(&principal)?;
+    let user_id: i64 = params.get("user_id").and_then(|s| s.parse().ok()).unwrap_or(0);
+    match state.users.list_grants_for_user(user_id).await {
+        Ok(grants) => Ok(Json(serde_json::json!({"grants": grants}))),
+        Err(e) => Ok(Json(serde_json::json!({"error": e}))),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct AdminSetGrantsRequest {
+    token: String,
+    grantee_user_id: i64,
+    grants: Vec<GrantEntry>,
+}
+
+#[derive(serde::Deserialize)]
+struct GrantEntry {
+    resource_type: String,
+    resource_id: Option<String>,
+}
+
+async fn handle_admin_set_sharing_grants(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AdminSetGrantsRequest>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let principal = resolve_principal(&state, &req.token).await?;
+    require_admin(&principal)?;
+    let grant_tuples: Vec<(String, Option<String>)> = req.grants.iter()
+        .map(|g| (g.resource_type.clone(), g.resource_id.clone()))
+        .collect();
+    match state.users.set_grants(principal.user_id(), req.grantee_user_id, &grant_tuples).await {
+        Ok(count) => Ok(Json(serde_json::json!({"ok": true, "count": count}))),
+        Err(e) => Ok(Json(serde_json::json!({"error": e}))),
+    }
+}
+
+async fn handle_admin_delete_sharing_grant(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(grant_id): axum::extract::Path<i64>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    require_admin(&principal)?;
+    match state.users.delete_grant(grant_id).await {
+        Ok(()) => Ok(Json(serde_json::json!({"ok": true}))),
+        Err(e) => Ok(Json(serde_json::json!({"error": e}))),
+    }
+}
+
+// ── Personality docs API ──────────────────────────────────────────────────
+
+async fn handle_personality_list(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let agent_id = params.get("agent_id").map(|s| s.as_str()).unwrap_or("main");
+    match state.users.list_personality_docs(principal.user_id(), agent_id).await {
+        Ok(docs) => Ok(Json(serde_json::json!({"docs": docs}))),
+        Err(e) => Ok(Json(serde_json::json!({"error": e}))),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct CreatePersonalityDocRequest {
+    token: String,
+    agent_id: String,
+    doc_type: String,
+    title: String,
+    content: String,
+}
+
+async fn handle_personality_create(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreatePersonalityDocRequest>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let principal = resolve_principal(&state, &req.token).await?;
+    match state.users.create_personality_doc(
+        principal.user_id(), &req.agent_id, &req.doc_type, &req.title, &req.content,
+    ).await {
+        Ok(doc) => Ok(Json(serde_json::json!({"ok": true, "doc": doc}))),
+        Err(e) => Ok(Json(serde_json::json!({"error": e}))),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct UpdatePersonalityDocRequest {
+    token: String,
+    title: Option<String>,
+    content: Option<String>,
+}
+
+async fn handle_personality_update(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(doc_id): axum::extract::Path<i64>,
+    Json(req): Json<UpdatePersonalityDocRequest>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let principal = resolve_principal(&state, &req.token).await?;
+    match state.users.update_personality_doc(doc_id, principal.user_id(), req.title.as_deref(), req.content.as_deref()).await {
+        Ok(()) => Ok(Json(serde_json::json!({"ok": true}))),
+        Err(e) => Ok(Json(serde_json::json!({"error": e}))),
+    }
+}
+
+async fn handle_personality_delete(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(doc_id): axum::extract::Path<i64>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    match state.users.delete_personality_doc(doc_id, principal.user_id()).await {
+        Ok(()) => Ok(Json(serde_json::json!({"ok": true}))),
+        Err(e) => Ok(Json(serde_json::json!({"error": e}))),
+    }
+}
+
+// ── Onboarding API ───────────────────────────────────────────────────────
+
+async fn handle_onboarding_status(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let complete = state.users.is_onboarding_complete(principal.user_id()).await;
+    Ok(Json(serde_json::json!({"complete": complete})))
+}
+
+async fn handle_onboarding_complete(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let _ = state.users.set_onboarding_complete(principal.user_id()).await;
+    Ok(Json(serde_json::json!({"ok": true})))
 }
 
 // ── Tool hooks endpoints (4features Stage 2) ──────────────────────────────
@@ -4461,6 +4660,19 @@ async fn main() {
         .route("/api/me/agents", post(handle_create_user_agent))
         .route("/api/me/agents/{agent_id}", axum::routing::put(handle_update_user_agent))
         .route("/api/me/agents/{agent_id}", axum::routing::delete(handle_delete_user_agent))
+        // Sharing grants
+        .route("/api/admin/sharing/options", get(handle_admin_sharing_options))
+        .route("/api/admin/sharing/grants", get(handle_admin_sharing_grants_list))
+        .route("/api/admin/sharing/grants", axum::routing::put(handle_admin_set_sharing_grants))
+        .route("/api/admin/sharing/grants/{id}", axum::routing::delete(handle_admin_delete_sharing_grant))
+        // Personality docs
+        .route("/api/me/personality", get(handle_personality_list))
+        .route("/api/me/personality", post(handle_personality_create))
+        .route("/api/me/personality/{id}", axum::routing::put(handle_personality_update))
+        .route("/api/me/personality/{id}", axum::routing::delete(handle_personality_delete))
+        // Onboarding
+        .route("/api/me/onboarding", get(handle_onboarding_status))
+        .route("/api/me/onboarding/complete", post(handle_onboarding_complete))
         // v5 Item 4: OAuth2 authorization_code endpoints
         .route("/api/oauth/start", post(handle_oauth_start))
         .route("/api/oauth/callback", get(handle_oauth_callback))
@@ -4559,6 +4771,7 @@ async fn main() {
         .route("/research", get(pages::research::render))
         .route("/landing", get(pages::landing::render))
         .route("/register", get(pages::register::render))
+        .route("/onboarding", get(pages::onboarding::render))
         .route("/api/auth/login", post(setup::handle_login))
         .route("/api/setup/status", get(setup::handle_setup_status))
         .route("/api/setup/scan", get(setup::handle_hardware_scan))

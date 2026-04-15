@@ -10,11 +10,11 @@
 //! caller's id; reads accept an `Option<i64>` **scope**:
 //!
 //! * `None` → caller is the legacy/admin principal, no filter applied.
-//! * `Some(uid)` → filter `WHERE user_id = uid`.
+//! * `Some(vec![uid, ...])` → filter `WHERE user_id IN (uid, ...)`.
 //!
 //! This is the single mechanism that stops user A from reading user B's
 //! conversations. The admin path is an escape hatch; normal callers must
-//! always pass `Some(principal.user_id())`.
+//! always pass their visible_user_ids from the SharingResolver.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -130,7 +130,7 @@ impl ConversationManager {
 
     /// Retrieve a conversation summary by id, scoped to a user.
     /// `scope = None` bypasses the filter (admin).
-    pub async fn get(&self, id: &str, scope: Option<i64>) -> Option<Conversation> {
+    pub async fn get(&self, id: &str, scope: Option<Vec<i64>>) -> Option<Conversation> {
         let db = Arc::clone(&self.db);
         let id = id.to_string();
         tokio::task::spawn_blocking(move || -> Option<Conversation> {
@@ -138,17 +138,18 @@ impl ConversationManager {
             let base = "SELECT c.id, c.agent, c.title, c.user_id, c.created_at, c.updated_at, \
                         (SELECT COUNT(*) FROM conversation_messages_v2 WHERE conversation_id = c.id) \
                         FROM conversations_v2 c WHERE c.id = ?";
-            let row = match scope {
+            match scope {
                 None => conn.query_row(base, params![&id], row_to_conv).optional().ok().flatten(),
-                Some(uid) => {
-                    let sql = format!("{} AND c.user_id = ?", base);
-                    conn.query_row(&sql, params![&id, uid], row_to_conv)
-                        .optional()
-                        .ok()
-                        .flatten()
+                Some(ref uids) => {
+                    let placeholders = uids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                    let sql = format!("{} AND c.user_id IN ({placeholders})", base);
+                    let mut all_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+                    all_params.push(Box::new(id.clone()));
+                    for uid in uids { all_params.push(Box::new(*uid)); }
+                    let refs: Vec<&dyn rusqlite::ToSql> = all_params.iter().map(|b| b.as_ref()).collect();
+                    conn.query_row(&sql, refs.as_slice(), row_to_conv).optional().ok().flatten()
                 }
-            };
-            row
+            }
         })
         .await
         .ok()
@@ -158,7 +159,7 @@ impl ConversationManager {
     /// Get all messages for a conversation in chronological order. Scoped
     /// by joining back to conversations_v2 so Bob can't read Alice's
     /// messages even if he knows her conversation id.
-    pub async fn messages(&self, id: &str, scope: Option<i64>) -> Vec<ConvMessage> {
+    pub async fn messages(&self, id: &str, scope: Option<Vec<i64>>) -> Vec<ConvMessage> {
         let db = Arc::clone(&self.db);
         let id = id.to_string();
         tokio::task::spawn_blocking(move || -> Vec<ConvMessage> {
@@ -169,32 +170,21 @@ impl ConversationManager {
                         WHERE m.conversation_id = ?";
             match scope {
                 None => {
-                    let mut stmt = match conn.prepare(&format!("{} ORDER BY m.id ASC", base)) {
-                        Ok(s) => s,
-                        Err(_) => return Vec::new(),
-                    };
-                    let rows = stmt
-                        .query_map(params![&id], row_to_msg)
-                        .ok();
-                    match rows {
-                        Some(iter) => iter.filter_map(Result::ok).collect(),
-                        None => Vec::new(),
-                    }
+                    let sql = format!("{base} ORDER BY m.id ASC");
+                    let mut stmt = match conn.prepare(&sql) { Ok(s) => s, Err(_) => return Vec::new() };
+                    stmt.query_map(params![&id], row_to_msg).ok()
+                        .map(|iter| iter.filter_map(Result::ok).collect()).unwrap_or_default()
                 }
-                Some(uid) => {
-                    let mut stmt = match conn
-                        .prepare(&format!("{} AND c.user_id = ? ORDER BY m.id ASC", base))
-                    {
-                        Ok(s) => s,
-                        Err(_) => return Vec::new(),
-                    };
-                    let rows = stmt
-                        .query_map(params![&id, uid], row_to_msg)
-                        .ok();
-                    match rows {
-                        Some(iter) => iter.filter_map(Result::ok).collect(),
-                        None => Vec::new(),
-                    }
+                Some(ref uids) => {
+                    let placeholders = uids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                    let sql = format!("{base} AND c.user_id IN ({placeholders}) ORDER BY m.id ASC");
+                    let mut all_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+                    all_params.push(Box::new(id.clone()));
+                    for uid in uids { all_params.push(Box::new(*uid)); }
+                    let refs: Vec<&dyn rusqlite::ToSql> = all_params.iter().map(|b| b.as_ref()).collect();
+                    let mut stmt = match conn.prepare(&sql) { Ok(s) => s, Err(_) => return Vec::new() };
+                    stmt.query_map(refs.as_slice(), row_to_msg).ok()
+                        .map(|iter| iter.filter_map(Result::ok).collect()).unwrap_or_default()
                 }
             }
         })
@@ -207,7 +197,7 @@ impl ConversationManager {
         &self,
         agent: &str,
         limit: usize,
-        scope: Option<i64>,
+        scope: Option<Vec<i64>>,
     ) -> Vec<Conversation> {
         let db = Arc::clone(&self.db);
         let agent = agent.to_string();
@@ -218,36 +208,22 @@ impl ConversationManager {
                         FROM conversations_v2 c WHERE c.agent = ?";
             match scope {
                 None => {
-                    let mut stmt = match conn.prepare(&format!(
-                        "{} ORDER BY c.updated_at DESC LIMIT ?",
-                        base
-                    )) {
-                        Ok(s) => s,
-                        Err(_) => return Vec::new(),
-                    };
-                    let rows = stmt
-                        .query_map(params![&agent, limit as i64], row_to_conv)
-                        .ok();
-                    match rows {
-                        Some(iter) => iter.filter_map(Result::ok).collect(),
-                        None => Vec::new(),
-                    }
+                    let sql = format!("{base} ORDER BY c.updated_at DESC LIMIT ?");
+                    let mut stmt = match conn.prepare(&sql) { Ok(s) => s, Err(_) => return Vec::new() };
+                    stmt.query_map(params![&agent, limit as i64], row_to_conv).ok()
+                        .map(|iter| iter.filter_map(Result::ok).collect()).unwrap_or_default()
                 }
-                Some(uid) => {
-                    let mut stmt = match conn.prepare(&format!(
-                        "{} AND c.user_id = ? ORDER BY c.updated_at DESC LIMIT ?",
-                        base
-                    )) {
-                        Ok(s) => s,
-                        Err(_) => return Vec::new(),
-                    };
-                    let rows = stmt
-                        .query_map(params![&agent, uid, limit as i64], row_to_conv)
-                        .ok();
-                    match rows {
-                        Some(iter) => iter.filter_map(Result::ok).collect(),
-                        None => Vec::new(),
-                    }
+                Some(ref uids) => {
+                    let placeholders = uids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                    let sql = format!("{base} AND c.user_id IN ({placeholders}) ORDER BY c.updated_at DESC LIMIT ?");
+                    let mut all_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+                    all_params.push(Box::new(agent.clone()));
+                    for uid in uids { all_params.push(Box::new(*uid)); }
+                    all_params.push(Box::new(limit as i64));
+                    let refs: Vec<&dyn rusqlite::ToSql> = all_params.iter().map(|b| b.as_ref()).collect();
+                    let mut stmt = match conn.prepare(&sql) { Ok(s) => s, Err(_) => return Vec::new() };
+                    stmt.query_map(refs.as_slice(), row_to_conv).ok()
+                        .map(|iter| iter.filter_map(Result::ok).collect()).unwrap_or_default()
                 }
             }
         })

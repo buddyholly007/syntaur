@@ -66,9 +66,34 @@ pub struct Invite {
     pub name_hint: Option<String>,
     pub role: String,
     pub expires_at: i64,
+    pub sharing_preset: Option<String>,
     pub consumed_at: Option<i64>,
     pub consumed_by: Option<i64>,
     pub created_at: i64,
+}
+
+/// A sharing grant record.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SharingGrant {
+    pub id: i64,
+    pub grantor_user_id: i64,
+    pub grantee_user_id: i64,
+    pub resource_type: String,
+    pub resource_id: Option<String>,
+    pub created_at: i64,
+}
+
+/// A personality document for shaping a user's AI agent.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PersonalityDoc {
+    pub id: i64,
+    pub user_id: i64,
+    pub agent_id: String,
+    pub doc_type: String,
+    pub title: String,
+    pub content: String,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 pub struct UserStore {
@@ -392,6 +417,7 @@ impl UserStore {
         name_hint: Option<&str>,
         role: &str,
         expires_hours: u64,
+        sharing_preset: Option<&str>,
     ) -> Result<Invite, String> {
         use rand::RngCore;
         let mut bytes = [0u8; 16];
@@ -405,9 +431,9 @@ impl UserStore {
 
         let db = self.db.lock().await;
         db.execute(
-            "INSERT INTO user_invites (code, created_by, name_hint, role, expires_at, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?)",
-            params![code, created_by, name_hint, role, expires_at, now],
+            "INSERT INTO user_invites (code, created_by, name_hint, role, expires_at, sharing_preset, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![code, created_by, name_hint, role, expires_at, sharing_preset, now],
         )
         .map_err(|e| format!("create_invite: {}", e))?;
         let id = db.last_insert_rowid();
@@ -418,6 +444,7 @@ impl UserStore {
             name_hint: name_hint.map(String::from),
             role: role.to_string(),
             expires_at,
+            sharing_preset: sharing_preset.map(String::from),
             consumed_at: None,
             consumed_by: None,
             created_at: now,
@@ -428,7 +455,7 @@ impl UserStore {
         let db = self.db.lock().await;
         let invite: Invite = db
             .query_row(
-                "SELECT id, code, created_by, name_hint, role, expires_at, consumed_at, consumed_by, created_at \
+                "SELECT id, code, created_by, name_hint, role, expires_at, sharing_preset, consumed_at, consumed_by, created_at \
                  FROM user_invites WHERE code = ?",
                 params![code],
                 |r| {
@@ -439,9 +466,10 @@ impl UserStore {
                         name_hint: r.get(3)?,
                         role: r.get(4)?,
                         expires_at: r.get(5)?,
-                        consumed_at: r.get(6)?,
-                        consumed_by: r.get(7)?,
-                        created_at: r.get(8)?,
+                        sharing_preset: r.get(6)?,
+                        consumed_at: r.get(7)?,
+                        consumed_by: r.get(8)?,
+                        created_at: r.get(9)?,
                     })
                 },
             )
@@ -468,7 +496,7 @@ impl UserStore {
         let db = self.db.lock().await;
         let mut stmt = db
             .prepare(
-                "SELECT id, code, created_by, name_hint, role, expires_at, consumed_at, consumed_by, created_at \
+                "SELECT id, code, created_by, name_hint, role, expires_at, sharing_preset, consumed_at, consumed_by, created_at \
                  FROM user_invites ORDER BY id DESC",
             )
             .map_err(|e| format!("list_invites: {}", e))?;
@@ -481,9 +509,10 @@ impl UserStore {
                     name_hint: r.get(3)?,
                     role: r.get(4)?,
                     expires_at: r.get(5)?,
-                    consumed_at: r.get(6)?,
-                    consumed_by: r.get(7)?,
-                    created_at: r.get(8)?,
+                    sharing_preset: r.get(6)?,
+                    consumed_at: r.get(7)?,
+                    consumed_by: r.get(8)?,
+                    created_at: r.get(9)?,
                 })
             })
             .map_err(|e| format!("list_invites query: {}", e))?;
@@ -601,6 +630,235 @@ impl UserStore {
             params![user_id, agent_id],
         )
         .map_err(|e| format!("delete_user_agent: {}", e))?;
+        Ok(())
+    }
+
+    // ── sharing grants ─────────────────────────────────────────────────
+
+    /// Get the list of user_ids whose data `requesting_user_id` can see
+    /// for a given resource_type + resource_id. Returns None = no filter (see all).
+    pub async fn visible_user_ids(
+        &self,
+        requesting_user_id: i64,
+        sharing_mode: &str,
+        resource_type: &str,
+        resource_id: Option<&str>,
+    ) -> Option<Vec<i64>> {
+        match sharing_mode {
+            "shared" => None, // everyone sees everything
+            "selective" => {
+                let db = self.db.lock().await;
+                let mut ids = vec![requesting_user_id];
+                // Find all grantors who have granted this resource to the requester
+                let mut stmt = db.prepare(
+                    "SELECT DISTINCT grantor_user_id FROM sharing_grants \
+                     WHERE grantee_user_id = ? AND resource_type = ? \
+                     AND (resource_id = ? OR resource_id = '*' OR resource_id IS NULL)"
+                ).ok();
+                if let Some(ref mut s) = stmt {
+                    let rid = resource_id.unwrap_or("*");
+                    if let Ok(rows) = s.query_map(params![requesting_user_id, resource_type, rid], |r| r.get::<_, i64>(0)) {
+                        for r in rows.flatten() {
+                            if !ids.contains(&r) {
+                                ids.push(r);
+                            }
+                        }
+                    }
+                }
+                // Also include user_id=0 (system/shared data)
+                if !ids.contains(&0) {
+                    ids.push(0);
+                }
+                Some(ids)
+            }
+            _ => {
+                // "isolated" — own data + system data only
+                Some(vec![requesting_user_id, 0])
+            }
+        }
+    }
+
+    pub async fn list_grants_for_user(&self, grantee_user_id: i64) -> Result<Vec<SharingGrant>, String> {
+        let db = self.db.lock().await;
+        let mut stmt = db.prepare(
+            "SELECT id, grantor_user_id, grantee_user_id, resource_type, resource_id, created_at \
+             FROM sharing_grants WHERE grantee_user_id = ? ORDER BY resource_type, resource_id"
+        ).map_err(|e| format!("list_grants: {e}"))?;
+        let rows = stmt.query_map(params![grantee_user_id], |r| {
+            Ok(SharingGrant {
+                id: r.get(0)?,
+                grantor_user_id: r.get(1)?,
+                grantee_user_id: r.get(2)?,
+                resource_type: r.get(3)?,
+                resource_id: r.get(4)?,
+                created_at: r.get(5)?,
+            })
+        }).map_err(|e| format!("list_grants query: {e}"))?;
+        let mut out = Vec::new();
+        for r in rows { out.push(r.map_err(|e| format!("row: {e}"))?); }
+        Ok(out)
+    }
+
+    /// Bulk-set grants for a grantee from a grantor. Replaces all existing grants
+    /// from that grantor to that grantee.
+    pub async fn set_grants(
+        &self,
+        grantor_user_id: i64,
+        grantee_user_id: i64,
+        grants: &[(String, Option<String>)], // (resource_type, resource_id)
+    ) -> Result<usize, String> {
+        let now = Utc::now().timestamp();
+        let db = self.db.lock().await;
+        // Remove old grants from this grantor to this grantee
+        db.execute(
+            "DELETE FROM sharing_grants WHERE grantor_user_id = ? AND grantee_user_id = ?",
+            params![grantor_user_id, grantee_user_id],
+        ).map_err(|e| format!("delete old grants: {e}"))?;
+        // Insert new grants
+        let mut count = 0;
+        for (rt, rid) in grants {
+            db.execute(
+                "INSERT OR IGNORE INTO sharing_grants (grantor_user_id, grantee_user_id, resource_type, resource_id, created_at) \
+                 VALUES (?, ?, ?, ?, ?)",
+                params![grantor_user_id, grantee_user_id, rt, rid.as_deref(), now],
+            ).map_err(|e| format!("insert grant: {e}"))?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    pub async fn delete_grant(&self, grant_id: i64) -> Result<(), String> {
+        let db = self.db.lock().await;
+        db.execute("DELETE FROM sharing_grants WHERE id = ?", params![grant_id])
+            .map_err(|e| format!("delete_grant: {e}"))?;
+        Ok(())
+    }
+
+    /// Expand a sharing preset JSON string into grants.
+    /// Preset format: [{"resource_type":"oauth","resource_id":"*"}, ...]
+    pub async fn apply_sharing_preset(
+        &self,
+        grantor_user_id: i64,
+        grantee_user_id: i64,
+        preset_json: &str,
+    ) -> Result<usize, String> {
+        let entries: Vec<serde_json::Value> = serde_json::from_str(preset_json)
+            .map_err(|e| format!("parse preset: {e}"))?;
+        let grants: Vec<(String, Option<String>)> = entries.iter().filter_map(|v| {
+            let rt = v.get("resource_type")?.as_str()?.to_string();
+            let rid = v.get("resource_id").and_then(|r| r.as_str()).map(String::from);
+            Some((rt, rid))
+        }).collect();
+        self.set_grants(grantor_user_id, grantee_user_id, &grants).await
+    }
+
+    // ── personality docs ──────────────────────────────────────────────────
+
+    pub async fn list_personality_docs(&self, user_id: i64, agent_id: &str) -> Result<Vec<PersonalityDoc>, String> {
+        let db = self.db.lock().await;
+        let mut stmt = db.prepare(
+            "SELECT id, user_id, agent_id, doc_type, title, content, created_at, updated_at \
+             FROM user_personality_docs WHERE user_id = ? AND agent_id = ? ORDER BY doc_type, id"
+        ).map_err(|e| format!("list_personality: {e}"))?;
+        let rows = stmt.query_map(params![user_id, agent_id], |r| {
+            Ok(PersonalityDoc {
+                id: r.get(0)?,
+                user_id: r.get(1)?,
+                agent_id: r.get(2)?,
+                doc_type: r.get(3)?,
+                title: r.get(4)?,
+                content: r.get(5)?,
+                created_at: r.get(6)?,
+                updated_at: r.get(7)?,
+            })
+        }).map_err(|e| format!("query: {e}"))?;
+        let mut out = Vec::new();
+        for r in rows { out.push(r.map_err(|e| format!("row: {e}"))?); }
+        Ok(out)
+    }
+
+    pub async fn create_personality_doc(
+        &self,
+        user_id: i64,
+        agent_id: &str,
+        doc_type: &str,
+        title: &str,
+        content: &str,
+    ) -> Result<PersonalityDoc, String> {
+        let now = Utc::now().timestamp();
+        let db = self.db.lock().await;
+        db.execute(
+            "INSERT INTO user_personality_docs (user_id, agent_id, doc_type, title, content, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![user_id, agent_id, doc_type, title, content, now, now],
+        ).map_err(|e| format!("create_personality: {e}"))?;
+        let id = db.last_insert_rowid();
+        Ok(PersonalityDoc {
+            id, user_id, agent_id: agent_id.to_string(),
+            doc_type: doc_type.to_string(), title: title.to_string(),
+            content: content.to_string(), created_at: now, updated_at: now,
+        })
+    }
+
+    pub async fn update_personality_doc(&self, id: i64, user_id: i64, title: Option<&str>, content: Option<&str>) -> Result<(), String> {
+        let now = Utc::now().timestamp();
+        let db = self.db.lock().await;
+        if let Some(t) = title {
+            db.execute("UPDATE user_personality_docs SET title = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+                params![t, now, id, user_id]).map_err(|e| format!("update title: {e}"))?;
+        }
+        if let Some(c) = content {
+            db.execute("UPDATE user_personality_docs SET content = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+                params![c, now, id, user_id]).map_err(|e| format!("update content: {e}"))?;
+        }
+        Ok(())
+    }
+
+    pub async fn delete_personality_doc(&self, id: i64, user_id: i64) -> Result<(), String> {
+        let db = self.db.lock().await;
+        db.execute("DELETE FROM user_personality_docs WHERE id = ? AND user_id = ?", params![id, user_id])
+            .map_err(|e| format!("delete_personality: {e}"))?;
+        Ok(())
+    }
+
+    /// Get combined personality text for a user+agent, truncated to max_chars.
+    pub async fn personality_prompt(&self, user_id: i64, agent_id: &str, max_chars: usize) -> String {
+        let docs = self.list_personality_docs(user_id, agent_id).await.unwrap_or_default();
+        if docs.is_empty() { return String::new(); }
+        let mut parts = Vec::new();
+        let mut total = 0;
+        for doc in &docs {
+            let header = format!("[{}] {}", doc.doc_type, doc.title);
+            let entry = format!("{}\n{}", header, doc.content);
+            if total + entry.len() > max_chars {
+                let remaining = max_chars.saturating_sub(total);
+                if remaining > 50 {
+                    parts.push(format!("{}...[truncated]", &entry[..remaining.min(entry.len())]));
+                }
+                break;
+            }
+            total += entry.len();
+            parts.push(entry);
+        }
+        if parts.is_empty() { return String::new(); }
+        format!("# About this user\n\n{}", parts.join("\n\n"))
+    }
+
+    // ── onboarding ───────────────────────────────────────────────────────
+
+    pub async fn is_onboarding_complete(&self, user_id: i64) -> bool {
+        let db = self.db.lock().await;
+        db.query_row(
+            "SELECT COALESCE(onboarding_complete, 1) FROM users WHERE id = ?",
+            params![user_id],
+            |r| r.get::<_, i64>(0),
+        ).unwrap_or(1) != 0
+    }
+
+    pub async fn set_onboarding_complete(&self, user_id: i64) -> Result<(), String> {
+        let db = self.db.lock().await;
+        db.execute("UPDATE users SET onboarding_complete = 1 WHERE id = ?", params![user_id])
+            .map_err(|e| format!("set_onboarding: {e}"))?;
         Ok(())
     }
 

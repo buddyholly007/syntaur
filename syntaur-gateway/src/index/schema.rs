@@ -1042,6 +1042,30 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX IF NOT EXISTS idx_user_invites_code ON user_invites(code);
     "#,
+
+    // Migration 29: Personality docs, invite sharing presets, onboarding flag.
+    r#"
+    -- Per-user AI personality documents (bio, preferences, writing samples)
+    CREATE TABLE IF NOT EXISTS user_personality_docs (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        agent_id   TEXT NOT NULL,
+        doc_type   TEXT NOT NULL,
+        title      TEXT NOT NULL,
+        content    TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_personality_user ON user_personality_docs(user_id, agent_id);
+
+    -- Sharing preset on invites (JSON array of grants to auto-create)
+    ALTER TABLE user_invites ADD COLUMN sharing_preset TEXT;
+
+    -- Onboarding completion flag
+    ALTER TABLE users ADD COLUMN onboarding_complete INTEGER NOT NULL DEFAULT 0;
+    -- Existing users are already onboarded
+    UPDATE users SET onboarding_complete = 1;
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

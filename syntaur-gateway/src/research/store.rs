@@ -249,32 +249,29 @@ impl SessionStore {
 
     /// Get a session by id (any status). Used by /api/research/{id} GET.
     /// `scope` = user filter (None for admin).
-    pub async fn get(&self, id: &str, scope: Option<i64>) -> Option<ResearchReport> {
+    pub async fn get(&self, id: &str, scope: Option<Vec<i64>>) -> Option<ResearchReport> {
         let db = Arc::clone(&self.db);
         let id = id.to_string();
         tokio::task::spawn_blocking(move || -> Option<ResearchReport> {
             let conn = db.blocking_lock();
+            let base = "SELECT query, plan_json, evidence_json, report_text, duration_ms, error, status \
+                        FROM research_sessions WHERE id = ?";
             let row: Option<(String, Option<String>, Option<String>, Option<String>, Option<i64>, Option<String>, String)> = match scope {
                 None => conn
-                    .query_row(
-                        "SELECT query, plan_json, evidence_json, report_text, duration_ms, error, status \
-                         FROM research_sessions WHERE id = ?",
-                        params![&id],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
-                    )
-                    .optional()
-                    .ok()
-                    .flatten(),
-                Some(uid) => conn
-                    .query_row(
-                        "SELECT query, plan_json, evidence_json, report_text, duration_ms, error, status \
-                         FROM research_sessions WHERE id = ? AND user_id = ?",
-                        params![&id, uid],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
-                    )
-                    .optional()
-                    .ok()
-                    .flatten(),
+                    .query_row(base, params![&id],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))
+                    .optional().ok().flatten(),
+                Some(ref uids) => {
+                    let placeholders = uids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                    let sql = format!("{base} AND user_id IN ({placeholders})");
+                    let mut all_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+                    all_params.push(Box::new(id.clone()));
+                    for uid in uids { all_params.push(Box::new(*uid)); }
+                    let refs: Vec<&dyn rusqlite::ToSql> = all_params.iter().map(|b| b.as_ref()).collect();
+                    conn.query_row(&sql, refs.as_slice(),
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))
+                        .optional().ok().flatten()
+                }
             };
             let (query, plan_json, evidence_json, report_text, duration_ms, error, _status) = row?;
             let plan: Vec<PlanStep> = plan_json

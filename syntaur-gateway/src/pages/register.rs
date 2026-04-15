@@ -94,7 +94,7 @@ async function doRegister() {
     const data = await resp.json();
     if (data.ok && data.token) {
       sessionStorage.setItem('syntaur_token', data.token);
-      window.location.href = '/';
+      window.location.href = data.needs_onboarding ? '/onboarding' : '/';
     } else {
       showErr(data.error || 'Registration failed');
     }
