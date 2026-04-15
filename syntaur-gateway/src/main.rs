@@ -107,6 +107,8 @@ pub struct AppState {
     /// Slash command registry — `/foo` shortcuts the user can invoke
     /// from Telegram or the HTTP /api/slash endpoint. (4features Stage 5)
     pub slash: Arc<slash::SlashStore>,
+    /// Data sharing mode: "shared" | "isolated" | "selective"
+    pub sharing_mode: Arc<tokio::sync::RwLock<String>>,
     /// Tool names disabled by the module system (from disabled modules).
     pub disabled_tools: Vec<&'static str>,
     /// Bearer secret required for /v1/chat/completions when set
@@ -327,6 +329,7 @@ pub async fn resolve_principal(
         return Ok(auth::Principal::User {
             id: resolved.user_id,
             name: resolved.user_name,
+            role: resolved.user_role,
         });
     }
     if auth::legacy_admin_enabled(&state.users).await {
@@ -2279,6 +2282,309 @@ async fn handle_admin_link_telegram(
     }
 }
 
+// ── Multi-user management endpoints ────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct AdminInviteRequest {
+    token: String,
+    name_hint: Option<String>,
+    #[serde(default = "default_user_role")]
+    role: String,
+    #[serde(default = "default_invite_hours")]
+    expires_hours: u64,
+}
+fn default_user_role() -> String { "user".to_string() }
+fn default_invite_hours() -> u64 { 72 }
+
+async fn handle_admin_invite(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AdminInviteRequest>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let principal = resolve_principal(&state, &req.token).await?;
+    require_admin(&principal)?;
+    match state.users.create_invite(
+        principal.user_id(),
+        req.name_hint.as_deref(),
+        &req.role,
+        req.expires_hours,
+    ).await {
+        Ok(invite) => Ok(Json(serde_json::json!({
+            "ok": true,
+            "code": invite.code,
+            "expires_at": invite.expires_at,
+            "register_url": format!("/register?code={}", invite.code),
+        }))),
+        Err(e) => Ok(Json(serde_json::json!({"error": e}))),
+    }
+}
+
+async fn handle_admin_list_invites(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    require_admin(&principal)?;
+    match state.users.list_invites().await {
+        Ok(invites) => Ok(Json(serde_json::json!({"invites": invites}))),
+        Err(e) => Ok(Json(serde_json::json!({"error": e}))),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct RegisterRequest {
+    code: String,
+    name: String,
+    password: String,
+}
+
+async fn handle_register(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RegisterRequest>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    if req.name.trim().is_empty() || req.password.len() < 8 {
+        return Ok(Json(serde_json::json!({
+            "ok": false,
+            "error": "Name required, password must be at least 8 characters"
+        })));
+    }
+    // Validate and consume invite
+    let invite = match state.users.consume_invite(&req.code, 0).await {
+        Ok(inv) => inv,
+        Err(e) => return Ok(Json(serde_json::json!({"ok": false, "error": e}))),
+    };
+    // Create user with password
+    let password_hash = match crate::auth::users::hash_password(&req.password) {
+        Ok(h) => h,
+        Err(e) => return Ok(Json(serde_json::json!({"ok": false, "error": e}))),
+    };
+    let user = match state.users.create_user_full(&req.name, &invite.role, Some(&password_hash)).await {
+        Ok(u) => u,
+        Err(e) => return Ok(Json(serde_json::json!({"ok": false, "error": e}))),
+    };
+    // Update invite with the actual user_id
+    let _ = state.users.consume_invite(&req.code, user.id).await;
+    // Mint a session token
+    let token = match state.users.mint_token(user.id, "registration").await {
+        Ok(t) => t,
+        Err(e) => return Ok(Json(serde_json::json!({"ok": false, "error": e}))),
+    };
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "user": user,
+        "token": token,
+    })))
+}
+
+#[derive(serde::Deserialize)]
+struct AdminUpdateUserRequest {
+    token: String,
+    role: Option<String>,
+    disabled: Option<bool>,
+}
+
+async fn handle_admin_update_user(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(user_id): axum::extract::Path<i64>,
+    Json(req): Json<AdminUpdateUserRequest>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let principal = resolve_principal(&state, &req.token).await?;
+    require_admin(&principal)?;
+    if let Some(ref role) = req.role {
+        if let Err(e) = state.users.update_user_role(user_id, role).await {
+            return Ok(Json(serde_json::json!({"error": e})));
+        }
+    }
+    if let Some(disabled) = req.disabled {
+        if disabled {
+            if let Err(e) = state.users.disable_user(user_id).await {
+                return Ok(Json(serde_json::json!({"error": e})));
+            }
+        } else {
+            if let Err(e) = state.users.enable_user(user_id).await {
+                return Ok(Json(serde_json::json!({"error": e})));
+            }
+        }
+    }
+    match state.users.get_user(user_id).await {
+        Ok(Some(u)) => Ok(Json(serde_json::json!({"ok": true, "user": u}))),
+        Ok(None) => Ok(Json(serde_json::json!({"error": "user not found"}))),
+        Err(e) => Ok(Json(serde_json::json!({"error": e}))),
+    }
+}
+
+async fn handle_admin_delete_user(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(user_id): axum::extract::Path<i64>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    require_admin(&principal)?;
+    match state.users.delete_user(user_id).await {
+        Ok(()) => Ok(Json(serde_json::json!({"ok": true}))),
+        Err(e) => Ok(Json(serde_json::json!({"error": e}))),
+    }
+}
+
+async fn handle_me(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let user_id = principal.user_id();
+    let user = state.users.get_user(user_id).await.ok().flatten();
+    let agents = state.users.list_user_agents(user_id).await.unwrap_or_default();
+    let sharing_mode = state.sharing_mode.read().await.clone();
+    Ok(Json(serde_json::json!({
+        "user": user,
+        "role": principal.role(),
+        "agents": agents,
+        "sharing_mode": sharing_mode,
+    })))
+}
+
+#[derive(serde::Deserialize)]
+struct ChangePasswordRequest {
+    token: String,
+    current_password: Option<String>,
+    new_password: String,
+}
+
+async fn handle_change_password(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ChangePasswordRequest>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let principal = resolve_principal(&state, &req.token).await?;
+    let user_id = principal.user_id();
+    if req.new_password.len() < 8 {
+        return Ok(Json(serde_json::json!({"ok": false, "error": "Password must be at least 8 characters"})));
+    }
+    // If user already has a password, verify current
+    if state.users.has_password(user_id).await.unwrap_or(false) {
+        let current = req.current_password.as_deref().unwrap_or("");
+        if !state.users.verify_password(user_id, current).await.unwrap_or(false) {
+            return Ok(Json(serde_json::json!({"ok": false, "error": "Current password is incorrect"})));
+        }
+    }
+    match state.users.set_password(user_id, &req.new_password).await {
+        Ok(()) => Ok(Json(serde_json::json!({"ok": true}))),
+        Err(e) => Ok(Json(serde_json::json!({"ok": false, "error": e}))),
+    }
+}
+
+// ── Sharing config endpoints ──────────────────────────────────────────────
+
+async fn handle_admin_get_sharing(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    require_admin(&principal)?;
+    let mode = state.sharing_mode.read().await.clone();
+    Ok(Json(serde_json::json!({"mode": mode})))
+}
+
+#[derive(serde::Deserialize)]
+struct AdminSetSharingRequest {
+    token: String,
+    mode: String,
+}
+
+async fn handle_admin_set_sharing(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AdminSetSharingRequest>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let principal = resolve_principal(&state, &req.token).await?;
+    require_admin(&principal)?;
+    if let Err(e) = state.users.set_sharing_mode(&req.mode, principal.user_id()).await {
+        return Ok(Json(serde_json::json!({"error": e})));
+    }
+    *state.sharing_mode.write().await = req.mode.clone();
+    Ok(Json(serde_json::json!({"ok": true, "mode": req.mode})))
+}
+
+// ── User agent endpoints ──────────────────────────────────────────────────
+
+async fn handle_me_agents(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let agents = state.users.list_user_agents(principal.user_id()).await.unwrap_or_default();
+    Ok(Json(serde_json::json!({"agents": agents})))
+}
+
+#[derive(serde::Deserialize)]
+struct CreateUserAgentRequest {
+    token: String,
+    agent_id: String,
+    display_name: String,
+    #[serde(default = "default_base_agent")]
+    base_agent: String,
+    system_prompt: Option<String>,
+}
+fn default_base_agent() -> String { "main".to_string() }
+
+async fn handle_create_user_agent(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateUserAgentRequest>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let principal = resolve_principal(&state, &req.token).await?;
+    match state.users.create_user_agent(
+        principal.user_id(),
+        &req.agent_id,
+        &req.display_name,
+        &req.base_agent,
+        req.system_prompt.as_deref(),
+    ).await {
+        Ok(agent) => Ok(Json(serde_json::json!({"ok": true, "agent": agent}))),
+        Err(e) => Ok(Json(serde_json::json!({"error": e}))),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateUserAgentRequest {
+    token: String,
+    display_name: Option<String>,
+    system_prompt: Option<Option<String>>,
+    enabled: Option<bool>,
+}
+
+async fn handle_update_user_agent(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(agent_id): axum::extract::Path<String>,
+    Json(req): Json<UpdateUserAgentRequest>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let principal = resolve_principal(&state, &req.token).await?;
+    match state.users.update_user_agent(
+        principal.user_id(),
+        &agent_id,
+        req.display_name.as_deref(),
+        req.system_prompt.as_ref().map(|o| o.as_deref()),
+        req.enabled,
+    ).await {
+        Ok(()) => Ok(Json(serde_json::json!({"ok": true}))),
+        Err(e) => Ok(Json(serde_json::json!({"error": e}))),
+    }
+}
+
+async fn handle_delete_user_agent(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(agent_id): axum::extract::Path<String>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    match state.users.delete_user_agent(principal.user_id(), &agent_id).await {
+        Ok(()) => Ok(Json(serde_json::json!({"ok": true}))),
+        Err(e) => Ok(Json(serde_json::json!({"error": e}))),
+    }
+}
+
 // ── Tool hooks endpoints (4features Stage 2) ──────────────────────────────
 
 #[derive(serde::Deserialize, Debug)]
@@ -3960,6 +4266,9 @@ async fn main() {
             .as_ref()
             .and_then(|h| h.voice_secret.clone())
             .filter(|s| !s.is_empty()),
+        sharing_mode: Arc::new(tokio::sync::RwLock::new(
+            users.get_sharing_mode().await.unwrap_or_else(|_| "shared".to_string()),
+        )),
         disabled_tools: config.modules.disabled_tools(),
         tool_router,
         external_callbacks: Arc::new(Mutex::new(Vec::new())),
@@ -4065,6 +4374,8 @@ async fn main() {
         // v5 Item 3 Stage 5: admin endpoints (users, tokens, telegram links)
         .route("/api/admin/users", post(handle_admin_create_user))
         .route("/api/admin/users", get(handle_admin_list_users))
+        .route("/api/admin/users/{id}", axum::routing::put(handle_admin_update_user))
+        .route("/api/admin/users/{id}", axum::routing::delete(handle_admin_delete_user))
         .route("/api/admin/users/{id}/tokens", post(handle_admin_mint_token))
         .route(
             "/api/admin/tokens/{token_id}",
@@ -4074,6 +4385,18 @@ async fn main() {
             "/api/admin/users/{id}/telegram-links",
             post(handle_admin_link_telegram),
         )
+        // Multi-user: invites, registration, profile, sharing
+        .route("/api/admin/invites", post(handle_admin_invite))
+        .route("/api/admin/invites", get(handle_admin_list_invites))
+        .route("/api/admin/sharing", get(handle_admin_get_sharing))
+        .route("/api/admin/sharing", axum::routing::put(handle_admin_set_sharing))
+        .route("/api/auth/register", post(handle_register))
+        .route("/api/me", get(handle_me))
+        .route("/api/me/password", axum::routing::put(handle_change_password))
+        .route("/api/me/agents", get(handle_me_agents))
+        .route("/api/me/agents", post(handle_create_user_agent))
+        .route("/api/me/agents/{agent_id}", axum::routing::put(handle_update_user_agent))
+        .route("/api/me/agents/{agent_id}", axum::routing::delete(handle_delete_user_agent))
         // v5 Item 4: OAuth2 authorization_code endpoints
         .route("/api/oauth/start", post(handle_oauth_start))
         .route("/api/oauth/callback", get(handle_oauth_callback))
@@ -4171,6 +4494,7 @@ async fn main() {
         .route("/knowledge", get(pages::knowledge::render))
         .route("/research", get(pages::research::render))
         .route("/landing", get(pages::landing::render))
+        .route("/register", get(pages::register::render))
         .route("/api/auth/login", post(setup::handle_login))
         .route("/api/setup/status", get(setup::handle_setup_status))
         .route("/api/setup/scan", get(setup::handle_hardware_scan))

@@ -1,7 +1,7 @@
-//! User + token + Telegram-link persistence.
+//! User + token + Telegram-link + password + invite persistence.
 //!
-//! One store for all three: `users`, `user_api_tokens`, `user_telegram_links`.
-//! Same `~/.syntaur/index.db` file as everything else, schema v7.
+//! One store for all: `users`, `user_api_tokens`, `user_telegram_links`,
+//! `user_invites`, `user_agents`. Same `~/.syntaur/index.db` file.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,6 +17,7 @@ use tokio::sync::Mutex;
 pub struct User {
     pub id: i64,
     pub name: String,
+    pub role: String,
     pub created_at: i64,
     pub disabled: bool,
 }
@@ -36,7 +37,38 @@ pub struct ApiTokenMeta {
 pub struct ResolvedToken {
     pub user_id: i64,
     pub user_name: String,
+    pub user_role: String,
     pub token_id: i64,
+}
+
+/// A user-owned agent definition.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UserAgent {
+    pub id: i64,
+    pub user_id: i64,
+    pub agent_id: String,
+    pub display_name: String,
+    pub base_agent: String,
+    pub system_prompt: Option<String>,
+    pub workspace: Option<String>,
+    pub tool_profile: String,
+    pub enabled: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// An invite code record.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Invite {
+    pub id: i64,
+    pub code: String,
+    pub created_by: i64,
+    pub name_hint: Option<String>,
+    pub role: String,
+    pub expires_at: i64,
+    pub consumed_at: Option<i64>,
+    pub consumed_by: Option<i64>,
+    pub created_at: i64,
 }
 
 pub struct UserStore {
@@ -57,36 +89,46 @@ impl UserStore {
 
     // ── user CRUD ─────────────────────────────────────────────────────────
 
-    /// Create a new user. Fails if the name is already taken.
+    /// Create a new user with an optional password and role.
     pub async fn create_user(&self, name: &str) -> Result<User, String> {
+        self.create_user_full(name, "user", None).await
+    }
+
+    pub async fn create_user_full(
+        &self,
+        name: &str,
+        role: &str,
+        password_hash: Option<&str>,
+    ) -> Result<User, String> {
         let now = Utc::now().timestamp();
         let db = self.db.lock().await;
         db.execute(
-            "INSERT INTO users (name, created_at, disabled) VALUES (?, ?, 0)",
-            params![name, now],
+            "INSERT INTO users (name, role, password_hash, created_at, disabled) VALUES (?, ?, ?, ?, 0)",
+            params![name, role, password_hash, now],
         )
         .map_err(|e| format!("create user '{}': {}", name, e))?;
         let id = db.last_insert_rowid();
         Ok(User {
             id,
             name: name.to_string(),
+            role: role.to_string(),
             created_at: now,
             disabled: false,
         })
     }
 
-    /// Return the user with the given id, or None.
     pub async fn get_user(&self, id: i64) -> Result<Option<User>, String> {
         let db = self.db.lock().await;
         db.query_row(
-            "SELECT id, name, created_at, disabled FROM users WHERE id = ?",
+            "SELECT id, name, COALESCE(role,'user'), created_at, disabled FROM users WHERE id = ?",
             params![id],
             |r| {
                 Ok(User {
                     id: r.get(0)?,
                     name: r.get(1)?,
-                    created_at: r.get(2)?,
-                    disabled: r.get::<_, i64>(3)? != 0,
+                    role: r.get(2)?,
+                    created_at: r.get(3)?,
+                    disabled: r.get::<_, i64>(4)? != 0,
                 })
             },
         )
@@ -94,18 +136,38 @@ impl UserStore {
         .map_err(|e| format!("get_user: {}", e))
     }
 
+    pub async fn get_user_by_name(&self, name: &str) -> Result<Option<User>, String> {
+        let db = self.db.lock().await;
+        db.query_row(
+            "SELECT id, name, COALESCE(role,'user'), created_at, disabled FROM users WHERE name = ?",
+            params![name],
+            |r| {
+                Ok(User {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    role: r.get(2)?,
+                    created_at: r.get(3)?,
+                    disabled: r.get::<_, i64>(4)? != 0,
+                })
+            },
+        )
+        .optional()
+        .map_err(|e| format!("get_user_by_name: {}", e))
+    }
+
     pub async fn list_users(&self) -> Result<Vec<User>, String> {
         let db = self.db.lock().await;
         let mut stmt = db
-            .prepare("SELECT id, name, created_at, disabled FROM users ORDER BY id")
+            .prepare("SELECT id, name, COALESCE(role,'user'), created_at, disabled FROM users ORDER BY id")
             .map_err(|e| format!("list_users prepare: {}", e))?;
         let rows = stmt
             .query_map([], |r| {
                 Ok(User {
                     id: r.get(0)?,
                     name: r.get(1)?,
-                    created_at: r.get(2)?,
-                    disabled: r.get::<_, i64>(3)? != 0,
+                    role: r.get(2)?,
+                    created_at: r.get(3)?,
+                    disabled: r.get::<_, i64>(4)? != 0,
                 })
             })
             .map_err(|e| format!("list_users query: {}", e))?;
@@ -116,10 +178,37 @@ impl UserStore {
         Ok(out)
     }
 
-    /// Returns true if there are zero users in the table. Used by the
-    /// legacy admin fallback: an empty users table means the system is
-    /// still running in "pre-Item-3" mode and the legacy global token is
-    /// still authoritative.
+    pub async fn update_user_role(&self, id: i64, role: &str) -> Result<(), String> {
+        let db = self.db.lock().await;
+        db.execute("UPDATE users SET role = ? WHERE id = ?", params![role, id])
+            .map_err(|e| format!("update_user_role: {}", e))?;
+        Ok(())
+    }
+
+    pub async fn disable_user(&self, id: i64) -> Result<(), String> {
+        let db = self.db.lock().await;
+        db.execute("UPDATE users SET disabled = 1 WHERE id = ?", params![id])
+            .map_err(|e| format!("disable_user: {}", e))?;
+        Ok(())
+    }
+
+    pub async fn enable_user(&self, id: i64) -> Result<(), String> {
+        let db = self.db.lock().await;
+        db.execute("UPDATE users SET disabled = 0 WHERE id = ?", params![id])
+            .map_err(|e| format!("enable_user: {}", e))?;
+        Ok(())
+    }
+
+    pub async fn delete_user(&self, id: i64) -> Result<(), String> {
+        if id == 1 {
+            return Err("cannot delete the primary admin user".to_string());
+        }
+        let db = self.db.lock().await;
+        db.execute("DELETE FROM users WHERE id = ?", params![id])
+            .map_err(|e| format!("delete_user: {}", e))?;
+        Ok(())
+    }
+
     pub async fn is_empty(&self) -> Result<bool, String> {
         let db = self.db.lock().await;
         let n: i64 = db
@@ -128,14 +217,52 @@ impl UserStore {
         Ok(n == 0)
     }
 
+    // ── passwords ────────────────────────────────────────────────────────
+
+    pub async fn set_password(&self, user_id: i64, password: &str) -> Result<(), String> {
+        let hash = hash_password(password)?;
+        let db = self.db.lock().await;
+        db.execute(
+            "UPDATE users SET password_hash = ? WHERE id = ?",
+            params![hash, user_id],
+        )
+        .map_err(|e| format!("set_password: {}", e))?;
+        Ok(())
+    }
+
+    pub async fn verify_password(&self, user_id: i64, password: &str) -> Result<bool, String> {
+        let db = self.db.lock().await;
+        let hash: Option<String> = db
+            .query_row(
+                "SELECT password_hash FROM users WHERE id = ? AND disabled = 0",
+                params![user_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("verify_password: {}", e))?
+            .flatten();
+        match hash {
+            Some(h) => Ok(verify_password_hash(password, &h)),
+            None => Ok(false),
+        }
+    }
+
+    pub async fn has_password(&self, user_id: i64) -> Result<bool, String> {
+        let db = self.db.lock().await;
+        let hash: Option<String> = db
+            .query_row(
+                "SELECT password_hash FROM users WHERE id = ?",
+                params![user_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("has_password: {}", e))?
+            .flatten();
+        Ok(hash.is_some())
+    }
+
     // ── tokens ────────────────────────────────────────────────────────────
 
-    /// Mint a new API token for an existing user. The **raw** token is
-    /// returned exactly once; only the hash is persisted.
-    ///
-    /// Token format: `ocp_` + 32 bytes of base64url-encoded randomness.
-    /// ~256 bits of entropy, uniform random, SHA256 of it as the storage
-    /// key is indistinguishable from random to any attacker.
     pub async fn mint_token(&self, user_id: i64, name: &str) -> Result<String, String> {
         self.mint_token_with_expiry(user_id, name, None).await
     }
@@ -171,15 +298,12 @@ impl UserStore {
         Ok(raw)
     }
 
-    /// Look up a raw token against the store. Returns Some(ResolvedToken) on
-    /// hit, None on miss. Revoked tokens are treated as misses. Updates
-    /// `last_used_at` as a side effect.
     pub async fn resolve_token(&self, raw_token: &str) -> Result<Option<ResolvedToken>, String> {
         let hash = hash_token(raw_token);
         let db = self.db.lock().await;
         let row = db
             .query_row(
-                "SELECT t.id, t.user_id, u.name, t.revoked_at, t.expires_at \
+                "SELECT t.id, t.user_id, u.name, COALESCE(u.role,'user'), t.revoked_at, t.expires_at \
                  FROM user_api_tokens t \
                  JOIN users u ON u.id = t.user_id \
                  WHERE t.token_hash = ? AND u.disabled = 0",
@@ -189,21 +313,21 @@ impl UserStore {
                         r.get::<_, i64>(0)?,
                         r.get::<_, i64>(1)?,
                         r.get::<_, String>(2)?,
-                        r.get::<_, Option<i64>>(3)?,
+                        r.get::<_, String>(3)?,
                         r.get::<_, Option<i64>>(4)?,
+                        r.get::<_, Option<i64>>(5)?,
                     ))
                 },
             )
             .optional()
             .map_err(|e| format!("resolve_token: {}", e))?;
 
-        let Some((token_id, user_id, user_name, revoked_at, expires_at)) = row else {
+        let Some((token_id, user_id, user_name, user_role, revoked_at, expires_at)) = row else {
             return Ok(None);
         };
         if revoked_at.is_some() {
             return Ok(None);
         }
-        // Check token expiry
         if let Some(exp) = expires_at {
             if Utc::now().timestamp() > exp {
                 return Ok(None);
@@ -217,6 +341,7 @@ impl UserStore {
         Ok(Some(ResolvedToken {
             user_id,
             user_name,
+            user_role,
             token_id,
         }))
     }
@@ -259,12 +384,257 @@ impl UserStore {
         Ok(out)
     }
 
+    // ── invites ───────────────────────────────────────────────────────────
+
+    pub async fn create_invite(
+        &self,
+        created_by: i64,
+        name_hint: Option<&str>,
+        role: &str,
+        expires_hours: u64,
+    ) -> Result<Invite, String> {
+        use rand::RngCore;
+        let mut bytes = [0u8; 16];
+        rand::thread_rng().fill_bytes(&mut bytes);
+        let code = base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            bytes,
+        );
+        let now = Utc::now().timestamp();
+        let expires_at = now + (expires_hours as i64) * 3600;
+
+        let db = self.db.lock().await;
+        db.execute(
+            "INSERT INTO user_invites (code, created_by, name_hint, role, expires_at, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+            params![code, created_by, name_hint, role, expires_at, now],
+        )
+        .map_err(|e| format!("create_invite: {}", e))?;
+        let id = db.last_insert_rowid();
+        Ok(Invite {
+            id,
+            code,
+            created_by,
+            name_hint: name_hint.map(String::from),
+            role: role.to_string(),
+            expires_at,
+            consumed_at: None,
+            consumed_by: None,
+            created_at: now,
+        })
+    }
+
+    pub async fn consume_invite(&self, code: &str, user_id: i64) -> Result<Invite, String> {
+        let db = self.db.lock().await;
+        let invite: Invite = db
+            .query_row(
+                "SELECT id, code, created_by, name_hint, role, expires_at, consumed_at, consumed_by, created_at \
+                 FROM user_invites WHERE code = ?",
+                params![code],
+                |r| {
+                    Ok(Invite {
+                        id: r.get(0)?,
+                        code: r.get(1)?,
+                        created_by: r.get(2)?,
+                        name_hint: r.get(3)?,
+                        role: r.get(4)?,
+                        expires_at: r.get(5)?,
+                        consumed_at: r.get(6)?,
+                        consumed_by: r.get(7)?,
+                        created_at: r.get(8)?,
+                    })
+                },
+            )
+            .map_err(|e| format!("invite not found: {}", e))?;
+
+        if invite.consumed_at.is_some() {
+            return Err("invite already used".to_string());
+        }
+        if Utc::now().timestamp() > invite.expires_at {
+            return Err("invite expired".to_string());
+        }
+
+        let now = Utc::now().timestamp();
+        db.execute(
+            "UPDATE user_invites SET consumed_at = ?, consumed_by = ? WHERE id = ?",
+            params![now, user_id, invite.id],
+        )
+        .map_err(|e| format!("consume_invite: {}", e))?;
+
+        Ok(invite)
+    }
+
+    pub async fn list_invites(&self) -> Result<Vec<Invite>, String> {
+        let db = self.db.lock().await;
+        let mut stmt = db
+            .prepare(
+                "SELECT id, code, created_by, name_hint, role, expires_at, consumed_at, consumed_by, created_at \
+                 FROM user_invites ORDER BY id DESC",
+            )
+            .map_err(|e| format!("list_invites: {}", e))?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(Invite {
+                    id: r.get(0)?,
+                    code: r.get(1)?,
+                    created_by: r.get(2)?,
+                    name_hint: r.get(3)?,
+                    role: r.get(4)?,
+                    expires_at: r.get(5)?,
+                    consumed_at: r.get(6)?,
+                    consumed_by: r.get(7)?,
+                    created_at: r.get(8)?,
+                })
+            })
+            .map_err(|e| format!("list_invites query: {}", e))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| format!("list_invites row: {}", e))?);
+        }
+        Ok(out)
+    }
+
+    // ── user agents ──────────────────────────────────────────────────────
+
+    pub async fn list_user_agents(&self, user_id: i64) -> Result<Vec<UserAgent>, String> {
+        let db = self.db.lock().await;
+        let mut stmt = db
+            .prepare(
+                "SELECT id, user_id, agent_id, display_name, base_agent, system_prompt, \
+                 workspace, tool_profile, enabled, created_at, updated_at \
+                 FROM user_agents WHERE user_id = ? ORDER BY agent_id",
+            )
+            .map_err(|e| format!("list_user_agents: {}", e))?;
+        let rows = stmt
+            .query_map(params![user_id], map_user_agent)
+            .map_err(|e| format!("list_user_agents query: {}", e))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| format!("list_user_agents row: {}", e))?);
+        }
+        Ok(out)
+    }
+
+    pub async fn get_user_agent(&self, user_id: i64, agent_id: &str) -> Result<Option<UserAgent>, String> {
+        let db = self.db.lock().await;
+        db.query_row(
+            "SELECT id, user_id, agent_id, display_name, base_agent, system_prompt, \
+             workspace, tool_profile, enabled, created_at, updated_at \
+             FROM user_agents WHERE user_id = ? AND agent_id = ?",
+            params![user_id, agent_id],
+            map_user_agent,
+        )
+        .optional()
+        .map_err(|e| format!("get_user_agent: {}", e))
+    }
+
+    pub async fn create_user_agent(
+        &self,
+        user_id: i64,
+        agent_id: &str,
+        display_name: &str,
+        base_agent: &str,
+        system_prompt: Option<&str>,
+    ) -> Result<UserAgent, String> {
+        let now = Utc::now().timestamp();
+        let db = self.db.lock().await;
+        db.execute(
+            "INSERT INTO user_agents (user_id, agent_id, display_name, base_agent, system_prompt, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![user_id, agent_id, display_name, base_agent, system_prompt, now, now],
+        )
+        .map_err(|e| format!("create_user_agent: {}", e))?;
+        let id = db.last_insert_rowid();
+        Ok(UserAgent {
+            id,
+            user_id,
+            agent_id: agent_id.to_string(),
+            display_name: display_name.to_string(),
+            base_agent: base_agent.to_string(),
+            system_prompt: system_prompt.map(String::from),
+            workspace: None,
+            tool_profile: "full".to_string(),
+            enabled: true,
+            created_at: now,
+            updated_at: now,
+        })
+    }
+
+    pub async fn update_user_agent(
+        &self,
+        user_id: i64,
+        agent_id: &str,
+        display_name: Option<&str>,
+        system_prompt: Option<Option<&str>>,
+        enabled: Option<bool>,
+    ) -> Result<(), String> {
+        let now = Utc::now().timestamp();
+        let db = self.db.lock().await;
+        if let Some(dn) = display_name {
+            db.execute(
+                "UPDATE user_agents SET display_name = ?, updated_at = ? WHERE user_id = ? AND agent_id = ?",
+                params![dn, now, user_id, agent_id],
+            )
+            .map_err(|e| format!("update_user_agent display_name: {}", e))?;
+        }
+        if let Some(sp) = system_prompt {
+            db.execute(
+                "UPDATE user_agents SET system_prompt = ?, updated_at = ? WHERE user_id = ? AND agent_id = ?",
+                params![sp, now, user_id, agent_id],
+            )
+            .map_err(|e| format!("update_user_agent system_prompt: {}", e))?;
+        }
+        if let Some(en) = enabled {
+            db.execute(
+                "UPDATE user_agents SET enabled = ?, updated_at = ? WHERE user_id = ? AND agent_id = ?",
+                params![en as i64, now, user_id, agent_id],
+            )
+            .map_err(|e| format!("update_user_agent enabled: {}", e))?;
+        }
+        Ok(())
+    }
+
+    pub async fn delete_user_agent(&self, user_id: i64, agent_id: &str) -> Result<(), String> {
+        let db = self.db.lock().await;
+        db.execute(
+            "DELETE FROM user_agents WHERE user_id = ? AND agent_id = ?",
+            params![user_id, agent_id],
+        )
+        .map_err(|e| format!("delete_user_agent: {}", e))?;
+        Ok(())
+    }
+
+    // ── sharing config ───────────────────────────────────────────────────
+
+    pub async fn get_sharing_mode(&self) -> Result<String, String> {
+        let db = self.db.lock().await;
+        db.query_row(
+            "SELECT mode FROM sharing_config ORDER BY id DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("get_sharing_mode: {}", e))
+        .map(|o| o.unwrap_or_else(|| "shared".to_string()))
+    }
+
+    pub async fn set_sharing_mode(&self, mode: &str, by_user: i64) -> Result<(), String> {
+        let valid = ["shared", "isolated", "selective"];
+        if !valid.contains(&mode) {
+            return Err(format!("invalid sharing mode '{}', expected one of: {}", mode, valid.join(", ")));
+        }
+        let now = Utc::now().timestamp();
+        let db = self.db.lock().await;
+        db.execute(
+            "INSERT INTO sharing_config (mode, updated_at, updated_by) VALUES (?, ?, ?)",
+            params![mode, now, by_user],
+        )
+        .map_err(|e| format!("set_sharing_mode: {}", e))?;
+        Ok(())
+    }
+
     // ── Telegram chat links ───────────────────────────────────────────────
 
-    /// Bind a (bot_token, chat_id) pair to a user. Idempotent: if the
-    /// pair is already linked to the same user, this is a no-op; if it's
-    /// linked to a different user, this errors out rather than silently
-    /// reassigning.
     pub async fn link_telegram(
         &self,
         user_id: i64,
@@ -272,7 +642,6 @@ impl UserStore {
         chat_id: i64,
     ) -> Result<(), String> {
         let db = self.db.lock().await;
-        // Check for an existing link to a different user.
         let existing: Option<i64> = db
             .query_row(
                 "SELECT user_id FROM user_telegram_links WHERE bot_token = ? AND chat_id = ?",
@@ -300,7 +669,6 @@ impl UserStore {
         Ok(())
     }
 
-    /// Resolve a (bot_token, chat_id) pair to a user_id, if linked.
     pub async fn resolve_telegram_chat(
         &self,
         bot_token: &str,
@@ -317,14 +685,51 @@ impl UserStore {
     }
 }
 
+fn map_user_agent(r: &rusqlite::Row) -> rusqlite::Result<UserAgent> {
+    Ok(UserAgent {
+        id: r.get(0)?,
+        user_id: r.get(1)?,
+        agent_id: r.get(2)?,
+        display_name: r.get(3)?,
+        base_agent: r.get(4)?,
+        system_prompt: r.get(5)?,
+        workspace: r.get(6)?,
+        tool_profile: r.get(7)?,
+        enabled: r.get::<_, i64>(8)? != 0,
+        created_at: r.get(9)?,
+        updated_at: r.get(10)?,
+    })
+}
+
 /// Hash a raw bearer token for storage + lookup.
-///
-/// Single-pass SHA256 is sufficient here because the raw token has
-/// ~256 bits of uniform-random entropy — brute force is infeasible and
-/// bcrypt/argon2-style work factors only matter for low-entropy secrets
-/// like user-chosen passwords. base64url-no-pad gives us a stable
-/// text-column form we can UNIQUE-constrain without pulling in `hex`.
 pub fn hash_token(raw: &str) -> String {
     let digest = Sha256::digest(raw.as_bytes());
     base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, digest)
+}
+
+/// Hash a user-chosen password with argon2id.
+pub fn hash_password(password: &str) -> Result<String, String> {
+    use argon2::{Argon2, PasswordHasher};
+    use argon2::password_hash::SaltString;
+    use argon2::password_hash::rand_core::OsRng;
+
+    let salt = SaltString::generate(&mut OsRng);
+    let argon2 = Argon2::default();
+    argon2
+        .hash_password(password.as_bytes(), &salt)
+        .map(|h| h.to_string())
+        .map_err(|e| format!("hash_password: {}", e))
+}
+
+/// Verify a password against an argon2id hash.
+pub fn verify_password_hash(password: &str, hash: &str) -> bool {
+    use argon2::{Argon2, PasswordVerifier};
+    use argon2::PasswordHash;
+
+    let Ok(parsed) = PasswordHash::new(hash) else {
+        return false;
+    };
+    Argon2::default()
+        .verify_password(password.as_bytes(), &parsed)
+        .is_ok()
 }

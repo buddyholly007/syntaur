@@ -57,6 +57,7 @@ const BODY_HTML: &str = r##"<!-- Top bar -->
     <button class="tab" onclick="showTab('llm')">LLM Backends</button>
     <button class="tab" onclick="showTab('media')">Media Bridge</button>
     <button class="tab" onclick="showTab('system')">System</button>
+    <button class="tab" onclick="showTab('users')" id="users-tab-btn">Users</button>
   </div>
 
   <!-- General tab -->
@@ -593,11 +594,91 @@ bash install.sh   # systemd-user service / launchd agent</code></pre>
     </div>
   </div>
 
+  <!-- Users tab (admin only) -->
+  <div class="tab-content hidden" id="tab-users">
+    <div class="space-y-4">
+      <div class="bg-gray-900 rounded-xl border border-gray-700 p-6">
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="font-medium">User Accounts</h3>
+          <button onclick="showInviteDialog()" class="text-sm bg-oc-600 hover:bg-oc-700 text-white px-4 py-1.5 rounded-lg">Invite User</button>
+        </div>
+        <div id="users-list" class="space-y-2">
+          <p class="text-sm text-gray-500">Loading...</p>
+        </div>
+      </div>
+
+      <div class="bg-gray-900 rounded-xl border border-gray-700 p-6">
+        <h3 class="font-medium mb-4">Data Sharing</h3>
+        <p class="text-xs text-gray-500 mb-3">Controls whether users share data or have separate accounts.</p>
+        <div class="space-y-2" id="sharing-radios">
+          <label class="flex items-center gap-3 p-3 rounded-lg bg-gray-800 cursor-pointer hover:bg-gray-750">
+            <input type="radio" name="sharing" value="shared" onchange="setSharingMode(this.value)" class="accent-sky-500">
+            <div>
+              <p class="text-sm font-medium text-gray-300">Shared</p>
+              <p class="text-xs text-gray-500">All users see all data — conversations, knowledge, agents</p>
+            </div>
+          </label>
+          <label class="flex items-center gap-3 p-3 rounded-lg bg-gray-800 cursor-pointer hover:bg-gray-750">
+            <input type="radio" name="sharing" value="isolated" onchange="setSharingMode(this.value)" class="accent-sky-500">
+            <div>
+              <p class="text-sm font-medium text-gray-300">Isolated</p>
+              <p class="text-xs text-gray-500">Each user has their own conversations, knowledge, and agents</p>
+            </div>
+          </label>
+        </div>
+      </div>
+
+      <div class="bg-gray-900 rounded-xl border border-gray-700 p-6">
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="font-medium">Pending Invites</h3>
+        </div>
+        <div id="invites-list" class="space-y-2">
+          <p class="text-sm text-gray-500">Loading...</p>
+        </div>
+      </div>
+
+      <div class="bg-gray-900 rounded-xl border border-gray-700 p-6">
+        <h3 class="font-medium mb-4">Change Your Password</h3>
+        <div class="space-y-3 max-w-sm">
+          <input type="password" id="pw-current" placeholder="Current password (if set)" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-sm text-white placeholder-gray-500 focus:border-oc-500 outline-none">
+          <input type="password" id="pw-new" placeholder="New password (min 8 chars)" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-sm text-white placeholder-gray-500 focus:border-oc-500 outline-none">
+          <button onclick="changePassword()" class="text-sm bg-gray-700 hover:bg-gray-600 text-white px-4 py-1.5 rounded-lg" id="pw-btn">Update Password</button>
+          <p id="pw-status" class="text-xs hidden"></p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Invite dialog -->
+  <div id="invite-dialog" class="fixed inset-0 z-50 bg-black/60 flex items-center justify-center hidden">
+    <div class="bg-gray-800 rounded-xl border border-gray-700 p-6 w-full max-w-sm mx-4">
+      <h3 class="font-medium mb-4">Invite a User</h3>
+      <div class="space-y-3">
+        <input type="text" id="invite-name" placeholder="Name (optional hint)" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-2 text-sm text-white placeholder-gray-500 focus:border-oc-500 outline-none">
+        <select id="invite-role" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-2 text-sm text-gray-300">
+          <option value="user">User</option>
+          <option value="admin">Admin</option>
+        </select>
+        <div class="flex gap-2">
+          <button onclick="sendInvite()" class="flex-1 bg-oc-600 hover:bg-oc-700 text-white text-sm py-2 rounded-lg" id="invite-btn">Create Invite</button>
+          <button onclick="document.getElementById('invite-dialog').classList.add('hidden')" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white text-sm py-2 rounded-lg">Cancel</button>
+        </div>
+        <div id="invite-result" class="hidden text-sm"></div>
+      </div>
+    </div>
+  </div>
+
 </div>
 
 <script>
 const token = sessionStorage.getItem('syntaur_token') || '';
 if (!token) { window.location.href = '/'; }
+const esc = (s) => String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function authFetch(url, opts = {}) {
+  opts.headers = opts.headers || {};
+  opts.headers['Authorization'] = 'Bearer ' + token;
+  return fetch(url, opts);
+}
 
 function showTab(name) {
   document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
@@ -840,6 +921,173 @@ async function uploadAvatar(agentId, input) {
   } catch(e) { console.log('upload error:', e); }
   input.value = '';
 }
+
+// ── Users tab ────────────────────────────────────────────────────────────
+async function loadUsers() {
+  try {
+    const data = await authFetch('/api/admin/users').then(r => r.json());
+    const users = data.users || [];
+    const list = document.getElementById('users-list');
+    if (users.length === 0) {
+      list.innerHTML = '<p class="text-sm text-gray-500">No users.</p>';
+      return;
+    }
+    list.innerHTML = users.map(u => `
+      <div class="flex items-center justify-between bg-gray-800 rounded-lg p-3">
+        <div>
+          <span class="font-medium text-sm">${esc(u.name)}</span>
+          <span class="ml-2 text-xs px-2 py-0.5 rounded-full ${u.role === 'admin' ? 'bg-sky-900 text-sky-300' : 'bg-gray-700 text-gray-400'}">${esc(u.role)}</span>
+          ${u.disabled ? '<span class="ml-1 text-xs text-red-400">(disabled)</span>' : ''}
+        </div>
+        <div class="flex gap-2 text-xs">
+          ${u.id !== 1 ? `
+            <button onclick="toggleUser(${u.id}, ${u.disabled})" class="px-2 py-1 rounded bg-gray-700 hover:bg-gray-600">${u.disabled ? 'Enable' : 'Disable'}</button>
+            <button onclick="deleteUser(${u.id}, '${esc(u.name)}')" class="px-2 py-1 rounded bg-red-900/30 hover:bg-red-900/50 text-red-400">Delete</button>
+          ` : ''}
+        </div>
+      </div>
+    `).join('');
+  } catch(e) { console.error('loadUsers', e); }
+}
+
+async function toggleUser(id, currentlyDisabled) {
+  await authFetch(`/api/admin/users/${id}`, {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ token, disabled: !currentlyDisabled })
+  });
+  loadUsers();
+}
+
+async function deleteUser(id, name) {
+  if (!confirm(`Delete user "${name}"? This cannot be undone.`)) return;
+  await authFetch(`/api/admin/users/${id}?token=${encodeURIComponent(token)}`, { method: 'DELETE' });
+  loadUsers();
+}
+
+function showInviteDialog() {
+  document.getElementById('invite-result').classList.add('hidden');
+  document.getElementById('invite-dialog').classList.remove('hidden');
+}
+
+async function sendInvite() {
+  const btn = document.getElementById('invite-btn');
+  btn.textContent = 'Creating...';
+  try {
+    const data = await authFetch('/api/admin/invites', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        token,
+        name_hint: document.getElementById('invite-name').value.trim() || null,
+        role: document.getElementById('invite-role').value,
+      })
+    }).then(r => r.json());
+    if (data.ok) {
+      const url = window.location.origin + data.register_url;
+      document.getElementById('invite-result').innerHTML = `
+        <p class="text-green-400 mb-1">Invite created!</p>
+        <input type="text" value="${esc(url)}" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-1.5 text-xs text-gray-300" readonly onclick="this.select()">
+        <p class="text-xs text-gray-500 mt-1">Share this link. Expires in 72 hours.</p>
+      `;
+      document.getElementById('invite-result').classList.remove('hidden');
+      loadInvites();
+    } else {
+      document.getElementById('invite-result').innerHTML = `<p class="text-red-400">${esc(data.error)}</p>`;
+      document.getElementById('invite-result').classList.remove('hidden');
+    }
+  } catch(e) {
+    document.getElementById('invite-result').innerHTML = `<p class="text-red-400">${e.message}</p>`;
+    document.getElementById('invite-result').classList.remove('hidden');
+  }
+  btn.textContent = 'Create Invite';
+}
+
+async function loadInvites() {
+  try {
+    const data = await authFetch('/api/admin/invites?token=' + encodeURIComponent(token)).then(r => r.json());
+    const invites = data.invites || [];
+    const list = document.getElementById('invites-list');
+    const active = invites.filter(i => !i.consumed_at && (i.expires_at * 1000) > Date.now());
+    if (active.length === 0) {
+      list.innerHTML = '<p class="text-sm text-gray-500">No pending invites.</p>';
+      return;
+    }
+    list.innerHTML = active.map(i => `
+      <div class="flex items-center justify-between bg-gray-800 rounded-lg p-3 text-sm">
+        <div>
+          <span class="text-gray-300">${esc(i.name_hint || 'No name')}</span>
+          <span class="ml-2 text-xs text-gray-500">${esc(i.role)}</span>
+        </div>
+        <span class="text-xs text-gray-500">expires ${new Date(i.expires_at * 1000).toLocaleDateString()}</span>
+      </div>
+    `).join('');
+  } catch(e) { console.error('loadInvites', e); }
+}
+
+async function loadSharingMode() {
+  try {
+    const data = await authFetch('/api/admin/sharing?token=' + encodeURIComponent(token)).then(r => r.json());
+    const mode = data.mode || 'shared';
+    document.querySelectorAll('input[name="sharing"]').forEach(r => { r.checked = r.value === mode; });
+  } catch(e) { console.error('loadSharingMode', e); }
+}
+
+async function setSharingMode(mode) {
+  await authFetch('/api/admin/sharing', {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ token, mode })
+  });
+}
+
+async function changePassword() {
+  const btn = document.getElementById('pw-btn');
+  const status = document.getElementById('pw-status');
+  btn.textContent = 'Updating...';
+  status.classList.add('hidden');
+  try {
+    const data = await authFetch('/api/me/password', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        token,
+        current_password: document.getElementById('pw-current').value || null,
+        new_password: document.getElementById('pw-new').value,
+      })
+    }).then(r => r.json());
+    if (data.ok) {
+      status.textContent = 'Password updated';
+      status.className = 'text-xs text-green-400';
+    } else {
+      status.textContent = data.error || 'Failed';
+      status.className = 'text-xs text-red-400';
+    }
+    status.classList.remove('hidden');
+    document.getElementById('pw-current').value = '';
+    document.getElementById('pw-new').value = '';
+  } catch(e) {
+    status.textContent = e.message;
+    status.className = 'text-xs text-red-400';
+    status.classList.remove('hidden');
+  }
+  btn.textContent = 'Update Password';
+}
+
+// Check if user is admin, show/hide users tab
+(async function() {
+  try {
+    const data = await authFetch('/api/me?token=' + encodeURIComponent(token)).then(r => r.json());
+    if (data.role === 'admin') {
+      document.getElementById('users-tab-btn').style.display = '';
+      loadUsers();
+      loadInvites();
+      loadSharingMode();
+    } else {
+      document.getElementById('users-tab-btn').style.display = 'none';
+    }
+  } catch {}
+})();
 
 loadSettings();
 loadLicense();

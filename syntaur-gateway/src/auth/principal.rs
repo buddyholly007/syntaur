@@ -16,16 +16,6 @@
 //!    `Principal::LegacyAdmin`. The legacy fallback only runs when no real
 //!    users are configured so a fresh install keeps working.
 //! 4. Otherwise, return 401.
-//!
-//! ## Design constraints
-//!
-//! * The extractor runs on every request. It must be fast and allocation-
-//!   light. We do one DB hit per request (the token resolution) and cache
-//!   the `Principal` on the request extensions so downstream code doesn't
-//!   re-resolve.
-//! * The legacy fallback is **on by default** and **off when any real
-//!   user exists**. No config switch: the users table is the source of
-//!   truth.
 
 use std::sync::Arc;
 
@@ -44,16 +34,13 @@ pub const ADMIN_USER_ID: i64 = 0;
 pub enum Principal {
     /// Pre-Item-3 admin — the system is still running in "legacy" mode
     /// (empty users table) and the caller presented the global token.
-    /// Treated as super-user: sees all rows, can hit admin endpoints,
-    /// can approve anything.
     LegacyAdmin,
     /// Real user row from the `users` table.
-    User { id: i64, name: String },
+    User { id: i64, name: String, role: String },
 }
 
 impl Principal {
     /// The effective user_id used to stamp writes and filter reads.
-    /// Legacy admin uses 0, real users use their row id.
     pub fn user_id(&self) -> i64 {
         match self {
             Self::LegacyAdmin => ADMIN_USER_ID,
@@ -69,20 +56,12 @@ impl Principal {
         }
     }
 
-    /// True iff the caller can hit admin endpoints (create users, mint
-    /// tokens, manage Telegram links, see any user's data).
-    ///
-    /// Two paths to admin:
-    ///   * `LegacyAdmin` — empty users table, legacy global token. Used
-    ///     before any real user is bootstrapped.
-    ///   * `User { id: 1, .. }` — the first user created via
-    ///     `bootstrap-admin` always gets id 1, and we treat that id as
-    ///     admin. Cleaner long-term: add an `is_admin INTEGER` column
-    ///     to the users table and load the flag from there. v5 polish.
+    /// True iff the caller can hit admin endpoints.
+    /// Role-based: admin role or LegacyAdmin.
     pub fn is_admin(&self) -> bool {
         match self {
             Self::LegacyAdmin => true,
-            Self::User { id, .. } => *id == 1,
+            Self::User { role, .. } => role == "admin",
         }
     }
 
@@ -90,15 +69,30 @@ impl Principal {
     ///
     /// `None`  = no filter (admin, see everything).
     /// `Some(uid)` = `WHERE user_id = uid`.
-    ///
-    /// This is the single function every handler calls when passing a
-    /// scope to ConversationManager / PendingActionStore / SessionStore,
-    /// so there's exactly one place that decides "does this principal
-    /// see everyone's data or only their own?"
     pub fn scope(&self) -> Option<i64> {
         match self {
             Self::LegacyAdmin => None,
+            Self::User { role, .. } if role == "admin" => None,
             Self::User { id, .. } => Some(*id),
+        }
+    }
+
+    /// Sharing-mode-aware scope. In "shared" mode, all users see all data.
+    /// In "isolated" mode, non-admin users see only their own data.
+    pub fn scope_with_sharing(&self, sharing_mode: &str) -> Option<i64> {
+        match self {
+            Self::LegacyAdmin => None,
+            Self::User { role, .. } if role == "admin" => None,
+            _ if sharing_mode == "shared" => None,
+            Self::User { id, .. } => Some(*id),
+        }
+    }
+
+    /// The user's role string.
+    pub fn role(&self) -> &str {
+        match self {
+            Self::LegacyAdmin => "admin",
+            Self::User { role, .. } => role.as_str(),
         }
     }
 }
@@ -112,10 +106,7 @@ pub async fn legacy_admin_enabled(users: &UserStore) -> bool {
 
 // ── axum extractor ────────────────────────────────────────────────────
 
-/// Pieces the extractor needs from AppState. We can't pass AppState
-/// directly because the extractor runs inside the router layer and the
-/// type is `Arc<crate::AppState>`. Instead, both shared stores get
-/// promoted to request extensions during the router `with_state` call.
+/// Pieces the extractor needs from AppState.
 #[derive(Clone)]
 pub struct AuthContext {
     pub users: Arc<UserStore>,
@@ -149,7 +140,6 @@ where
         let (raw_token, via_query_string) = if let Some(t) = bearer {
             (Some(t), false)
         } else {
-            // Fall back to query param for curl-style callers.
             let qs = Query::<TokenQuery>::try_from_uri(&parts.uri)
                 .ok()
                 .and_then(|Query(q)| q.token);
@@ -166,8 +156,7 @@ where
             }
             log::warn!(
                 "[auth] DEPRECATED: token passed via ?token= query string. \
-                 Use Authorization: Bearer <token> header instead. \
-                 Query string tokens may leak into browser history, server logs, and referrer headers."
+                 Use Authorization: Bearer <token> header instead."
             );
         }
 
@@ -184,20 +173,18 @@ where
                 return Ok(Principal::User {
                     id: resolved.user_id,
                     name: resolved.user_name,
+                    role: resolved.user_role,
                 });
             }
             Ok(None) => {}
             Err(e) => {
                 log::warn!("[auth] token lookup error: {}", e);
-                // Fall through to the legacy check so a transient DB
-                // error on the users table doesn't lock out the admin.
             }
         }
 
         // 2. Legacy admin fallback — only when users table is empty.
         if legacy_admin_enabled(&ctx.users).await {
             if let Some(legacy) = ctx.legacy_token.as_deref() {
-                // Constant-time comparison to prevent timing side-channels.
                 let a = raw.as_bytes();
                 let b = legacy.as_bytes();
                 let len_match = a.len() == b.len();

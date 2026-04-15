@@ -975,6 +975,73 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE documents ADD COLUMN agent_id TEXT NOT NULL DEFAULT 'shared';
     CREATE INDEX IF NOT EXISTS idx_documents_agent ON documents(agent_id);
     "#,
+
+    // Migration 28: Multi-user accounts.
+    // Role-based admin (replaces hardcoded id==1), per-user passwords,
+    // user-owned agents, data sharing controls, invite system.
+    r#"
+    ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user';
+    ALTER TABLE users ADD COLUMN password_hash TEXT;
+
+    -- Existing user 1 becomes admin
+    UPDATE users SET role = 'admin' WHERE id = 1;
+
+    -- Per-user agents (overlay on system agents from config)
+    CREATE TABLE IF NOT EXISTS user_agents (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        agent_id     TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        base_agent   TEXT NOT NULL DEFAULT 'main',
+        system_prompt TEXT,
+        workspace    TEXT,
+        tool_profile TEXT DEFAULT 'full',
+        enabled      INTEGER NOT NULL DEFAULT 1,
+        created_at   INTEGER NOT NULL,
+        updated_at   INTEGER NOT NULL,
+        UNIQUE(user_id, agent_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_agents_user ON user_agents(user_id);
+
+    -- Data sharing mode: shared (legacy), isolated, or selective
+    CREATE TABLE IF NOT EXISTS sharing_config (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        mode       TEXT NOT NULL DEFAULT 'shared',
+        updated_at INTEGER NOT NULL,
+        updated_by INTEGER
+    );
+    INSERT INTO sharing_config (mode, updated_at) VALUES ('shared', strftime('%s','now'));
+
+    -- Selective sharing grants (admin → other users)
+    CREATE TABLE IF NOT EXISTS sharing_grants (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        grantor_user_id INTEGER NOT NULL REFERENCES users(id),
+        grantee_user_id INTEGER NOT NULL REFERENCES users(id),
+        resource_type   TEXT NOT NULL,
+        resource_id     TEXT,
+        created_at      INTEGER NOT NULL,
+        UNIQUE(grantor_user_id, grantee_user_id, resource_type, resource_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_sharing_grants_grantee ON sharing_grants(grantee_user_id);
+
+    -- Per-user knowledge isolation
+    ALTER TABLE documents ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0;
+    CREATE INDEX IF NOT EXISTS idx_documents_user ON documents(user_id);
+
+    -- Invite codes for adding new users
+    CREATE TABLE IF NOT EXISTS user_invites (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        code        TEXT NOT NULL UNIQUE,
+        created_by  INTEGER NOT NULL REFERENCES users(id),
+        name_hint   TEXT,
+        role        TEXT NOT NULL DEFAULT 'user',
+        expires_at  INTEGER NOT NULL,
+        consumed_at INTEGER,
+        consumed_by INTEGER REFERENCES users(id),
+        created_at  INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_invites_code ON user_invites(code);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

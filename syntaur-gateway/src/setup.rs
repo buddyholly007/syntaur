@@ -397,7 +397,7 @@ pub async fn handle_login(
     }
 
     // Try 1: check if it's a valid user API token (ocp_*)
-    if let Ok(Some(resolved)) = state.users.resolve_token(&req.password).await {
+    if let Ok(Some(_resolved)) = state.users.resolve_token(&req.password).await {
         return Ok(Json(LoginResponse {
             success: true,
             token: Some(req.password.clone()),
@@ -405,18 +405,50 @@ pub async fn handle_login(
         }));
     }
 
-    // Try 2: check gateway password (constant-time comparison)
+    // Try 2: per-user password auth (username + password)
+    if let Some(ref username) = req.username {
+        if let Ok(Some(user)) = state.users.get_user_by_name(username).await {
+            if user.disabled {
+                return Ok(Json(LoginResponse {
+                    success: false,
+                    token: None,
+                    error: Some("Account is disabled".to_string()),
+                }));
+            }
+            if state.users.verify_password(user.id, &req.password).await.unwrap_or(false) {
+                if let Ok(token) = state.users.mint_token(user.id, "dashboard-session").await {
+                    return Ok(Json(LoginResponse {
+                        success: true,
+                        token: Some(token),
+                        error: None,
+                    }));
+                }
+            }
+            return Ok(Json(LoginResponse {
+                success: false,
+                token: None,
+                error: Some("Invalid username or password".to_string()),
+            }));
+        }
+        return Ok(Json(LoginResponse {
+            success: false,
+            token: None,
+            error: Some("Invalid username or password".to_string()),
+        }));
+    }
+
+    // Try 3: check gateway password (constant-time comparison) — legacy single-user mode
     let gw_auth = &state.config.gateway.auth;
     let password_match = gw_auth.extra.get("password")
         .and_then(|v| v.as_str())
         .map(|p| constant_time_eq(p.as_bytes(), req.password.as_bytes()))
         .unwrap_or(false);
 
-    // Try 3: check gateway token directly (constant-time comparison)
+    // Try 4: check gateway token directly (constant-time comparison)
     let token_match = constant_time_eq(gw_auth.token.as_bytes(), req.password.as_bytes());
 
     if password_match || token_match {
-        // Mint a session token for the first user (or create one)
+        // Mint a session token for the first user (admin)
         if let Ok(users) = state.users.list_users().await {
             if let Some(user) = users.first() {
                 if let Ok(token) = state.users.mint_token(user.id, "dashboard-session").await {
@@ -446,6 +478,7 @@ pub async fn handle_login(
 #[derive(Deserialize)]
 pub struct LoginRequest {
     pub password: String,
+    pub username: Option<String>,
 }
 
 #[derive(Serialize)]

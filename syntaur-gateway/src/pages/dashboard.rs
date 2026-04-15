@@ -46,12 +46,19 @@ const BODY_HTML: &str = r##"<!-- Login overlay -->
     </div>
     <div class="bg-gray-800 rounded-xl border border-gray-700 p-6">
       <div class="space-y-4">
+        <div id="login-username-row" class="hidden">
+          <label class="block text-sm font-medium text-gray-300 mb-1.5">Username</label>
+          <input type="text" id="login-user" class="w-full bg-gray-900 border border-gray-600 rounded-lg px-4 py-2.5 text-white placeholder-gray-400 focus:border-oc-500 focus:ring-1 focus:ring-oc-500 outline-none" placeholder="Username" autocomplete="username">
+        </div>
         <div>
           <label class="block text-sm font-medium text-gray-300 mb-1.5">Password</label>
-          <input type="password" id="login-pass" class="w-full bg-gray-900 border border-gray-600 rounded-lg px-4 py-2.5 text-white placeholder-gray-400 focus:border-oc-500 focus:ring-1 focus:ring-oc-500 outline-none" placeholder="Dashboard password" onkeydown="if(event.key==='Enter')doLogin()">
+          <input type="password" id="login-pass" class="w-full bg-gray-900 border border-gray-600 rounded-lg px-4 py-2.5 text-white placeholder-gray-400 focus:border-oc-500 focus:ring-1 focus:ring-oc-500 outline-none" placeholder="Dashboard password" onkeydown="if(event.key==='Enter')doLogin()" autocomplete="current-password">
         </div>
         <button onclick="doLogin()" class="w-full bg-oc-600 hover:bg-oc-700 text-white font-medium py-2.5 px-6 rounded-lg transition-colors" id="login-btn">Sign In</button>
         <p id="login-error" class="text-sm text-red-400 hidden"></p>
+        <p class="text-center text-xs text-gray-500">
+          <a href="#" onclick="toggleUsernameField()" id="login-toggle" class="hover:text-gray-300">Sign in with username</a>
+        </p>
       </div>
     </div>
   </div>
@@ -993,8 +1000,24 @@ renderTodos();
 renderCalendar();
 
 // Login
+function toggleUsernameField() {
+  const row = document.getElementById('login-username-row');
+  const toggle = document.getElementById('login-toggle');
+  if (row.classList.contains('hidden')) {
+    row.classList.remove('hidden');
+    toggle.textContent = 'Sign in with password only';
+    document.getElementById('login-user').focus();
+  } else {
+    row.classList.add('hidden');
+    toggle.textContent = 'Sign in with username';
+    document.getElementById('login-pass').focus();
+  }
+}
+
 async function doLogin() {
   const pass = document.getElementById('login-pass').value;
+  const userEl = document.getElementById('login-user');
+  const username = userEl && !document.getElementById('login-username-row').classList.contains('hidden') ? userEl.value.trim() : null;
   const errEl = document.getElementById('login-error');
   errEl.classList.add('hidden');
   document.getElementById('login-btn').textContent = 'Signing in...';
@@ -1002,7 +1025,7 @@ async function doLogin() {
   try {
     const resp = await fetch('/api/auth/login', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ password: pass })
+      body: JSON.stringify(username ? { password: pass, username } : { password: pass })
     });
     const data = await resp.json();
     if (data.success && data.token) {
