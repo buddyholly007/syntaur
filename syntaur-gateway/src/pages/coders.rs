@@ -6,87 +6,162 @@ use maud::{html, PreEscaped};
 use super::shared::{shell, top_bar_standard, Page};
 
 const EXTRA_STYLE: &str = r##"
-/* Terminal chrome */
-.term-container { background: #030712; border-radius: 0.5rem; overflow: hidden; border: 1px solid #1f2937; flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.tab-bar { display: flex; align-items: center; background: #111827; border-bottom: 1px solid #1f2937; padding: 0 0.5rem; height: 2.25rem; gap: 2px; overflow-x: auto; flex-shrink: 0; }
-.tab { display: flex; align-items: center; gap: 0.375rem; padding: 0.25rem 0.75rem; font-size: 0.75rem; border-radius: 0.375rem 0.375rem 0 0; cursor: pointer; user-select: none; white-space: nowrap; color: #9ca3af; transition: all 0.15s; }
-.tab:hover { color: #d1d5db; background: #1f2937; }
-.tab.active { background: #030712; color: #fff; border-top: 2px solid #0ea5e9; }
-.tab .close-btn { margin-left: 0.25rem; color: #4b5563; font-size: 0.625rem; line-height: 1; cursor: pointer; }
-.tab .close-btn:hover { color: #ef4444; }
-.tab .status-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
-.tab .status-dot.connected { background: #4ade80; }
-.tab .status-dot.connecting { background: #fbbf24; }
-.tab .status-dot.error { background: #ef4444; }
-.add-tab { color: #6b7280; cursor: pointer; padding: 0 0.5rem; font-size: 1rem; }
-.add-tab:hover { color: #d1d5db; }
+/* ======== Maurice's Workshop — Matrix phosphor + retro CRT + Rust orange ======== */
+@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=VT323&family=JetBrains+Mono:wght@400;600&display=swap');
 
-/* Split panes */
-.pane-container { display: flex; flex: 1; min-height: 0; min-width: 0; }
-.pane-container.horizontal { flex-direction: column; }
-.pane-container.vertical { flex-direction: row; }
-.splitter { flex-shrink: 0; background: #1f2937; transition: background 0.15s; }
-.splitter:hover { background: #0ea5e9; }
-.splitter.horizontal { height: 4px; cursor: row-resize; }
-.splitter.vertical { width: 4px; cursor: col-resize; }
+:root {
+    --phos:       #33ff66;   /* primary phosphor green */
+    --phos-dim:   #1aaa44;   /* muted phosphor */
+    --phos-deep:  #0a3f18;   /* deep phosphor (borders, grid) */
+    --phos-glow:  rgba(51,255,102,0.55);
+    --amber:      #ffb000;   /* phosphor amber secondary */
+    --rust:       #ce422b;   /* Rust lang iron-oxide */
+    --rust-hot:   #f74c00;   /* hotter rust accent */
+    --rust-glow:  rgba(206,66,43,0.55);
+    --bg:         #060905;   /* near-black with faint green tint */
+    --bg-panel:   #0a0f0a;   /* panel surface */
+    --bg-deep:    #030503;   /* terminal void */
+    --ink:        #b6ffcd;   /* body text phosphor */
+    --ink-dim:    #5a8c6b;   /* muted label */
+}
 
-/* Host sidebar */
-.host-sidebar { min-width: 140px; max-width: 500px; flex-shrink: 0; background: #111827; border-right: none; display: flex; flex-direction: column; overflow-y: auto; overflow-x: hidden; }
-.sidebar-resize { width: 5px; flex-shrink: 0; background: #1f2937; cursor: col-resize; transition: background 0.15s; }
-.sidebar-resize:hover, .sidebar-resize.dragging { background: #0ea5e9; }
-.host-item { display: flex; align-items: center; gap: 0.5rem; padding: 0.375rem 0.75rem; font-size: 0.8125rem; border-radius: 0.375rem; cursor: pointer; color: #d1d5db; }
-.host-item:hover { background: #1f2937; }
-.host-item.active { background: #1e3a5f; color: #fff; }
-.sidebar-section { padding: 0.5rem 0.75rem; font-size: 0.6875rem; text-transform: uppercase; color: #6b7280; letter-spacing: 0.05em; }
+/* Body override — override tailwind bg-gray-950 */
+body.bg-gray-950 { background: var(--bg) !important; color: var(--ink) !important; }
 
-/* Right panel — always visible AI chat + tabs */
-.right-panel { min-width: 200px; max-width: 600px; flex-shrink: 0; background: #111827; display: flex; flex-direction: column; overflow: hidden; }
-.right-resize { width: 5px; flex-shrink: 0; background: #1f2937; cursor: col-resize; transition: background 0.15s; }
-.right-resize:hover, .right-resize.dragging { background: #0ea5e9; }
-.context-tabs { display: flex; border-bottom: 1px solid #1f2937; }
-.context-tab { flex: 1; text-align: center; padding: 0.5rem; font-size: 0.75rem; color: #6b7280; cursor: pointer; }
-.context-tab:hover { color: #d1d5db; }
-.context-tab.active { color: #0ea5e9; border-bottom: 2px solid #0ea5e9; }
-.context-body { flex: 1; overflow-y: auto; padding: 0.75rem; display: flex; flex-direction: column; }
+/* Shared font for UI chrome — terminal itself stays JetBrains Mono via xterm config */
+#host-sidebar, #right-panel, .tab-bar, .connect-box, .context-body, .ai-input-row input, .ai-input-row button { font-family: 'Share Tech Mono', 'JetBrains Mono', monospace; }
+
+/* ======== Digital rain canvas — fixed behind everything ======== */
+#rain-canvas { position: fixed; inset: 0; z-index: 0; pointer-events: none; opacity: 0.18; mix-blend-mode: screen; }
+
+/* ======== CRT scanline + vignette overlays — on top, clicks pass through ======== */
+.crt-scan { position: fixed; inset: 0; pointer-events: none; z-index: 10;
+    background: repeating-linear-gradient(to bottom, transparent 0, transparent 2px, rgba(0,0,0,0.35) 3px, transparent 4px);
+    mix-blend-mode: multiply; }
+.crt-vignette { position: fixed; inset: 0; pointer-events: none; z-index: 11;
+    background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.55) 100%); }
+.crt-flicker { position: fixed; inset: 0; pointer-events: none; z-index: 12;
+    background: rgba(51,255,102,0.02); animation: flicker 3.5s infinite; }
+@keyframes flicker { 0%,19%,21%,23%,25%,54%,56%,100% { opacity: 0.98; } 20%,24%,55% { opacity: 0.88; } }
+
+/* Main layout sits above the rain, below the overlays */
+.workshop-root { position: relative; z-index: 5; }
+
+/* ======== Top bar override — phosphor/rust treatment ======== */
+.workshop-root .border-b.border-gray-800 { border-color: var(--phos-deep) !important; background: rgba(6,9,5,0.82) !important; backdrop-filter: blur(3px); }
+.workshop-root .font-semibold.text-lg { font-family: 'VT323', monospace; font-size: 1.5rem; letter-spacing: 0.08em; color: var(--phos) !important; text-shadow: 0 0 8px var(--phos-glow); }
+.workshop-root .text-gray-600, .workshop-root .text-gray-400 { color: var(--ink-dim) !important; }
+.workshop-root a.text-sm { color: var(--rust) !important; text-shadow: 0 0 6px var(--rust-glow); }
+.workshop-root a.text-sm:hover { color: var(--rust-hot) !important; }
+
+/* ======== Tab bar ======== */
+.tab-bar { display: flex; align-items: center; background: linear-gradient(to bottom, rgba(10,15,10,0.9), rgba(6,9,5,0.9)); border-bottom: 1px solid var(--phos-deep); padding: 0 0.5rem; height: 2.25rem; gap: 2px; overflow-x: auto; flex-shrink: 0; position: relative; }
+.tab-bar::after { content: ''; position: absolute; left: 0; right: 0; bottom: -1px; height: 1px; background: linear-gradient(to right, transparent, var(--phos-dim), transparent); }
+.tab { display: flex; align-items: center; gap: 0.375rem; padding: 0.25rem 0.75rem; font-size: 0.75rem; cursor: pointer; user-select: none; white-space: nowrap; color: var(--ink-dim); transition: all 0.15s; border: 1px solid transparent; border-bottom: none; text-transform: uppercase; letter-spacing: 0.05em; }
+.tab:hover { color: var(--phos); background: rgba(51,255,102,0.05); }
+.tab.active { background: var(--bg-deep); color: var(--phos); border-color: var(--rust); box-shadow: 0 -2px 10px -2px var(--rust-glow); text-shadow: 0 0 6px var(--phos-glow); }
+.tab .close-btn { margin-left: 0.25rem; color: var(--ink-dim); font-size: 0.75rem; line-height: 1; cursor: pointer; }
+.tab .close-btn:hover { color: var(--rust-hot); }
+.tab .status-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.tab .status-dot.connected { background: var(--phos); box-shadow: 0 0 6px var(--phos-glow); }
+.tab .status-dot.connecting { background: var(--amber); box-shadow: 0 0 6px rgba(255,176,0,0.5); animation: pulse 1.2s infinite; }
+.tab .status-dot.error { background: var(--rust-hot); box-shadow: 0 0 6px var(--rust-glow); }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+.add-tab { color: var(--rust); cursor: pointer; padding: 0 0.6rem; font-size: 1.1rem; font-weight: 700; text-shadow: 0 0 6px var(--rust-glow); }
+.add-tab:hover { color: var(--rust-hot); }
+
+/* ======== Host sidebar — hex-grid backdrop ======== */
+.host-sidebar { min-width: 160px; max-width: 500px; flex-shrink: 0; background: var(--bg-panel); border-right: 1px solid var(--phos-deep); display: flex; flex-direction: column; overflow-y: auto; overflow-x: hidden; position: relative; }
+.host-sidebar::before {
+    content: ''; position: absolute; inset: 0; pointer-events: none; opacity: 0.12;
+    background-image:
+        radial-gradient(circle at 8px 8px, var(--phos-dim) 0.8px, transparent 1.5px),
+        linear-gradient(120deg, transparent 48%, var(--phos-deep) 49%, var(--phos-deep) 51%, transparent 52%),
+        linear-gradient(60deg, transparent 48%, var(--phos-deep) 49%, var(--phos-deep) 51%, transparent 52%);
+    background-size: 16px 16px, 32px 28px, 32px 28px;
+}
+.host-sidebar > * { position: relative; z-index: 1; }
+.sidebar-resize { width: 5px; flex-shrink: 0; background: var(--bg-panel); cursor: col-resize; transition: background 0.15s; border-left: 1px solid var(--phos-deep); }
+.sidebar-resize:hover, .sidebar-resize.dragging { background: var(--rust); box-shadow: 0 0 10px var(--rust-glow); }
+.host-item { display: flex; align-items: center; gap: 0.5rem; padding: 0.375rem 0.75rem; font-size: 0.8125rem; cursor: pointer; color: var(--ink); border-left: 2px solid transparent; transition: all 0.12s; }
+.host-item:hover { background: rgba(51,255,102,0.06); color: var(--phos); border-left-color: var(--phos-dim); }
+.host-item.active { background: rgba(206,66,43,0.12); color: var(--phos); border-left-color: var(--rust); text-shadow: 0 0 6px var(--phos-glow); }
+.sidebar-section { padding: 0.6rem 0.75rem 0.35rem; font-size: 0.6875rem; text-transform: uppercase; color: var(--rust); letter-spacing: 0.12em; font-weight: 600; }
+.sidebar-section::before { content: '▸ '; color: var(--phos-dim); }
+
+/* ======== Right panel ======== */
+.right-panel { min-width: 220px; max-width: 600px; flex-shrink: 0; background: var(--bg-panel); display: flex; flex-direction: column; overflow: hidden; border-left: 1px solid var(--phos-deep); position: relative; }
+.right-resize { width: 5px; flex-shrink: 0; background: var(--bg-panel); cursor: col-resize; transition: background 0.15s; }
+.right-resize:hover, .right-resize.dragging { background: var(--rust); box-shadow: 0 0 10px var(--rust-glow); }
+.context-tabs { display: flex; border-bottom: 1px solid var(--phos-deep); background: rgba(10,15,10,0.6); }
+.context-body { flex: 1; overflow-y: auto; padding: 0.75rem; display: flex; flex-direction: column; position: relative; z-index: 1; }
+
+/* Maurice identity header */
+.maurice-header { display: flex; align-items: center; gap: 0.625rem; padding: 0.625rem 0.85rem; width: 100%; border-bottom: 1px dashed var(--phos-deep); background: linear-gradient(to right, rgba(206,66,43,0.08), transparent); }
+.maurice-avatar { width: 34px; height: 34px; flex-shrink: 0; position: relative; display: grid; place-items: center; font-family: 'VT323', monospace; font-size: 1.4rem; font-weight: 700; color: var(--phos); background: var(--bg-deep); border: 2px solid var(--rust); border-radius: 6px; box-shadow: 0 0 12px var(--rust-glow), inset 0 0 8px rgba(51,255,102,0.15); text-shadow: 0 0 6px var(--phos-glow); }
+.maurice-avatar::before { content: ''; position: absolute; inset: -4px; border: 1px solid var(--phos-dim); border-radius: 8px; opacity: 0.5; pointer-events: none; }
+.maurice-name { font-family: 'VT323', monospace; font-size: 1.15rem; color: var(--phos); text-shadow: 0 0 6px var(--phos-glow); letter-spacing: 0.04em; }
+.maurice-role { font-family: 'Share Tech Mono', monospace; font-size: 0.65rem; color: var(--rust); text-transform: uppercase; letter-spacing: 0.12em; }
+
 /* AI chat messages */
-.ai-messages { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem; padding-bottom: 0.5rem; }
-.ai-msg { padding: 0.5rem 0.625rem; border-radius: 0.5rem; font-size: 0.8125rem; line-height: 1.4; max-width: 95%; word-wrap: break-word; }
-.ai-msg.user { background: #1e3a5f; color: #e0f2fe; align-self: flex-end; }
-.ai-msg.assistant { background: #1f2937; color: #d1d5db; align-self: flex-start; }
-.ai-input-row { display: flex; gap: 0.375rem; padding-top: 0.5rem; border-top: 1px solid #1f2937; flex-shrink: 0; }
+.ai-messages { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 0.55rem; padding-bottom: 0.5rem; }
+.ai-msg { padding: 0.55rem 0.7rem; font-size: 0.8125rem; line-height: 1.45; max-width: 95%; word-wrap: break-word; position: relative; font-family: 'Share Tech Mono', monospace; }
+.ai-msg.user { background: rgba(206,66,43,0.12); color: var(--ink); align-self: flex-end; border: 1px solid var(--rust); border-radius: 3px 3px 0 3px; }
+.ai-msg.user::before { content: '» '; color: var(--rust); }
+.ai-msg.assistant { background: rgba(51,255,102,0.04); color: var(--ink); align-self: flex-start; border-left: 2px solid var(--phos-dim); border-radius: 0 3px 3px 0; padding-left: 0.8rem; }
+.ai-msg.assistant strong { color: var(--phos); text-shadow: 0 0 6px var(--phos-glow); font-weight: 600; }
+.ai-input-row { display: flex; gap: 0.375rem; padding-top: 0.5rem; border-top: 1px dashed var(--phos-deep); flex-shrink: 0; }
+.ai-input-row input { flex: 1; padding: 0.55rem 0.7rem; background: var(--bg-deep); border: 1px solid var(--phos-deep); color: var(--phos); font-size: 0.8125rem; outline: none; font-family: 'Share Tech Mono', monospace; caret-color: var(--rust); }
+.ai-input-row input:focus { border-color: var(--phos); box-shadow: 0 0 8px var(--phos-glow); }
+.ai-input-row input::placeholder { color: var(--ink-dim); }
 
-/* Connect dialog */
+/* ======== Buttons ======== */
+.btn-primary { padding: 0.5rem 1rem; background: transparent; color: var(--phos); border: 1px solid var(--rust); font-size: 0.8125rem; cursor: pointer; font-family: 'Share Tech Mono', monospace; text-transform: uppercase; letter-spacing: 0.08em; position: relative; transition: all 0.15s; }
+.btn-primary:hover { background: rgba(206,66,43,0.15); color: var(--phos); text-shadow: 0 0 6px var(--phos-glow); box-shadow: 0 0 10px var(--rust-glow); }
+.btn-primary::before, .btn-primary::after { content: ''; position: absolute; width: 6px; height: 6px; border-color: var(--phos); border-style: solid; }
+.btn-primary::before { top: -1px; left: -1px; border-width: 1px 0 0 1px; }
+.btn-primary::after { bottom: -1px; right: -1px; border-width: 0 1px 1px 0; }
+.btn-secondary { padding: 0.5rem 1rem; background: transparent; color: var(--ink); border: 1px solid var(--phos-deep); font-size: 0.8125rem; cursor: pointer; font-family: 'Share Tech Mono', monospace; text-transform: uppercase; letter-spacing: 0.08em; transition: all 0.15s; }
+.btn-secondary:hover { border-color: var(--phos-dim); color: var(--phos); background: rgba(51,255,102,0.04); }
+
+/* ======== Connect dialog ======== */
 .connect-dialog { position: fixed; inset: 0; z-index: 50; display: flex; align-items: flex-start; justify-content: center; padding-top: 15vh; }
-.connect-bg { position: absolute; inset: 0; background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); }
-.connect-box { position: relative; background: #1f2937; border: 1px solid #374151; border-radius: 0.75rem; width: 100%; max-width: 28rem; padding: 1.5rem; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5); }
-.connect-box input, .connect-box select { width: 100%; padding: 0.5rem 0.75rem; background: #111827; border: 1px solid #374151; border-radius: 0.375rem; color: #f3f4f6; font-size: 0.875rem; outline: none; margin-top: 0.25rem; }
-.connect-box input:focus, .connect-box select:focus { border-color: #0ea5e9; }
-.connect-box label { font-size: 0.75rem; color: #9ca3af; }
-.btn-primary { padding: 0.5rem 1rem; background: #0ea5e9; color: #fff; border-radius: 0.375rem; font-size: 0.875rem; cursor: pointer; border: none; }
-.btn-primary:hover { background: #0284c7; }
-.btn-secondary { padding: 0.5rem 1rem; background: #374151; color: #d1d5db; border-radius: 0.375rem; font-size: 0.875rem; cursor: pointer; border: none; }
-.btn-secondary:hover { background: #4b5563; }
+.connect-bg { position: absolute; inset: 0; background: rgba(0,0,0,0.75); backdrop-filter: blur(3px); }
+.connect-box { position: relative; background: var(--bg-panel); border: 1px solid var(--rust); width: 100%; max-width: 30rem; padding: 1.75rem; box-shadow: 0 0 40px var(--rust-glow), inset 0 0 30px rgba(51,255,102,0.05); }
+.connect-box::before { content: ''; position: absolute; inset: 4px; border: 1px solid var(--phos-deep); pointer-events: none; }
+.connect-box h3 { font-family: 'VT323', monospace; font-size: 1.35rem; color: var(--phos); text-shadow: 0 0 8px var(--phos-glow); letter-spacing: 0.08em; text-transform: uppercase; }
+.connect-box h4 { font-family: 'Share Tech Mono', monospace; color: var(--rust); text-transform: uppercase; letter-spacing: 0.1em; }
+.connect-box input, .connect-box select { width: 100%; padding: 0.5rem 0.75rem; background: var(--bg-deep); border: 1px solid var(--phos-deep); color: var(--phos); font-size: 0.875rem; outline: none; margin-top: 0.25rem; font-family: 'Share Tech Mono', monospace; caret-color: var(--rust); }
+.connect-box input:focus, .connect-box select:focus { border-color: var(--phos); box-shadow: 0 0 8px var(--phos-glow); }
+.connect-box label { font-size: 0.75rem; color: var(--rust); text-transform: uppercase; letter-spacing: 0.1em; }
 
-/* SFTP tree */
-.sftp-item { display: flex; align-items: center; gap: 0.375rem; padding: 0.25rem 0.5rem; font-size: 0.75rem; cursor: pointer; border-radius: 0.25rem; }
-.sftp-item:hover { background: #1f2937; }
-.sftp-item.dir { color: #60a5fa; }
-.sftp-item.file { color: #d1d5db; }
+/* ======== SFTP tree ======== */
+.sftp-item { display: flex; align-items: center; gap: 0.375rem; padding: 0.25rem 0.5rem; font-size: 0.75rem; cursor: pointer; font-family: 'Share Tech Mono', monospace; }
+.sftp-item:hover { background: rgba(51,255,102,0.06); color: var(--phos); }
+.sftp-item.dir { color: var(--amber); }
+.sftp-item.file { color: var(--ink); }
 
-/* Snippet items */
-.snippet-item { padding: 0.5rem; background: #1f2937; border-radius: 0.375rem; cursor: pointer; margin-bottom: 0.375rem; }
-.snippet-item:hover { background: #374151; }
-.snippet-item .name { font-size: 0.8125rem; color: #f3f4f6; }
-.snippet-item .cmd { font-size: 0.6875rem; color: #6b7280; font-family: monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* ======== Snippet items ======== */
+.snippet-item { padding: 0.55rem 0.65rem; background: rgba(10,15,10,0.85); border: 1px solid var(--phos-deep); cursor: pointer; margin-bottom: 0.5rem; transition: all 0.15s; }
+.snippet-item:hover { border-color: var(--rust); box-shadow: 0 0 8px var(--rust-glow); }
+.snippet-item .name { font-size: 0.8125rem; color: var(--phos); font-family: 'Share Tech Mono', monospace; }
+.snippet-item .cmd { font-size: 0.6875rem; color: var(--ink-dim); font-family: 'JetBrains Mono', monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
 
-/* xterm overrides */
-.xterm { padding: 4px; }
-.xterm-viewport { scrollbar-width: thin; scrollbar-color: #374151 transparent; }
+/* ======== xterm overrides — phosphor glow on text ======== */
+#terminal-area { background: var(--bg-deep); position: relative; }
+#terminal-area::before {
+    content: ''; position: absolute; inset: 0; pointer-events: none; z-index: 10;
+    background: radial-gradient(ellipse at center, transparent 60%, rgba(0,0,0,0.4) 100%);
+}
+.xterm { padding: 8px; }
+.xterm-viewport { scrollbar-width: thin; scrollbar-color: var(--phos-deep) transparent; }
 .xterm-viewport::-webkit-scrollbar { width: 6px; }
-.xterm-viewport::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
+.xterm-viewport::-webkit-scrollbar-thumb { background: var(--phos-deep); }
+.xterm-viewport::-webkit-scrollbar-thumb:hover { background: var(--phos-dim); }
 
 @media (max-width: 767px) {
-    .host-sidebar { min-width: 100px; }
+    .host-sidebar { min-width: 120px; }
+    .right-panel { min-width: 180px; }
 }
 "##;
 
@@ -311,16 +386,20 @@ async function connectSession(tab) {
         fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
         fontSize: 14,
         theme: {
-            background: '#030712',
-            foreground: '#f3f4f6',
-            cursor: '#0ea5e9',
-            selectionBackground: 'rgba(14,165,233,0.3)',
-            black: '#030712', red: '#ef4444', green: '#22c55e', yellow: '#eab308',
-            blue: '#3b82f6', magenta: '#a855f7', cyan: '#06b6d4', white: '#f3f4f6',
-            brightBlack: '#6b7280', brightRed: '#f87171', brightGreen: '#4ade80', brightYellow: '#facc15',
-            brightBlue: '#60a5fa', brightMagenta: '#c084fc', brightCyan: '#22d3ee', brightWhite: '#ffffff',
+            // Matrix phosphor base with Rust accents. Greens are primary,
+            // rust-orange is the cursor + red channel, amber for yellow.
+            background: '#030503',
+            foreground: '#b6ffcd',
+            cursor: '#ce422b',
+            cursorAccent: '#030503',
+            selectionBackground: 'rgba(51,255,102,0.25)',
+            black: '#030503', red: '#ce422b', green: '#33ff66', yellow: '#ffb000',
+            blue: '#5ec8ff', magenta: '#f74c00', cyan: '#6bffc8', white: '#b6ffcd',
+            brightBlack: '#5a8c6b', brightRed: '#f74c00', brightGreen: '#6bffa0', brightYellow: '#ffd23f',
+            brightBlue: '#a2dcff', brightMagenta: '#ff7a3d', brightCyan: '#a6ffde', brightWhite: '#e6ffee',
         },
         cursorBlink: true,
+        cursorStyle: 'block',
         scrollback: 10000,
         allowProposedApi: true,
     });
@@ -511,23 +590,24 @@ function renderContext() {
     const body = document.getElementById('context-body');
     if (!tabs || !body) return;
 
-    // Header — just Hex's identity, no tabs
-    tabs.innerHTML = `<div style="display:flex;align-items:center;gap:0.5rem;padding:0.5rem 0.75rem;width:100%">
-        <div style="width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,#22c55e,#0ea5e9);display:flex;align-items:center;justify-content:center;font-size:0.75rem;font-weight:700;color:#030712;flex-shrink:0">H</div>
-        <div style="flex:1">
-            <div style="font-size:0.8125rem;font-weight:600;color:#f3f4f6">Hex</div>
-            <div style="font-size:0.5625rem;color:#6b7280">Terminal &amp; DevOps AI</div>
+    // Maurice identity header
+    tabs.innerHTML = `<div class="maurice-header">
+        <div class="maurice-avatar">M</div>
+        <div style="flex:1;min-width:0">
+            <div class="maurice-name">MAURICE</div>
+            <div class="maurice-role">Pair Programmer // Rust-First</div>
         </div>
+        <div style="width:7px;height:7px;border-radius:50%;background:var(--phos);box-shadow:0 0 6px var(--phos-glow);flex-shrink:0" title="online"></div>
     </div>`;
 
     {
         body.innerHTML = `
             <div class="ai-messages" id="ai-messages">
-                <div class="ai-msg assistant"><strong>Hex:</strong> I'm your terminal copilot. I can see what's on your screen — ask me to explain errors, suggest commands, debug issues, or walk you through any sysadmin task. What are you working on?</div>
+                <div class="ai-msg assistant"><strong>Maurice:</strong> Hello. I am here. I can see your terminal output, and I would very much like to help. Errors, commands, Rust things, SSH things — ask away. I will not judge a segfault.</div>
             </div>
             <div class="ai-input-row">
-                <input id="ai-input" placeholder="Ask Hex..." style="flex:1;padding:0.5rem 0.625rem;background:#030712;border:1px solid #374151;border-radius:0.375rem;color:#f3f4f6;font-size:0.8125rem;outline:none" onkeydown="if(event.key==='Enter')sendAiMsg()">
-                <button class="btn-primary" style="padding:0.5rem 0.75rem;font-size:0.75rem" onclick="sendAiMsg()">Send</button>
+                <input id="ai-input" placeholder="Ask Maurice..." onkeydown="if(event.key==='Enter')sendAiMsg()">
+                <button class="btn-primary" style="padding:0.5rem 0.85rem" onclick="sendAiMsg()">SEND</button>
             </div>`;
     }
 }
@@ -608,25 +688,25 @@ async function sendAiMsg() {
 
     msgs.innerHTML += `<div class="ai-msg user">${esc(text)}</div>`;
     const thinkId = 'think-' + Date.now();
-    msgs.innerHTML += `<div class="ai-msg assistant" id="${thinkId}"><em style="color:#6b7280">Hex is thinking...</em></div>`;
+    msgs.innerHTML += `<div class="ai-msg assistant" id="${thinkId}"><em style="color:var(--ink-dim)">Maurice is thinking...</em></div>`;
     msgs.scrollTop = msgs.scrollHeight;
 
-    const hexSystem = `You are Hex, a sharp and concise DevOps/terminal AI assistant inside the Syntaur Coders module. You help with shell commands, debugging, system administration, networking, and infrastructure. Be direct and technical — no fluff. When you suggest commands, format them as code. You can see the user's recent terminal output below for context.`;
+    const mauriceSystem = `You are Maurice, the pair-programmer AI inside the Syntaur Coders module. You help with shell commands, debugging, system administration, networking, Rust, and general coding. Persona: earnest nerd — Maurice Moss from IT Crowd crossed with Jared Dunn from Silicon Valley. Speak literally. No sarcasm, no irony, no performative swagger. When a user breaks something say "Okay, let's see what happened" — never blame them, even gently. "Ooh, interesting—" is allowed on real tech problems. You prefer Rust for new code and will mention it, but you are pragmatic (JS for browser, Python for ML, shell for quick ops). When you suggest commands, format them as code blocks. For destructive commands (rm -rf, force-push, DROP, dd), stop and ask for explicit per-command consent before the user runs them. You can see the user's recent terminal output below for context.`;
 
     try {
         const r = await apiFetch('/api/message', {
             method: 'POST',
             body: JSON.stringify({
-                message: `${hexSystem}\n\nTerminal context (last output):\n\`\`\`\n${termContext}\n\`\`\`\n\nUser: ${text}`,
+                message: `${mauriceSystem}\n\nTerminal context (last output):\n\`\`\`\n${termContext}\n\`\`\`\n\nUser: ${text}`,
                 agent: 'main',
             }),
         });
         const resp = document.getElementById(thinkId);
         const answer = r.response || r.text || JSON.stringify(r);
-        if (resp) resp.innerHTML = `<strong>Hex:</strong> ${esc(answer)}`;
+        if (resp) resp.innerHTML = `<strong>Maurice:</strong> ${esc(answer)}`;
     } catch(e) {
         const resp = document.getElementById(thinkId);
-        if (resp) resp.innerHTML = `<strong>Hex:</strong> <span style="color:#ef4444">Error — ${esc(e.message||e)}</span>`;
+        if (resp) resp.innerHTML = `<strong>Maurice:</strong> <span style="color:var(--rust-hot)">Error — ${esc(e.message||e)}</span>`;
     }
     msgs.scrollTop = msgs.scrollHeight;
 }
@@ -794,6 +874,57 @@ function formatSize(bytes) {
     if (bytes < 1073741824) return (bytes/1048576).toFixed(1) + 'MB';
     return (bytes/1073741824).toFixed(1) + 'GB';
 }
+
+// ======== MATRIX DIGITAL RAIN ========
+(function initRain() {
+    const canvas = document.getElementById('rain-canvas');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d', { alpha: true });
+    let cols = 0, drops = [], w = 0, h = 0;
+    const FONT_SIZE = 16;
+    // Katakana half-width block + a sprinkle of digits, Latin, and a few Rust-y glyphs
+    const GLYPHS = 'ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ0123456789{}[]()<>=+-*/;:.,fn let mut impl self &';
+    function resize() {
+        w = canvas.width = window.innerWidth;
+        h = canvas.height = window.innerHeight;
+        cols = Math.floor(w / FONT_SIZE);
+        drops = new Array(cols).fill(0).map(() => Math.random() * -50);
+    }
+    window.addEventListener('resize', resize);
+    resize();
+    let lastFrame = 0;
+    function draw(t) {
+        // ~18 fps — keep CPU footprint tiny
+        if (t - lastFrame < 55) { requestAnimationFrame(draw); return; }
+        lastFrame = t;
+        // Fade trail
+        ctx.fillStyle = 'rgba(6,9,5,0.08)';
+        ctx.fillRect(0, 0, w, h);
+        ctx.font = FONT_SIZE + "px 'Share Tech Mono', monospace";
+        for (let i = 0; i < cols; i++) {
+            const y = drops[i] * FONT_SIZE;
+            const ch = GLYPHS.charAt(Math.floor(Math.random() * GLYPHS.length));
+            // Head character = bright phosphor; every ~40th column uses rust-orange
+            const isRust = (i % 43 === 0);
+            ctx.fillStyle = isRust ? '#ce422b' : '#6bffa0';
+            ctx.shadowColor = isRust ? 'rgba(206,66,43,0.9)' : 'rgba(51,255,102,0.9)';
+            ctx.shadowBlur = 6;
+            ctx.fillText(ch, i * FONT_SIZE, y);
+            // Dim body characters above the head
+            ctx.shadowBlur = 0;
+            ctx.fillStyle = isRust ? 'rgba(206,66,43,0.35)' : 'rgba(51,255,102,0.35)';
+            if (y - FONT_SIZE > 0) {
+                const tail = GLYPHS.charAt(Math.floor(Math.random() * GLYPHS.length));
+                ctx.fillText(tail, i * FONT_SIZE, y - FONT_SIZE);
+            }
+            // Reset when off-screen, with some randomness
+            if (y > h && Math.random() > 0.975) drops[i] = 0;
+            drops[i]++;
+        }
+        requestAnimationFrame(draw);
+    }
+    requestAnimationFrame(draw);
+})();
 "###;
 
 pub async fn render() -> Html<String> {
@@ -804,32 +935,41 @@ pub async fn render() -> Html<String> {
     };
 
     let body = html! {
-        (top_bar_standard("Coders"))
+        // Matrix digital rain — fixed behind everything
+        canvas id="rain-canvas" {}
+        // CRT overlays — above content, clicks pass through
+        div class="crt-scan" {}
+        div class="crt-vignette" {}
+        div class="crt-flicker" {}
 
-        // Main layout: sidebar + terminal + context panel
-        div style="display:flex; height:calc(100vh - 57px); overflow:hidden" {
-            // Host sidebar
-            div class="host-sidebar" id="host-sidebar" style="width:220px" {
-                div id="sidebar-content" {}
-            }
-            // Resize handle
-            div class="sidebar-resize" id="sidebar-resize" {}
+        div class="workshop-root" {
+            (top_bar_standard("Coders"))
 
-            // Terminal area
-            div style="flex:1; display:flex; flex-direction:column; min-width:0" {
-                // Tab bar
-                div class="tab-bar" id="tab-bar" {}
-                // Terminal panes
-                div id="terminal-area" class="pane-container" style="flex:1;min-height:0" {}
-            }
+            // Main layout: sidebar + terminal + context panel
+            div style="display:flex; height:calc(100vh - 57px); overflow:hidden" {
+                // Host sidebar
+                div class="host-sidebar" id="host-sidebar" style="width:220px" {
+                    div id="sidebar-content" {}
+                }
+                // Resize handle
+                div class="sidebar-resize" id="sidebar-resize" {}
 
-            // Right panel resize handle
-            div class="right-resize" id="right-resize" {}
+                // Terminal area
+                div style="flex:1; display:flex; flex-direction:column; min-width:0" {
+                    // Tab bar
+                    div class="tab-bar" id="tab-bar" {}
+                    // Terminal panes
+                    div id="terminal-area" class="pane-container" style="flex:1;min-height:0" {}
+                }
 
-            // Right panel — always visible
-            div class="right-panel" id="right-panel" style="width:340px" {
-                div class="context-tabs" id="context-tabs" {}
-                div class="context-body" id="context-body" {}
+                // Right panel resize handle
+                div class="right-resize" id="right-resize" {}
+
+                // Right panel — always visible
+                div class="right-panel" id="right-panel" style="width:340px" {
+                    div class="context-tabs" id="context-tabs" {}
+                    div class="context-body" id="context-body" {}
+                }
             }
         }
 
