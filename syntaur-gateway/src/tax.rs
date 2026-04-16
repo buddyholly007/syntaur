@@ -7419,3 +7419,313 @@ pub async fn handle_entity_comparison(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(result))
 }
+
+// ── Paper Filing Package (Printable 1040 + Schedules) ───────────────────────
+
+/// Generate a complete printable tax return package as HTML.
+/// Includes Form 1040, applicable schedules, filing checklist, and mailing instructions.
+pub fn generate_print_return(conn: &rusqlite::Connection, user_id: i64, year: i64) -> Result<String, String> {
+    // Load taxpayer profile
+    let (first, last, ssn_last4, address, city, st, zip, filing_status, occupation,
+     spouse_first, spouse_last) = conn.query_row(
+        "SELECT first_name, last_name, SUBSTR(ssn_encrypted,-4), address_line1, city, state, zip, \
+         filing_status, occupation, spouse_first, spouse_last \
+         FROM taxpayer_profiles WHERE user_id = ? AND tax_year = ?",
+        rusqlite::params![user_id, year],
+        |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?, r.get::<_,Option<String>>(2)?,
+                r.get::<_,Option<String>>(3)?, r.get::<_,Option<String>>(4)?,
+                r.get::<_,Option<String>>(5)?, r.get::<_,Option<String>>(6)?,
+                r.get::<_,String>(7)?, r.get::<_,Option<String>>(8)?,
+                r.get::<_,Option<String>>(9)?, r.get::<_,Option<String>>(10)?)),
+    ).map_err(|e| format!("Taxpayer profile not found: {e}. Complete your profile first."))?;
+
+    let est = compute_tax_estimate(conn, user_id, year, &filing_status)?;
+
+    // Dependents
+    let mut dep_stmt = conn.prepare(
+        "SELECT first_name, last_name, relationship, months_lived, qualifies_ctc \
+         FROM dependents WHERE user_id = ? AND tax_year = ?"
+    ).map_err(|e| e.to_string())?;
+    let deps: Vec<(String, String, String, i64, bool)> = dep_stmt.query_map(
+        rusqlite::params![user_id, year], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+    }).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
+
+    let fs_check = |s: &str| if filing_status == s { "X" } else { "&nbsp;" };
+    let d = |cents: i64| cents_to_display(cents);
+    let has_se = est.se_income > 0;
+    let has_itemized = est.deduction_type == "Itemized";
+    let has_ltcg = est.ltcg_tax > 0;
+
+    let mut html = String::new();
+    html.push_str(&format!(r#"<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>Tax Return {year} — {first} {last}</title>
+<style>
+@media print {{ @page {{ margin: 0.5in; size: letter; }} body {{ font-size: 10pt; }} .no-print {{ display: none; }} }}
+body {{ font-family: 'Courier New', monospace; max-width: 8in; margin: 0 auto; padding: 20px; color: #000; background: #fff; }}
+h1 {{ text-align: center; font-size: 16pt; border-bottom: 3px double #000; padding-bottom: 8px; }}
+h2 {{ font-size: 12pt; border-bottom: 1px solid #000; margin-top: 24px; }}
+h3 {{ font-size: 11pt; margin-top: 16px; }}
+.form-header {{ text-align: center; font-weight: bold; font-size: 14pt; margin: 20px 0 5px; }}
+.form-sub {{ text-align: center; font-size: 9pt; color: #555; }}
+.line {{ display: flex; justify-content: space-between; padding: 2px 0; border-bottom: 1px dotted #ccc; }}
+.line-num {{ width: 30px; font-weight: bold; color: #333; }}
+.line-desc {{ flex: 1; }}
+.line-val {{ text-align: right; min-width: 100px; font-weight: bold; }}
+.info-box {{ border: 1px solid #000; padding: 8px; margin: 8px 0; }}
+.check {{ display: inline-block; width: 14px; height: 14px; border: 1px solid #000; text-align: center; font-size: 10pt; margin-right: 4px; }}
+.section {{ margin: 16px 0; }}
+.page-break {{ page-break-before: always; }}
+.checklist li {{ padding: 4px 0; }}
+.signature-line {{ border-bottom: 1px solid #000; width: 300px; display: inline-block; height: 20px; margin-top: 20px; }}
+</style></head><body>"#));
+
+    // ── Print button (hidden when printing) ──
+    html.push_str(r#"<div class="no-print" style="text-align:center;margin-bottom:20px;">
+        <button onclick="window.print()" style="padding:10px 30px;font-size:14pt;cursor:pointer;">Print Tax Return</button>
+        <p style="color:#666;font-size:9pt;">This document is formatted for US Letter paper. Print or Save as PDF.</p>
+    </div>"#);
+
+    // ── FORM 1040 ──
+    html.push_str(&format!(r#"
+<div class="form-header">Form 1040 — U.S. Individual Income Tax Return</div>
+<div class="form-sub">Department of the Treasury — Internal Revenue Service | Tax Year {year}</div>
+
+<div class="info-box">
+<strong>Filing Status:</strong>
+<span class="check">{}</span> Single
+<span class="check">{}</span> Married filing jointly
+<span class="check">{}</span> Married filing separately
+<span class="check">{}</span> Head of household
+</div>
+
+<div class="info-box">
+<strong>Your first name and middle initial:</strong> {first} &nbsp;&nbsp; <strong>Last name:</strong> {last} &nbsp;&nbsp; <strong>SSN:</strong> ***-**-{ssn}<br>
+<strong>Address:</strong> {addr} &nbsp;&nbsp; <strong>City:</strong> {cty} &nbsp;&nbsp; <strong>State:</strong> {stt} &nbsp;&nbsp; <strong>ZIP:</strong> {zp}<br>
+<strong>Occupation:</strong> {occ}
+</div>"#,
+        fs_check("single"), fs_check("married_jointly"), fs_check("married_separately"), fs_check("head_of_household"),
+        ssn = ssn_last4.as_deref().unwrap_or("----"),
+        addr = address.as_deref().unwrap_or(""), cty = city.as_deref().unwrap_or(""),
+        stt = st.as_deref().unwrap_or(""), zp = zip.as_deref().unwrap_or(""),
+        occ = occupation.as_deref().unwrap_or(""),
+    ));
+
+    if let (Some(sf), Some(sl)) = (&spouse_first, &spouse_last) {
+        if !sf.is_empty() {
+            html.push_str(&format!(r#"<div class="info-box"><strong>Spouse:</strong> {sf} {sl}</div>"#));
+        }
+    }
+
+    // Dependents
+    if !deps.is_empty() {
+        html.push_str(r#"<div class="info-box"><strong>Dependents:</strong><br>"#);
+        for (df, dl, rel, months, ctc) in &deps {
+            html.push_str(&format!("{df} {dl} — {rel}, {months} months, CTC: {}<br>",
+                if *ctc { "Yes" } else { "No" }));
+        }
+        html.push_str("</div>");
+    }
+
+    // Income section
+    html.push_str(r#"<h2>Income</h2><div class="section">"#);
+    let ded_label = format!("{} deduction", est.deduction_type);
+    let lines: Vec<(&str, &str, String)> = vec![
+        ("1", "Wages, salaries, tips (W-2 box 1)", d(est.w2_income)),
+        ("2a", "Tax-exempt interest", "$0.00".into()),
+        ("3a", "Qualified dividends", "$0.00".into()),
+        ("8", "Other income (Schedule 1)", d(est.se_income)),
+        ("9", "Total income", d(est.gross_income)),
+        ("10", "Adjustments (Schedule 1)", d(est.half_se_tax + est.se_health_deduction + est.student_loan_deduction)),
+        ("11", "Adjusted gross income (AGI)", d(est.agi)),
+        ("12", &ded_label, d(est.deduction_used)),
+        ("13", "Qualified business income deduction", d(est.qbi_deduction)),
+        ("15", "Taxable income", d(est.taxable_income)),
+    ];
+    for (num, desc, val) in &lines {
+        html.push_str(&format!(r#"<div class="line"><span class="line-num">{num}</span><span class="line-desc">{desc}</span><span class="line-val">{val}</span></div>"#));
+    }
+    html.push_str("</div>");
+
+    // Tax & Credits
+    html.push_str(r#"<h2>Tax and Credits</h2><div class="section">"#);
+    let tax_lines: Vec<(&str, &str, String)> = vec![
+        ("16", "Tax (from tax table or Schedule D)", d(est.ordinary_tax + est.ltcg_tax)),
+        ("23", "Other taxes (Schedule 2 — SE tax)", d(est.se_tax)),
+        ("24", "Total tax", d(est.total_tax)),
+    ];
+    for (num, desc, val) in &tax_lines {
+        html.push_str(&format!(r#"<div class="line"><span class="line-num">{num}</span><span class="line-desc">{desc}</span><span class="line-val">{val}</span></div>"#));
+    }
+    html.push_str("</div>");
+
+    // Payments
+    html.push_str(r#"<h2>Payments</h2><div class="section">"#);
+    let pay_lines: Vec<(&str, &str, String)> = vec![
+        ("25a", "Federal income tax withheld (W-2)", d(est.w2_withheld)),
+        ("26", "Estimated tax payments", d(est.estimated_payments)),
+        ("27", "Earned income credit (EITC)", d(est.eitc)),
+        ("28", "Child tax credit", d(est.child_credit)),
+        ("29", "Other credits (Schedule 3)", d(est.cdcc + est.education_credits + est.savers_credit + est.energy_credits)),
+        ("33", "Total payments", d(est.total_payments)),
+    ];
+    for (num, desc, val) in &pay_lines {
+        html.push_str(&format!(r#"<div class="line"><span class="line-num">{num}</span><span class="line-desc">{desc}</span><span class="line-val">{val}</span></div>"#));
+    }
+    if est.owed >= 0 {
+        html.push_str(&format!(r#"<div class="line"><span class="line-num">37</span><span class="line-desc"><strong>Amount you owe</strong></span><span class="line-val"><strong>{}</strong></span></div>"#, d(est.owed)));
+    } else {
+        html.push_str(&format!(r#"<div class="line"><span class="line-num">35a</span><span class="line-desc"><strong>Overpaid (Refund)</strong></span><span class="line-val"><strong>{}</strong></span></div>"#, d(est.owed.abs())));
+    }
+    html.push_str("</div>");
+
+    // Signature
+    html.push_str(&format!(r#"
+<div class="section" style="margin-top:30px;">
+<strong>Sign Here:</strong><br>
+Your signature: <span class="signature-line"></span> Date: <span class="signature-line" style="width:120px;"></span><br>
+Occupation: {}<br>
+</div>"#, occupation.as_deref().unwrap_or("")));
+
+    // ── SCHEDULE C (if SE income) ──
+    if has_se {
+        html.push_str(r#"<div class="page-break"></div>"#);
+        html.push_str(&format!(r#"
+<div class="form-header">Schedule C — Profit or Loss From Business</div>
+<div class="form-sub">Sole Proprietorship | {first} {last} | {year}</div>
+<div class="section">
+<div class="line"><span class="line-num">1</span><span class="line-desc">Gross receipts</span><span class="line-val">{}</span></div>
+<div class="line"><span class="line-num">28</span><span class="line-desc">Total expenses</span><span class="line-val">{}</span></div>
+<div class="line"><span class="line-num">29</span><span class="line-desc">Meals adjustment (50%)</span><span class="line-val">({})</span></div>
+<div class="line"><span class="line-num">31</span><span class="line-desc"><strong>Net profit (loss)</strong></span><span class="line-val"><strong>{}</strong></span></div>
+</div>"#, d(est.se_income), d(est.biz_deductions + est.meals_adjustment), d(est.meals_adjustment),
+            d(std::cmp::max(est.se_income - est.biz_deductions, 0))));
+    }
+
+    // ── SCHEDULE SE (if SE income) ──
+    if has_se {
+        let se_net = std::cmp::max(est.se_income - est.biz_deductions, 0);
+        let se_taxable = (se_net as f64 * 0.9235) as i64;
+        html.push_str(&format!(r#"
+<div class="form-header">Schedule SE — Self-Employment Tax</div>
+<div class="section">
+<div class="line"><span class="line-num">2</span><span class="line-desc">Net earnings from self-employment</span><span class="line-val">{}</span></div>
+<div class="line"><span class="line-num">4a</span><span class="line-desc">92.35% of line 2</span><span class="line-val">{}</span></div>
+<div class="line"><span class="line-num">10</span><span class="line-desc">Social Security tax</span><span class="line-val">{}</span></div>
+<div class="line"><span class="line-num">11</span><span class="line-desc">Medicare tax</span><span class="line-val">{}</span></div>
+<div class="line"><span class="line-num">12</span><span class="line-desc"><strong>Total SE tax</strong></span><span class="line-val"><strong>{}</strong></span></div>
+<div class="line"><span class="line-num">13</span><span class="line-desc">Deductible part (50%)</span><span class="line-val">{}</span></div>
+</div>"#, d(se_net), d(se_taxable),
+            d(std::cmp::min(se_taxable, 17_610_000) * 1240 / 10000),
+            d(se_taxable * 290 / 10000), d(est.se_tax), d(est.half_se_tax)));
+    }
+
+    // ── SCHEDULE A (if itemizing) ──
+    if has_itemized {
+        html.push_str(r#"<div class="page-break"></div>"#);
+        html.push_str(&format!(r#"
+<div class="form-header">Schedule A — Itemized Deductions</div>
+<div class="section">
+<div class="line"><span class="line-num">4</span><span class="line-desc">State/local taxes (SALT, capped)</span><span class="line-val">{}</span></div>
+<div class="line"><span class="line-num">1</span><span class="line-desc">Medical (above 7.5% AGI)</span><span class="line-val">{}</span></div>
+<div class="line"><span class="line-num">17</span><span class="line-desc"><strong>Total itemized deductions</strong></span><span class="line-val"><strong>{}</strong></span></div>
+</div>"#, d(est.salt_capped), d(est.medical_deductible), d(est.itemized_deduction)));
+    }
+
+    // ── SCHEDULE 3 (credits) ──
+    if est.total_credits > est.child_credit + est.eitc {
+        html.push_str(&format!(r#"
+<div class="form-header">Schedule 3 — Additional Credits and Payments</div>
+<div class="section">
+<div class="line"><span class="line-num">2</span><span class="line-desc">Child and dependent care credit</span><span class="line-val">{}</span></div>
+<div class="line"><span class="line-num">3</span><span class="line-desc">Education credits</span><span class="line-val">{}</span></div>
+<div class="line"><span class="line-num">4</span><span class="line-desc">Retirement savings credit</span><span class="line-val">{}</span></div>
+<div class="line"><span class="line-num">5</span><span class="line-desc">Residential energy credit</span><span class="line-val">{}</span></div>
+</div>"#, d(est.cdcc), d(est.education_credits), d(est.savers_credit), d(est.energy_credits)));
+    }
+
+    // ── FILING CHECKLIST ──
+    html.push_str(r#"<div class="page-break"></div>"#);
+    html.push_str(&format!(r#"
+<h1>Filing Checklist — {year} Tax Return</h1>
+<div class="section">
+<h3>Before Mailing</h3>
+<ul class="checklist">
+<li>☐ Sign and date Form 1040</li>
+{spouse_sign}
+<li>☐ Attach W-2(s) to the front of Form 1040</li>
+<li>☐ Attach all schedules in order (1, 2, 3, A, B, C, D, SE)</li>
+<li>☐ Include payment check if you owe (payable to "United States Treasury")</li>
+<li>☐ Write SSN, tax year, and "Form 1040" on check memo line</li>
+<li>☐ Keep a copy of everything for your records</li>
+</ul>
+
+<h3>Mailing Address</h3>
+<div class="info-box">
+{mail_addr}
+</div>
+
+<h3>Deadlines</h3>
+<ul>
+<li><strong>April 15, {year_plus}</strong> — Filing deadline (or October 15 with extension)</li>
+<li>Singed. Singed via USPS Certified Mail recommended for proof of filing.</li>
+</ul>
+
+<h3>Summary</h3>
+<div class="info-box">
+<strong>Total Tax:</strong> {total_tax}<br>
+<strong>Total Payments/Credits:</strong> {total_pay}<br>
+<strong>{owed_label}:</strong> <strong>{owed}</strong><br>
+<strong>Effective Rate:</strong> {rate}
+</div>
+</div>
+</body></html>"#,
+        spouse_sign = if spouse_first.is_some() { "<li>☐ Spouse signs and dates Form 1040</li>" } else { "" },
+        mail_addr = irs_mailing_address(&st.as_deref().unwrap_or(""), est.owed >= 0),
+        year_plus = year + 1,
+        total_tax = d(est.total_tax), total_pay = d(est.total_payments),
+        owed_label = if est.owed >= 0 { "Amount Owed" } else { "Refund" },
+        owed = d(est.owed.abs()), rate = format!("{:.1}%", est.effective_rate),
+    ));
+
+    Ok(html)
+}
+
+/// IRS mailing address based on state of residence and whether payment is enclosed.
+fn irs_mailing_address(state: &str, has_payment: bool) -> &'static str {
+    // Simplified — IRS assigns different addresses by state group
+    match (state, has_payment) {
+        ("CT"|"DE"|"DC"|"GA"|"IL"|"IN"|"KY"|"ME"|"MD"|"MA"|"MI"|"NH"|"NJ"|"NY"|"NC"|"OH"|"PA"|"RI"|"SC"|"TN"|"VT"|"VA"|"WV"|"WI", true) =>
+            "Internal Revenue Service<br>P.O. Box 931000<br>Louisville, KY 40293-1000",
+        ("CT"|"DE"|"DC"|"GA"|"IL"|"IN"|"KY"|"ME"|"MD"|"MA"|"MI"|"NH"|"NJ"|"NY"|"NC"|"OH"|"PA"|"RI"|"SC"|"TN"|"VT"|"VA"|"WV"|"WI", false) =>
+            "Department of the Treasury<br>Internal Revenue Service<br>Kansas City, MO 64999-0002",
+        (_, true) =>
+            "Internal Revenue Service<br>P.O. Box 802501<br>Cincinnati, OH 45280-2501",
+        (_, false) =>
+            "Department of the Treasury<br>Internal Revenue Service<br>Austin, TX 73301-0002",
+    }
+}
+
+// ── Print Return API ────────────────────────────────────────────────────────
+
+pub async fn handle_print_return(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<axum::response::Html<String>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized".to_string()))?;
+    let uid = principal.user_id();
+    require_tax_module(&state, uid).await?;
+    let year: i64 = params.get("year").and_then(|s| s.parse().ok()).unwrap_or(2025);
+    let db = state.db_path.clone();
+
+    let html = tokio::task::spawn_blocking(move || -> Result<String, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        generate_print_return(&conn, uid, year)
+    }).await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(axum::response::Html(html))
+}

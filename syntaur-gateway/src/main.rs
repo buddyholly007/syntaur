@@ -5095,6 +5095,8 @@ async fn main() {
         .route("/api/tax/entities/{id}/1099", get(tax::handle_1099_list))
         .route("/api/tax/entities/{id}/1099", post(tax::handle_1099_issue))
         .route("/api/tax/entity-comparison", get(tax::handle_entity_comparison))
+        // Paper filing (printable return)
+        .route("/api/tax/print", get(tax::handle_print_return))
         // Module licensing
         .route("/api/modules/status", get(tax::handle_module_status))
         .route("/api/modules/trial", post(tax::handle_start_trial))
