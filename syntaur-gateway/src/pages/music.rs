@@ -317,6 +317,91 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   }
   .np-eyebrow::before { content: '> '; color: var(--c-mag); }
 
+  /* ── AI DJ chat thread ────────────────────────────────────────────
+     Conversation transcript above the prompt input. User turns are
+     small magenta-bordered bubbles (right-aligned), DJ turns are
+     wider cyan-accented blocks containing the actual track list. */
+  .dj-thread {
+    max-height: 420px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 6px 4px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--c-line) transparent;
+  }
+  .dj-thread::-webkit-scrollbar { width: 6px; }
+  .dj-thread::-webkit-scrollbar-track { background: transparent; }
+  .dj-thread::-webkit-scrollbar-thumb { background: var(--c-line); }
+  .dj-thread::-webkit-scrollbar-thumb:hover { background: var(--c-mag); }
+
+  .dj-turn-user {
+    align-self: flex-end;
+    max-width: 85%;
+    background: linear-gradient(135deg, rgba(255,44,223,0.18) 0%, rgba(255,44,223,0.05) 100%);
+    border: 1px solid rgba(255,44,223,0.45);
+    padding: 6px 10px;
+    clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
+  }
+  .dj-turn-dj {
+    align-self: stretch;
+    background: rgba(0,240,255,0.04);
+    border: 1px solid rgba(0,240,255,0.28);
+    padding: 8px 10px;
+    clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
+  }
+  .dj-turn-label {
+    font-family: 'Rajdhani', sans-serif;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.22em;
+    color: var(--c-mag);
+    display: inline-block;
+    margin-bottom: 2px;
+  }
+  .dj-turn-dj .dj-turn-label { color: var(--c-cy); }
+  .dj-turn-prompt { font-size: 12px; color: var(--c-text); line-height: 1.4; }
+  .dj-turn-summary { font-size: 11px; color: var(--c-text-mute); margin-top: 2px; }
+  .dj-turn-tracks { margin-top: 6px; max-height: 240px; overflow-y: auto; }
+  .dj-turn-tracks::-webkit-scrollbar { width: 4px; }
+  .dj-turn-tracks::-webkit-scrollbar-thumb { background: var(--c-line); }
+  .dj-refine-bar {
+    margin-top: 8px;
+    padding-top: 6px;
+    border-top: 1px solid rgba(0,240,255,0.15);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+  }
+  .dj-refine-bar > .dj-refine-label {
+    font-family: 'Rajdhani', sans-serif;
+    font-size: 9px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--c-text-mute);
+  }
+  .dj-refine-btn {
+    font-family: 'Rajdhani', sans-serif;
+    font-weight: 600;
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 3px 8px;
+    border: 1px solid var(--c-line);
+    background: var(--c-surface);
+    color: var(--c-text-mute);
+    clip-path: polygon(4px 0, 100% 0, 100% calc(100% - 4px), calc(100% - 4px) 100%, 0 100%, 0 4px);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .dj-refine-btn:hover { color: var(--c-cy); border-color: var(--c-cy); box-shadow: 0 0 6px var(--c-cy-soft); }
+  .dj-refine-btn.like   { color: var(--c-lime); border-color: rgba(194,255,0,0.35); }
+  .dj-refine-btn.like:hover   { box-shadow: 0 0 6px rgba(194,255,0,0.3); }
+  .dj-refine-btn.dislike { color: var(--c-red);  border-color: rgba(255,58,85,0.35); }
+  .dj-refine-btn.dislike:hover { box-shadow: 0 0 6px rgba(255,58,85,0.3); }
+
   /* ── Volume slider — neon track ──────────────────────────────────── */
   input[type="range"] { accent-color: var(--c-mag); }
 
@@ -562,17 +647,32 @@ const BODY_HTML: &str = r##"<!-- Top bar — matches the dashboard so the music 
       </div>
     </div>
 
-    <!-- AI DJ -->
+    <!-- AI DJ — chat-style transcript above input. Each turn = your prompt
+         (magenta bubble) + DJ's set (cyan-accented track list). Persists
+         across reloads via localStorage. -->
     <div class="card">
-      <h3 class="font-medium text-gray-200 text-sm">AI DJ</h3>
-      <p class="text-xs text-gray-500 mt-0.5 mb-3">Tell me the vibe.</p>
-      <div class="flex gap-2">
+      <div class="flex items-center justify-between">
+        <div>
+          <h3 class="font-medium text-gray-200 text-sm">AI DJ</h3>
+          <p class="text-xs text-gray-500 mt-0.5">Tell me the vibe.</p>
+        </div>
+        <button id="dj-clear-thread" onclick="clearDjThread()" class="hidden text-[10px] text-gray-500 hover:text-red-400 font-mono uppercase tracking-wider">Clear thread</button>
+      </div>
+
+      <!-- Conversation transcript -->
+      <div id="dj-thread" class="dj-thread mt-3">
+        <p class="text-xs text-gray-600 italic px-1 py-2">// no sessions yet — drop a vibe below</p>
+      </div>
+
+      <!-- Compose row -->
+      <div class="flex gap-2 mt-2">
         <input type="text" id="dj-prompt" placeholder="upbeat 80s synthwave, jazz for studying…" class="flex-1 min-w-0 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-oc-500" onkeydown="if(event.key==='Enter')runDj()">
         <button onmousedown="startDjStt(event)" onmouseup="stopDjStt(event)" ontouchstart="startDjStt(event)" ontouchend="stopDjStt(event)" id="dj-mic-btn" class="bg-gray-800 hover:bg-gray-700 text-gray-300 px-3 rounded-lg text-sm flex items-center flex-shrink-0" title="Hold to dictate">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
         </button>
         <button onclick="runDj()" id="dj-run-btn" class="bg-oc-600 hover:bg-oc-700 text-white px-4 rounded-lg text-sm font-medium flex-shrink-0">Build</button>
       </div>
+
       <div class="mt-3 flex items-center gap-4">
         <label class="cyber-check-label">
           <input type="checkbox" id="dj-create-playlist" class="cyber-check"> Save as playlist
@@ -586,15 +686,10 @@ const BODY_HTML: &str = r##"<!-- Top bar — matches the dashboard so the music 
           </select>
         </label>
       </div>
-      <div id="dj-results" class="mt-4 hidden"></div>
-      <div id="dj-feedback" class="hidden mt-3 flex flex-wrap items-center gap-2 pt-3 border-t border-gray-700/50">
-        <span class="text-xs text-gray-500">Refine:</span>
-        <button onclick="refineDj('more like the liked tracks')" class="text-xs bg-green-900/30 hover:bg-green-900/50 text-green-300 px-2 py-1 rounded">More liked</button>
-        <button onclick="refineDj('drop anything resembling the disliked tracks')" class="text-xs bg-red-900/30 hover:bg-red-900/50 text-red-300 px-2 py-1 rounded">Drop disliked</button>
-        <button onclick="refineDj('slower, more chill')" class="text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 px-2 py-1 rounded">Chill</button>
-        <button onclick="refineDj('faster, more energy')" class="text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 px-2 py-1 rounded">Energy</button>
-        <button onclick="refineDj('different genre entirely')" class="text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 px-2 py-1 rounded">Different genre</button>
-      </div>
+
+      <!-- Legacy stub kept hidden so any unmodified handlers still find it. -->
+      <div id="dj-results" class="hidden"></div>
+      <div id="dj-feedback" class="hidden"></div>
     </div>
 
     <!-- Speakers -->
@@ -1064,16 +1159,141 @@ async function checkMusicProvider() {
   } catch(e) { /* ignore */ }
 }
 
-async function runDj(overridePrompt) {
+// ── DJ chat thread ──────────────────────────────────────────────────
+// Persistent transcript stored in localStorage. Each turn:
+//   { role: 'user', text, ts }
+//   { role: 'dj',   prompt, tracks, playlist_id?, error?, ts, likes:[], dislikes:[] }
+// Most-recent DJ turn is the "active" one — its tracks drive djLastTracks
+// (so the queue auto-populate logic still works) and its likes/dislikes
+// feed the refinement.
+let djThread = [];
+const DJ_THREAD_KEY = 'dj_thread_v1';
+const DJ_THREAD_CAP = 30;
+
+function loadDjThread() {
+  try {
+    djThread = JSON.parse(localStorage.getItem(DJ_THREAD_KEY) || '[]');
+    if (!Array.isArray(djThread)) djThread = [];
+  } catch (e) { djThread = []; }
+  // Restore djLastPrompt + djLastTracks from the latest DJ turn so
+  // refineDj has something to chain off of after a page reload.
+  const lastDj = [...djThread].reverse().find(t => t.role === 'dj' && Array.isArray(t.tracks));
+  if (lastDj) {
+    djLastPrompt = lastDj.prompt || '';
+    djLastTracks = lastDj.tracks || [];
+    (lastDj.likes || []).forEach(id => djLikes.add(id));
+    (lastDj.dislikes || []).forEach(id => djDislikes.add(id));
+  }
+}
+function saveDjThread() {
+  // Cap to last N turns so localStorage doesn't grow unbounded.
+  if (djThread.length > DJ_THREAD_CAP) {
+    djThread = djThread.slice(-DJ_THREAD_CAP);
+  }
+  // Mirror the in-memory like/dislike sets onto the active DJ turn so
+  // they survive reload.
+  const activeIdx = findActiveDjTurnIdx();
+  if (activeIdx !== -1) {
+    djThread[activeIdx].likes = [...djLikes];
+    djThread[activeIdx].dislikes = [...djDislikes];
+  }
+  try { localStorage.setItem(DJ_THREAD_KEY, JSON.stringify(djThread)); } catch (e) {}
+}
+function findActiveDjTurnIdx() {
+  for (let i = djThread.length - 1; i >= 0; i--) {
+    if (djThread[i].role === 'dj' && Array.isArray(djThread[i].tracks)) return i;
+  }
+  return -1;
+}
+function clearDjThread() {
+  if (djThread.length > 0 && !confirm('Clear the entire DJ thread?')) return;
+  djThread = [];
+  djLastPrompt = '';
+  djLastTracks = [];
+  djLikes.clear();
+  djDislikes.clear();
+  saveDjThread();
+  renderDjThread();
+}
+
+function renderDjThread() {
+  const container = document.getElementById('dj-thread');
+  const clearBtn  = document.getElementById('dj-clear-thread');
+  if (!container) return;
+  if (djThread.length === 0) {
+    container.innerHTML = '<p class="text-xs text-gray-600 italic px-1 py-2">// no sessions yet — drop a vibe below</p>';
+    if (clearBtn) clearBtn.classList.add('hidden');
+    return;
+  }
+  if (clearBtn) clearBtn.classList.remove('hidden');
+  const activeIdx = findActiveDjTurnIdx();
+  container.innerHTML = djThread.map((turn, i) => renderDjTurn(turn, i, i === activeIdx)).join('');
+  // Scroll to the bottom so the most recent turn is visible.
+  requestAnimationFrame(() => { container.scrollTop = container.scrollHeight; });
+}
+
+function renderDjTurn(turn, idx, isActive) {
+  if (turn.role === 'user') {
+    return '<div class="dj-turn-user">' +
+      '<span class="dj-turn-label">You</span>' +
+      '<div class="dj-turn-prompt">' + escapeHtml(turn.text || '') + '</div>' +
+    '</div>';
+  }
+  if (turn.role === 'dj') {
+    if (turn.error) {
+      return '<div class="dj-turn-dj">' +
+        '<span class="dj-turn-label">DJ</span>' +
+        '<div class="dj-turn-prompt"><span style="color:var(--c-red)">' + escapeHtml(turn.error) + '</span></div>' +
+      '</div>';
+    }
+    const tracks = turn.tracks || [];
+    const tracksHtml = tracks.length === 0
+      ? '<p class="text-xs text-gray-500 italic">No matches in catalog.</p>'
+      : tracks.map(t => renderDjTrack(t)).join('');
+    const summary = (turn.playlist_id ? '<span style="color:var(--c-lime)">▸ Saved as playlist</span> · ' : '') +
+                    tracks.length + ' tracks';
+    const refineBar = isActive && tracks.length > 0 ? djRefineBarHtml() : '';
+    return '<div class="dj-turn-dj">' +
+      '<span class="dj-turn-label">DJ</span>' +
+      '<div class="dj-turn-summary">' + summary + '</div>' +
+      '<div class="dj-turn-tracks">' + tracksHtml + '</div>' +
+      refineBar +
+    '</div>';
+  }
+  return '';
+}
+
+function djRefineBarHtml() {
+  return '<div class="dj-refine-bar">' +
+    '<span class="dj-refine-label">Refine</span>' +
+    '<button class="dj-refine-btn like" onclick="refineDj(\'more like the liked tracks\')">More liked</button>' +
+    '<button class="dj-refine-btn dislike" onclick="refineDj(\'drop anything resembling the disliked tracks\')">Drop disliked</button>' +
+    '<button class="dj-refine-btn" onclick="refineDj(\'slower, more chill\')">Chill</button>' +
+    '<button class="dj-refine-btn" onclick="refineDj(\'faster, more energy\')">Energy</button>' +
+    '<button class="dj-refine-btn" onclick="refineDj(\'different genre entirely\')">Different genre</button>' +
+  '</div>';
+}
+
+async function runDj(overridePrompt, displayText) {
   const promptEl = document.getElementById('dj-prompt');
   const prompt = overridePrompt || promptEl.value.trim();
   if (!prompt) return;
   djLastPrompt = prompt;
+  // New turn for this prompt — clear previous likes/dislikes so the next
+  // refinement starts fresh against THIS set's reactions.
+  djLikes.clear();
+  djDislikes.clear();
+  djThread.push({ role: 'user', text: displayText || prompt, ts: Date.now() });
+  // Placeholder DJ turn ("picking tracks…") so the user sees activity
+  // immediately and the spinner lives inline with the conversation.
+  djThread.push({ role: 'dj', prompt, tracks: null, pending: true, ts: Date.now() });
+  saveDjThread();
+  renderDjPending();
+  promptEl.value = '';
+
   const btn = document.getElementById('dj-run-btn');
   btn.textContent = 'Working…'; btn.disabled = true;
-  const results = document.getElementById('dj-results');
-  results.classList.remove('hidden');
-  results.innerHTML = '<p class="text-xs text-gray-500 italic">Picking tracks…</p>';
+  let result = null;
   try {
     const resp = await authFetch('/api/music/dj', {
       method: 'POST',
@@ -1085,28 +1305,50 @@ async function runDj(overridePrompt) {
         create_playlist: document.getElementById('dj-create-playlist').checked,
       }),
     });
-    const data = await resp.json();
-    if (data.error) {
-      results.innerHTML = `<p class="text-xs text-red-400">${escapeHtml(data.error)}</p><p class="text-xs text-gray-500 mt-1">${escapeHtml(data.hint || '')}</p>`;
-      return;
-    }
-    const tracks = data.tracks || [];
-    djLastTracks = tracks;
-    if (tracks.length === 0) {
-      results.innerHTML = '<p class="text-xs text-gray-500">No matches found in the Apple Music catalog for those ideas.</p>';
-      return;
-    }
-    const playlistLine = data.playlist_id ? `<p class="text-xs text-green-400 mb-3">✓ Saved as Apple Music playlist</p>` : '';
-    results.innerHTML = playlistLine + '<p class="text-xs text-gray-400 mb-2">Found ' + tracks.length + ' tracks:</p>' + tracks.map(t => renderDjTrack(t)).join('');
-    document.getElementById('dj-feedback').classList.remove('hidden');
-    // Auto-populate queue
-    queueTracks.length = 0;
-    tracks.forEach(t => queueTracks.push(t));
-    renderQueue();
-  } catch(e) {
-    if (e.message !== 'unauthorized') results.innerHTML = `<p class="text-xs text-red-400">DJ failed: ${escapeHtml(e.message)}</p>`;
+    result = await resp.json();
+  } catch (e) {
+    if (e.message === 'unauthorized') return;
+    result = { error: 'DJ failed: ' + e.message };
   }
   btn.textContent = 'Build'; btn.disabled = false;
+
+  // Replace the pending placeholder with the final turn.
+  const pendingIdx = djThread.findIndex(t => t.pending);
+  const finalTurn = {
+    role: 'dj',
+    prompt,
+    ts: Date.now(),
+    tracks: Array.isArray(result && result.tracks) ? result.tracks : [],
+    playlist_id: result && result.playlist_id || null,
+    likes: [], dislikes: [],
+  };
+  if (result && result.error) finalTurn.error = result.error + (result.hint ? (' — ' + result.hint) : '');
+  if (pendingIdx !== -1) djThread[pendingIdx] = finalTurn; else djThread.push(finalTurn);
+  djLastTracks = finalTurn.tracks;
+  saveDjThread();
+  renderDjThread();
+
+  // Auto-populate queue with the freshest set so play-next still works.
+  if (finalTurn.tracks.length > 0) {
+    queueTracks.length = 0;
+    finalTurn.tracks.forEach(t => queueTracks.push(t));
+    renderQueue();
+  }
+}
+
+function renderDjPending() {
+  // Re-render with the placeholder visible. The pending DJ turn has
+  // tracks: null which we display as "// picking tracks…".
+  const container = document.getElementById('dj-thread');
+  if (!container) return;
+  container.innerHTML = djThread.map((t, i) => {
+    if (t.pending) {
+      return '<div class="dj-turn-dj"><span class="dj-turn-label">DJ</span>' +
+        '<div class="dj-turn-prompt"><span class="text-gray-500 italic">// picking tracks…</span></div></div>';
+    }
+    return renderDjTurn(t, i, false);
+  }).join('');
+  requestAnimationFrame(() => { container.scrollTop = container.scrollHeight; });
 }
 
 function renderDjTrack(t) {
@@ -1138,28 +1380,26 @@ function renderDjTrack(t) {
 
 function toggleLike(id) {
   if (djLikes.has(id)) djLikes.delete(id); else { djLikes.add(id); djDislikes.delete(id); }
-  renderDjResultsInPlace();
+  saveDjThread();
+  renderDjThread();
 }
 function toggleDislike(id) {
   if (djDislikes.has(id)) djDislikes.delete(id); else { djDislikes.add(id); djLikes.delete(id); }
-  renderDjResultsInPlace();
-}
-function renderDjResultsInPlace() {
-  const results = document.getElementById('dj-results');
-  if (!results || djLastTracks.length === 0) return;
-  const header = `<p class="text-xs text-gray-400 mb-2">Found ${djLastTracks.length} tracks (${djLikes.size} 👍, ${djDislikes.size} 👎):</p>`;
-  results.innerHTML = header + djLastTracks.map(t => renderDjTrack(t)).join('');
+  saveDjThread();
+  renderDjThread();
 }
 
 async function refineDj(instruction) {
   if (djLastTracks.length === 0) return;
-  const likedNames = djLastTracks.filter(t => djLikes.has(t.id)).map(t => `${t.name} — ${t.artist}`).join('; ');
-  const dislikedNames = djLastTracks.filter(t => djDislikes.has(t.id)).map(t => `${t.name} — ${t.artist}`).join('; ');
+  // Build the under-the-hood prompt that includes liked/disliked tracks
+  // — same as before — but show the user a friendlier label in the
+  // chat transcript so the bubble doesn't read like a system prompt.
+  const likedNames = djLastTracks.filter(t => djLikes.has(t.id)).map(t => t.name + ' — ' + t.artist).join('; ');
+  const dislikedNames = djLastTracks.filter(t => djDislikes.has(t.id)).map(t => t.name + ' — ' + t.artist).join('; ');
   let refinedPrompt = djLastPrompt + '. ' + instruction;
-  if (likedNames) refinedPrompt += `. The user LIKED: ${likedNames}`;
-  if (dislikedNames) refinedPrompt += `. The user DISLIKED: ${dislikedNames}`;
-  djLikes.clear(); djDislikes.clear();
-  await runDj(refinedPrompt);
+  if (likedNames) refinedPrompt += '. The user LIKED: ' + likedNames;
+  if (dislikedNames) refinedPrompt += '. The user DISLIKED: ' + dislikedNames;
+  await runDj(refinedPrompt, instruction);
 }
 
 function renderQueue() {
@@ -1196,6 +1436,8 @@ function refreshAll() {
   checkMusicProvider();
 }
 
+loadDjThread();
+renderDjThread();
 refreshAll();
 setInterval(loadNowPlaying, 5000);
 
