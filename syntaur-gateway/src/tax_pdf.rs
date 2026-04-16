@@ -476,6 +476,89 @@ pub fn fill_form_4868_with_cover(
     Ok(buf)
 }
 
+// ── #10 envelope generator ─────────────────────────────────────────────
+//
+// US #10 commercial envelope: 9.5" wide × 4.125" tall = 684 × 297 pt.
+// USPS Domestic Mail Manual addressing zones (DMM 202.4):
+//   * Return address: top-left corner, ≥ 1/2" from top + left edges
+//   * Recipient address ("OCR read area"): roughly center-right, with at
+//     least 5/8" clear on all sides; bottom of the lowest line ≥ 5/8"
+//     above the bottom edge to keep the postage area + barcode zone clear.
+//
+// Positions in the layout below land the address blocks in the standard
+// USPS-readable zones for a #10 envelope fed long-edge-first.
+
+/// Generate a single-page PDF sized for a #10 envelope (9.5" × 4.125",
+/// landscape) with the return address top-left and the IRS recipient
+/// address center-right. Both are positioned per USPS DMM 202.4.
+pub fn build_envelope_10(
+    return_name: &str,
+    return_address: &str,
+    return_csz: &str,
+    recipient: &IrsAddress,
+) -> Result<Vec<u8>, String> {
+    use lopdf::{dictionary, Document, Object, Stream};
+    let mut doc = Document::with_version("1.5");
+
+    // ── Compose the content stream ──
+    let mut s = String::new();
+    s.push_str("BT\n");
+    // Return address — top-left, 0.5" from top, 0.5" from left.
+    // y from bottom = 297 - 36 - 12 = 249 for first line.
+    s.push_str("/F1 11 Tf\n");
+    s.push_str(&format!("1 0 0 1 36 249 Tm\n({}) Tj\n", pdf_escape(return_name)));
+    s.push_str(&format!("1 0 0 1 36 235 Tm\n({}) Tj\n", pdf_escape(return_address)));
+    s.push_str(&format!("1 0 0 1 36 221 Tm\n({}) Tj\n", pdf_escape(return_csz)));
+
+    // Recipient — center, slightly right of envelope center, three lines.
+    // x = 252pt (3.5" from left), y starts at 144pt (2" from bottom)
+    // and reads downward. Font 12pt for crisp OCR.
+    s.push_str("/F2 12 Tf\n");
+    s.push_str(&format!("1 0 0 1 252 144 Tm\n({}) Tj\n", pdf_escape(recipient.line1)));
+    s.push_str(&format!("1 0 0 1 252 128 Tm\n({}) Tj\n", pdf_escape(recipient.line2)));
+    s.push_str(&format!("1 0 0 1 252 112 Tm\n({}) Tj\n", pdf_escape(recipient.line3)));
+    s.push_str("ET\n");
+
+    // ── Build PDF objects ──
+    let f_regular = doc.add_object(dictionary! {
+        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+    });
+    let f_bold = doc.add_object(dictionary! {
+        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica-Bold",
+    });
+    let resources = doc.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => f_regular, "F2" => f_bold },
+    });
+    let content_id = doc.add_object(Stream::new(dictionary! {}, s.into_bytes()));
+
+    // /Pages root + single page child. Order matters because /Pages must
+    // exist before the page can reference it as /Parent.
+    let pages_id = doc.new_object_id();
+    let page = dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        // 9.5" × 4.125" landscape envelope at 72 DPI = 684 × 297 pt.
+        "MediaBox" => vec![0.into(), 0.into(), 684.into(), 297.into()],
+        "Resources" => resources,
+        "Contents" => content_id,
+    };
+    let page_id = doc.add_object(page);
+    let pages = dictionary! {
+        "Type" => "Pages",
+        "Kids" => vec![Object::Reference(page_id)],
+        "Count" => 1,
+    };
+    doc.objects.insert(pages_id, Object::Dictionary(pages));
+
+    let catalog = dictionary! { "Type" => "Catalog", "Pages" => pages_id };
+    let catalog_id = doc.add_object(catalog);
+    doc.trailer.set("Root", catalog_id);
+
+    let mut buf = Vec::with_capacity(8192);
+    doc.save_to(&mut buf).map_err(|e| format!("save: {e}"))?;
+    Ok(buf)
+}
+
 /// Apply the form-field values + checkboxes to a loaded Form 4868 PDF.
 /// Shared between `fill_form_4868` and `fill_form_4868_with_cover`.
 fn apply_form_fields(doc: &mut Document, data: &Form4868Data) -> Result<(), String> {

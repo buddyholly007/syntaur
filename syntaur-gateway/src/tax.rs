@@ -2898,6 +2898,105 @@ pub async fn handle_extension(
     Ok((headers, pdf_bytes))
 }
 
+/// Generate a #10 envelope PDF (9.5" × 4.125") with the user's return
+/// address top-left and the correct IRS service-center address center-right,
+/// positioned per USPS DMM 202.4 so it prints directly on a #10 envelope.
+///
+/// Optional query params:
+/// - `payment=N` (cents) — drives which IRS PO Box appears as recipient
+/// - `name`, `address`, `city`, `state`, `zip` — override values from the
+///   profile/scans (same semantics as the main extension endpoint)
+pub async fn handle_extension_envelope(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<(axum::http::HeaderMap, Vec<u8>), (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    let year: i64 = params.get("year").and_then(|y| y.parse().ok()).unwrap_or_else(default_tax_year);
+    let payment_override: Option<i64> = params.get("payment").and_then(|p| p.parse().ok());
+
+    let q = |k: &str| params.get(k).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let name_q = q("name");
+    let addr_q = q("address");
+    let city_q = q("city");
+    let state_q = q("state");
+    let zip_q = q("zip");
+
+    let db = state.db_path.clone();
+    let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let filing_status: String = conn.query_row(
+            "SELECT filing_status FROM taxpayer_profiles WHERE user_id = ? AND tax_year = ?",
+            rusqlite::params![uid, year], |r| r.get(0),
+        ).unwrap_or_else(|_| "single".to_string());
+
+        // Same identification merge as handle_extension, abbreviated for
+        // the four fields we actually print on an envelope.
+        type Row = (Option<String>, Option<String>, Option<String>, Option<String>,
+                    Option<String>, Option<String>, Option<String>, Option<String>, Option<String>);
+        let row: Row = conn.query_row(
+            "SELECT first_name, last_name, address_line1, address_line2, city, state, zip, \
+                    spouse_first, spouse_last \
+             FROM taxpayer_profiles WHERE user_id = ? AND tax_year = ?",
+            rusqlite::params![uid, year],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?,
+                    r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?))
+        ).unwrap_or_else(|_| (None, None, None, None, None, None, None, None, None));
+        let (first, last, a1, a2, city, st, zip, sp_f, sp_l) = row;
+
+        let scan = pull_scan_identity(&conn, uid, year);
+        let user_disp: String = conn.query_row(
+            "SELECT COALESCE(display_name, username, '') FROM users WHERE id = ?",
+            rusqlite::params![uid], |r| r.get(0),
+        ).unwrap_or_default();
+
+        let primary = match (first.as_deref(), last.as_deref()) {
+            (Some(f), Some(l)) if !f.is_empty() || !l.is_empty() => format!("{} {}", f, l).trim().to_string(),
+            _ => scan.primary_name.clone().unwrap_or(user_disp),
+        };
+        let mut name_line = primary;
+        if filing_status == "married_jointly" {
+            let spouse = match (sp_f.as_deref(), sp_l.as_deref()) {
+                (Some(f), Some(l)) if !f.is_empty() || !l.is_empty() => format!("{} {}", f, l).trim().to_string(),
+                _ => scan.spouse_name.clone().unwrap_or_default(),
+            };
+            if !spouse.is_empty() { name_line = format!("{} & {}", name_line, spouse); }
+        }
+        let addr_combined = match (a1.as_deref(), a2.as_deref()) {
+            (Some(a), Some(b)) if !b.is_empty() => format!("{}, {}", a, b),
+            (Some(a), _) => a.to_string(), _ => String::new(),
+        };
+        let final_name = name_q.unwrap_or(name_line);
+        let final_addr = addr_q.unwrap_or_else(|| if !addr_combined.is_empty() { addr_combined } else { scan.address.clone().unwrap_or_default() });
+        let final_city = city_q.or(city).or(scan.city.clone()).unwrap_or_default();
+        let final_state = state_q.or(st).or(scan.state.clone()).unwrap_or_default();
+        let final_zip = zip_q.or(zip).or(scan.zip.clone()).unwrap_or_default();
+        let csz = format!("{}, {} {}", final_city.trim(), final_state.trim(), final_zip.trim());
+        let csz = csz.trim_matches(|c: char| c == ',' || c.is_whitespace()).to_string();
+
+        // Decide payment vs no-payment to pick the right IRS address.
+        let est = compute_tax_estimate(&conn, uid, year, &filing_status)?;
+        let balance_due = std::cmp::max(est.total_tax - est.total_payments, 0);
+        let amount_paying = payment_override.unwrap_or(balance_due);
+        let with_payment = amount_paying > 0;
+        let irs = crate::tax_pdf::irs_mailing_address(&final_state, with_payment);
+
+        crate::tax_pdf::build_envelope_10(&final_name, &final_addr, &csz, &irs)
+    }).await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("content-type", "application/pdf".parse().unwrap());
+    headers.insert(
+        "content-disposition",
+        format!("attachment; filename=\"form-4868-{}-envelope.pdf\"", year).parse().unwrap(),
+    );
+    Ok((headers, bytes))
+}
+
 /// Re-run the vision extractor on a previously-scanned tax document.
 ///
 /// Useful when the extraction prompt has been extended (e.g., to capture

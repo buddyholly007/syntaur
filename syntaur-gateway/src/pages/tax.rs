@@ -114,6 +114,31 @@ const BODY_HTML: &str = r##"<!-- Module paywall overlay (hidden by default, show
           <button onclick="toggleProfileEdit()" class="text-xs text-oc-500 hover:text-oc-400" id="profile-edit-btn">Edit</button>
         </div>
       </div>
+      <!-- Masked SSN banner — shown when stored SSN starts with X (i.e. user
+           saved a redacted W-2 last-4 instead of their real digits). -->
+      <div id="ssn-banner" class="hidden mb-3 p-3 rounded-lg border border-yellow-600/40 bg-yellow-500/10">
+        <div class="flex items-start gap-3">
+          <div class="text-yellow-300 text-lg leading-none mt-0.5">!</div>
+          <div class="flex-1">
+            <p class="text-xs font-medium text-yellow-200" id="ssn-banner-title">Your SSN is masked</p>
+            <p class="text-xs text-gray-300 mt-1" id="ssn-banner-detail">The IRS needs your full 9-digit SSN to file Form 4868.</p>
+            <div class="mt-2 grid grid-cols-1 md:grid-cols-2 gap-2">
+              <div id="ssn-banner-self-row" class="hidden">
+                <label class="text-xs text-gray-400">Your SSN</label>
+                <input id="ssn-banner-self" class="input text-sm" placeholder='###-##-####' autocomplete="off">
+              </div>
+              <div id="ssn-banner-spouse-row" class="hidden">
+                <label class="text-xs text-gray-400">Spouse SSN</label>
+                <input id="ssn-banner-spouse" class="input text-sm" placeholder='###-##-####' autocomplete="off">
+              </div>
+            </div>
+            <div class="mt-2 flex items-center gap-2">
+              <button onclick="saveSsnBanner()" class="btn-primary text-xs">Save SSN</button>
+              <span id="ssn-banner-result" class="text-xs"></span>
+            </div>
+          </div>
+        </div>
+      </div>
       <!-- View mode -->
       <div id="profile-view">
         <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm" id="profile-summary">
@@ -323,8 +348,9 @@ const BODY_HTML: &str = r##"<!-- Module paywall overlay (hidden by default, show
         <div class="bg-gray-900 rounded-lg p-3 mb-3 space-y-2" id="ext-copy-fields">
           <!-- Populated by JS: steps + identity + spouse + payment -->
         </div>
-        <div id="ext-form-link" class="mb-3 flex items-center gap-3">
+        <div id="ext-form-link" class="mb-3 flex items-center gap-3 flex-wrap">
           <a id="ext-form-anchor" href="#" onclick="openForm4868(); return false;" class="bg-oc-600 hover:bg-oc-700 text-white font-medium py-2 px-4 rounded-lg transition-colors text-sm inline-block no-underline cursor-pointer">Generate Form 4868 &rarr;</a>
+          <a href="#" onclick="openEnvelope(); return false;" class="bg-gray-700 hover:bg-gray-600 text-white font-medium py-2 px-4 rounded-lg transition-colors text-sm inline-block no-underline cursor-pointer" title="9.5 x 4.125 inch PDF positioned for direct envelope printing">Print #10 envelope</a>
           <span class="text-xs text-gray-500">Pre-filled from your documents. Print or save as PDF.</span>
         </div>
         <div class="bg-gray-800 rounded-lg p-3 border border-gray-700">
@@ -2498,7 +2524,60 @@ async function loadProfile() {
   } catch(e) {}
 }
 
+// True when the stored SSN is missing or contains masking characters
+// (anything other than 9 digits with optional dashes).
+function _ssnIsMasked(s) {
+  if (!s) return true;
+  const digits = (s.match(/\d/g) || []).join('');
+  return /[xX]/.test(s) || digits.length !== 9;
+}
+
+function renderSsnBanner(profile) {
+  const banner = document.getElementById('ssn-banner');
+  if (!profile) { banner.classList.add('hidden'); return; }
+  const selfMasked = _ssnIsMasked(profile.ssn);
+  const isJoint = profile.filing_status === 'married_jointly';
+  const spouseMasked = isJoint && _ssnIsMasked(profile.spouse_ssn);
+  if (!selfMasked && !spouseMasked) { banner.classList.add('hidden'); return; }
+  // Build a clear title that names exactly what's missing.
+  let parts = [];
+  if (selfMasked) parts.push('your SSN');
+  if (spouseMasked) parts.push("spouse's SSN");
+  document.getElementById('ssn-banner-title').textContent =
+    'Form 4868 needs ' + parts.join(' and ') + ' — your saved value is masked.';
+  document.getElementById('ssn-banner-detail').textContent =
+    'Most W-2s now show only the last 4 digits, so we can\'t pull this from a scan. Type the full 9 digits once and we\'ll keep them with the rest of your profile.';
+  document.getElementById('ssn-banner-self-row').classList.toggle('hidden', !selfMasked);
+  document.getElementById('ssn-banner-spouse-row').classList.toggle('hidden', !spouseMasked);
+  document.getElementById('ssn-banner-result').textContent = '';
+  banner.classList.remove('hidden');
+}
+
+async function saveSsnBanner() {
+  const result = document.getElementById('ssn-banner-result');
+  const yr = selectedYear || yearStart().slice(0,4);
+  const ssn = (document.getElementById('ssn-banner-self').value || '').trim();
+  const sp = (document.getElementById('ssn-banner-spouse').value || '').trim();
+  // Validate: 9 digits expected (dashes optional).
+  const checkDigits = s => (s.match(/\d/g) || []).length;
+  if (ssn && checkDigits(ssn) !== 9) { result.textContent = 'SSN needs 9 digits.'; result.className='text-xs text-red-400'; return; }
+  if (sp && checkDigits(sp) !== 9) { result.textContent = "Spouse's SSN needs 9 digits."; result.className='text-xs text-red-400'; return; }
+  if (!ssn && !sp) { result.textContent = 'Type at least one SSN.'; result.className='text-xs text-yellow-400'; return; }
+  result.textContent = 'Saving...'; result.className='text-xs text-gray-400';
+  try {
+    const body = { token, year: parseInt(yr) };
+    if (ssn) body.ssn = ssn;
+    if (sp) body.spouse_ssn = sp;
+    await authFetch('/api/tax/profile', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+    result.textContent = 'Saved.'; result.className='text-xs text-green-400';
+    document.getElementById('ssn-banner-self').value = '';
+    document.getElementById('ssn-banner-spouse').value = '';
+    setTimeout(() => loadProfile(), 400); // re-render with the new full value
+  } catch(e) { result.textContent = 'Error: '+e.message; result.className='text-xs text-red-400'; }
+}
+
 function renderProfileView(profile, deps, income) {
+  renderSsnBanner(profile);
   const summary = document.getElementById('profile-summary');
   if (!profile) {
     summary.innerHTML = `<div class="col-span-4 text-center py-3">
@@ -2928,6 +3007,17 @@ function addCopyRow(parent, label, value) {
     row.querySelector('div').appendChild(btn);
   }
   parent.appendChild(row);
+}
+
+function openEnvelope() {
+  const yr = selectedYear || yearStart().slice(0,4);
+  const payment = parseCents(document.getElementById('ext-payment').value);
+  const params = new URLSearchParams({ token, year: yr, payment });
+  const opt = id => (document.getElementById(id) || {}).value || '';
+  [['name','ext-opt-name'],['address','ext-opt-address'],['city','ext-opt-city'],
+   ['state','ext-opt-state'],['zip','ext-opt-zip']
+  ].forEach(([k, id]) => { const v = opt(id).trim(); if (v) params.set(k, v); });
+  window.location.href = '/api/tax/extension/envelope?' + params.toString();
 }
 
 function openForm4868() {
