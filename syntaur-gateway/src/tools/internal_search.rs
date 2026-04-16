@@ -92,11 +92,14 @@ impl Tool for InternalSearchTool {
         // - Main agent: searches all by default, or a specific agent if requested
         // - Other agents: always scoped to own agent_id + "shared"
         let agent_ids = if ctx.agent_id == MAIN_AGENT_ID {
-            // Main agent can optionally restrict to a specific agent
+            // Main agent can optionally restrict to a specific agent.
+            // Journal documents are always excluded from main-agent searches
+            // (privacy boundary — consistent with conversation isolation).
             args.get("agent")
                 .and_then(|v| v.as_str())
                 .map(|a| vec![a.to_string(), "shared".to_string()])
-            // None = search everything
+            // None = search everything except journal
+            // (the search::query function handles journal exclusion when agent_ids is None)
         } else {
             // Non-main agents: own knowledge + shared
             Some(vec![ctx.agent_id.to_string(), "shared".to_string()])

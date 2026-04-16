@@ -41,6 +41,9 @@ pub fn query(
         for id in ids {
             bind_values.push(Box::new(id.clone()));
         }
+    } else {
+        // No agent filter (main agent) — exclude journal documents for privacy
+        conditions.push("d.agent_id != 'journal'".to_string());
     }
     bind_values.push(Box::new(top_k as i64));
 
