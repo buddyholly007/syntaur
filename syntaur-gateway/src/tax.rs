@@ -7052,3 +7052,370 @@ pub async fn handle_supported_states(
         "CA","NY","PA","IL","OH","GA","NC","MI","NJ","VA","MA","CO","AZ"
     ]}))
 }
+
+// ── Business Entity Engine ──────────────────────────────────────────────────
+
+/// Compute P&L for a business entity.
+fn compute_entity_pnl(conn: &rusqlite::Connection, entity_id: i64, year: i64) -> serde_json::Value {
+    let income: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(amount_cents),0) FROM entity_income WHERE entity_id=? AND tax_year=?",
+        rusqlite::params![entity_id, year], |r| r.get(0),
+    ).unwrap_or(0);
+    let expenses: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(amount_cents),0) FROM entity_expenses WHERE entity_id=? AND tax_year=?",
+        rusqlite::params![entity_id, year], |r| r.get(0),
+    ).unwrap_or(0);
+    let net = income - expenses;
+
+    // Get entity type for tax calculation
+    let entity_type: String = conn.query_row(
+        "SELECT entity_type FROM business_entities WHERE id=?",
+        rusqlite::params![entity_id], |r| r.get(0),
+    ).unwrap_or_else(|_| "sole_prop".to_string());
+
+    // S-Corp/Partnership: pass-through to shareholders
+    // C-Corp: entity-level tax at 21% flat
+    let entity_tax = if entity_type == "c_corp" {
+        std::cmp::max(net, 0) * 2100 / 10000 // 21% flat
+    } else { 0 };
+
+    // Shareholder distributions
+    let mut sh_stmt = conn.prepare(
+        "SELECT name, ownership_pct, salary_cents, distribution_cents \
+         FROM entity_shareholders WHERE entity_id=? AND tax_year=? ORDER BY ownership_pct DESC"
+    ).ok();
+    let shareholders: Vec<serde_json::Value> = sh_stmt.as_mut().map(|s| {
+        s.query_map(rusqlite::params![entity_id, year], |r| {
+            let pct: i64 = r.get(1)?;
+            let k1_share = net * pct / 100;
+            Ok(serde_json::json!({
+                "name": r.get::<_,String>(0)?, "ownership_pct": pct,
+                "salary": cents_to_display(r.get::<_,i64>(2)?),
+                "distributions": cents_to_display(r.get::<_,i64>(3)?),
+                "k1_ordinary": cents_to_display(k1_share),
+                "k1_ordinary_cents": k1_share,
+            }))
+        }).ok().map(|rows| rows.filter_map(|r| r.ok()).collect()).unwrap_or_default()
+    }).unwrap_or_default();
+
+    // Expense breakdown by category
+    let mut cat_stmt = conn.prepare(
+        "SELECT category, SUM(amount_cents) FROM entity_expenses WHERE entity_id=? AND tax_year=? GROUP BY category ORDER BY SUM(amount_cents) DESC"
+    ).ok();
+    let categories: Vec<serde_json::Value> = cat_stmt.as_mut().map(|s| {
+        s.query_map(rusqlite::params![entity_id, year], |r| {
+            Ok(serde_json::json!({"category": r.get::<_,String>(0)?, "amount": cents_to_display(r.get::<_,i64>(1)?)}))
+        }).ok().map(|rows| rows.filter_map(|r| r.ok()).collect()).unwrap_or_default()
+    }).unwrap_or_default();
+
+    serde_json::json!({
+        "income": cents_to_display(income), "expenses": cents_to_display(expenses),
+        "net_income": cents_to_display(net), "entity_tax": cents_to_display(entity_tax),
+        "entity_type": entity_type,
+        "is_pass_through": entity_type != "c_corp",
+        "shareholders": shareholders, "expense_categories": categories,
+    })
+}
+
+// ── Business Entity API ─────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct CreateEntityReq {
+    token: String,
+    entity_name: String,
+    entity_type: String,
+    ein: Option<String>,
+    state_of_formation: Option<String>,
+    formation_date: Option<String>,
+    ownership_pct: Option<i64>,
+}
+
+pub async fn handle_entity_create(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateEntityReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &req.token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized".to_string()))?;
+    let uid = principal.user_id();
+    require_tax_module(&state, uid).await?;
+    let valid_types = ["sole_prop", "s_corp", "partnership", "c_corp", "llc_single", "llc_multi"];
+    if !valid_types.contains(&req.entity_type.as_str()) {
+        return Ok(Json(serde_json::json!({"ok": false, "error": format!("Invalid type. Use: {}", valid_types.join(", "))})));
+    }
+    let db = state.db_path.clone();
+    let now = chrono::Utc::now().timestamp();
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO business_entities (user_id, entity_name, entity_type, ein_encrypted, \
+             state_of_formation, formation_date, ownership_pct, status, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+            rusqlite::params![uid, req.entity_name, req.entity_type, req.ein,
+                req.state_of_formation, req.formation_date,
+                req.ownership_pct.unwrap_or(100), now, now],
+        ).map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({"ok": true, "entity_id": conn.last_insert_rowid()}))
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(result))
+}
+
+pub async fn handle_entity_list(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized".to_string()))?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT id, entity_name, entity_type, state_of_formation, formation_date, \
+             ownership_pct, status FROM business_entities WHERE user_id=? ORDER BY entity_name"
+        ).map_err(|e| e.to_string())?;
+        let entities: Vec<serde_json::Value> = stmt.query_map(rusqlite::params![uid], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_,i64>(0)?, "name": r.get::<_,String>(1)?,
+                "type": r.get::<_,String>(2)?, "state": r.get::<_,Option<String>>(3)?,
+                "formed": r.get::<_,Option<String>>(4)?,
+                "ownership_pct": r.get::<_,i64>(5)?, "status": r.get::<_,String>(6)?,
+            }))
+        }).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
+        Ok(serde_json::json!({"entities": entities}))
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(result))
+}
+
+pub async fn handle_entity_summary(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(entity_id): axum::extract::Path<i64>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let _principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized".to_string()))?;
+    let year: i64 = params.get("year").and_then(|s| s.parse().ok()).unwrap_or(2025);
+    let db = state.db_path.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        Ok(compute_entity_pnl(&conn, entity_id, year))
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(result))
+}
+
+#[derive(serde::Deserialize)]
+pub struct EntityIncomeReq { token: String, entity_id: i64, tax_year: i64, income_type: String, amount_cents: i64, description: Option<String> }
+
+pub async fn handle_entity_income_create(
+    State(state): State<Arc<AppState>>, Json(req): Json<EntityIncomeReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let _p = crate::resolve_principal(&state, &req.token).await.map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized".to_string()))?;
+    let db = state.db_path.clone();
+    let now = chrono::Utc::now().timestamp();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        conn.execute("INSERT INTO entity_income (entity_id, tax_year, income_type, amount_cents, description, created_at) VALUES (?,?,?,?,?,?)",
+            rusqlite::params![req.entity_id, req.tax_year, req.income_type, req.amount_cents, req.description, now]).map_err(|e| e.to_string())?;
+        Ok(())
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+#[derive(serde::Deserialize)]
+pub struct EntityExpenseReq { token: String, entity_id: i64, tax_year: i64, category: String, amount_cents: i64, vendor: Option<String>, expense_date: Option<String>, description: Option<String> }
+
+pub async fn handle_entity_expense_create(
+    State(state): State<Arc<AppState>>, Json(req): Json<EntityExpenseReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let _p = crate::resolve_principal(&state, &req.token).await.map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized".to_string()))?;
+    let db = state.db_path.clone();
+    let now = chrono::Utc::now().timestamp();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        conn.execute("INSERT INTO entity_expenses (entity_id, tax_year, category, amount_cents, vendor, expense_date, description, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            rusqlite::params![req.entity_id, req.tax_year, req.category, req.amount_cents, req.vendor, req.expense_date, req.description, now]).map_err(|e| e.to_string())?;
+        Ok(())
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+#[derive(serde::Deserialize)]
+pub struct ShareholderReq { token: String, entity_id: i64, tax_year: i64, name: String, ownership_pct: i64, salary_cents: Option<i64>, distribution_cents: Option<i64> }
+
+pub async fn handle_shareholder_save(
+    State(state): State<Arc<AppState>>, Json(req): Json<ShareholderReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let _p = crate::resolve_principal(&state, &req.token).await.map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized".to_string()))?;
+    let db = state.db_path.clone();
+    let now = chrono::Utc::now().timestamp();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO entity_shareholders (entity_id, name, ownership_pct, salary_cents, distribution_cents, tax_year, created_at) \
+             VALUES (?,?,?,?,?,?,?) ON CONFLICT(entity_id, name, tax_year) DO UPDATE SET \
+             ownership_pct=excluded.ownership_pct, salary_cents=excluded.salary_cents, distribution_cents=excluded.distribution_cents",
+            rusqlite::params![req.entity_id, req.name, req.ownership_pct,
+                req.salary_cents.unwrap_or(0), req.distribution_cents.unwrap_or(0), req.tax_year, now]).map_err(|e| e.to_string())?;
+        Ok(())
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+/// Generate K-1 data for all shareholders of an entity.
+pub async fn handle_entity_k1_generate(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(entity_id): axum::extract::Path<i64>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let _p = crate::resolve_principal(&state, token).await.map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized".to_string()))?;
+    let year: i64 = params.get("year").and_then(|s| s.parse().ok()).unwrap_or(2025);
+    let db = state.db_path.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let pnl = compute_entity_pnl(&conn, entity_id, year);
+        let entity_name: String = conn.query_row(
+            "SELECT entity_name FROM business_entities WHERE id=?",
+            rusqlite::params![entity_id], |r| r.get(0),
+        ).unwrap_or_else(|_| "Unknown".to_string());
+        let entity_type: String = conn.query_row(
+            "SELECT entity_type FROM business_entities WHERE id=?",
+            rusqlite::params![entity_id], |r| r.get(0),
+        ).unwrap_or_else(|_| "partnership".to_string());
+
+        let shareholders = pnl.get("shareholders").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let k1s: Vec<serde_json::Value> = shareholders.iter().map(|sh| {
+            serde_json::json!({
+                "entity_name": entity_name,
+                "entity_type": entity_type,
+                "form": if entity_type == "s_corp" { "1120-S K-1" } else { "1065 K-1" },
+                "shareholder": sh.get("name"),
+                "ownership_pct": sh.get("ownership_pct"),
+                "ordinary_income": sh.get("k1_ordinary"),
+                "salary": sh.get("salary"),
+                "distributions": sh.get("distributions"),
+                "tax_year": year,
+            })
+        }).collect();
+        Ok(serde_json::json!({"k1s": k1s, "entity": entity_name, "year": year}))
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(result))
+}
+
+#[derive(serde::Deserialize)]
+pub struct Issue1099Req { token: String, entity_id: i64, tax_year: i64, recipient_name: String, recipient_address: Option<String>, amount_cents: i64 }
+
+pub async fn handle_1099_issue(
+    State(state): State<Arc<AppState>>, Json(req): Json<Issue1099Req>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let _p = crate::resolve_principal(&state, &req.token).await.map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized".to_string()))?;
+    if req.amount_cents < 60_000 { // $600 threshold
+        return Ok(Json(serde_json::json!({"ok": false, "error": "1099-NEC only required for payments of $600 or more"})));
+    }
+    let db = state.db_path.clone();
+    let now = chrono::Utc::now().timestamp();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO entity_1099s (entity_id, tax_year, recipient_name, recipient_address, amount_cents, form_type, status, created_at) \
+             VALUES (?,?,?,?,?,'1099-NEC','draft',?)",
+            rusqlite::params![req.entity_id, req.tax_year, req.recipient_name, req.recipient_address, req.amount_cents, now]).map_err(|e| e.to_string())?;
+        Ok(())
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+pub async fn handle_1099_list(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(entity_id): axum::extract::Path<i64>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let _p = crate::resolve_principal(&state, token).await.map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized".to_string()))?;
+    let year: i64 = params.get("year").and_then(|s| s.parse().ok()).unwrap_or(2025);
+    let db = state.db_path.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT id, recipient_name, amount_cents, form_type, status FROM entity_1099s WHERE entity_id=? AND tax_year=? ORDER BY recipient_name"
+        ).map_err(|e| e.to_string())?;
+        let forms: Vec<serde_json::Value> = stmt.query_map(rusqlite::params![entity_id, year], |r| {
+            Ok(serde_json::json!({"id": r.get::<_,i64>(0)?, "recipient": r.get::<_,String>(1)?,
+                "amount": cents_to_display(r.get::<_,i64>(2)?), "form": r.get::<_,String>(3)?, "status": r.get::<_,String>(4)?}))
+        }).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
+        Ok(serde_json::json!({"forms": forms, "year": year}))
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(result))
+}
+
+/// Compare entity structures: sole prop vs S-Corp vs LLC.
+pub async fn handle_entity_comparison(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized".to_string()))?;
+    let uid = principal.user_id();
+    require_tax_module(&state, uid).await?;
+    let year: i64 = params.get("year").and_then(|s| s.parse().ok()).unwrap_or(2025);
+    let income_cents: i64 = params.get("income").and_then(|s| s.parse().ok()).unwrap_or(0);
+    let db = state.db_path.clone();
+
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+
+        // If no income specified, use actual SE income
+        let se_income = if income_cents > 0 { income_cents } else {
+            conn.query_row(
+                "SELECT COALESCE(SUM(amount_cents),0) FROM tax_income WHERE user_id=? AND tax_year=? AND (category LIKE '%1099%' OR category LIKE '%Self%')",
+                rusqlite::params![uid, year], |r| r.get(0),
+            ).unwrap_or(0)
+        };
+
+        if se_income == 0 {
+            return Ok(serde_json::json!({"error": "No self-employment income to compare. Pass ?income=CENTS to model."}));
+        }
+
+        // Sole prop: full SE tax on all income
+        let se_taxable = (se_income as f64 * 0.9235) as i64;
+        let sp_se_tax = std::cmp::min(se_taxable, 17_610_000) * 1240 / 10000 + se_taxable * 290 / 10000;
+
+        // S-Corp: reasonable salary (60% of income) gets employment tax, rest is distribution
+        let reasonable_salary = se_income * 60 / 100;
+        let sc_employer_fica = std::cmp::min(reasonable_salary, 17_610_000) * 765 / 10000; // 7.65%
+        let sc_employee_fica = sc_employer_fica; // employee pays same
+        let sc_total_fica = sc_employer_fica + sc_employee_fica;
+        let sc_savings = sp_se_tax - sc_total_fica;
+
+        Ok(serde_json::json!({
+            "income": cents_to_display(se_income),
+            "sole_proprietorship": {
+                "se_tax": cents_to_display(sp_se_tax),
+                "notes": "Full 15.3% SE tax on all net earnings",
+            },
+            "s_corp": {
+                "reasonable_salary": cents_to_display(reasonable_salary),
+                "employer_fica": cents_to_display(sc_employer_fica),
+                "employee_fica": cents_to_display(sc_employee_fica),
+                "total_fica": cents_to_display(sc_total_fica),
+                "distribution": cents_to_display(se_income - reasonable_salary),
+                "savings_vs_sole_prop": cents_to_display(sc_savings),
+                "notes": "Salary taxed at FICA rates; distributions avoid SE tax",
+            },
+            "recommendation": if sc_savings > 500_000 {
+                format!("S-Corp could save {} annually in SE tax. Consider if income is consistently above $50K.", cents_to_display(sc_savings))
+            } else {
+                "At this income level, the administrative cost of an S-Corp may not justify the tax savings. Stay as sole proprietor.".to_string()
+            },
+        }))
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(result))
+}

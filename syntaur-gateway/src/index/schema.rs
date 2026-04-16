@@ -1364,6 +1364,73 @@ const MIGRATIONS: &[&str] = &[
         UNIQUE(user_id, tax_year, state)
     );
     "#,
+
+    // Migration 36: Business entities — S-Corp, Partnership, C-Corp.
+    r#"
+    CREATE TABLE IF NOT EXISTS business_entities (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id             INTEGER NOT NULL,
+        entity_name         TEXT NOT NULL,
+        entity_type         TEXT NOT NULL,
+        ein_encrypted       TEXT,
+        formation_date      TEXT,
+        state_of_formation  TEXT,
+        fiscal_year_end     TEXT DEFAULT '12-31',
+        ownership_pct       INTEGER NOT NULL DEFAULT 100,
+        status              TEXT NOT NULL DEFAULT 'active',
+        created_at          INTEGER NOT NULL,
+        updated_at          INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_entities_user ON business_entities(user_id);
+
+    CREATE TABLE IF NOT EXISTS entity_income (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        entity_id           INTEGER NOT NULL REFERENCES business_entities(id) ON DELETE CASCADE,
+        tax_year            INTEGER NOT NULL,
+        income_type         TEXT NOT NULL,
+        amount_cents        INTEGER NOT NULL,
+        description         TEXT,
+        created_at          INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS entity_expenses (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        entity_id           INTEGER NOT NULL REFERENCES business_entities(id) ON DELETE CASCADE,
+        tax_year            INTEGER NOT NULL,
+        category            TEXT NOT NULL,
+        amount_cents        INTEGER NOT NULL,
+        vendor              TEXT,
+        expense_date        TEXT,
+        description         TEXT,
+        created_at          INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS entity_shareholders (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        entity_id           INTEGER NOT NULL REFERENCES business_entities(id) ON DELETE CASCADE,
+        name                TEXT NOT NULL,
+        ssn_encrypted       TEXT,
+        ownership_pct       INTEGER NOT NULL,
+        distribution_cents  INTEGER NOT NULL DEFAULT 0,
+        salary_cents        INTEGER NOT NULL DEFAULT 0,
+        tax_year            INTEGER NOT NULL,
+        created_at          INTEGER NOT NULL,
+        UNIQUE(entity_id, name, tax_year)
+    );
+
+    CREATE TABLE IF NOT EXISTS entity_1099s (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        entity_id           INTEGER NOT NULL REFERENCES business_entities(id) ON DELETE CASCADE,
+        tax_year            INTEGER NOT NULL,
+        recipient_name      TEXT NOT NULL,
+        recipient_tin       TEXT,
+        recipient_address   TEXT,
+        amount_cents        INTEGER NOT NULL,
+        form_type           TEXT NOT NULL DEFAULT '1099-NEC',
+        status              TEXT NOT NULL DEFAULT 'draft',
+        created_at          INTEGER NOT NULL
+    );
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
