@@ -21,10 +21,11 @@ pub async fn render() -> Html<String> {
 }
 
 const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
-  body { font-family: 'Inter', sans-serif; background: #0a0a0a; }
+  body { font-family: 'Inter', sans-serif; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; background: #0a0a0a; }
   .card { @apply bg-gray-800 rounded-xl border border-gray-700 p-5; }
   .badge { @apply inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium; }
   .badge-green { @apply bg-green-900/50 text-green-400; }
+  .badge-yellow { @apply bg-yellow-900/50 text-yellow-400; }
   .badge-gray { @apply bg-gray-700 text-gray-400; }
   .badge-blue { @apply bg-blue-900/50 text-blue-400; }
   .pulse { animation: pulse 2s infinite; }
@@ -35,14 +36,28 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   .speaker-card { transition: all 0.15s; }
   .speaker-card.selected { @apply border-oc-500 bg-oc-900/30; }"##;
 
-const BODY_HTML: &str = r##"<!-- Header -->
-<div class="sticky top-0 z-40 bg-gray-950/90 backdrop-blur border-b border-gray-800 px-4 py-3 flex items-center justify-between">
-  <div class="flex items-center gap-3">
-    <a href="/" class="text-sm text-gray-400 hover:text-gray-200">&larr; Dashboard</a>
-    <span class="text-gray-700">/</span>
-    <span class="text-sm text-gray-100">Music</span>
+const BODY_HTML: &str = r##"<!-- Top bar — matches the dashboard so the music page feels like
+     part of Syntaur, not a different app dropped onto the same domain. -->
+<div class="border-b border-gray-800 bg-gray-900/50 backdrop-blur sticky top-0 z-40">
+  <div class="px-4 py-2.5 flex items-center justify-between">
+    <div class="flex items-center gap-3 min-w-0">
+      <a href="/" class="flex items-center gap-2 hover:opacity-80 flex-shrink-0">
+        <img src="/app-icon.jpg" class="h-8 w-8 rounded-lg" alt="">
+        <span class="font-semibold">Syntaur</span>
+      </a>
+      <span class="text-gray-700">/</span>
+      <span class="text-sm text-gray-200">Music</span>
+      <span id="media-bridge-pill" class="hidden ml-1 text-[10px] text-emerald-300 bg-emerald-900/40 px-2 py-0.5 rounded-full" title="Local Media Bridge is running — playback bypasses popups">Bridge on</span>
+    </div>
+    <div class="flex items-center gap-3 text-sm">
+      <a href="/" class="text-gray-400 hover:text-white transition-colors">Home</a>
+      <a href="/settings" class="text-gray-400 hover:text-gray-300">Settings</a>
+      <a href="/profile" class="text-gray-400 hover:text-gray-300" title="Profile">Profile</a>
+      <button onclick="refreshAll()" class="text-gray-500 hover:text-gray-300" title="Refresh">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
+      </button>
+    </div>
   </div>
-  <button onclick="refreshAll()" class="text-xs text-gray-400 hover:text-gray-200">&#8634; Refresh</button>
 </div>
 
 <!-- Hidden player containers — audio plays through browser's audio output -->
@@ -50,170 +65,176 @@ const BODY_HTML: &str = r##"<!-- Header -->
   <div id="yt-player-mount"></div>
 </div>
 
-<div class="max-w-4xl mx-auto px-4 py-6 space-y-4">
+<!-- Two-panel layout, matching the dashboard.
+     Left  (60%): the listening experience  — hero now-playing + queue
+     Right (40%): the controls — provider, AI DJ, speakers, EQ -->
+<div class="flex h-[calc(100vh-45px)]">
 
-  <!-- Now Playing -->
-  <div class="card">
-    <div class="flex items-center justify-between mb-3">
-      <h3 class="text-xs uppercase tracking-wider text-gray-500">Now playing</h3>
-      <div class="flex items-center gap-2">
-        <span id="media-bridge-pill" class="hidden text-[10px] text-emerald-300 bg-emerald-900/40 px-2 py-0.5 rounded-full" title="Local Media Bridge is running — playback bypasses popups">⚡ Bridge on</span>
-        <button id="apple-music-start-btn" onclick="startAppleMusicPlayer()" class="hidden text-xs bg-pink-700 hover:bg-pink-600 text-white px-3 py-1 rounded-lg" title="Pre-open the Apple Music player window so subsequent plays autoplay">🎵 Start Apple Music player</button>
-      </div>
-    </div>
-    <div id="now-playing" class="flex items-center gap-4">
-      <div class="w-20 h-20 rounded-lg bg-gray-900 flex-shrink-0 flex items-center justify-center overflow-hidden" id="np-art">
-        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="text-gray-600"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
-      </div>
-      <div class="flex-1 min-w-0">
-        <div class="text-lg font-medium text-gray-200 overflow-hidden" id="np-song-wrap"><span id="np-song">Nothing playing</span></div>
-        <p class="text-sm text-gray-500 truncate" id="np-artist">—</p>
-        <p class="text-xs text-gray-600 mt-1" id="np-source"></p>
-      </div>
-      <div class="flex gap-2 flex-shrink-0">
-        <button onclick="control('prev')" class="bg-gray-900 hover:bg-gray-700 text-gray-300 rounded-full w-10 h-10 flex items-center justify-center transition-colors" title="Previous">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="19,20 9,12 19,4"/><rect x="5" y="4" width="2" height="16"/></svg>
-        </button>
-        <button onclick="control('play_pause')" id="np-play" class="bg-oc-600 hover:bg-oc-700 text-white rounded-full w-12 h-12 flex items-center justify-center transition-colors" title="Play/Pause">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
-        </button>
-        <button onclick="control('next')" class="bg-gray-900 hover:bg-gray-700 text-gray-300 rounded-full w-10 h-10 flex items-center justify-center transition-colors" title="Next">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,4 15,12 5,20"/><rect x="17" y="4" width="2" height="16"/></svg>
-        </button>
-      </div>
-    </div>
-    <!-- Volume slider (hidden when no playback target supports it) -->
-    <div id="volume-row" class="hidden mt-4 pt-4 border-t border-gray-700/50 flex items-center gap-3">
-      <span class="text-xs text-gray-500">🔈</span>
-      <input type="range" id="volume-slider" min="0" max="100" value="50" class="flex-1 accent-oc-500" oninput="onVolumeChange(this.value)">
-      <span class="text-xs text-gray-500">🔊</span>
-      <span class="text-xs text-gray-400 w-10 text-right" id="volume-label">50%</span>
-    </div>
-  </div>
+  <!-- LEFT: Listening (60%) -->
+  <div class="w-[60%] border-r border-gray-800 overflow-y-auto px-6 py-6 space-y-4">
 
-  <!-- Music provider chip — shows which provider is active -->
-  <div id="provider-chip" class="card bg-gray-900 border-gray-700 py-3 hidden">
-    <div class="flex items-center justify-between gap-3">
-      <div class="flex items-center gap-3 flex-1 min-w-0">
-        <span class="text-xl flex-shrink-0" id="provider-icon">🎵</span>
-        <div class="flex-1 min-w-0">
-          <p class="text-xs text-gray-500">Music provider</p>
-          <p class="text-sm font-medium truncate" id="provider-name">—</p>
-          <p id="spotify-web-player-badge" class="hidden text-[10px] text-green-400 mt-0.5">✓ Spotify Web Player active on this tab</p>
+    <!-- Hero Now Playing -->
+    <div class="card p-6">
+      <div class="flex items-start gap-5">
+        <div class="w-40 h-40 rounded-xl bg-gray-900 flex-shrink-0 flex items-center justify-center overflow-hidden border border-gray-700/50" id="np-art">
+          <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.25" class="text-gray-600"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+        </div>
+        <div class="flex-1 min-w-0 flex flex-col">
+          <p class="text-[11px] uppercase tracking-wider text-gray-500">Now playing</p>
+          <div class="text-2xl font-semibold text-gray-100 mt-1.5 overflow-hidden" id="np-song-wrap">
+            <span id="np-song">Nothing playing</span>
+          </div>
+          <p class="text-sm text-gray-400 mt-1 truncate" id="np-artist">—</p>
+          <p class="text-xs text-gray-500 mt-2" id="np-source"></p>
+          <!-- Controls — bigger, calmer, breathing room -->
+          <div class="flex items-center gap-3 mt-auto pt-5">
+            <button onclick="control('prev')" class="bg-gray-900 hover:bg-gray-700 text-gray-300 rounded-full w-10 h-10 flex items-center justify-center transition-colors" title="Previous">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="19,20 9,12 19,4"/><rect x="5" y="4" width="2" height="16"/></svg>
+            </button>
+            <button onclick="control('play_pause')" id="np-play" class="bg-oc-600 hover:bg-oc-700 text-white rounded-full w-12 h-12 flex items-center justify-center transition-colors shadow-lg shadow-oc-900/30" title="Play/Pause">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
+            </button>
+            <button onclick="control('next')" class="bg-gray-900 hover:bg-gray-700 text-gray-300 rounded-full w-10 h-10 flex items-center justify-center transition-colors" title="Next">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,4 15,12 5,20"/><rect x="17" y="4" width="2" height="16"/></svg>
+            </button>
+          </div>
         </div>
       </div>
-      <a href="/settings?tab=sync" class="text-xs text-gray-500 hover:text-gray-200">Change →</a>
+      <!-- Volume slider (hidden when no playback target supports it) -->
+      <div id="volume-row" class="hidden mt-5 pt-4 border-t border-gray-700/50 flex items-center gap-3">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-gray-500 flex-shrink-0"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 010 7.07"/></svg>
+        <input type="range" id="volume-slider" min="0" max="100" value="50" class="flex-1 accent-oc-500" oninput="onVolumeChange(this.value)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-gray-500 flex-shrink-0"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 010 7.07"/><path d="M19.07 4.93a10 10 0 010 14.14"/></svg>
+        <span class="text-xs text-gray-400 w-10 text-right" id="volume-label">50%</span>
+      </div>
+      <!-- Apple Music start button — tertiary, hidden until needed.
+           JS toggles the button's own .hidden, so we must NOT wrap it
+           in a separately-hidden container or it'll never appear. -->
+      <button id="apple-music-start-btn" onclick="startAppleMusicPlayer()" class="hidden mt-3 text-xs text-pink-300 hover:text-pink-200 underline self-start" title="Pre-open the Apple Music player window so subsequent plays autoplay">Start Apple Music player →</button>
     </div>
-  </div>
 
-  <!-- No provider connected banner -->
-  <div id="no-provider-banner" class="hidden card border-yellow-700/50 bg-yellow-900/20">
-    <div class="flex items-start gap-3">
-      <span class="text-2xl flex-shrink-0">🎵</span>
-      <div class="flex-1">
-        <p class="text-sm font-medium text-yellow-300">No music provider connected</p>
-        <p class="text-xs text-gray-400 mt-1">Pick a service — Apple Music (works now via bookmarklet), Spotify (OAuth), YouTube Music (OAuth), or Tidal (coming soon). Connect one in Sync settings and the DJ, queue, and search all light up.</p>
-        <a href="/settings?tab=sync" class="inline-block mt-2 text-xs text-yellow-300 hover:text-yellow-200 underline">Open Sync settings →</a>
+    <!-- Queue (up next) — only renders when something's in it -->
+    <div id="queue-card" class="card hidden">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-medium text-gray-200 text-sm">Up next</h3>
+        <button onclick="clearQueue()" class="text-xs text-gray-500 hover:text-gray-300">Clear</button>
+      </div>
+      <div id="queue-list" class="space-y-1"></div>
+    </div>
+
+    <!-- "How this works" — collapsed by default so it doesn't shout
+         at someone who just wants to listen to music. -->
+    <details class="px-1">
+      <summary class="cursor-pointer text-xs text-gray-500 hover:text-gray-300 py-2 select-none">How playback works</summary>
+      <ul class="text-xs text-gray-400 space-y-1.5 leading-relaxed mt-2 pl-2">
+        <li><strong class="text-gray-300">Phone (default):</strong> the Syntaur Voice PWA on your phone launches Music.app with the selected track. Audio plays through the phone's output — your speakers, AirPods, or AirPlay target.</li>
+        <li><strong class="text-gray-300">iOS Control Center:</strong> to AirPlay to multiple speakers at once, swipe iOS Control Center, hold the music widget, tap each speaker. Zero extra setup.</li>
+        <li><strong class="text-gray-300">Home Assistant (optional):</strong> if you run HA, Syntaur can target specific HomePods, Apple TVs, or Sonos directly and group them from this page. Skip if you don't use HA — the phone path covers most cases.</li>
+        <li><strong class="text-gray-300">DRM-protected streams:</strong> all major services encrypt audio. The decoder always runs on a licensed client — your phone or a smart speaker. Syntaur orchestrates commands but never touches the encrypted audio itself.</li>
+      </ul>
+    </details>
+
+  </div><!-- /left -->
+
+  <!-- RIGHT: Controls (40%) -->
+  <div class="w-[40%] overflow-y-auto p-4 space-y-4">
+
+    <!-- Music provider chip — small, status-only -->
+    <div id="provider-chip" class="card bg-gray-900 border-gray-700 py-3 hidden">
+      <div class="flex items-center justify-between gap-3">
+        <div class="flex items-center gap-3 flex-1 min-w-0">
+          <span class="flex-shrink-0 w-8 h-8 rounded-lg bg-gray-800 flex items-center justify-center" id="provider-icon">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-gray-400"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+          </span>
+          <div class="flex-1 min-w-0">
+            <p class="text-[10px] uppercase tracking-wider text-gray-500">Provider</p>
+            <p class="text-sm font-medium truncate text-gray-200" id="provider-name">—</p>
+            <p id="spotify-web-player-badge" class="hidden text-[10px] text-green-400 mt-0.5">Spotify Web Player active on this tab</p>
+          </div>
+        </div>
+        <a href="/settings?tab=sync" class="text-xs text-gray-500 hover:text-gray-200">Change</a>
       </div>
     </div>
-  </div>
 
-  <!-- AI DJ -->
-  <div class="card">
-    <div class="flex items-center justify-between mb-3">
-      <div>
-        <h3 class="font-medium text-gray-100">🎙️ AI DJ</h3>
-        <p class="text-xs text-gray-500 mt-0.5">Tell me the vibe. I'll build a playlist from your music provider's catalog.</p>
+    <!-- No provider connected banner — only when relevant -->
+    <div id="no-provider-banner" class="hidden card border-yellow-700/50 bg-yellow-900/20">
+      <div class="flex items-start gap-3">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-yellow-400 flex-shrink-0 mt-0.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        <div class="flex-1">
+          <p class="text-sm font-medium text-yellow-300">No music provider connected</p>
+          <p class="text-xs text-gray-400 mt-1">Pick a service in Sync settings — Apple Music, Spotify, YouTube Music, or Tidal — and the DJ, queue, and search all light up.</p>
+          <a href="/settings?tab=sync" class="inline-block mt-2 text-xs text-yellow-300 hover:text-yellow-200 underline">Open Sync settings</a>
+        </div>
       </div>
     </div>
-    <div class="flex gap-2">
-      <input type="text" id="dj-prompt" placeholder="e.g. upbeat 80s synthwave, jazz for studying, something like Miles Davis but more modern…" class="flex-1 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-oc-500" onkeydown="if(event.key==='Enter')runDj()">
-      <button onmousedown="startDjStt(event)" onmouseup="stopDjStt(event)" ontouchstart="startDjStt(event)" ontouchend="stopDjStt(event)" id="dj-mic-btn" class="bg-gray-800 hover:bg-gray-700 text-gray-300 px-3 rounded-lg text-sm flex items-center" title="Hold to dictate">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
-      </button>
-      <button onclick="runDj()" id="dj-run-btn" class="bg-oc-600 hover:bg-oc-700 text-white px-4 rounded-lg text-sm font-medium">Build</button>
-    </div>
-    <div class="mt-2 flex items-center gap-4 text-xs text-gray-500">
-      <label class="flex items-center gap-1.5 cursor-pointer">
-        <input type="checkbox" id="dj-create-playlist" class="accent-oc-500"> Save as playlist
-      </label>
-      <label class="flex items-center gap-1.5">
-        <span>Track count:</span>
-        <select id="dj-count" class="bg-gray-900 border border-gray-700 rounded text-xs py-0.5 px-1 outline-none">
-          <option value="10">10</option>
-          <option value="15" selected>15</option>
-          <option value="25">25</option>
-        </select>
-      </label>
-    </div>
-    <div id="dj-results" class="mt-4 hidden"></div>
-    <div id="dj-feedback" class="hidden mt-3 flex flex-wrap items-center gap-2 pt-3 border-t border-gray-700/50">
-      <span class="text-xs text-gray-500">Refine:</span>
-      <button onclick="refineDj('more like the liked tracks')" class="text-xs bg-green-900/30 hover:bg-green-900/50 text-green-300 px-2 py-1 rounded">More like the 👍 ones</button>
-      <button onclick="refineDj('drop anything resembling the disliked tracks')" class="text-xs bg-red-900/30 hover:bg-red-900/50 text-red-300 px-2 py-1 rounded">Drop the 👎 ones</button>
-      <button onclick="refineDj('slower, more chill')" class="text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 px-2 py-1 rounded">Slower/chill</button>
-      <button onclick="refineDj('faster, more energy')" class="text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 px-2 py-1 rounded">Faster/energy</button>
-      <button onclick="refineDj('different genre entirely')" class="text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 px-2 py-1 rounded">Different genre</button>
-    </div>
-  </div>
 
-  <!-- Queue (up next) -->
-  <div id="queue-card" class="card hidden">
-    <div class="flex items-center justify-between mb-3">
-      <h3 class="font-medium text-gray-100">📃 Queue</h3>
-      <button onclick="clearQueue()" class="text-xs text-gray-500 hover:text-gray-300">Clear</button>
-    </div>
-    <div id="queue-list" class="space-y-1"></div>
-  </div>
-
-  <!-- Speakers -->
-  <div class="card">
-    <div class="flex items-center justify-between mb-3">
-      <div>
-        <h3 class="font-medium text-gray-100">🔊 Speakers</h3>
-        <p class="text-xs text-gray-500 mt-0.5">Where music plays. Your phone handles playback by default — pick a specific target below when you want something different.</p>
-      </div>
-    </div>
-    <div id="speakers-list" class="space-y-2">
-      <p class="text-xs text-gray-500 italic">Loading…</p>
-    </div>
-    <div id="group-controls" class="hidden mt-4 pt-4 border-t border-gray-700">
-      <p class="text-xs text-gray-500 mb-2">Selected (<span id="group-count">0</span>) — grouping is Home Assistant only.</p>
+    <!-- AI DJ -->
+    <div class="card">
+      <h3 class="font-medium text-gray-200 text-sm">AI DJ</h3>
+      <p class="text-xs text-gray-500 mt-0.5 mb-3">Tell me the vibe.</p>
       <div class="flex gap-2">
-        <button onclick="groupSelected()" id="group-btn" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-3 py-1.5 rounded-lg">Group into one</button>
-        <button onclick="ungroupSelected()" class="text-xs text-gray-400 hover:text-gray-200">Ungroup</button>
+        <input type="text" id="dj-prompt" placeholder="upbeat 80s synthwave, jazz for studying…" class="flex-1 min-w-0 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-oc-500" onkeydown="if(event.key==='Enter')runDj()">
+        <button onmousedown="startDjStt(event)" onmouseup="stopDjStt(event)" ontouchstart="startDjStt(event)" ontouchend="stopDjStt(event)" id="dj-mic-btn" class="bg-gray-800 hover:bg-gray-700 text-gray-300 px-3 rounded-lg text-sm flex items-center flex-shrink-0" title="Hold to dictate">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+        </button>
+        <button onclick="runDj()" id="dj-run-btn" class="bg-oc-600 hover:bg-oc-700 text-white px-4 rounded-lg text-sm font-medium flex-shrink-0">Build</button>
+      </div>
+      <div class="mt-2 flex items-center gap-4 text-xs text-gray-500">
+        <label class="flex items-center gap-1.5 cursor-pointer">
+          <input type="checkbox" id="dj-create-playlist" class="accent-oc-500"> Save as playlist
+        </label>
+        <label class="flex items-center gap-1.5">
+          <span>Tracks:</span>
+          <select id="dj-count" class="bg-gray-900 border border-gray-700 rounded text-xs py-0.5 px-1 outline-none">
+            <option value="10">10</option>
+            <option value="15" selected>15</option>
+            <option value="25">25</option>
+          </select>
+        </label>
+      </div>
+      <div id="dj-results" class="mt-4 hidden"></div>
+      <div id="dj-feedback" class="hidden mt-3 flex flex-wrap items-center gap-2 pt-3 border-t border-gray-700/50">
+        <span class="text-xs text-gray-500">Refine:</span>
+        <button onclick="refineDj('more like the liked tracks')" class="text-xs bg-green-900/30 hover:bg-green-900/50 text-green-300 px-2 py-1 rounded">More liked</button>
+        <button onclick="refineDj('drop anything resembling the disliked tracks')" class="text-xs bg-red-900/30 hover:bg-red-900/50 text-red-300 px-2 py-1 rounded">Drop disliked</button>
+        <button onclick="refineDj('slower, more chill')" class="text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 px-2 py-1 rounded">Chill</button>
+        <button onclick="refineDj('faster, more energy')" class="text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 px-2 py-1 rounded">Energy</button>
+        <button onclick="refineDj('different genre entirely')" class="text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 px-2 py-1 rounded">Different genre</button>
       </div>
     </div>
-  </div>
 
-  <!-- Equalizer -->
-  <div class="card" id="eq-card">
-    <div class="flex items-center justify-between mb-3">
-      <div>
-        <h3 class="font-medium text-gray-100">🎚 Equalizer</h3>
-        <p class="text-xs text-gray-500 mt-0.5" id="eq-hint">Pick a sound preset. Available presets depend on your speaker.</p>
+    <!-- Speakers -->
+    <div class="card">
+      <h3 class="font-medium text-gray-200 text-sm">Speakers</h3>
+      <p class="text-xs text-gray-500 mt-0.5 mb-3">Where music plays. Phone by default — pick another target below to override.</p>
+      <div id="speakers-list" class="space-y-2">
+        <p class="text-xs text-gray-500 italic">Loading…</p>
+      </div>
+      <div id="group-controls" class="hidden mt-4 pt-4 border-t border-gray-700/50">
+        <p class="text-xs text-gray-500 mb-2">Selected (<span id="group-count">0</span>) — grouping is Home Assistant only.</p>
+        <div class="flex gap-2">
+          <button onclick="groupSelected()" id="group-btn" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-3 py-1.5 rounded-lg">Group</button>
+          <button onclick="ungroupSelected()" class="text-xs text-gray-400 hover:text-gray-200">Ungroup</button>
+        </div>
       </div>
     </div>
-    <div id="eq-targets" class="space-y-3">
-      <p class="text-xs text-gray-500 italic">Select a speaker above to see its EQ options.</p>
-    </div>
-    <div class="mt-3 p-3 bg-gray-900/50 rounded-lg border border-gray-800">
-      <p class="text-xs text-gray-400"><strong class="text-gray-200">📱 Phone playback:</strong> EQ is controlled by iOS — open Settings → Music → EQ on your phone to pick a preset. That setting persists across all music playback on the phone.</p>
-    </div>
-  </div>
 
-  <!-- Honest disclosure -->
-  <div class="card border-gray-800 bg-gray-900/50">
-    <h4 class="text-xs uppercase tracking-wider text-gray-500 mb-2">How this works</h4>
-    <ul class="text-xs text-gray-400 space-y-1.5 leading-relaxed">
-      <li>📱 <strong>Phone (default):</strong> the Syntaur Voice PWA on your phone launches Music.app with the selected track. Audio plays through the phone's output — your speakers, AirPods, or AirPlay target.</li>
-      <li>🎚️ <strong>iOS Control Center:</strong> to AirPlay to multiple speakers at once, swipe iOS Control Center → hold the music widget → tap each speaker. This works with zero extra setup.</li>
-      <li>🏠 <strong>Home Assistant (optional):</strong> if you run HA, Syntaur can target specific HomePods/Apple TVs/Sonos directly and group them from this page. Skip if you don't use HA — the phone path covers most cases.</li>
-      <li>🎵 <strong>DRM-protected streams:</strong> all major services (Apple Music, Spotify, Tidal, YouTube Music) encrypt audio. The decoder always runs on a licensed client — your phone's native app or a smart speaker. Syntaur orchestrates commands but never touches the encrypted audio itself.</li>
-    </ul>
-  </div>
+    <!-- Equalizer -->
+    <div class="card" id="eq-card">
+      <h3 class="font-medium text-gray-200 text-sm">Equalizer</h3>
+      <p class="text-xs text-gray-500 mt-0.5 mb-3" id="eq-hint">Pick a sound preset. Available presets depend on your speaker.</p>
+      <div id="eq-targets" class="space-y-3">
+        <p class="text-xs text-gray-500 italic">Select a speaker above to see its EQ options.</p>
+      </div>
+      <details class="mt-3 text-xs text-gray-500">
+        <summary class="cursor-pointer hover:text-gray-300 select-none">Phone playback EQ</summary>
+        <p class="mt-2 text-gray-400 leading-relaxed">EQ is controlled by iOS — open Settings → Music → EQ on your phone to pick a preset. That setting persists across all music playback on the phone.</p>
+      </details>
+    </div>
 
-</div>"##;
+  </div><!-- /right -->
+
+</div><!-- /split -->"##;
 
 const MUSIC_JS: &str = r##"const token = sessionStorage.getItem('syntaur_token') || localStorage.getItem('syntaur_token') || '';
 if (!token) { window.location.href = '/'; }
