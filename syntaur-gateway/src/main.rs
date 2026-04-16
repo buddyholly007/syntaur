@@ -116,6 +116,7 @@ pub struct AppState {
     /// Bearer secret required for /v1/chat/completions when set
     /// in connectors.home_assistant.voice_secret. None = open.
     pub ha_voice_secret: Option<String>,
+    pub escalation: std::sync::Arc<crate::agents::escalation::EscalationTracker>,
     /// Phase 0 voice skill router. Embedding-based dispatcher that lets
     /// the voice path expose ~6 base tools to Qwen while routing the
     /// long tail (~30+ skills) through a single `find_tool(intent)` call.
@@ -1301,7 +1302,22 @@ async fn handle_api_message(
                         lcm.store_message(&agent_id, cid, "assistant", &text);
                     }
                 }
-                return Ok(Json(serde_json::json!({"response": text, "rounds": round, "conversation_id": req.conversation_id})));
+                // Escalation check: classify user message + track + offer if threshold met
+                let escalation_offer = if agent_id == "main" {
+                    let conv_key = req.conversation_id.as_deref().unwrap_or("ephemeral");
+                    let module_tag = crate::agents::escalation::classify(&req.message);
+                    state.escalation.record(conv_key, module_tag);
+                    state.escalation.should_offer(conv_key).map(|m| {
+                        crate::agents::escalation::EscalationTracker::build_offer(&m)
+                    })
+                } else {
+                    None
+                };
+                let mut resp = serde_json::json!({"response": text, "rounds": round, "conversation_id": req.conversation_id});
+                if let Some(esc) = escalation_offer {
+                    resp["escalation"] = esc;
+                }
+                return Ok(Json(resp));
             }
             llm::LlmResult::ToolCalls { content, tool_calls } => {
                 messages.push(llm::ChatMessage::assistant_with_tools(&content, tool_calls.clone()));
@@ -4751,6 +4767,7 @@ async fn main() {
             .as_ref()
             .and_then(|h| h.voice_secret.clone())
             .filter(|s| !s.is_empty()),
+        escalation: std::sync::Arc::new(crate::agents::escalation::EscalationTracker::new()),
         sharing_mode: Arc::new(tokio::sync::RwLock::new(
             users.get_sharing_mode().await.unwrap_or_else(|_| "shared".to_string()),
         )),
