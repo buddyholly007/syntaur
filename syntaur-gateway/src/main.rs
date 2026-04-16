@@ -4995,6 +4995,7 @@ async fn main() {
         .route("/api/setup/test-telegram", post(setup::handle_test_telegram))
         .route("/api/setup/test-ha", post(setup::handle_test_ha))
         .route("/api/setup/modules", get(setup::handle_setup_modules))
+        .route("/api/agents/resolve_prompt", get(handle_api_agent_resolve_prompt))
         .route("/api/modules/toggle", post(setup::handle_module_toggle))
         .route("/api/license/status", get(setup::handle_license_status))
         .route("/api/license/activate", post(setup::handle_license_activate))
@@ -5626,3 +5627,70 @@ fn open_browser(url: &str) -> std::io::Result<()> {
     }
     Ok(())
 }
+
+// -- Debug: resolve a default persona's system prompt with substitution ------
+//
+// GET /api/agents/resolve_prompt?agent_key=module_tax&token=...
+//
+// Returns the stored template from module_agent_defaults with all known
+// variables filled in from the caller's user context. Intended for
+// observability while the personas system is being wired up.
+async fn handle_api_agent_resolve_prompt(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let agent_key = params
+        .get("agent_key")
+        .cloned()
+        .ok_or(axum::http::StatusCode::BAD_REQUEST)?;
+    let token = params
+        .get("token")
+        .cloned()
+        .ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+
+    let principal = resolve_principal(&state, &token).await?;
+    let uid = principal.user_id();
+
+    let db = state.db_path.clone();
+    let key = agent_key.clone();
+    let loaded = tokio::task::spawn_blocking(move || {
+        let conn = rusqlite::Connection::open(&db).ok()?;
+        crate::agents::templates::load_default(&conn, &key).ok().flatten()
+    })
+    .await
+    .ok()
+    .flatten();
+
+    let (template, display_name, default_humor) =
+        loaded.ok_or(axum::http::StatusCode::NOT_FOUND)?;
+
+    let first_name = state.users.get_user(uid).await.ok().flatten().map(|u| u.name);
+    let personality = state.users.personality_prompt(uid, &agent_key, 4000).await;
+    let personality_opt = if personality.is_empty() {
+        None
+    } else {
+        Some(personality)
+    };
+    let humor = default_humor.unwrap_or(3);
+
+    let ctx = crate::agents::templates::base_context(
+        first_name.as_deref(),
+        personality_opt.as_deref(),
+        &display_name,
+        "Kyron",
+        humor,
+    );
+
+    let prompt = crate::agents::templates::substitute(&template, &ctx);
+
+    Ok(Json(serde_json::json!({
+        "agent_key": agent_key,
+        "user_id": uid,
+        "display_name": display_name,
+        "humor_level": humor,
+        "length": prompt.len(),
+        "placeholders_remaining": prompt.matches("{{").count(),
+        "prompt": prompt,
+    })))
+}
+

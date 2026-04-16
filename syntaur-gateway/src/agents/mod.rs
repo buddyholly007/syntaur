@@ -9,3 +9,4 @@
 //! escalation rules) lives in vault/projects/syntaur_personas.md.
 
 pub mod defaults;
+pub mod templates;
