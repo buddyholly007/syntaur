@@ -18,11 +18,11 @@ const EXTRA_STYLE: &str = r##"
     --rust:       #ce422b;   /* Rust lang iron-oxide */
     --rust-hot:   #f74c00;   /* hotter rust accent */
     --rust-glow:  rgba(206,66,43,0.55);
-    --bg:         #060905;   /* near-black with faint green tint */
-    --bg-panel:   #0a0f0a;   /* panel surface */
-    --bg-deep:    #030503;   /* terminal void */
-    --ink:        #b6ffcd;   /* body text phosphor */
-    --ink-dim:    #5a8c6b;   /* muted label */
+    --bg:         #080c07;   /* near-black with faint green tint — slightly lifted */
+    --bg-panel:   #0d130c;   /* panel surface */
+    --bg-deep:    #060a06;   /* terminal void — lifted a touch */
+    --ink:        #ccffdd;   /* body text phosphor — brighter */
+    --ink-dim:    #6fa580;   /* muted label — slightly brighter */
 }
 
 /* Body override — override tailwind bg-gray-950 */
@@ -36,10 +36,10 @@ body.bg-gray-950 { background: var(--bg) !important; color: var(--ink) !importan
 
 /* ======== CRT scanline + vignette overlays — inside the glass area ======== */
 .crt-scan { position: fixed; inset: 32px 38px 62px 38px; pointer-events: none; z-index: 10;
-    background: repeating-linear-gradient(to bottom, transparent 0, transparent 2px, rgba(0,0,0,0.35) 3px, transparent 4px);
+    background: repeating-linear-gradient(to bottom, transparent 0, transparent 2px, rgba(0,0,0,0.18) 3px, transparent 4px);
     mix-blend-mode: multiply; border-radius: 22px; }
 .crt-vignette { position: fixed; inset: 32px 38px 62px 38px; pointer-events: none; z-index: 11;
-    background: radial-gradient(ellipse at center, transparent 42%, rgba(0,0,0,0.78) 100%);
+    background: radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,0.4) 100%);
     border-radius: 22px; }
 .crt-flicker { position: fixed; inset: 32px 38px 62px 38px; pointer-events: none; z-index: 12;
     background: rgba(51,255,102,0.02); animation: flicker 3.5s infinite; border-radius: 22px; }
@@ -52,21 +52,21 @@ body.bg-gray-950 { overflow: hidden; }
     /* Chunky plastic frame — thick all around, extra-thick bottom for brand plate */
     border-style: solid;
     border-width: 32px 38px 62px 38px;
-    /* Warm aged-beige plastic with top-highlight + bottom-shadow shading */
-    border-color: #c7b791;
+    /* Dimmed aged-beige plastic — darker, more weathered */
+    border-color: #9c8a64;
     border-image: linear-gradient(to bottom,
-        #e2d4b0 0%,   /* top — lit, cream */
-        #d6c69c 12%,
-        #c7b88f 42%,  /* body — warm beige */
-        #b6a57d 72%,
-        #9c8a65 92%,  /* bottom — shadow, darker beige */
-        #867653 100%) 1;
-    /* Recessed CRT tube glass */
+        #b5a27a 0%,   /* top — lit but muted cream */
+        #a89572 12%,
+        #938068 42%,  /* body — aged beige */
+        #7f6e52 72%,
+        #68583f 92%,  /* bottom — shadow */
+        #524432 100%) 1;
+    /* Recessed CRT tube glass — less severe inner darkening */
     box-shadow:
-        inset 0 0 0 3px #5c4f3a,                    /* dark seam where glass meets bezel */
-        inset 0 0 0 5px #2a231a,                    /* deep ledge */
-        inset 0 0 14px 2px rgba(0,0,0,0.85),        /* inner glass shadow */
-        inset 0 0 120px 60px rgba(0,0,0,0.35),      /* bulged-glass curvature darkening */
+        inset 0 0 0 3px #4a3f2e,                    /* dark seam where glass meets bezel */
+        inset 0 0 0 5px #1f1a12,                    /* deep ledge */
+        inset 0 0 10px 1px rgba(0,0,0,0.7),         /* softer inner glass shadow */
+        inset 0 0 90px 30px rgba(0,0,0,0.15),       /* very subtle curvature darkening */
         0 0 60px rgba(0,0,0,0.85);                  /* drop shadow behind the monitor */
     /* Chunky rounded corners (late-90s Apple curvature) */
     border-radius: 48px;
@@ -95,8 +95,8 @@ body.bg-gray-950 { overflow: hidden; }
     position: absolute; left: 0; right: 0; bottom: 18px;
     text-align: center;
     font-family: 'VT323', monospace; font-size: 0.8rem; letter-spacing: 0.22em;
-    color: #6b5a3e;
-    text-shadow: 0 1px 0 rgba(255,240,210,0.45), 0 -1px 0 rgba(40,30,15,0.1);
+    color: #3a2e1c;
+    text-shadow: 0 1px 0 rgba(200,180,140,0.35), 0 -1px 0 rgba(20,15,8,0.2);
     pointer-events: none;
 }
 /* Power LED — phosphor green pinhole on the beige, bottom-right */
@@ -117,7 +117,7 @@ body.bg-gray-950 { overflow: hidden; }
 .crt-led-label {
     position: fixed; bottom: 19px; right: 76px; z-index: 22; pointer-events: none;
     font-family: 'VT323', monospace; font-size: 0.78rem; letter-spacing: 0.18em;
-    color: #6b5a3e; text-shadow: 0 1px 0 rgba(255,240,210,0.45);
+    color: #3a2e1c; text-shadow: 0 1px 0 rgba(200,180,140,0.35);
 }
 /* Side vent slats — subtle horizontal striations on the left bezel, 90s styling */
 .crt-vents {
@@ -239,7 +239,7 @@ body.bg-gray-950 { overflow: hidden; }
 #terminal-area { background: var(--bg-deep); position: relative; }
 #terminal-area::before {
     content: ''; position: absolute; inset: 0; pointer-events: none; z-index: 10;
-    background: radial-gradient(ellipse at center, transparent 60%, rgba(0,0,0,0.4) 100%);
+    background: radial-gradient(ellipse at center, transparent 75%, rgba(0,0,0,0.2) 100%);
 }
 .xterm { padding: 8px; }
 .xterm-viewport { scrollbar-width: thin; scrollbar-color: var(--phos-deep) transparent; }
@@ -476,11 +476,11 @@ async function connectSession(tab) {
         theme: {
             // Matrix phosphor base with Rust accents. Greens are primary,
             // rust-orange is the cursor + red channel, amber for yellow.
-            background: '#030503',
-            foreground: '#b6ffcd',
+            background: '#060a06',
+            foreground: '#ccffdd',
             cursor: '#ce422b',
-            cursorAccent: '#030503',
-            selectionBackground: 'rgba(51,255,102,0.25)',
+            cursorAccent: '#060a06',
+            selectionBackground: 'rgba(51,255,102,0.3)',
             black: '#030503', red: '#ce422b', green: '#33ff66', yellow: '#ffb000',
             blue: '#5ec8ff', magenta: '#f74c00', cyan: '#6bffc8', white: '#b6ffcd',
             brightBlack: '#5a8c6b', brightRed: '#f74c00', brightGreen: '#6bffa0', brightYellow: '#ffd23f',
