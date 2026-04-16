@@ -18,38 +18,348 @@ pub async fn render() -> Html<String> {
 }
 
 const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
+  @import url('https://fonts.googleapis.com/css2?family=Antonio:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:wght@400;600;700&display=swap');
+
+  /* =========================================================================
+     Tax module — "Data's positronic ledger"
+     LCARS chrome (orange/gold/peach) + parchment accountant's desk main canvas
+     + positronic-brain sidebar for Positron. Dark leather backing.
+     ========================================================================= */
+  :root {
+    /* LCARS palette (authentic TNG) */
+    --lcars-orange: #ff9c3d;
+    --lcars-peach:  #ffb889;
+    --lcars-salmon: #e88b7a;
+    --lcars-gold:   #d4a574;
+    --lcars-purple: #b797c7;
+    --lcars-blue:   #8aa7d9;
+    --lcars-red:    #cc6666;
+    /* Accountant / ledger palette */
+    --paper:        #ece2c6;        /* warm parchment */
+    --paper-dark:   #d6c8a4;        /* aged paper rule line */
+    --ledger:       #3a6650;        /* forest-green ledger */
+    --ledger-pale:  rgba(58,102,80,0.12);
+    --ink-sepia:    #2b1d10;        /* serious ink on paper */
+    --ink-navy:     #1a2540;        /* section heading ink */
+    --ink-red:      #8b2f1f;        /* red-ink deductions */
+    /* Dark leather desk */
+    --desk-deep:    #0a0806;
+    --desk-mid:     #15110c;
+    --desk-trim:    #2a2014;
+  }
+
   body { font-family: 'Inter', sans-serif; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; }
-  .card { @apply bg-gray-800 rounded-xl border border-gray-700 p-5; }
-  .btn-primary { @apply bg-oc-600 hover:bg-oc-700 text-white font-medium py-2 px-4 rounded-lg transition-colors text-sm; }
-  .input { @apply w-full bg-gray-900 border border-gray-600 rounded-lg px-3 py-2 text-white placeholder-gray-500 focus:border-oc-500 focus:ring-1 focus:ring-oc-500 outline-none text-sm; }
-  select, select.input { color-scheme: dark; }
-  select option { background-color: #111827; color: #e5e7eb; }
-  .label { @apply block text-xs font-medium text-gray-400 mb-1; }
+  body.bg-gray-950 { background: radial-gradient(ellipse at 50% -20%, #1c160e 0%, #0a0806 70%) !important; }
 
-  /* 2-level nav — top-level sections + sub-tab chips */
-  .sec-tab { padding: 0.75rem 1rem; font-size: 0.875rem; font-weight: 500; color: #9ca3af; border-bottom: 2px solid transparent; transition: all 0.12s; cursor: pointer; white-space: nowrap; }
-  .sec-tab:hover { color: #e5e7eb; }
-  .sec-tab.active { color: #f3f4f6; border-bottom-color: #0ea5e9; }
-  .sub-tab { padding: 0.35rem 0.85rem; font-size: 0.75rem; color: #9ca3af; background: #1f2937; border: 1px solid #374151; border-radius: 999px; cursor: pointer; white-space: nowrap; transition: all 0.12s; }
-  .sub-tab:hover { color: #e5e7eb; border-color: #4b5563; }
-  .sub-tab.active { color: #f0f9ff; background: #075985; border-color: #0284c7; }
-  .sub-tab .sub-tab-badge { display: inline-block; margin-left: 0.35rem; padding: 0 0.35rem; min-width: 1.1rem; height: 1.1rem; line-height: 1.1rem; text-align: center; font-size: 0.625rem; border-radius: 999px; background: #16a34a; color: #fff; }
+  /* ─── Top bar — dark leather trim with LCARS gold underline ─── */
+  .border-b.border-gray-800.bg-gray-900\/50 {
+    background: rgba(14,11,7,0.88) !important;
+    border-color: var(--desk-trim) !important;
+    box-shadow: 0 1px 0 0 var(--lcars-gold);
+  }
 
-  /* KPI strip — compact tile row that sits at top of the main canvas */
-  .kpi-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.5rem; margin-bottom: 1rem; }
+  /* ─── Section-level nav — LCARS block buttons ─── */
+  .sec-tab {
+    position: relative;
+    padding: 0.55rem 1.1rem;
+    font-family: 'Antonio', 'Inter', sans-serif;
+    font-size: 0.8rem;
+    font-weight: 500;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--lcars-peach);
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.12s;
+  }
+  .sec-tab:hover { color: var(--lcars-orange); }
+  .sec-tab.active {
+    color: #0a0806;
+    background: var(--lcars-orange);
+    border-bottom-color: var(--lcars-orange);
+    box-shadow: 0 0 14px rgba(255,156,61,0.4);
+  }
+
+  /* ─── Sub-tab chips — LCARS pill row ─── */
+  .sub-tab {
+    padding: 0.3rem 0.85rem;
+    font-family: 'Antonio', 'Inter', sans-serif;
+    font-size: 0.7rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: #0a0806;
+    background: var(--lcars-gold);
+    border: none;
+    border-radius: 0 999px 999px 0;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.15s;
+  }
+  .sub-tab:first-child { border-radius: 999px 0 0 999px; }
+  .sub-tab:hover { background: var(--lcars-peach); }
+  .sub-tab.active {
+    background: var(--lcars-orange);
+    box-shadow: 0 0 8px rgba(255,156,61,0.5);
+  }
+  .sub-tab .sub-tab-badge {
+    display: inline-block; margin-left: 0.35rem; padding: 0 0.35rem;
+    min-width: 1.1rem; height: 1.1rem; line-height: 1.1rem; text-align: center;
+    font-size: 0.625rem; border-radius: 999px; background: var(--lcars-red); color: #0a0806; font-weight: 600;
+  }
+
+  /* ─── KPI strip — LCARS block-headers + IBM Plex Mono numerals ─── */
+  .kpi-strip {
+    display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0;
+    margin-bottom: 1rem;
+    border: 1px solid var(--desk-trim); border-radius: 0.35rem; overflow: hidden;
+    background: var(--desk-deep);
+  }
   @media (max-width: 900px) { .kpi-strip { grid-template-columns: repeat(2, 1fr); } }
-  .kpi-tile { background: #111827; border: 1px solid #1f2937; border-radius: 0.5rem; padding: 0.7rem 0.85rem; }
-  .kpi-tile .kpi-label { font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.06em; color: #6b7280; }
-  .kpi-tile .kpi-value { font-size: 1.25rem; font-weight: 600; color: #f3f4f6; margin-top: 0.15rem; }
-  .kpi-tile .kpi-sub { font-size: 0.7rem; color: #9ca3af; margin-top: 0.1rem; }
-  .kpi-tile.ok .kpi-value { color: #4ade80; }
-  .kpi-tile.warn .kpi-value { color: #fbbf24; }
-  .kpi-tile.bad .kpi-value { color: #f87171; }
+  .kpi-tile { background: #110e09; padding: 0; border-left: 1px solid var(--desk-trim); border-radius: 0; }
+  .kpi-tile:first-child { border-left: none; }
+  .kpi-tile .kpi-label {
+    background: var(--lcars-gold); color: #0a0806;
+    padding: 0.3rem 0.7rem;
+    font-family: 'Antonio', sans-serif; font-size: 0.65rem;
+    letter-spacing: 0.14em; text-transform: uppercase;
+  }
+  .kpi-tile .kpi-value {
+    font-family: 'IBM Plex Mono', monospace; font-size: 1.5rem; font-weight: 500;
+    color: var(--lcars-peach); padding: 0.55rem 0.75rem 0;
+  }
+  .kpi-tile .kpi-sub {
+    font-family: 'IBM Plex Mono', monospace; font-size: 0.68rem;
+    color: #8a7a5c; padding: 0.1rem 0.75rem 0.6rem;
+  }
+  .kpi-tile.ok  .kpi-value { color: #7aea9e; }
+  .kpi-tile.warn .kpi-value { color: var(--lcars-orange); }
+  .kpi-tile.bad  .kpi-value { color: var(--lcars-red); }
 
-  /* Deadline pill */
-  .deadline-pill { display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.25rem 0.65rem; border-radius: 999px; font-size: 0.7rem; font-weight: 500; background: rgba(217,119,6,0.12); color: #fbbf24; border: 1px solid rgba(217,119,6,0.35); white-space: nowrap; }
-  .deadline-pill .deadline-dot { width: 6px; height: 6px; border-radius: 50%; background: #f59e0b; animation: deadline-pulse 2s infinite; }
-  @keyframes deadline-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }"##;
+  /* ─── Deadline pill — LCARS alert ─── */
+  .deadline-pill {
+    display: inline-flex; align-items: center; gap: 0.4rem;
+    padding: 0.25rem 0.7rem 0.25rem 0.5rem;
+    font-family: 'Antonio', sans-serif; font-size: 0.7rem;
+    letter-spacing: 0.12em; text-transform: uppercase; font-weight: 500;
+    background: var(--lcars-red) !important;
+    color: #0a0806 !important;
+    border: none !important;
+    border-radius: 999px 0 0 999px;
+    white-space: nowrap;
+  }
+  .deadline-pill .deadline-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: #0a0806; animation: deadline-pulse 2s infinite;
+  }
+  @keyframes deadline-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+  /* ─── Cards — parchment on dark leather ─── */
+  .card {
+    background: linear-gradient(180deg, #f0e7cc 0%, #e3d6b4 100%) !important;
+    color: var(--ink-sepia) !important;
+    border: 1px solid var(--desk-trim) !important;
+    border-radius: 0.3rem !important;
+    padding: 1.1rem 1.25rem !important;
+    box-shadow: 0 3px 14px rgba(0,0,0,0.55), inset 0 0 0 1px rgba(255,240,210,0.25);
+    position: relative;
+  }
+  /* Faint ledger stripe on the left edge */
+  .card::before {
+    content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
+    background: linear-gradient(180deg, var(--lcars-gold), var(--ledger));
+  }
+  .card h1, .card h2, .card h3, .card h4 {
+    font-family: 'Source Serif 4', Georgia, serif;
+    color: var(--ink-navy) !important;
+    font-weight: 600 !important;
+    letter-spacing: 0.01em;
+  }
+  .card p, .card span, .card div, .card label, .card td, .card th, .card li {
+    color: var(--ink-sepia);
+  }
+  /* Amount / dollar text — always monospaced for a ledger feel */
+  .card .amount, .card [class*="font-medium"][class*="gray-200"],
+  .card .text-2xl, .card .text-xl, .card [id^="sum-"], .card [id^="ext-"] {
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  /* Muted text on cards — use softer sepia */
+  .card .text-gray-300, .card .text-gray-400, .card .text-gray-500, .card .text-gray-600, .card .text-gray-700 {
+    color: #6a5a3e !important;
+  }
+  .card .text-xs, .card .text-sm { color: #4a3a26 !important; }
+  .card .text-yellow-500\/60 { color: var(--ink-red) !important; }
+  .card .text-green-400 { color: var(--ledger) !important; font-family: 'IBM Plex Mono', monospace; }
+  .card .text-red-400, .card .text-red-500 { color: var(--ink-red) !important; }
+  .card .text-oc-500, .card .text-oc-400, .card .text-oc-300 { color: var(--ink-navy) !important; font-weight: 500; }
+  /* Inner "sub-cards" (gray-900 boxes inside cards) — faded parchment wells */
+  .card .bg-gray-900, .card .bg-gray-900\/40, .card .bg-gray-900\/50,
+  .card .bg-gray-800, .card .bg-gray-800\/50 {
+    background: rgba(58,40,20,0.08) !important;
+    border-color: rgba(43,29,16,0.18) !important;
+  }
+  .card .border-gray-700, .card .border-gray-800, .card .border-gray-700\/50, .card .border-gray-800\/30, .card .border-gray-800\/50 {
+    border-color: rgba(43,29,16,0.22) !important;
+  }
+  /* Ledger-green progress bars inside overview */
+  .card .bg-oc-500 { background: var(--ledger) !important; }
+  .card .bg-purple-500 { background: var(--lcars-purple) !important; }
+  .card .bg-gray-700 { background: rgba(43,29,16,0.15) !important; }
+
+  /* Badges on cards */
+  .card .badge-green { background: rgba(58,102,80,0.25) !important; color: var(--ledger) !important; }
+  .card .badge-yellow { background: rgba(212,165,116,0.3) !important; color: #6b4d1a !important; }
+  .card .badge-red { background: rgba(139,47,31,0.18) !important; color: var(--ink-red) !important; }
+
+  /* ─── Buttons ─── */
+  .btn-primary {
+    background: var(--lcars-orange) !important;
+    color: #0a0806 !important;
+    font-family: 'Antonio', sans-serif !important;
+    font-weight: 500 !important;
+    letter-spacing: 0.1em !important;
+    text-transform: uppercase;
+    border-radius: 0.25rem !important;
+    padding: 0.5rem 1.1rem !important;
+  }
+  .btn-primary:hover { background: var(--lcars-peach) !important; box-shadow: 0 0 12px rgba(255,156,61,0.45); }
+
+  /* ─── Inputs on parchment cards ─── */
+  .card .input, .card input:not([type="checkbox"]):not([type="radio"]), .card select, .card textarea {
+    background: rgba(252,245,226,0.7) !important;
+    color: var(--ink-sepia) !important;
+    border: 1px solid rgba(43,29,16,0.35) !important;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  .card .input:focus, .card input:focus, .card select:focus, .card textarea:focus {
+    border-color: var(--ink-navy) !important;
+    box-shadow: 0 0 0 1px var(--ink-navy) !important;
+    outline: none !important;
+  }
+  .card .label { color: var(--ink-navy) !important; font-family: 'Antonio', sans-serif; text-transform: uppercase; letter-spacing: 0.1em; font-size: 0.7rem !important; }
+
+  /* Year-select in top bar keeps dark style */
+  #year-select { background: var(--desk-mid); color: var(--lcars-peach); border-color: var(--desk-trim); font-family: 'IBM Plex Mono', monospace; }
+
+  /* ─── Tables — alternating ledger rows ─── */
+  .card table tr:nth-child(even), .card .ledger-table tr:nth-child(even) { background: var(--ledger-pale); }
+
+  /* ═════════════════════════════════════════════════════════════════════════
+     POSITRONIC MATRIX — the right-rail AI chat
+     ═════════════════════════════════════════════════════════════════════════ */
+  .positron-panel {
+    position: relative;
+    background: radial-gradient(ellipse at top, #0d0d14, #05050a 80%);
+    border-left: 2px solid var(--lcars-gold);
+  }
+  #positron-brain {
+    position: absolute; inset: 0; pointer-events: none; z-index: 0;
+    opacity: 0.55;
+  }
+  .positron-panel > * { position: relative; z-index: 1; }
+
+  .positron-header {
+    display: flex; align-items: center; gap: 0.6rem;
+    padding: 0.55rem 0.85rem;
+    background: linear-gradient(90deg, var(--lcars-orange) 0%, var(--lcars-orange) 60%, transparent 60.5%);
+    color: #0a0806;
+  }
+  .positron-header .p-frame {
+    width: 28px; height: 28px; border-radius: 4px;
+    background: #0a0806;
+    display: flex; align-items: center; justify-content: center;
+    font-family: 'Antonio', sans-serif; font-weight: 700;
+    font-size: 1rem; color: var(--lcars-peach);
+    border: 1px solid rgba(255,156,61,0.6);
+    box-shadow: inset 0 0 8px rgba(255,184,137,0.4);
+  }
+  .positron-header .p-title {
+    flex: 1; font-family: 'Antonio', sans-serif;
+    font-size: 0.82rem; font-weight: 500;
+    letter-spacing: 0.18em; text-transform: uppercase;
+  }
+  .positron-header .p-status {
+    display: flex; align-items: center; gap: 0.3rem;
+    font-family: 'IBM Plex Mono', monospace; font-size: 0.65rem;
+  }
+  .positron-header .p-led {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: #7aea9e; box-shadow: 0 0 6px rgba(122,234,158,0.9);
+    animation: positron-pulse 2.2s ease-in-out infinite;
+  }
+  @keyframes positron-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+  .positron-logbar {
+    padding: 0.35rem 0.85rem;
+    background: rgba(255,156,61,0.08);
+    border-bottom: 1px solid rgba(255,156,61,0.2);
+    font-family: 'IBM Plex Mono', monospace; font-size: 0.62rem;
+    color: var(--lcars-peach);
+    display: flex; justify-content: space-between; gap: 0.5rem;
+  }
+  .positron-logbar .logbar-label { letter-spacing: 0.12em; text-transform: uppercase; opacity: 0.7; }
+  .positron-logbar .logbar-value { letter-spacing: 0.05em; }
+
+  /* Chat messages */
+  #tax-chat-messages { padding: 0.75rem !important; gap: 0.75rem !important; }
+  #tax-chat-messages > div {
+    background: rgba(255,156,61,0.05);
+    border-left: 2px solid var(--lcars-gold);
+    padding: 0.6rem 0.75rem !important;
+    border-radius: 0 6px 6px 0;
+  }
+  #tax-chat-messages > div > div, #tax-chat-messages > div > p,
+  #tax-chat-messages > div p, #tax-chat-messages .text-sm, #tax-chat-messages .text-gray-400 {
+    color: var(--lcars-peach) !important;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.78rem !important;
+    line-height: 1.55;
+  }
+  /* Quick-action chips inside chat greeting */
+  #tax-chat-messages button {
+    background: transparent !important;
+    color: var(--lcars-gold) !important;
+    border: 1px solid var(--lcars-gold) !important;
+    border-radius: 0 999px 999px 0 !important;
+    font-family: 'Antonio', sans-serif;
+    letter-spacing: 0.08em; text-transform: uppercase;
+    font-size: 0.65rem !important;
+    padding: 0.2rem 0.6rem !important;
+  }
+  #tax-chat-messages button:hover { background: rgba(212,165,116,0.15) !important; color: var(--lcars-orange) !important; }
+
+  /* Input row */
+  .positron-input-row {
+    padding: 0.55rem 0.75rem;
+    border-top: 1px solid rgba(255,156,61,0.25);
+    background: rgba(14,10,5,0.6);
+  }
+  #tax-chat-input {
+    background: rgba(255,184,137,0.05) !important;
+    border: 1px solid rgba(255,156,61,0.3) !important;
+    color: var(--lcars-peach) !important;
+    font-family: 'IBM Plex Mono', monospace !important;
+    font-size: 0.78rem !important;
+    border-radius: 0.25rem !important;
+  }
+  #tax-chat-input:focus { border-color: var(--lcars-orange) !important; box-shadow: 0 0 8px rgba(255,156,61,0.3) !important; }
+  #tax-chat-input::placeholder { color: rgba(212,165,116,0.55) !important; }
+
+  .transmit-btn {
+    background: var(--lcars-orange); color: #0a0806;
+    font-family: 'Antonio', sans-serif;
+    letter-spacing: 0.12em; text-transform: uppercase;
+    font-size: 0.68rem; font-weight: 500;
+    padding: 0.4rem 0.85rem;
+    border: none;
+    border-radius: 999px 0 0 999px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.12s;
+  }
+  .transmit-btn:hover { background: var(--lcars-peach); box-shadow: 0 0 10px rgba(255,156,61,0.45); }"##;
 
 const BODY_HTML: &str = r##"<!-- Module paywall overlay (hidden by default, shown if module is locked) -->
 <div id="module-paywall" class="hidden fixed inset-0 z-50 bg-gray-950/95 backdrop-blur-sm flex items-center justify-center">
@@ -1357,34 +1667,46 @@ const BODY_HTML: &str = r##"<!-- Module paywall overlay (hidden by default, show
 
   </div><!-- end left panel -->
 
-  <!-- RIGHT: AI Chat -->
-  <div class="w-[380px] border-l border-gray-800 flex flex-col flex-shrink-0">
-    <div class="px-4 py-2.5 border-b border-gray-800 flex items-center justify-between">
-      <div class="flex items-center gap-2">
-        <img src="/agent-avatar/main" class="w-6 h-6 rounded-lg" alt="">
-        <span class="text-sm font-medium text-gray-300">Tax Assistant</span>
-      </div>
-      <button onclick="clearTaxChat()" class="text-xs text-gray-500 hover:text-gray-300">Clear</button>
+  <!-- RIGHT: Positronic Matrix (AI chat, Positron persona) -->
+  <div class="w-[380px] positron-panel flex flex-col flex-shrink-0">
+    <!-- Animated positronic brain canvas behind messages -->
+    <canvas id="positron-brain"></canvas>
+
+    <!-- LCARS header -->
+    <div class="positron-header">
+      <div class="p-frame">P</div>
+      <div class="p-title">Positronic Matrix</div>
+      <div class="p-status"><span class="p-led"></span><span>ONLINE</span></div>
     </div>
-    <div class="flex-1 overflow-y-auto p-3 space-y-3" id="tax-chat-messages">
+
+    <!-- Log counter / action strip -->
+    <div class="positron-logbar">
+      <span class="logbar-label">LOG</span>
+      <span class="logbar-value" id="positron-log-index">0000.0</span>
+      <span class="logbar-label" style="margin-left:auto">CYCLES</span>
+      <span class="logbar-value" id="positron-msg-count">0</span>
+      <button onclick="clearTaxChat()" class="logbar-label" style="background:none;border:none;color:inherit;cursor:pointer;margin-left:0.5rem;opacity:0.7" title="Clear conversation">CLR</button>
+    </div>
+
+    <div class="flex-1 overflow-y-auto space-y-3" id="tax-chat-messages">
       <div class="flex gap-2">
         <img src="/agent-avatar/main" class="w-6 h-6 rounded-lg flex-shrink-0 mt-0.5" alt="">
         <div class="text-sm text-gray-400">
-          <p>I can help with your taxes. Try:</p>
+          <p>Positron here. I have access to your receipts, expenses, investments, and taxpayer profile. I can compute deductions, flag inconsistencies, and cite IRC when appropriate. Queries:</p>
           <div class="flex flex-wrap gap-1 mt-2">
-            <button onclick="taxChat('Show my expense summary for 2025')" class="text-xs bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-full px-2.5 py-1 transition-colors">2025 summary</button>
-            <button onclick="taxChat('What are my deductible expenses?')" class="text-xs bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-full px-2.5 py-1 transition-colors">Deductible?</button>
-            <button onclick="taxChat('Log a $50 lunch at Chipotle today as business meal')" class="text-xs bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-full px-2.5 py-1 transition-colors">Log expense</button>
+            <button onclick="taxChat('Show my expense summary for 2025')">2025 Summary</button>
+            <button onclick="taxChat('What are my deductible expenses?')">Deductibility</button>
+            <button onclick="taxChat('Log a $50 lunch at Chipotle today as business meal')">Log Expense</button>
           </div>
         </div>
       </div>
     </div>
-    <div class="p-3 border-t border-gray-800">
+
+    <!-- Input -->
+    <div class="positron-input-row">
       <div class="flex gap-2 items-end">
-        <textarea id="tax-chat-input" rows="1" class="flex-1 bg-gray-800 border border-gray-700 rounded-xl px-3 py-2 text-white placeholder-gray-400 focus:border-oc-500 outline-none resize-none text-sm" placeholder="Ask about taxes..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendTaxChat()}" oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,100)+'px'" style="max-height:100px"></textarea>
-        <button onclick="sendTaxChat()" class="bg-oc-600 hover:bg-oc-700 text-white rounded-xl p-2 transition-colors flex-shrink-0" id="tax-send-btn">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-        </button>
+        <textarea id="tax-chat-input" rows="1" class="flex-1 px-3 py-2 outline-none resize-none" placeholder="Query Positron..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendTaxChat()}" oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,100)+'px'" style="max-height:100px"></textarea>
+        <button onclick="sendTaxChat()" class="transmit-btn flex-shrink-0" id="tax-send-btn">TRANSMIT</button>
       </div>
     </div>
   </div>
@@ -1908,6 +2230,7 @@ async function sendTaxChat() {
   userEl.className = 'flex gap-2 justify-end';
   userEl.innerHTML = `<div class="max-w-[85%] bg-oc-900/40 border border-oc-800/40 rounded-xl rounded-br-sm px-3 py-2 text-sm text-gray-200">${esc(msg)}</div>`;
   messages.appendChild(userEl);
+  positronMsgCount++;
 
   // Thinking
   const aiEl = document.createElement('div');
@@ -1918,6 +2241,7 @@ async function sendTaxChat() {
     </div>`;
   messages.appendChild(aiEl);
   messages.scrollTop = messages.scrollHeight;
+  updatePositronLog();
 
   const respEl = aiEl.querySelector('#tax-ai-resp');
   respEl.removeAttribute('id');
@@ -2010,7 +2334,8 @@ async function sendTaxChat() {
             respEl.innerHTML = `<div class="text-gray-300 leading-relaxed text-sm">${esc(ev.response).replace(/\n/g,'<br>')}</div>`;
             messages.scrollTop = messages.scrollHeight;
             taxChatSending = false; btn.disabled = false; input.focus();
-            if (msg.toLowerCase().match(/log|add|expense/)) { loadOverview(); loadExpenses(); }
+            positronMsgCount++; updatePositronLog();
+            if (msg.toLowerCase().match(/log|add|expense/)) { loadOverview(); loadExpenses(); loadKpiStrip(); }
             return;
           case 'error':
             evtSource.close();
@@ -4393,4 +4718,128 @@ loadKpiStrip();         // fills the always-visible KPI tiles
 updateDeadlinePill();   // shows next IRS deadline if within 60 days
 showSection('investments'); // default landing — Sean's most-frequent use
 setInterval(loadKpiStrip, 90000); // refresh portfolio every 90s
+initPositronicBrain();  // neural-net canvas animation + LCARS log counter
+updatePositronLog();    // initial log reading
+
+// ═══ POSITRONIC BRAIN — animated neural network behind the chat panel ═══
+function initPositronicBrain() {
+  const canvas = document.getElementById('positron-brain');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d', { alpha: true });
+  let w = 0, h = 0;
+  const NODE_COUNT = 38;
+  const nodes = [];   // {x,y,r,phase}
+  const edges = [];   // {a,b,len}
+  const pulses = [];  // {edge, t, dir}
+
+  function resize() {
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    w = canvas.width = Math.floor(rect.width * dpr);
+    h = canvas.height = Math.floor(rect.height * dpr);
+    canvas.style.width = rect.width + 'px';
+    canvas.style.height = rect.height + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    buildGraph(rect.width, rect.height);
+  }
+
+  function buildGraph(vw, vh) {
+    nodes.length = 0; edges.length = 0;
+    for (let i = 0; i < NODE_COUNT; i++) {
+      nodes.push({
+        x: Math.random() * vw,
+        y: Math.random() * vh,
+        r: 1.4 + Math.random() * 1.8,
+        phase: Math.random() * Math.PI * 2,
+      });
+    }
+    // Connect each node to its 2 nearest neighbors
+    for (let i = 0; i < nodes.length; i++) {
+      const dists = nodes
+        .map((n, j) => ({ j, d: j === i ? Infinity : Math.hypot(nodes[i].x - n.x, nodes[i].y - n.y) }))
+        .sort((a, b) => a.d - b.d);
+      for (let k = 0; k < 2; k++) {
+        const j = dists[k].j;
+        // Avoid duplicate edges
+        if (!edges.find(e => (e.a === i && e.b === j) || (e.a === j && e.b === i))) {
+          edges.push({ a: i, b: j, len: dists[k].d });
+        }
+      }
+    }
+  }
+
+  window.addEventListener('resize', resize);
+  setTimeout(resize, 50);
+
+  let t0 = performance.now();
+  function tick(now) {
+    const dt = (now - t0) / 1000; t0 = now;
+    if (!w || !h) { requestAnimationFrame(tick); return; }
+    const rect = canvas.getBoundingClientRect();
+    ctx.clearRect(0, 0, rect.width, rect.height);
+
+    // Draw fiber-optic edges
+    for (const e of edges) {
+      const a = nodes[e.a], b = nodes[e.b];
+      const grad = ctx.createLinearGradient(a.x, a.y, b.x, b.y);
+      grad.addColorStop(0, 'rgba(255,156,61,0.12)');
+      grad.addColorStop(0.5, 'rgba(255,184,137,0.22)');
+      grad.addColorStop(1, 'rgba(255,156,61,0.12)');
+      ctx.strokeStyle = grad;
+      ctx.lineWidth = 0.6;
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    }
+
+    // Spawn new pulses occasionally
+    if (Math.random() < 0.04 && pulses.length < 8) {
+      const e = edges[Math.floor(Math.random() * edges.length)];
+      pulses.push({ edge: e, t: 0, dir: Math.random() < 0.5 ? 1 : -1 });
+    }
+
+    // Advance and draw pulses
+    for (let i = pulses.length - 1; i >= 0; i--) {
+      const p = pulses[i];
+      p.t += dt * 0.6;
+      if (p.t > 1) { pulses.splice(i, 1); continue; }
+      const a = nodes[p.edge.a], b = nodes[p.edge.b];
+      const tt = p.dir === 1 ? p.t : 1 - p.t;
+      const px = a.x + (b.x - a.x) * tt;
+      const py = a.y + (b.y - a.y) * tt;
+      // Bright pulse head
+      ctx.fillStyle = 'rgba(255,220,170,0.95)';
+      ctx.shadowColor = 'rgba(255,184,137,0.9)';
+      ctx.shadowBlur = 8;
+      ctx.beginPath(); ctx.arc(px, py, 2.1, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+
+    // Draw nodes (neurons) with breathing glow
+    for (const n of nodes) {
+      n.phase += dt * 1.1;
+      const glow = 0.55 + 0.45 * Math.sin(n.phase);
+      ctx.fillStyle = `rgba(255,184,137,${0.45 + glow * 0.4})`;
+      ctx.shadowColor = `rgba(255,156,61,${glow * 0.7})`;
+      ctx.shadowBlur = 6 + glow * 6;
+      ctx.beginPath(); ctx.arc(n.x, n.y, n.r + glow * 0.3, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+}
+
+// Starship-style log counter: STARDATE-ish "XXXX.X" cycling slowly
+let positronMsgCount = 0;
+function updatePositronLog() {
+  const idx = document.getElementById('positron-log-index');
+  if (!idx) return;
+  const base = 48000;  // aesthetic starting offset
+  const now = Date.now() / 1000;
+  const stardate = (base + (now % 100000) / 10).toFixed(1);
+  idx.textContent = stardate;
+  const cnt = document.getElementById('positron-msg-count');
+  if (cnt) cnt.textContent = positronMsgCount.toString().padStart(3, '0');
+}
+setInterval(updatePositronLog, 3000);
 </script>"##;
