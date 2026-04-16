@@ -38,6 +38,8 @@ serde_yaml = "0.9"
 
 # PDF text extraction for the uploaded_files RAG connector.
 pdf-extract = "0.7"
+# AcroForm field filling for IRS Form 4868 (extension filing).
+lopdf = "0.34"
 
 # Document format extractors for RAG knowledge indexing.
 calamine = "0.26"       # XLSX/XLS/ODS spreadsheets

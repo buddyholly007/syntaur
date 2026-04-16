@@ -29,6 +29,7 @@ mod pages;
 mod setup;
 mod license;
 mod tax;
+mod tax_pdf;
 mod financial;
 mod calendar_reminder;
 mod sync;

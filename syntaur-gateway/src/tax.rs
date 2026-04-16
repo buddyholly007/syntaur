@@ -2567,10 +2567,13 @@ pub async fn handle_csv_irs_export(
 
 // ── Form 4868 Extension Generator ───────────────────────────────────────────
 
+/// Render the user's Form 4868 as a real fillable PDF — bundled blank IRS
+/// template with /V values set from the user's profile + tax estimate. The
+/// reader regenerates appearances on open thanks to /NeedAppearances=true.
 pub async fn handle_extension(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> Result<(axum::http::HeaderMap, String), (StatusCode, String)> {
+) -> Result<(axum::http::HeaderMap, Vec<u8>), (StatusCode, String)> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
     let principal = crate::resolve_principal(&state, token).await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
@@ -2580,82 +2583,97 @@ pub async fn handle_extension(
     let year: i64 = params.get("year").and_then(|y| y.parse().ok()).unwrap_or_else(|| default_tax_year());
     let ext_payment: i64 = params.get("payment").and_then(|p| p.parse().ok()).unwrap_or(0);
 
-    let text = tokio::task::spawn_blocking(move || -> Result<String, String> {
+    let pdf_bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
         let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
-        let est = compute_tax_estimate(&conn, uid, year, "married_jointly")?;
-        let d = |c: i64| cents_to_display(c);
 
-        // Get user name from principal or config
-        let user_name = conn.query_row(
-            "SELECT COALESCE(display_name, username, 'Taxpayer') FROM users WHERE id = ?",
-            rusqlite::params![uid], |r| r.get::<_, String>(0),
-        ).unwrap_or_else(|_| "Taxpayer".to_string());
+        // Pull filing status from the taxpayer profile so the estimate
+        // matches what we render on lines 4-7.
+        let filing_status: String = conn.query_row(
+            "SELECT filing_status FROM taxpayer_profiles WHERE user_id = ? AND tax_year = ?",
+            rusqlite::params![uid, year], |r| r.get(0),
+        ).unwrap_or_else(|_| "single".to_string());
 
+        let est = compute_tax_estimate(&conn, uid, year, &filing_status)?;
         let balance_due = std::cmp::max(est.total_tax - est.total_payments, 0);
+        // Display the dollar amounts as bare "1234.56" — the IRS form has
+        // its own dollar sign and column alignment.
+        let dollars = |c: i64| format!("{:.2}", c as f64 / 100.0);
 
-        let mut out = String::new();
-        out += "═══════════════════════════════════════════════════════════\n";
-        out += "     IRS FORM 4868 — Application for Automatic Extension\n";
-        out += "         of Time to File U.S. Individual Income Tax Return\n";
-        out += &format!("                      Tax Year {}\n", year);
-        out += "═══════════════════════════════════════════════════════════\n\n";
+        // Pull identification from taxpayer_profiles. Fall back to the user
+        // record when no profile has been saved yet.
+        type ProfileRow = (
+            Option<String>, Option<String>, Option<String>, Option<String>,
+            Option<String>, Option<String>, Option<String>, Option<String>,
+            Option<String>,
+        );
+        let profile: ProfileRow = conn.query_row(
+            "SELECT first_name, last_name, address_line1, address_line2, city, state, zip, \
+                    spouse_first, spouse_last \
+             FROM taxpayer_profiles WHERE user_id = ? AND tax_year = ?",
+            rusqlite::params![uid, year],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?,
+                    r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?))
+        ).unwrap_or_else(|_| (None, None, None, None, None, None, None, None, None));
+        let (first, last, addr1, addr2, city, st, zip, sp_first, sp_last) = profile;
 
-        out += &format!("Name: {}\n", user_name);
-        out += &format!("Tax Year: {}\n\n", year);
+        let user_display: String = conn.query_row(
+            "SELECT COALESCE(display_name, username, '') FROM users WHERE id = ?",
+            rusqlite::params![uid], |r| r.get(0),
+        ).unwrap_or_default();
 
-        out += "─── Part I: Identification ─────────────────────────────\n";
-        out += "  Line 1: Your name(s) and address: [fill in]\n";
-        out += "  Line 2: SSN: [fill in]\n";
-        out += "  Line 3: Filing status: [check appropriate box]\n\n";
+        // Build the name line: "First Last & Spouse First Last" if married
+        // jointly, otherwise just the primary taxpayer.
+        let primary = match (first.as_deref(), last.as_deref()) {
+            (Some(f), Some(l)) if !f.is_empty() || !l.is_empty() => format!("{} {}", f, l).trim().to_string(),
+            _ => user_display.clone(),
+        };
+        let mut name_line = primary;
+        if filing_status == "married_jointly" {
+            let spouse = match (sp_first.as_deref(), sp_last.as_deref()) {
+                (Some(f), Some(l)) if !f.is_empty() || !l.is_empty() => format!("{} {}", f, l).trim().to_string(),
+                _ => String::new(),
+            };
+            if !spouse.is_empty() {
+                name_line = format!("{} & {}", name_line, spouse);
+            }
+        }
 
-        out += "─── Part II: Individual Income Tax ─────────────────────\n";
-        out += &format!("  Line 4:  Estimate of total tax liability:    {}\n", d(est.total_tax));
-        out += &format!("  Line 5:  Total payments already made:        {}\n", d(est.total_payments));
-        out += &format!("  Line 6:  Balance due (line 4 - line 5):      {}\n", d(balance_due));
-        out += &format!("  Line 7:  Amount you're paying:               {}\n\n", d(ext_payment));
+        // Address line: "addr1, addr2" or just addr1.
+        let address_line = match (addr1.as_deref(), addr2.as_deref()) {
+            (Some(a1), Some(a2)) if !a2.is_empty() => format!("{}, {}", a1, a2),
+            (Some(a1), _) => a1.to_string(),
+            _ => String::new(),
+        };
+        // City/state/ZIP line: "City, ST 12345".
+        let csz = match (city.as_deref(), st.as_deref(), zip.as_deref()) {
+            (Some(c), Some(s), Some(z)) if !c.is_empty() || !s.is_empty() || !z.is_empty() =>
+                format!("{}, {} {}", c.trim(), s.trim(), z.trim()).trim_matches(|c: char| c == ',' || c.is_whitespace()).to_string(),
+            _ => String::new(),
+        };
 
-        out += "─── Tax Estimate Breakdown ─────────────────────────────\n";
-        out += &format!("  Gross Income:                  {}\n", d(est.gross_income));
-        out += &format!("  Adjusted Gross Income:         {}\n", d(est.agi));
-        out += &format!("  Federal Income Tax:            {}\n", d(est.ordinary_tax));
-        if est.se_tax > 0 { out += &format!("  Self-Employment Tax:           {}\n", d(est.se_tax)); }
-        if est.ltcg_tax > 0 { out += &format!("  Capital Gains Tax:             {}\n", d(est.ltcg_tax)); }
-        out += &format!("  Total Tax:                     {}\n", d(est.total_tax));
-        out += &format!("  W-2 Withholding:              -{}\n", d(est.w2_withheld));
-        if est.fed_paid > 0 { out += &format!("  Estimated Payments:           -{}\n", d(est.fed_paid)); }
-        if est.child_credit > 0 { out += &format!("  Child Tax Credit:             -{}\n", d(est.child_credit)); }
-        out += &format!("  Total Payments:               -{}\n", d(est.total_payments));
-        out += &format!("  ─────────────────────────────────\n");
-        out += &format!("  {}\n\n", if balance_due > 0 { format!("Balance Due: {}", d(balance_due)) } else { format!("Refund Expected: {}", d(-est.owed)) });
-
-        out += "═══════════════════════════════════════════════════════════\n";
-        out += "HOW TO FILE THIS EXTENSION:\n\n";
-        out += "Option 1 (Fastest): IRS Free File\n";
-        out += "  → Go to irs.gov/freefile\n";
-        out += "  → Choose any partner → File Form 4868 electronically\n";
-        out += "  → Free for all taxpayers, no income limit\n\n";
-        out += "Option 2 (Auto-extension): IRS Direct Pay\n";
-        out += "  → Go to irs.gov/payments → Select 'Extension' as reason\n";
-        out += "  → Making a payment automatically files your extension\n\n";
-        out += "Option 3: Print & mail this form with your payment\n";
-        out += "  → Mail to your IRS service center by April 15\n";
-        out += "  → Download official Form 4868 at irs.gov/pub/irs-pdf/f4868.pdf\n\n";
-        out += "IMPORTANT DATES:\n";
-        out += &format!("  Filing deadline (with extension): October 15, {}\n", year + 1);
-        out += &format!("  Payment deadline (NOT extended):  April 15, {}\n", year + 1);
-        out += "  Interest/penalties accrue on unpaid tax after April 15.\n";
-        out += "═══════════════════════════════════════════════════════════\n";
-        out += &format!("\nGenerated by Syntaur Tax Module on {}\n", chrono::Utc::now().format("%Y-%m-%d"));
-
-        Ok(out)
+        let data = crate::tax_pdf::Form4868Data {
+            name: if name_line.is_empty() { None } else { Some(name_line) },
+            address: if address_line.is_empty() { None } else { Some(address_line) },
+            city_state_zip: if csz.is_empty() { None } else { Some(csz) },
+            total_tax: Some(dollars(est.total_tax)),
+            total_payments: Some(dollars(est.total_payments)),
+            balance_due: Some(dollars(balance_due)),
+            amount_paying: Some(dollars(ext_payment)),
+            out_of_country: false,
+            is_1040nr_no_wages: false,
+        };
+        crate::tax_pdf::fill_form_4868(&data)
     }).await
     .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let mut headers = axum::http::HeaderMap::new();
-    headers.insert("content-type", "text/plain; charset=utf-8".parse().unwrap());
-    headers.insert("content-disposition", format!("attachment; filename=\"form-4868-{}.txt\"", year).parse().unwrap());
-    Ok((headers, text))
+    headers.insert("content-type", "application/pdf".parse().unwrap());
+    headers.insert(
+        "content-disposition",
+        format!("attachment; filename=\"form-4868-{}.pdf\"", year).parse().unwrap(),
+    );
+    Ok((headers, pdf_bytes))
 }
 
 // ── Extension Filing Workflow (stateful) ────────────────────────────────────
