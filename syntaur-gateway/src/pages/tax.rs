@@ -2698,7 +2698,7 @@ async function startExtFiling(method) {
     if (resp.ok) {
       const blob = await resp.blob();
       const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
-      a.download = `form-4868-${yr}.txt`; a.click(); URL.revokeObjectURL(a.href);
+      a.download = `form-4868-${yr}.pdf`; a.click(); URL.revokeObjectURL(a.href);
     }
     if (extId) await authFetch(`/api/tax/extension/${extId}/file`, {
       method:'PUT', headers:{'Content-Type':'application/json'},
