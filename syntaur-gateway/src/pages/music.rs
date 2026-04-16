@@ -320,6 +320,93 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   /* ── Volume slider — neon track ──────────────────────────────────── */
   input[type="range"] { accent-color: var(--c-mag); }
 
+  /* ── Native dropdown reskin — notched, neon, custom arrow ──────── */
+  select.cyber-select {
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    background-color: var(--c-surface) !important;
+    border: 1px solid var(--c-line) !important;
+    border-radius: 0 !important;
+    color: var(--c-text) !important;
+    font-family: 'Rajdhani', sans-serif !important;
+    font-weight: 600 !important;
+    letter-spacing: 0.08em !important;
+    text-transform: uppercase !important;
+    padding: 4px 22px 4px 10px !important;
+    /* Inline SVG cyan caret as the dropdown arrow. */
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10' fill='none' stroke='%2300f0ff' stroke-width='1.5'><path d='M2 4l3 3 3-3'/></svg>") !important;
+    background-repeat: no-repeat;
+    background-position: right 6px center;
+    clip-path: polygon(5px 0, 100% 0, 100% calc(100% - 5px), calc(100% - 5px) 100%, 0 100%, 0 5px);
+    cursor: pointer;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  select.cyber-select:focus,
+  select.cyber-select:hover {
+    border-color: var(--c-cy) !important;
+    box-shadow: 0 0 6px var(--c-cy-soft) !important;
+  }
+  /* Dropdown popup itself (browser-controlled, but options inherit colors). */
+  select.cyber-select option { background: var(--c-surface); color: var(--c-text); }
+
+  /* ── Checkbox reskin — magenta-notched square with neon glow ───── */
+  input[type="checkbox"].cyber-check {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 14px; height: 14px;
+    margin: 0;
+    background: var(--c-surface);
+    border: 1px solid var(--c-line);
+    border-radius: 0;
+    clip-path: polygon(3px 0, 100% 0, 100% calc(100% - 3px), calc(100% - 3px) 100%, 0 100%, 0 3px);
+    cursor: pointer;
+    position: relative;
+    flex-shrink: 0;
+    transition: all 0.15s;
+  }
+  input[type="checkbox"].cyber-check:hover {
+    border-color: var(--c-cy);
+    box-shadow: 0 0 4px var(--c-cy-soft);
+  }
+  input[type="checkbox"].cyber-check:checked {
+    background: var(--c-mag);
+    border-color: var(--c-mag);
+    box-shadow: 0 0 6px var(--c-mag-soft);
+  }
+  /* Inner ✓ glyph drawn via SVG mask so it stays crisp at any zoom. */
+  input[type="checkbox"].cyber-check:checked::after {
+    content: '';
+    position: absolute;
+    inset: 1px;
+    background: var(--c-bg);
+    clip-path: polygon(13% 48%, 36% 70%, 85% 18%, 92% 27%, 38% 90%, 6% 58%);
+  }
+  /* Label that wraps the checkbox gets a subtle hover state. */
+  label.cyber-check-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    font-family: 'Rajdhani', sans-serif;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-size: 11px;
+    color: var(--c-text-mute);
+    transition: color 0.15s;
+  }
+  label.cyber-check-label:hover { color: var(--c-text); }
+  /* Same Rajdhani treatment for the inline "Tracks:" label next to the select. */
+  .cyber-inline-label {
+    font-family: 'Rajdhani', sans-serif;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-size: 11px;
+    color: var(--c-text-mute);
+  }
+
   .pulse { animation: pulse 2s infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.6} }
 
@@ -486,13 +573,13 @@ const BODY_HTML: &str = r##"<!-- Top bar — matches the dashboard so the music 
         </button>
         <button onclick="runDj()" id="dj-run-btn" class="bg-oc-600 hover:bg-oc-700 text-white px-4 rounded-lg text-sm font-medium flex-shrink-0">Build</button>
       </div>
-      <div class="mt-2 flex items-center gap-4 text-xs text-gray-500">
-        <label class="flex items-center gap-1.5 cursor-pointer">
-          <input type="checkbox" id="dj-create-playlist" class="accent-oc-500"> Save as playlist
+      <div class="mt-3 flex items-center gap-4">
+        <label class="cyber-check-label">
+          <input type="checkbox" id="dj-create-playlist" class="cyber-check"> Save as playlist
         </label>
-        <label class="flex items-center gap-1.5">
-          <span>Tracks:</span>
-          <select id="dj-count" class="bg-gray-900 border border-gray-700 rounded text-xs py-0.5 px-1 outline-none">
+        <label class="cyber-check-label" style="cursor: default;">
+          <span class="cyber-inline-label">Tracks</span>
+          <select id="dj-count" class="cyber-select">
             <option value="10">10</option>
             <option value="15" selected>15</option>
             <option value="25">25</option>
