@@ -26,13 +26,10 @@ pub async fn render() -> Html<String> {
 
 fn page_body() -> Markup {
     html! {
-        // ── Inline-SVG watermark behind everything ───────────────────
-        // A Renaissance-style geometric construction sketch — circles,
-        // inscribed square, diagonals, concentric rings, corner motifs.
-        // Hand-authored, no copyrighted source. Fixed-position so it
-        // doesn't scroll with content. Subtle (8-12% effective opacity)
-        // so the cards remain primary.
-        (PreEscaped(LIB_WATERMARK_SVG))
+        // Background image is set in CSS via body::before
+        // (see EXTRA_STYLE → /library-bg.webp). The hand-authored SVG
+        // watermark was removed when we got the photographic backdrop
+        // — kept the const around in source comments for reference.
 
         // ── Top bar — leather-bound spine ──────────────────────────────
         div class="lib-topbar" {
@@ -189,16 +186,36 @@ const EXTRA_STYLE: &str = r##"
 
   body {
     background: var(--lib-bg);
-    background-image:
-      /* faint candle warmth in opposing corners */
-      radial-gradient(ellipse 700px 500px at 0% 0%, rgba(200,155,60,0.10), transparent 60%),
-      radial-gradient(ellipse 600px 400px at 100% 100%, rgba(118,42,42,0.08), transparent 60%),
-      /* leather grain — large soft noise via two diagonal gradients */
-      linear-gradient(135deg, rgba(255,255,255,0.012) 0px, transparent 1px, transparent 4px),
-      linear-gradient(45deg,  rgba(0,0,0,0.06) 0px, transparent 1px, transparent 6px);
-    background-attachment: fixed;
     color: var(--lib-paper);
     font-family: 'EB Garamond', 'Iowan Old Style', Georgia, serif;
+  }
+  /* Full-bleed photographic background — Renaissance-alchemist scholar's
+     desk image, fixed to the viewport so it doesn't scroll with content.
+     Two darkening overlays keep the cards readable: a deep tint over the
+     whole image plus a stronger center-band gradient where the cards land. */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    background-image:
+      /* center-band darken so cards have a calmer surface to sit on */
+      linear-gradient(to bottom, rgba(7,4,1,0.30) 0%, rgba(7,4,1,0.55) 35%, rgba(7,4,1,0.55) 65%, rgba(7,4,1,0.30) 100%),
+      /* the actual scene */
+      url('/library-bg.webp');
+    background-size: cover, cover;
+    background-position: center, center;
+    background-repeat: no-repeat, no-repeat;
+    pointer-events: none;
+  }
+  /* Extra warm vignette over everything — pulls the eye toward center. */
+  body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    background: radial-gradient(ellipse 100% 80% at center, transparent 0%, transparent 40%, rgba(7,4,1,0.5) 100%);
   }
 
   /* ── Top bar — leather spine with gold tooling ──────────────────── */
@@ -510,167 +527,10 @@ const EXTRA_STYLE: &str = r##"
   .lib-card .border-gray-700,
   .lib-card .border-gray-800 { border-color: var(--lib-rule) !important; }
 
-  /* ── Background watermark — Renaissance construction sketch ───── */
-  .lib-watermark {
-    position: fixed;
-    top: 50%; left: 50%;
-    transform: translate(-50%, -50%);
-    /* As big as the smaller viewport dimension allows, capped at 900px so
-       it never crowds the layout on ultrawide displays. */
-    width: min(90vw, 90vh, 900px);
-    height: min(90vw, 90vh, 900px);
-    pointer-events: none;
-    opacity: 0.10;
-    z-index: 0;
-  }
-  /* Make sure all real content sits above the watermark layer. */
+  /* All real content sits above the photographic background image
+     (see body::before / body::after rules) and its darkening overlays. */
   .lib-topbar, .lib-body { position: relative; z-index: 1; }
 "##;
-
-/// Inline-SVG watermark: faded Renaissance-style geometric construction
-/// sketch. Hand-authored, no copyrighted source. Vitruvian-style outer
-/// circle inscribed in a square with crossed diagonals, concentric rings,
-/// 12-fold radial proportional lines, corner fleurons, and a degree-tick
-/// outer arc reminiscent of an astrolabe. Reads as a sketch on the desk
-/// rather than a hard graphic, thanks to the 10% container opacity.
-const LIB_WATERMARK_SVG: &str = r##"<svg class="lib-watermark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 800" fill="none" stroke="#f4ead5" stroke-width="0.7" stroke-linecap="round" aria-hidden="true">
-  <!-- Outer degree ring — every 6 degrees a tick, every 30 degrees a longer one. -->
-  <circle cx="400" cy="400" r="395" stroke-width="0.4"/>
-  <circle cx="400" cy="400" r="380" stroke-width="0.5"/>
-  <g stroke-width="0.4">
-    <!-- 60 short ticks (every 6°) — drawn as a single rotation pattern. -->
-    <g transform="translate(400 400)">
-      <g><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(6)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(12)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(18)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(24)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(30)"><line y1="-395" y2="-380"/></g>
-      <g transform="rotate(36)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(42)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(48)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(54)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(60)"><line y1="-395" y2="-380"/></g>
-      <g transform="rotate(66)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(72)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(78)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(84)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(90)"><line y1="-395" y2="-380"/></g>
-      <g transform="rotate(96)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(102)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(108)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(114)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(120)"><line y1="-395" y2="-380"/></g>
-      <g transform="rotate(126)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(132)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(138)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(144)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(150)"><line y1="-395" y2="-380"/></g>
-      <g transform="rotate(156)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(162)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(168)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(174)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(180)"><line y1="-395" y2="-380"/></g>
-      <g transform="rotate(186)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(192)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(198)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(204)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(210)"><line y1="-395" y2="-380"/></g>
-      <g transform="rotate(216)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(222)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(228)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(234)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(240)"><line y1="-395" y2="-380"/></g>
-      <g transform="rotate(246)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(252)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(258)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(264)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(270)"><line y1="-395" y2="-380"/></g>
-      <g transform="rotate(276)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(282)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(288)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(294)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(300)"><line y1="-395" y2="-380"/></g>
-      <g transform="rotate(306)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(312)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(318)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(324)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(330)"><line y1="-395" y2="-380"/></g>
-      <g transform="rotate(336)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(342)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(348)"><line y1="-395" y2="-385"/></g>
-      <g transform="rotate(354)"><line y1="-395" y2="-385"/></g>
-    </g>
-  </g>
-
-  <!-- Main composition circle (Vitruvian-style). -->
-  <circle cx="400" cy="400" r="280" stroke-width="0.9"/>
-  <!-- Inscribed square of equal area-of-interest. -->
-  <rect x="140" y="140" width="520" height="520" stroke-width="0.9"/>
-  <!-- Crossed diameters of the page. -->
-  <line x1="20" y1="400" x2="780" y2="400" stroke-width="0.5"/>
-  <line x1="400" y1="20" x2="400" y2="780" stroke-width="0.5"/>
-  <!-- Square diagonals — dashed like construction sketch. -->
-  <line x1="140" y1="140" x2="660" y2="660" stroke-width="0.5" stroke-dasharray="3 5"/>
-  <line x1="660" y1="140" x2="140" y2="660" stroke-width="0.5" stroke-dasharray="3 5"/>
-
-  <!-- Concentric inner rings (proportional studies). -->
-  <circle cx="400" cy="400" r="180" stroke-width="0.6"/>
-  <circle cx="400" cy="400" r="100" stroke-width="0.6"/>
-  <circle cx="400" cy="400" r="40"  stroke-width="0.5"/>
-
-  <!-- 12-fold radial lines through the main circle (clock spokes). -->
-  <g transform="translate(400 400)" stroke-width="0.4">
-    <g><line y1="-280" y2="280"/></g>
-    <g transform="rotate(30)"><line y1="-280" y2="280"/></g>
-    <g transform="rotate(60)"><line y1="-280" y2="280"/></g>
-    <g transform="rotate(90)"><line y1="-280" y2="280"/></g>
-    <g transform="rotate(120)"><line y1="-280" y2="280"/></g>
-    <g transform="rotate(150)"><line y1="-280" y2="280"/></g>
-  </g>
-
-  <!-- Vitruvian-style proportional crossbars — extra horizontal/vertical
-       guides drawn at 1/3 + 2/3 marks of the inscribed square. -->
-  <line x1="140" y1="313" x2="660" y2="313" stroke-width="0.4" stroke-dasharray="1 4"/>
-  <line x1="140" y1="487" x2="660" y2="487" stroke-width="0.4" stroke-dasharray="1 4"/>
-  <line x1="313" y1="140" x2="313" y2="660" stroke-width="0.4" stroke-dasharray="1 4"/>
-  <line x1="487" y1="140" x2="487" y2="660" stroke-width="0.4" stroke-dasharray="1 4"/>
-
-  <!-- Corner ornaments — small fleurons at the four cardinal points. -->
-  <g fill="#f4ead5" stroke="none" font-family="Georgia, serif" font-size="22" text-anchor="middle">
-    <text x="400" y="14">❦</text>
-    <text x="400" y="794">❦</text>
-    <text x="14"  y="408" transform="rotate(-90 14 400)">❦</text>
-    <text x="786" y="408" transform="rotate(90 786 400)">❦</text>
-  </g>
-
-  <!-- Compass / dividers in the upper-left corner — two splayed legs +
-       a ring at the apex, evoking a draftsman's tool. -->
-  <g stroke="#f4ead5" stroke-width="0.7" transform="translate(60 60) rotate(-15)">
-    <circle cx="40" cy="6" r="6" stroke-width="0.6"/>
-    <line x1="40" y1="12" x2="20" y2="80"/>
-    <line x1="40" y1="12" x2="60" y2="80"/>
-    <circle cx="20" cy="80" r="2" fill="#f4ead5" stroke="none"/>
-    <circle cx="60" cy="80" r="2" fill="#f4ead5" stroke="none"/>
-    <line x1="20" y1="80" x2="60" y2="80" stroke-dasharray="2 3" stroke-width="0.4"/>
-  </g>
-
-  <!-- Open codex sketch in the lower-right corner — two inclined pages
-       with a binding seam and a few horizontal text rules. -->
-  <g stroke="#f4ead5" stroke-width="0.7" transform="translate(640 660)">
-    <!-- left page -->
-    <path d="M 0 60 L 0 10 Q 35 -2 70 4 L 70 54 Q 35 48 0 60 Z"/>
-    <!-- right page -->
-    <path d="M 70 4 Q 105 -2 140 10 L 140 60 Q 105 48 70 54 Z"/>
-    <!-- text rules -->
-    <line x1="10"  y1="20" x2="60"  y2="14" stroke-width="0.3"/>
-    <line x1="10"  y1="28" x2="60"  y2="22" stroke-width="0.3"/>
-    <line x1="10"  y1="36" x2="60"  y2="30" stroke-width="0.3"/>
-    <line x1="80"  y1="14" x2="130" y2="20" stroke-width="0.3"/>
-    <line x1="80"  y1="22" x2="130" y2="28" stroke-width="0.3"/>
-    <line x1="80"  y1="30" x2="130" y2="36" stroke-width="0.3"/>
-  </g>
-</svg>"##;
 
 const PAGE_JS: &str = r#"
 const token = sessionStorage.getItem('syntaur_token') || '';

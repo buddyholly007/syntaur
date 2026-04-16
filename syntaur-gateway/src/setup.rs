@@ -938,6 +938,15 @@ pub async fn handle_logo() -> (axum::http::HeaderMap, &'static [u8]) {
     (h, include_bytes!("../static/logo.jpg"))
 }
 
+/// GET /library-bg.webp — Renaissance scholar's-desk image used as the
+/// /knowledge page backdrop. ~210 KB WebP, 3168x1344 (~21:9).
+pub async fn handle_library_bg() -> (axum::http::HeaderMap, &'static [u8]) {
+    let mut h = axum::http::HeaderMap::new();
+    h.insert("content-type", "image/webp".parse().unwrap());
+    h.insert("cache-control", "public, max-age=604800".parse().unwrap());
+    (h, include_bytes!("../static/library-bg.webp"))
+}
+
 /// GET /avatar.png
 pub async fn handle_avatar() -> (axum::http::HeaderMap, &'static [u8]) {
     let mut h = axum::http::HeaderMap::new();

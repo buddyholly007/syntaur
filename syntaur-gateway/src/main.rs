@@ -4951,6 +4951,7 @@ async fn main() {
         .route("/favicon.ico", get(setup::handle_favicon))
         .route("/favicon-32.png", get(setup::handle_favicon_png))
         .route("/app-icon.jpg", get(setup::handle_app_icon))
+        .route("/library-bg.webp", get(setup::handle_library_bg))
         .route("/logo.jpg", get(setup::handle_logo))
         .route("/avatar.png", get(setup::handle_avatar))
         .route("/icon-192.png", get(setup::handle_icon_192))
