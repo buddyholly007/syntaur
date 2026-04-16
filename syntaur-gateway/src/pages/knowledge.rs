@@ -376,9 +376,12 @@ const EXTRA_STYLE: &str = r##"
   }
   .lib-select option { background: #fffaf0; color: var(--lib-ink); }
 
-  /* Top-bar variant of the agent filter — sepia on dark leather. */
+  /* Top-bar variant of the agent filter — sepia on dark leather.
+     Use background-color (longhand) instead of `background:` shorthand —
+     the shorthand resets background-repeat to its default (`repeat`),
+     which would tile the dropdown's caret SVG across the whole control. */
   .lib-topbar .lib-select {
-    background: rgba(244,234,213,0.06) !important;
+    background-color: rgba(244,234,213,0.06) !important;
     color: var(--lib-paper) !important;
     border-color: var(--lib-ink-faint) !important;
     background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10' fill='none' stroke='%23c89b3c' stroke-width='1.5'><path d='M2 4l3 3 3-3'/></svg>") !important;
