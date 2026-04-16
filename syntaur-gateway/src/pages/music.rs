@@ -21,20 +21,322 @@ pub async fn render() -> Html<String> {
 }
 
 const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
-  body { font-family: 'Inter', sans-serif; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; background: #0a0a0a; }
-  .card { @apply bg-gray-800 rounded-xl border border-gray-700 p-5; }
-  .badge { @apply inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium; }
-  .badge-green { @apply bg-green-900/50 text-green-400; }
-  .badge-yellow { @apply bg-yellow-900/50 text-yellow-400; }
-  .badge-gray { @apply bg-gray-700 text-gray-400; }
-  .badge-blue { @apply bg-blue-900/50 text-blue-400; }
+  /* Rajdhani — condensed display face, Open Font License (free).
+     Used for HUD-style headings and the breadcrumb. */
+  @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&display=swap');
+
+  /* ── Cyber palette ─────────────────────────────────────────────────
+     Hot magenta + electric cyan on near-black. Lime for "live" status.
+     No copyrighted assets — palette is a 40-year-old genre vocabulary
+     (Tron, Akira, Blade Runner). */
+  :root {
+    --c-bg:        #07070d;
+    --c-surface:   #0e0e18;
+    --c-surface-2: #15152a;
+    --c-line:      #2a2a45;
+    --c-text:      #e8e8f0;
+    --c-text-mute: #7a7a8a;
+    --c-mag:       #ff2cdf;
+    --c-mag-soft:  rgba(255, 44, 223, 0.35);
+    --c-cy:        #00f0ff;
+    --c-cy-soft:   rgba(0, 240, 255, 0.30);
+    --c-lime:      #c2ff00;
+    --c-amber:     #ffb800;
+    --c-red:       #ff3a55;
+  }
+
+  body {
+    font-family: 'Inter', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    background: var(--c-bg);
+    color: var(--c-text);
+    /* Faint magenta→cyan corner glow + dot grid for night-city depth.
+       Both are CSS-only, no images shipped. */
+    background-image:
+      radial-gradient(ellipse 800px 600px at 100% 0%, rgba(255,44,223,0.08), transparent 60%),
+      radial-gradient(ellipse 700px 500px at 0% 100%, rgba(0,240,255,0.06), transparent 60%),
+      radial-gradient(rgba(255,255,255,0.025) 1px, transparent 1px);
+    background-size: 100% 100%, 100% 100%, 24px 24px;
+    background-attachment: fixed;
+  }
+
+  /* Subtle CRT scanlines, always on, very low opacity. */
+  body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background: linear-gradient(transparent 50%, rgba(0,240,255,0.025) 50%);
+    background-size: 100% 3px;
+    z-index: 9998;
+    mix-blend-mode: screen;
+  }
+
+  /* HUD-style display font for headings + brand text. */
+  .hud, h1, h2, h3, .top-brand, .breadcrumb {
+    font-family: 'Rajdhani', 'Inter', sans-serif;
+    letter-spacing: 0.04em;
+  }
+
+  /* ── Cards: clipped corners + bracket overlay ──────────────────── */
+  .card {
+    background: linear-gradient(180deg, var(--c-surface) 0%, var(--c-surface-2) 100%);
+    border: 1px solid var(--c-line);
+    padding: 1.25rem;
+    position: relative;
+    /* Notched corners — top-left + bottom-right cut. */
+    clip-path: polygon(
+      14px 0, 100% 0, 100% calc(100% - 14px),
+      calc(100% - 14px) 100%, 0 100%, 0 14px
+    );
+    border-radius: 0;
+  }
+  /* Magenta bracket at top-left corner. */
+  .card::before {
+    content: '';
+    position: absolute;
+    top: 6px; left: 6px;
+    width: 14px; height: 14px;
+    border-top: 1px solid var(--c-mag);
+    border-left: 1px solid var(--c-mag);
+    opacity: 0.7;
+    pointer-events: none;
+  }
+  /* Cyan bracket at bottom-right corner. */
+  .card::after {
+    content: '';
+    position: absolute;
+    bottom: 6px; right: 6px;
+    width: 14px; height: 14px;
+    border-bottom: 1px solid var(--c-cy);
+    border-right: 1px solid var(--c-cy);
+    opacity: 0.7;
+    pointer-events: none;
+  }
+
+  /* ── Badges: terminal-style pills ────────────────────────────────── */
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 0;
+    font-family: 'Rajdhani', sans-serif;
+    font-weight: 600;
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    border: 1px solid currentColor;
+  }
+  .badge-green  { color: var(--c-lime);  background: rgba(194,255,0,0.08); }
+  .badge-yellow { color: var(--c-amber); background: rgba(255,184,0,0.08); }
+  .badge-gray   { color: var(--c-text-mute); background: rgba(122,122,138,0.08); }
+  .badge-blue   { color: var(--c-cy);    background: rgba(0,240,255,0.08); }
+
+  /* Bridge "live" pill. Glows softly. */
+  #media-bridge-pill {
+    color: var(--c-lime);
+    background: rgba(194,255,0,0.1);
+    border: 1px solid var(--c-lime);
+    border-radius: 0;
+    font-family: 'Rajdhani', sans-serif;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 2px 8px;
+    box-shadow: 0 0 8px rgba(194,255,0,0.2);
+  }
+
+  /* ── Top bar tweaks ──────────────────────────────────────────────── */
+  .top-brand { font-size: 1rem; font-weight: 600; letter-spacing: 0.06em; }
+  .breadcrumb {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    color: var(--c-cy);
+  }
+  .breadcrumb::before { content: '['; color: var(--c-mag); margin-right: 6px; }
+  .breadcrumb::after  { content: ']'; color: var(--c-mag); margin-left:  6px; }
+
+  /* ── Now-playing visualizer ─────────────────────────────────────── */
+  /* 8-bar pure-CSS equalizer. We don't have real audio data on this
+     page (DRM streams stay client-side), but a subtle motion makes
+     the card feel alive without faking precision. Pauses when no
+     track is playing via the .viz-paused class toggled by JS. */
+  .np-viz {
+    display: flex;
+    align-items: flex-end;
+    gap: 3px;
+    height: 28px;
+    margin-top: 12px;
+    opacity: 0.85;
+  }
+  .np-viz span {
+    width: 4px;
+    background: linear-gradient(to top, var(--c-mag) 0%, var(--c-cy) 100%);
+    box-shadow: 0 0 4px rgba(255,44,223,0.5);
+    transform-origin: bottom;
+    animation: viz-bar 1.1s ease-in-out infinite;
+  }
+  .np-viz.viz-paused span { animation-play-state: paused; transform: scaleY(0.15); }
+  .np-viz span:nth-child(1) { animation-delay: -0.0s; }
+  .np-viz span:nth-child(2) { animation-delay: -0.2s; }
+  .np-viz span:nth-child(3) { animation-delay: -0.4s; }
+  .np-viz span:nth-child(4) { animation-delay: -0.6s; }
+  .np-viz span:nth-child(5) { animation-delay: -0.1s; }
+  .np-viz span:nth-child(6) { animation-delay: -0.3s; }
+  .np-viz span:nth-child(7) { animation-delay: -0.5s; }
+  .np-viz span:nth-child(8) { animation-delay: -0.7s; }
+  @keyframes viz-bar {
+    0%, 100% { transform: scaleY(0.25); }
+    20%      { transform: scaleY(0.9); }
+    40%      { transform: scaleY(0.45); }
+    60%      { transform: scaleY(1.0); }
+    80%      { transform: scaleY(0.35); }
+  }
+
+  /* ── Play / control buttons ──────────────────────────────────────── */
+  .ctrl-btn {
+    background: var(--c-surface);
+    border: 1px solid var(--c-line);
+    color: var(--c-text);
+    width: 40px; height: 40px;
+    border-radius: 0;
+    clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
+    display: flex; align-items: center; justify-content: center;
+    transition: all 0.15s;
+    cursor: pointer;
+  }
+  .ctrl-btn:hover {
+    background: var(--c-surface-2);
+    color: var(--c-cy);
+    box-shadow: 0 0 12px var(--c-cy-soft);
+  }
+  .ctrl-play {
+    background: linear-gradient(135deg, var(--c-mag) 0%, #c318a8 100%);
+    border: 1px solid var(--c-mag);
+    color: white;
+    width: 56px; height: 56px;
+    clip-path: polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px);
+    box-shadow: 0 0 16px var(--c-mag-soft), inset 0 0 8px rgba(255,255,255,0.15);
+    animation: pulse-glow 2.5s ease-in-out infinite;
+  }
+  .ctrl-play:hover {
+    background: linear-gradient(135deg, #ff5ce6 0%, var(--c-mag) 100%);
+    box-shadow: 0 0 24px var(--c-mag-soft), inset 0 0 8px rgba(255,255,255,0.25);
+  }
+  @keyframes pulse-glow {
+    0%, 100% { box-shadow: 0 0 16px var(--c-mag-soft), inset 0 0 8px rgba(255,255,255,0.15); }
+    50%      { box-shadow: 0 0 22px rgba(255,44,223,0.55), inset 0 0 8px rgba(255,255,255,0.25); }
+  }
+
+  /* ── Album art frame ─────────────────────────────────────────────── */
+  #np-art {
+    border: 1px solid var(--c-mag);
+    border-radius: 0;
+    clip-path: polygon(12px 0, 100% 0, 100% calc(100% - 12px), calc(100% - 12px) 100%, 0 100%, 0 12px);
+    background: var(--c-surface);
+    box-shadow: 0 0 24px rgba(255,44,223,0.15), inset 0 0 24px rgba(0,240,255,0.06);
+  }
+
+  /* ── Track title typography ──────────────────────────────────────── */
+  #np-song {
+    font-family: 'Rajdhani', sans-serif;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    /* Faint chromatic-aberration hint via stacked text-shadows.
+       Subtle so it reads as polish, not glitch. */
+    text-shadow:
+      -1px 0 0 rgba(255,44,223,0.25),
+       1px 0 0 rgba(0,240,255,0.25);
+  }
+
+  /* ── Inputs / forms ──────────────────────────────────────────────── */
+  input[type="text"], textarea, select {
+    background: var(--c-surface) !important;
+    border: 1px solid var(--c-line) !important;
+    border-radius: 0 !important;
+    color: var(--c-text) !important;
+    transition: all 0.15s;
+  }
+  input[type="text"]:focus, textarea:focus, select:focus {
+    border-color: var(--c-cy) !important;
+    box-shadow: 0 0 8px var(--c-cy-soft) !important;
+    outline: none !important;
+  }
+  /* DJ "Build" + group buttons get the magenta primary look. */
+  #dj-run-btn, #group-btn,
+  button.bg-oc-600 {
+    background: linear-gradient(135deg, var(--c-mag) 0%, #c318a8 100%) !important;
+    border: 1px solid var(--c-mag) !important;
+    border-radius: 0 !important;
+    clip-path: polygon(6px 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%, 0 6px);
+    font-family: 'Rajdhani', sans-serif;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    box-shadow: 0 0 10px var(--c-mag-soft);
+  }
+  #dj-run-btn:hover, #group-btn:hover,
+  button.bg-oc-600:hover {
+    background: linear-gradient(135deg, #ff5ce6 0%, var(--c-mag) 100%) !important;
+    box-shadow: 0 0 16px var(--c-mag-soft);
+  }
+
+  /* ── Speaker rows: notched + neon-on-select ──────────────────────── */
+  .speaker-card {
+    transition: all 0.15s;
+    border-radius: 0;
+    clip-path: polygon(6px 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%, 0 6px);
+  }
+  .speaker-card.selected {
+    border-color: var(--c-cy) !important;
+    background: rgba(0,240,255,0.06) !important;
+    box-shadow: 0 0 10px var(--c-cy-soft);
+  }
+
+  /* ── Section headings inside cards ───────────────────────────────── */
+  .card h3 {
+    font-family: 'Rajdhani', sans-serif;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    font-size: 0.8rem;
+    color: var(--c-text);
+  }
+  .card h3::before { content: '// '; color: var(--c-mag); opacity: 0.7; }
+
+  /* "Now playing" eyebrow label inside the hero card. */
+  .np-eyebrow {
+    font-family: 'Rajdhani', sans-serif;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.22em;
+    color: var(--c-cy);
+  }
+  .np-eyebrow::before { content: '> '; color: var(--c-mag); }
+
+  /* ── Volume slider — neon track ──────────────────────────────────── */
+  input[type="range"] { accent-color: var(--c-mag); }
+
   .pulse { animation: pulse 2s infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.6} }
-  /* Scrolling title for long song names */
-  @keyframes marquee { from{transform:translateX(0)} to{transform:translateX(calc(-100% + 280px))} }
-  .marquee-track { animation: marquee 12s linear infinite alternate; display: inline-block; white-space: nowrap; }
-  .speaker-card { transition: all 0.15s; }
-  .speaker-card.selected { @apply border-oc-500 bg-oc-900/30; }"##;
+
+  /* Marquee for long song names — keep, just rename gradient. */
+  @keyframes marquee {
+    from { transform: translateX(0); }
+    to   { transform: translateX(calc(-100% + 280px)); }
+  }
+  .marquee-track {
+    animation: marquee 12s linear infinite alternate;
+    display: inline-block;
+    white-space: nowrap;
+  }
+
+  /* The right-rail border separator gets a faint cyan glow. */
+  .border-r.border-gray-800 { border-right-color: var(--c-line) !important; box-shadow: 1px 0 12px rgba(0,240,255,0.04); }
+  .border-b.border-gray-800 { border-bottom-color: var(--c-line) !important; }"##;
 
 const BODY_HTML: &str = r##"<!-- Top bar — matches the dashboard so the music page feels like
      part of Syntaur, not a different app dropped onto the same domain. -->
@@ -43,11 +345,10 @@ const BODY_HTML: &str = r##"<!-- Top bar — matches the dashboard so the music 
     <div class="flex items-center gap-3 min-w-0">
       <a href="/" class="flex items-center gap-2 hover:opacity-80 flex-shrink-0">
         <img src="/app-icon.jpg" class="h-8 w-8 rounded-lg" alt="">
-        <span class="font-semibold">Syntaur</span>
+        <span class="top-brand">Syntaur</span>
       </a>
-      <span class="text-gray-700">/</span>
-      <span class="text-sm text-gray-200">Music</span>
-      <span id="media-bridge-pill" class="hidden ml-1 text-[10px] text-emerald-300 bg-emerald-900/40 px-2 py-0.5 rounded-full" title="Local Media Bridge is running — playback bypasses popups">Bridge on</span>
+      <span class="breadcrumb">Music</span>
+      <span id="media-bridge-pill" class="hidden ml-1" title="Local Media Bridge is running — playback bypasses popups">Bridge live</span>
     </div>
     <div class="flex items-center gap-3 text-sm">
       <a href="/" class="text-gray-400 hover:text-white transition-colors">Home</a>
@@ -76,25 +377,31 @@ const BODY_HTML: &str = r##"<!-- Top bar — matches the dashboard so the music 
     <!-- Hero Now Playing -->
     <div class="card p-6">
       <div class="flex items-start gap-5">
-        <div class="w-40 h-40 rounded-xl bg-gray-900 flex-shrink-0 flex items-center justify-center overflow-hidden border border-gray-700/50" id="np-art">
-          <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.25" class="text-gray-600"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+        <div class="w-40 h-40 flex-shrink-0 flex items-center justify-center overflow-hidden" id="np-art">
+          <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.25" class="text-gray-700"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
         </div>
         <div class="flex-1 min-w-0 flex flex-col">
-          <p class="text-[11px] uppercase tracking-wider text-gray-500">Now playing</p>
-          <div class="text-2xl font-semibold text-gray-100 mt-1.5 overflow-hidden" id="np-song-wrap">
+          <p class="np-eyebrow">Now playing</p>
+          <div class="text-2xl mt-1.5 overflow-hidden" id="np-song-wrap">
             <span id="np-song">Nothing playing</span>
           </div>
           <p class="text-sm text-gray-400 mt-1 truncate" id="np-artist">—</p>
           <p class="text-xs text-gray-500 mt-2" id="np-source"></p>
-          <!-- Controls — bigger, calmer, breathing room -->
+          <!-- Pure-CSS audio visualizer — pauses when nothing is playing
+               (JS toggles .viz-paused on the container based on np-play state). -->
+          <div class="np-viz viz-paused" id="np-viz" aria-hidden="true">
+            <span></span><span></span><span></span><span></span>
+            <span></span><span></span><span></span><span></span>
+          </div>
+          <!-- Controls -->
           <div class="flex items-center gap-3 mt-auto pt-5">
-            <button onclick="control('prev')" class="bg-gray-900 hover:bg-gray-700 text-gray-300 rounded-full w-10 h-10 flex items-center justify-center transition-colors" title="Previous">
+            <button onclick="control('prev')" class="ctrl-btn" title="Previous">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="19,20 9,12 19,4"/><rect x="5" y="4" width="2" height="16"/></svg>
             </button>
-            <button onclick="control('play_pause')" id="np-play" class="bg-oc-600 hover:bg-oc-700 text-white rounded-full w-12 h-12 flex items-center justify-center transition-colors shadow-lg shadow-oc-900/30" title="Play/Pause">
+            <button onclick="control('play_pause')" id="np-play" class="ctrl-play" title="Play/Pause">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
             </button>
-            <button onclick="control('next')" class="bg-gray-900 hover:bg-gray-700 text-gray-300 rounded-full w-10 h-10 flex items-center justify-center transition-colors" title="Next">
+            <button onclick="control('next')" class="ctrl-btn" title="Next">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,4 15,12 5,20"/><rect x="17" y="4" width="2" height="16"/></svg>
             </button>
           </div>
@@ -357,10 +664,13 @@ async function loadNowPlaying() {
     }
 
     const playBtn = document.getElementById('np-play');
+    const viz = document.getElementById('np-viz');
     if (state === 'playing') {
       playBtn.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
+      if (viz) viz.classList.remove('viz-paused');
     } else {
       playBtn.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>';
+      if (viz) viz.classList.add('viz-paused');
     }
 
     // Show volume slider only when HA entity has volume support
