@@ -24,7 +24,32 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   .input { @apply w-full bg-gray-900 border border-gray-600 rounded-lg px-3 py-2 text-white placeholder-gray-500 focus:border-oc-500 focus:ring-1 focus:ring-oc-500 outline-none text-sm; }
   select, select.input { color-scheme: dark; }
   select option { background-color: #111827; color: #e5e7eb; }
-  .label { @apply block text-xs font-medium text-gray-400 mb-1; }"##;
+  .label { @apply block text-xs font-medium text-gray-400 mb-1; }
+
+  /* 2-level nav — top-level sections + sub-tab chips */
+  .sec-tab { padding: 0.75rem 1rem; font-size: 0.875rem; font-weight: 500; color: #9ca3af; border-bottom: 2px solid transparent; transition: all 0.12s; cursor: pointer; white-space: nowrap; }
+  .sec-tab:hover { color: #e5e7eb; }
+  .sec-tab.active { color: #f3f4f6; border-bottom-color: #0ea5e9; }
+  .sub-tab { padding: 0.35rem 0.85rem; font-size: 0.75rem; color: #9ca3af; background: #1f2937; border: 1px solid #374151; border-radius: 999px; cursor: pointer; white-space: nowrap; transition: all 0.12s; }
+  .sub-tab:hover { color: #e5e7eb; border-color: #4b5563; }
+  .sub-tab.active { color: #f0f9ff; background: #075985; border-color: #0284c7; }
+  .sub-tab .sub-tab-badge { display: inline-block; margin-left: 0.35rem; padding: 0 0.35rem; min-width: 1.1rem; height: 1.1rem; line-height: 1.1rem; text-align: center; font-size: 0.625rem; border-radius: 999px; background: #16a34a; color: #fff; }
+
+  /* KPI strip — compact tile row that sits at top of the main canvas */
+  .kpi-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.5rem; margin-bottom: 1rem; }
+  @media (max-width: 900px) { .kpi-strip { grid-template-columns: repeat(2, 1fr); } }
+  .kpi-tile { background: #111827; border: 1px solid #1f2937; border-radius: 0.5rem; padding: 0.7rem 0.85rem; }
+  .kpi-tile .kpi-label { font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.06em; color: #6b7280; }
+  .kpi-tile .kpi-value { font-size: 1.25rem; font-weight: 600; color: #f3f4f6; margin-top: 0.15rem; }
+  .kpi-tile .kpi-sub { font-size: 0.7rem; color: #9ca3af; margin-top: 0.1rem; }
+  .kpi-tile.ok .kpi-value { color: #4ade80; }
+  .kpi-tile.warn .kpi-value { color: #fbbf24; }
+  .kpi-tile.bad .kpi-value { color: #f87171; }
+
+  /* Deadline pill */
+  .deadline-pill { display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.25rem 0.65rem; border-radius: 999px; font-size: 0.7rem; font-weight: 500; background: rgba(217,119,6,0.12); color: #fbbf24; border: 1px solid rgba(217,119,6,0.35); white-space: nowrap; }
+  .deadline-pill .deadline-dot { width: 6px; height: 6px; border-radius: 50%; background: #f59e0b; animation: deadline-pulse 2s infinite; }
+  @keyframes deadline-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }"##;
 
 const BODY_HTML: &str = r##"<!-- Module paywall overlay (hidden by default, shown if module is locked) -->
 <div id="module-paywall" class="hidden fixed inset-0 z-50 bg-gray-950/95 backdrop-blur-sm flex items-center justify-center">
@@ -65,46 +90,71 @@ const BODY_HTML: &str = r##"<!-- Module paywall overlay (hidden by default, show
 
 <!-- Top bar -->
 <div class="border-b border-gray-800 bg-gray-900/50 backdrop-blur sticky top-0 z-40">
-  <div class="max-w-6xl mx-auto px-4 py-2.5 flex items-center justify-between">
-    <div class="flex items-center gap-3">
-      <a href="/" class="flex items-center gap-2 hover:opacity-80">
+  <div class="max-w-6xl mx-auto px-4 py-2.5 flex items-center justify-between gap-3">
+    <div class="flex items-center gap-3 min-w-0">
+      <a href="/" class="flex items-center gap-2 hover:opacity-80 flex-shrink-0">
         <img src="/app-icon.jpg" class="h-8 w-8 rounded-lg" alt="">
         <span class="font-semibold">Syntaur</span>
       </a>
       <span class="text-gray-500">/</span>
-      <span class="text-gray-300 font-medium">Tax & Expenses</span>
+      <span class="text-gray-300 font-medium truncate">Tax &amp; Expenses</span>
     </div>
-    <div class="flex items-center gap-3 text-sm min-w-0">
-      <div class="flex items-center gap-3 overflow-x-auto whitespace-nowrap scrollbar-thin min-w-0">
-        <button onclick="showTab('overview')" class="tab text-white" id="tab-btn-overview">Overview</button>
-        <button onclick="showTab('expenses')" class="tab text-gray-400" id="tab-btn-expenses">Expenses</button>
-        <button onclick="showTab('receipts')" class="tab text-gray-400" id="tab-btn-receipts">Receipts</button>
-        <button onclick="showTab('documents')" class="tab text-gray-400" id="tab-btn-documents">Documents</button>
-        <button onclick="showTab('property')" class="tab text-gray-400" id="tab-btn-property">Property</button>
-        <button onclick="showTab('connections')" class="tab text-gray-400" id="tab-btn-connections">Connections</button>
-        <button onclick="showTab('credits')" class="tab text-gray-400" id="tab-btn-credits">Credits</button>
-        <button onclick="showTab('quarterly')" class="tab text-gray-400" id="tab-btn-quarterly">Quarterly</button>
-        <button onclick="showTab('investments')" class="tab text-gray-400" id="tab-btn-investments">Investments</button>
-        <button onclick="showTab('depreciation')" class="tab text-gray-400" id="tab-btn-depreciation">Depreciation</button>
-        <button onclick="showTab('state')" class="tab text-gray-400" id="tab-btn-state">State</button>
-        <button onclick="showTab('entities')" class="tab text-gray-400" id="tab-btn-entities">Entities</button>
-        <button onclick="showTab('insights')" class="tab text-gray-400" id="tab-btn-insights">Insights</button>
-        <button onclick="showTab('deductions')" class="tab text-gray-400 relative" id="tab-btn-deductions">Deductions <span id="ded-badge" class="hidden absolute -top-1 -right-2 bg-green-500 text-white text-[9px] rounded-full w-4 h-4 flex items-center justify-center"></span></button>
-        <button onclick="showTab('wizard')" class="tab text-gray-400" id="tab-btn-wizard">Wizard</button>
-      </div>
-      <select id="year-select" class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-sm text-gray-300 outline-none flex-shrink-0" onchange="changeYear()"></select>
-      <a href="/" class="text-gray-500 hover:text-gray-300 flex-shrink-0">Home</a>
+    <div class="flex items-center gap-3 text-sm flex-shrink-0">
+      <!-- Deadline pill — visible when any deadline is within 60 days -->
+      <span id="deadline-pill" class="deadline-pill hidden"><span class="deadline-dot"></span><span id="deadline-pill-text">—</span></span>
+      <select id="year-select" class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-sm text-gray-300 outline-none" onchange="changeYear()"></select>
+      <a href="/" class="text-gray-500 hover:text-gray-300">Home</a>
+    </div>
+  </div>
+  <!-- Section nav (top-level) -->
+  <div class="border-t border-gray-800/50">
+    <div class="max-w-6xl mx-auto px-4 flex items-center gap-1 overflow-x-auto whitespace-nowrap">
+      <button onclick="showSection('investments')" id="sec-btn-investments" class="sec-tab active">Investments</button>
+      <button onclick="showSection('documents')"   id="sec-btn-documents"   class="sec-tab">Documents</button>
+      <button onclick="showSection('deductions')"  id="sec-btn-deductions"  class="sec-tab">Deductions</button>
+      <button onclick="showSection('dashboard')"   id="sec-btn-dashboard"   class="sec-tab">Dashboard</button>
+      <button onclick="showSection('filing')"      id="sec-btn-filing"      class="sec-tab">Filing</button>
+    </div>
+  </div>
+  <!-- Sub-tab chip row (context-sensitive — populated by showSection()) -->
+  <div class="border-t border-gray-800/50 bg-gray-900/30">
+    <div class="max-w-6xl mx-auto px-4 py-2 flex items-center gap-2 overflow-x-auto whitespace-nowrap" id="sub-tab-bar">
+      <!-- filled in by JS -->
     </div>
   </div>
 </div>
 
-<div class="flex h-[calc(100vh-45px)]">
+<div class="flex h-[calc(100vh-126px)]">
 
   <!-- LEFT: Tax content -->
-  <div class="flex-1 overflow-y-auto px-4 py-6">
+  <div class="flex-1 overflow-y-auto px-4 py-4">
 
-  <!-- Overview tab -->
-  <div id="tab-overview">
+  <!-- KPI strip — always visible at top of main canvas -->
+  <div class="kpi-strip" id="kpi-strip">
+    <div class="kpi-tile" id="kpi-tile-portfolio">
+      <div class="kpi-label">Portfolio value</div>
+      <div class="kpi-value" id="kpi-portfolio-value">—</div>
+      <div class="kpi-sub" id="kpi-portfolio-sub"></div>
+    </div>
+    <div class="kpi-tile" id="kpi-tile-income">
+      <div class="kpi-label">Income YTD</div>
+      <div class="kpi-value" id="kpi-income-value">—</div>
+      <div class="kpi-sub" id="kpi-income-sub"></div>
+    </div>
+    <div class="kpi-tile" id="kpi-tile-deductions">
+      <div class="kpi-label">Deductions YTD</div>
+      <div class="kpi-value" id="kpi-deductions-value">—</div>
+      <div class="kpi-sub" id="kpi-deductions-sub"></div>
+    </div>
+    <div class="kpi-tile" id="kpi-tile-tax">
+      <div class="kpi-label">Est. refund / owe</div>
+      <div class="kpi-value" id="kpi-tax-value">—</div>
+      <div class="kpi-sub" id="kpi-tax-sub"></div>
+    </div>
+  </div>
+
+  <!-- Dashboard tab (the old "Overview") — hidden by default; Investments is the landing -->
+  <div id="tab-overview" class="hidden">
     <!-- Taxpayer Profile -->
     <div class="card mb-4" id="profile-card">
       <div class="flex items-center justify-between mb-3">
@@ -857,8 +907,8 @@ const BODY_HTML: &str = r##"<!-- Module paywall overlay (hidden by default, show
     </div>
   </div>
 
-  <!-- Investments tab -->
-  <div id="tab-investments" class="hidden">
+  <!-- Investments tab — default landing (most-viewed section) -->
+  <div id="tab-investments">
     <div class="card mb-6">
       <h3 class="font-medium mb-3">Connect Brokerage</h3>
       <p class="text-xs text-gray-500 mb-4">Connect your Alpaca account to import trades, dividends, and portfolio data.</p>
@@ -1430,6 +1480,10 @@ function showTab(name) {
     const btn = document.getElementById('tab-btn-' + t);
     if (btn) btn.className = 'tab ' + (t === name ? 'text-white' : 'text-gray-400 hover:text-gray-300');
   });
+  // Reflect active state on the sub-tab chips
+  document.querySelectorAll('#sub-tab-bar .sub-tab').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.tab === name);
+  });
   if (name === 'expenses') loadExpenses();
   if (name === 'receipts') loadReceipts();
   if (name === 'documents') loadDocuments();
@@ -1444,6 +1498,122 @@ function showTab(name) {
   if (name === 'insights') loadInsightsTab();
   if (name === 'deductions') loadDeductionsTab();
   if (name === 'wizard') loadWizard();
+}
+
+// ===== Section / sub-tab model =====
+// Top-level sections, in display order (Investments first — most-frequent use).
+// Each section lists its sub-tabs as [tab-id, display-label] pairs.
+// The first sub-tab in each list is the default for that section.
+const TAX_SECTIONS = {
+  investments: { label: 'Investments', tabs: [['investments', 'Holdings & activity']] },
+  documents:   { label: 'Documents',   tabs: [['documents', 'Tax documents'], ['receipts', 'Receipts']] },
+  deductions:  { label: 'Deductions',  tabs: [['deductions', 'Summary'], ['expenses', 'Expenses'], ['property', 'Property'], ['depreciation', 'Depreciation'], ['credits', 'Credits']] },
+  dashboard:   { label: 'Dashboard',   tabs: [['overview', 'Year overview']] },
+  filing:      { label: 'Filing',      tabs: [['wizard', 'Wizard'], ['quarterly', 'Quarterly'], ['state', 'State'], ['entities', 'Entities'], ['insights', 'Insights'], ['connections', 'Bank & brokerage']] },
+};
+
+let currentSection = 'investments';
+
+function showSection(name) {
+  const section = TAX_SECTIONS[name];
+  if (!section) return;
+  currentSection = name;
+  // Highlight the top-level section button
+  Object.keys(TAX_SECTIONS).forEach(k => {
+    const btn = document.getElementById('sec-btn-' + k);
+    if (btn) btn.classList.toggle('active', k === name);
+  });
+  // Repaint the sub-tab chip row
+  const bar = document.getElementById('sub-tab-bar');
+  if (bar) {
+    bar.innerHTML = section.tabs.map(([id, label]) => {
+      const badge = (id === 'deductions') ? '<span class="sub-tab-badge hidden" id="ded-badge"></span>' : '';
+      return `<button class="sub-tab" data-tab="${id}" onclick="showTab('${id}')">${label}${badge}</button>`;
+    }).join('');
+  }
+  // Show the section's default sub-tab (also triggers the panel's load fn)
+  showTab(section.tabs[0][0]);
+}
+
+// ===== KPI strip — aggregates data from summary + investments endpoints =====
+async function loadKpiStrip() {
+  const portEl = document.getElementById('kpi-portfolio-value');
+  const portSub = document.getElementById('kpi-portfolio-sub');
+  const incEl = document.getElementById('kpi-income-value');
+  const incSub = document.getElementById('kpi-income-sub');
+  const dedEl = document.getElementById('kpi-deductions-value');
+  const dedSub = document.getElementById('kpi-deductions-sub');
+  const taxEl = document.getElementById('kpi-tax-value');
+  const taxSub = document.getElementById('kpi-tax-sub');
+  const taxTile = document.getElementById('kpi-tile-tax');
+  if (!portEl) return;
+
+  // Portfolio — live investment summary
+  try {
+    const r = await authFetch(`/api/financial/investments/summary?token=${token}`);
+    if (r.ok) {
+      const d = await r.json();
+      if (d.total_value_cents != null) {
+        portEl.textContent = fmtSignedDollars(d.total_value_cents).replace(/^-/, '');
+        if (d.unrealized_pl_cents != null) {
+          portSub.textContent = `${d.unrealized_pl_cents >= 0 ? '+' : ''}${fmtSignedDollars(d.unrealized_pl_cents)} unrealized`;
+          portSub.style.color = d.unrealized_pl_cents >= 0 ? '#4ade80' : '#f87171';
+        }
+      } else {
+        portEl.textContent = '—';
+        portSub.textContent = 'No brokerage connected';
+      }
+    }
+  } catch(e) { portEl.textContent = '—'; }
+
+  // Income YTD, deductions, est refund — tax summary endpoint
+  try {
+    const r = await authFetch(`/api/tax/summary?token=${token}&start=${yearStart()}&end=${yearEnd()}`);
+    if (r.ok) {
+      const d = await r.json();
+      if (d.income_ytd_display) {
+        incEl.textContent = d.income_ytd_display;
+      } else {
+        incEl.textContent = '—';
+        incSub.textContent = 'No income records yet';
+      }
+      dedEl.textContent = d.deductible_display || '$0.00';
+      dedSub.textContent = `${d.receipt_count || 0} receipts`;
+      if (d.est_refund_cents != null) {
+        const refund = d.est_refund_cents;
+        taxEl.textContent = (refund >= 0 ? '+' : '') + fmtSignedDollars(refund);
+        taxSub.textContent = refund >= 0 ? 'Estimated refund' : 'Estimated owed';
+        taxTile.classList.remove('ok','warn','bad');
+        taxTile.classList.add(refund >= 0 ? 'ok' : 'warn');
+      } else {
+        taxEl.textContent = '—';
+        taxSub.textContent = 'Need more data';
+      }
+    }
+  } catch(e) {}
+}
+
+// ===== Deadline pill — next tax deadline within 60 days =====
+function updateDeadlinePill() {
+  const pill = document.getElementById('deadline-pill');
+  const txt = document.getElementById('deadline-pill-text');
+  if (!pill || !txt) return;
+  const now = new Date();
+  const yr = now.getFullYear();
+  // Hardcoded IRS-calendar deadlines; dynamic year so this survives Jan 1 rollover
+  const deadlines = [
+    { d: new Date(yr, 3, 15),  label: 'April 15 filing' },
+    { d: new Date(yr, 5, 15),  label: 'Q2 estimated' },
+    { d: new Date(yr, 8, 15),  label: 'Q3 estimated' },
+    { d: new Date(yr, 0, 15),  label: 'Q4 estimated (prev yr)' },
+    { d: new Date(yr, 9, 15),  label: 'Extension final' },
+  ].filter(x => x.d > now).sort((a,b) => a.d - b.d);
+  if (!deadlines.length) { pill.classList.add('hidden'); return; }
+  const next = deadlines[0];
+  const days = Math.ceil((next.d - now) / 86400000);
+  if (days > 60) { pill.classList.add('hidden'); return; }
+  txt.textContent = `${next.label} — ${days}d`;
+  pill.classList.remove('hidden');
 }
 
 // Overview
@@ -3223,10 +3393,12 @@ async function loadDeductionSummary() {
     document.getElementById('ded-approved').textContent = Object.values(data.by_type||{}).reduce((s,t)=>s+(t.approved||0),0);
     document.getElementById('ded-denied').textContent = Object.values(data.by_type||{}).reduce((s,t)=>s+(t.denied||0),0);
     document.getElementById('ded-saved').textContent = data.total_approved_display || '$0.00';
-    // Badge on tab
+    // Badge on the Deductions sub-tab chip (null-safe — chip only exists when section is active)
     const badge = document.getElementById('ded-badge');
-    if (data.total_pending > 0) { badge.textContent = data.total_pending; badge.classList.remove('hidden'); }
-    else { badge.classList.add('hidden'); }
+    if (badge) {
+      if (data.total_pending > 0) { badge.textContent = data.total_pending; badge.classList.remove('hidden'); }
+      else { badge.classList.add('hidden'); }
+    }
   } catch(e) {}
 }
 
@@ -4214,7 +4386,11 @@ document.addEventListener('keydown', e => {
 
 // Init
 loadProfile();
-loadOverview();
+loadOverview();         // populates summary data used by the KPI strip + dashboard
 loadCategories();
 loadTaxConversation();
+loadKpiStrip();         // fills the always-visible KPI tiles
+updateDeadlinePill();   // shows next IRS deadline if within 60 days
+showSection('investments'); // default landing — Sean's most-frequent use
+setInterval(loadKpiStrip, 90000); // refresh portfolio every 90s
 </script>"##;
