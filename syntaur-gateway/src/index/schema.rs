@@ -1431,6 +1431,28 @@ const MIGRATIONS: &[&str] = &[
         created_at          INTEGER NOT NULL
     );
     "#,
+
+    // Migration 37: Module agent defaults table — seed registry for the 8
+    // canonical personas (Peter/Kyron/Positron/Cortex/Silvr/Thaddeus/Maurice/Mushi).
+    // Rows are upserted on gateway startup from src/agents/defaults.rs.
+    r#"
+    CREATE TABLE IF NOT EXISTS module_agent_defaults (
+        id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_key                TEXT NOT NULL UNIQUE,
+        module_name              TEXT,
+        default_display_name     TEXT NOT NULL,
+        easter_egg_inspiration   TEXT NOT NULL,
+        system_prompt_template   TEXT NOT NULL,
+        tone_dials_json          TEXT NOT NULL,
+        memory_scope_json        TEXT NOT NULL,
+        public_role              TEXT NOT NULL,
+        configurable_humor_dial  INTEGER NOT NULL DEFAULT 0,
+        default_humor_value      INTEGER,
+        created_at               INTEGER NOT NULL,
+        updated_at               INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_mad_module ON module_agent_defaults(module_name);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

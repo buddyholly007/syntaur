@@ -97,6 +97,7 @@ impl Indexer {
 
         // Run schema migrations
         schema::migrate(&conn).map_err(|e| format!("migrate: {}", e))?;
+        crate::agents::defaults::seed(&conn).map_err(|e| format!("seed agents: {}", e))?;
 
         info!("[index] opened {} (WAL)", db_path.display());
 

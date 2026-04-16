@@ -36,6 +36,7 @@ mod sync;
 mod music;
 pub mod crypto;
 pub mod terminal;
+mod agents;
 
 /// Brand name constant — used in user-facing messages.
 pub const BRAND: &str = "Syntaur";
