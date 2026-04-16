@@ -1331,6 +1331,39 @@ const MIGRATIONS: &[&str] = &[
         created_at          INTEGER NOT NULL
     );
     "#,
+
+    // Migration 35: State income tax engine.
+    r#"
+    CREATE TABLE IF NOT EXISTS state_tax_profiles (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id             INTEGER NOT NULL,
+        tax_year            INTEGER NOT NULL,
+        state               TEXT NOT NULL,
+        residency_type      TEXT NOT NULL DEFAULT 'full_year',
+        months_resident     INTEGER NOT NULL DEFAULT 12,
+        state_wages_cents   INTEGER NOT NULL DEFAULT 0,
+        state_withheld_cents INTEGER NOT NULL DEFAULT 0,
+        created_at          INTEGER NOT NULL,
+        updated_at          INTEGER NOT NULL,
+        UNIQUE(user_id, tax_year, state)
+    );
+
+    CREATE TABLE IF NOT EXISTS state_tax_estimates (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id             INTEGER NOT NULL,
+        tax_year            INTEGER NOT NULL,
+        state               TEXT NOT NULL,
+        state_agi_cents     INTEGER NOT NULL DEFAULT 0,
+        state_taxable_cents INTEGER NOT NULL DEFAULT 0,
+        state_tax_cents     INTEGER NOT NULL DEFAULT 0,
+        state_credits_cents INTEGER NOT NULL DEFAULT 0,
+        state_withheld_cents INTEGER NOT NULL DEFAULT 0,
+        state_owed_cents    INTEGER NOT NULL DEFAULT 0,
+        effective_rate      REAL NOT NULL DEFAULT 0.0,
+        created_at          INTEGER NOT NULL,
+        UNIQUE(user_id, tax_year, state)
+    );
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

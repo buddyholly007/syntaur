@@ -6712,3 +6712,343 @@ pub async fn handle_what_if(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(result))
 }
+
+// ── State Tax Engine ────────────────────────────────────────────────────────
+
+/// State tax bracket data: (upper_limit_cents, rate_basis_points).
+/// Returns (brackets, standard_deduction_cents, personal_exemption_cents).
+/// 2025 rates for top 10 states by population + common others.
+fn state_brackets(state: &str, filing_status: &str) -> (Vec<(i64, i64)>, i64, i64) {
+    let is_joint = filing_status == "married_jointly";
+    match state {
+        // California — 9 brackets, top 13.3%
+        "CA" => {
+            let brackets = if is_joint {
+                vec![(2_168_400, 100), (5_144_200, 200), (8_108_400, 400), (10_055_400, 600),
+                     (12_714_600, 800), (32_587_400, 930), (39_104_800, 1030),
+                     (65_174_600, 1130), (130_349_200, 1230), (i64::MAX, 1330)]
+            } else {
+                vec![(1_084_200, 100), (2_572_100, 200), (4_054_200, 400), (5_027_700, 600),
+                     (6_357_300, 800), (16_293_700, 930), (19_552_400, 1030),
+                     (32_587_300, 1130), (100_000_000, 1230), (i64::MAX, 1330)]
+            };
+            let std_ded = if is_joint { 1_108_400 } else { 554_200 };
+            (brackets, std_ded, 0)
+        }
+        // New York — 8 brackets, top 10.9%
+        "NY" => {
+            let brackets = if is_joint {
+                vec![(1_740_000, 400), (2_390_000, 450), (5_540_000, 525),
+                     (10_750_000, 585), (16_150_000, 625), (21_550_000, 685),
+                     (32_350_000, 965), (i64::MAX, 1090)]
+            } else {
+                vec![(870_000, 400), (1_195_000, 450), (2_770_000, 525),
+                     (5_375_000, 585), (8_075_000, 625), (10_775_000, 685),
+                     (2_500_000_000, 965), (i64::MAX, 1090)]
+            };
+            let std_ded = if is_joint { 1_610_000 } else { 805_000 };
+            (brackets, std_ded, 0)
+        }
+        // Pennsylvania — flat 3.07%
+        "PA" => (vec![(i64::MAX, 307)], 0, 0),
+        // Illinois — flat 4.95%
+        "IL" => {
+            let exemption = if is_joint { 475_000 } else { 237_500 };
+            (vec![(i64::MAX, 495)], 0, exemption)
+        }
+        // Ohio — 4 brackets, top 3.5% (reduced 2025)
+        "OH" => {
+            let brackets = vec![(2_600_000, 0), (4_600_000, 275), (9_200_000, 321), (i64::MAX, 350)];
+            (brackets, 0, 0)
+        }
+        // Georgia — 6 brackets, top 5.39% (2025 phase-down)
+        "GA" => {
+            let brackets = if is_joint {
+                vec![(1_000_000, 100), (3_000_000, 200), (5_000_000, 300),
+                     (7_000_000, 400), (10_000_000, 500), (i64::MAX, 539)]
+            } else {
+                vec![(75_000, 100), (250_000, 200), (375_000, 300),
+                     (500_000, 400), (700_000, 500), (i64::MAX, 539)]
+            };
+            let std_ded = if is_joint { 1_200_000 } else { 600_000 };
+            (brackets, std_ded, 0)
+        }
+        // North Carolina — flat 4.5% (2025)
+        "NC" => {
+            let std_ded = if is_joint { 2_550_000 } else { 1_275_000 };
+            (vec![(i64::MAX, 450)], std_ded, 0)
+        }
+        // Michigan — flat 4.05%
+        "MI" => {
+            let exemption = if is_joint { 1_040_000 } else { 520_000 };
+            (vec![(i64::MAX, 405)], 0, exemption)
+        }
+        // New Jersey — 7 brackets, top 10.75%
+        "NJ" => {
+            let brackets = if is_joint {
+                vec![(2_000_000, 140), (5_000_000, 175), (7_000_000, 245),
+                     (8_000_000, 350), (15_000_000, 553), (100_000_000, 897),
+                     (i64::MAX, 1075)]
+            } else {
+                vec![(2_000_000, 140), (3_500_000, 175), (4_000_000, 245),
+                     (7_500_000, 350), (50_000_000, 553), (100_000_000, 897),
+                     (i64::MAX, 1075)]
+            };
+            (brackets, 0, 100_000)
+        }
+        // Virginia — 4 brackets, top 5.75%
+        "VA" => {
+            let brackets = vec![(300_000, 200), (500_000, 300), (1_700_000, 500), (i64::MAX, 575)];
+            let std_ded = if is_joint { 1_600_000 } else { 800_000 };
+            (brackets, std_ded, 93_000)
+        }
+        // Massachusetts — flat 5%
+        "MA" => {
+            let exemption = if is_joint { 880_000 } else { 440_000 };
+            (vec![(i64::MAX, 500)], 0, exemption)
+        }
+        // Colorado — flat 4.4%
+        "CO" => {
+            let std_ded = if is_joint { 2_750_000 } else { 1_375_000 };
+            (vec![(i64::MAX, 440)], std_ded, 0)
+        }
+        // Arizona — flat 2.5%
+        "AZ" => {
+            let std_ded = if is_joint { 2_792_000 } else { 1_396_000 };
+            (vec![(i64::MAX, 250)], std_ded, 0)
+        }
+        // No income tax states
+        "TX" | "FL" | "NV" | "WA" | "WY" | "SD" | "AK" | "TN" | "NH" => {
+            (vec![], 0, 0)
+        }
+        _ => {
+            // Unknown state — return empty (no tax)
+            (vec![], 0, 0)
+        }
+    }
+}
+
+/// Compute state income tax for one state.
+pub fn compute_state_tax(
+    federal_agi: i64,
+    state: &str,
+    filing_status: &str,
+    state_wages: i64,
+    state_withheld: i64,
+    residency: &str,
+    months: i64,
+) -> serde_json::Value {
+    let (brackets, std_ded, exemption) = state_brackets(state, filing_status);
+
+    // No income tax states
+    if brackets.is_empty() {
+        return serde_json::json!({
+            "state": state, "has_income_tax": false,
+            "state_tax": "$0.00", "state_tax_cents": 0,
+            "owed": "$0.00", "owed_cents": 0,
+        });
+    }
+
+    // State AGI: start from federal AGI (most states)
+    // Apply residency proration for part-year
+    let proration = if residency == "part_year" && months < 12 {
+        months as f64 / 12.0
+    } else { 1.0 };
+
+    let state_agi = (federal_agi as f64 * proration) as i64;
+    let state_taxable = std::cmp::max(state_agi - std_ded - exemption, 0);
+
+    // Compute tax through brackets
+    let mut tax = 0i64;
+    let mut prev = 0i64;
+    for &(limit, rate) in &brackets {
+        let bracket_income = std::cmp::min(state_taxable, limit) - prev;
+        if bracket_income <= 0 { break; }
+        tax += bracket_income * rate / 10000;
+        prev = limit;
+    }
+
+    let owed = tax - state_withheld;
+    let effective = if state_agi > 0 { (tax as f64 / state_agi as f64) * 100.0 } else { 0.0 };
+
+    serde_json::json!({
+        "state": state, "has_income_tax": true,
+        "state_agi": cents_to_display(state_agi),
+        "state_taxable": cents_to_display(state_taxable),
+        "standard_deduction": cents_to_display(std_ded),
+        "exemption": cents_to_display(exemption),
+        "state_tax": cents_to_display(tax), "state_tax_cents": tax,
+        "state_withheld": cents_to_display(state_withheld),
+        "owed": cents_to_display(owed), "owed_cents": owed,
+        "effective_rate": format!("{:.2}%", effective),
+        "residency": residency, "months": months,
+    })
+}
+
+// ── State Tax API ───────────────────────────────────────────────────────────
+
+pub async fn handle_state_tax_estimate(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized".to_string()))?;
+    let uid = principal.user_id();
+    require_tax_module(&state, uid).await?;
+    let year: i64 = params.get("year").and_then(|s| s.parse().ok()).unwrap_or(2025);
+    let db = state.db_path.clone();
+
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+
+        let fs: String = conn.query_row(
+            "SELECT filing_status FROM taxpayer_profiles WHERE user_id = ? AND tax_year = ?",
+            rusqlite::params![uid, year], |r| r.get(0),
+        ).unwrap_or_else(|_| "single".to_string());
+
+        let federal = compute_tax_estimate(&conn, uid, year, &fs)?;
+
+        // Get all state profiles for this user/year
+        let mut stmt = conn.prepare(
+            "SELECT state, residency_type, months_resident, state_wages_cents, state_withheld_cents \
+             FROM state_tax_profiles WHERE user_id = ? AND tax_year = ? ORDER BY state"
+        ).map_err(|e| e.to_string())?;
+
+        let states: Vec<serde_json::Value> = stmt.query_map(rusqlite::params![uid, year], |r| {
+            let st: String = r.get(0)?;
+            let residency: String = r.get(1)?;
+            let months: i64 = r.get(2)?;
+            let wages: i64 = r.get(3)?;
+            let withheld: i64 = r.get(4)?;
+            Ok(compute_state_tax(federal.agi, &st, &fs, wages, withheld, &residency, months))
+        }).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
+
+        let total_state_tax: i64 = states.iter()
+            .filter_map(|s| s.get("state_tax_cents").and_then(|v| v.as_i64()))
+            .sum();
+        let total_state_owed: i64 = states.iter()
+            .filter_map(|s| s.get("owed_cents").and_then(|v| v.as_i64()))
+            .sum();
+
+        Ok(serde_json::json!({
+            "year": year,
+            "federal_agi": cents_to_display(federal.agi),
+            "states": states,
+            "total_state_tax": cents_to_display(total_state_tax),
+            "total_state_owed": cents_to_display(total_state_owed),
+            "combined_tax": cents_to_display(federal.total_tax + total_state_tax),
+            "combined_effective_rate": if federal.gross_income > 0 {
+                format!("{:.1}%", ((federal.total_tax + total_state_tax) as f64 / federal.gross_income as f64) * 100.0)
+            } else { "0.0%".to_string() },
+        }))
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(result))
+}
+
+#[derive(serde::Deserialize)]
+pub struct StateProfileReq {
+    token: String,
+    tax_year: i64,
+    state: String,
+    residency_type: Option<String>,
+    months_resident: Option<i64>,
+    state_wages_cents: Option<i64>,
+    state_withheld_cents: Option<i64>,
+}
+
+pub async fn handle_state_profile_save(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<StateProfileReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &req.token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized".to_string()))?;
+    let uid = principal.user_id();
+    require_tax_module(&state, uid).await?;
+    let db = state.db_path.clone();
+    let now = chrono::Utc::now().timestamp();
+
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO state_tax_profiles (user_id, tax_year, state, residency_type, months_resident, \
+             state_wages_cents, state_withheld_cents, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(user_id, tax_year, state) DO UPDATE SET \
+             residency_type=excluded.residency_type, months_resident=excluded.months_resident, \
+             state_wages_cents=excluded.state_wages_cents, state_withheld_cents=excluded.state_withheld_cents, \
+             updated_at=excluded.updated_at",
+            rusqlite::params![uid, req.tax_year, req.state.to_uppercase(),
+                req.residency_type.as_deref().unwrap_or("full_year"),
+                req.months_resident.unwrap_or(12),
+                req.state_wages_cents.unwrap_or(0),
+                req.state_withheld_cents.unwrap_or(0),
+                now, now],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+pub async fn handle_state_profile_list(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized".to_string()))?;
+    let uid = principal.user_id();
+    let year: i64 = params.get("year").and_then(|s| s.parse().ok()).unwrap_or(2025);
+    let db = state.db_path.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT state, residency_type, months_resident, state_wages_cents, state_withheld_cents \
+             FROM state_tax_profiles WHERE user_id = ? AND tax_year = ? ORDER BY state"
+        ).map_err(|e| e.to_string())?;
+        let profiles: Vec<serde_json::Value> = stmt.query_map(rusqlite::params![uid, year], |r| {
+            Ok(serde_json::json!({
+                "state": r.get::<_,String>(0)?, "residency": r.get::<_,String>(1)?,
+                "months": r.get::<_,i64>(2)?,
+                "wages": cents_to_display(r.get::<_,i64>(3)?),
+                "withheld": cents_to_display(r.get::<_,i64>(4)?),
+            }))
+        }).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
+        Ok(serde_json::json!({"profiles": profiles, "year": year}))
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(result))
+}
+
+/// List all supported states with their tax type (income tax / no income tax).
+pub async fn handle_supported_states(
+    State(_state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let states = vec![
+        ("AL", "Alabama", true), ("AK", "Alaska", false), ("AZ", "Arizona", true),
+        ("AR", "Arkansas", true), ("CA", "California", true), ("CO", "Colorado", true),
+        ("CT", "Connecticut", true), ("DE", "Delaware", true), ("FL", "Florida", false),
+        ("GA", "Georgia", true), ("HI", "Hawaii", true), ("ID", "Idaho", true),
+        ("IL", "Illinois", true), ("IN", "Indiana", true), ("IA", "Iowa", true),
+        ("KS", "Kansas", true), ("KY", "Kentucky", true), ("LA", "Louisiana", true),
+        ("ME", "Maine", true), ("MD", "Maryland", true), ("MA", "Massachusetts", true),
+        ("MI", "Michigan", true), ("MN", "Minnesota", true), ("MS", "Mississippi", true),
+        ("MO", "Missouri", true), ("MT", "Montana", true), ("NE", "Nebraska", true),
+        ("NV", "Nevada", false), ("NH", "New Hampshire", false), ("NJ", "New Jersey", true),
+        ("NM", "New Mexico", true), ("NY", "New York", true), ("NC", "North Carolina", true),
+        ("ND", "North Dakota", true), ("OH", "Ohio", true), ("OK", "Oklahoma", true),
+        ("OR", "Oregon", true), ("PA", "Pennsylvania", true), ("RI", "Rhode Island", true),
+        ("SC", "South Carolina", true), ("SD", "South Dakota", false), ("TN", "Tennessee", false),
+        ("TX", "Texas", false), ("UT", "Utah", true), ("VT", "Vermont", true),
+        ("VA", "Virginia", true), ("WA", "Washington", false), ("WV", "West Virginia", true),
+        ("WI", "Wisconsin", true), ("WY", "Wyoming", false), ("DC", "District of Columbia", true),
+    ];
+    let list: Vec<serde_json::Value> = states.iter().map(|(code, name, has_tax)| {
+        serde_json::json!({"code": code, "name": name, "has_income_tax": has_tax})
+    }).collect();
+    Json(serde_json::json!({"states": list, "brackets_available": [
+        "CA","NY","PA","IL","OH","GA","NC","MI","NJ","VA","MA","CO","AZ"
+    ]}))
+}

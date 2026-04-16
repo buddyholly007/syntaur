@@ -5079,6 +5079,11 @@ async fn main() {
         .route("/api/tax/audit-risk", get(tax::handle_audit_risk))
         .route("/api/tax/insights", get(tax::handle_tax_insights))
         .route("/api/tax/what-if", post(tax::handle_what_if))
+        // State tax engine (Phase 3)
+        .route("/api/tax/state/estimate", get(tax::handle_state_tax_estimate))
+        .route("/api/tax/state/profile", get(tax::handle_state_profile_list))
+        .route("/api/tax/state/profile", post(tax::handle_state_profile_save))
+        .route("/api/tax/state/supported", get(tax::handle_supported_states))
         // Module licensing
         .route("/api/modules/status", get(tax::handle_module_status))
         .route("/api/modules/trial", post(tax::handle_start_trial))
