@@ -2951,21 +2951,39 @@ pub async fn analyze_form_4868_internal(
 
 /// Same as `analyze_form_4868_internal` but accepts pre-loaded bytes —
 /// avoids a second IRS round-trip when the caller already has them.
-async fn analyze_form_4868_with_pdf(
-    state: &AppState, year: i64, pdf_bytes: &[u8],
-) -> Result<crate::tax_pdf::FormOverrides, String> {
-    // 2. Render to PNGs for vision (AcroForm field annotations are visible
-    //    on the form itself; vision can map "the box next to '1 Your name(s)'"
-    //    to a field-position which we then cross-reference with field names).
-    //    Plus, page 4 has the printable Where-to-File chart we want to
-    //    re-extract into JSON.
-    let tmp_pdf = format!("/tmp/f4868-analyze-{}.pdf", year);
-    std::fs::write(&tmp_pdf, pdf_bytes).map_err(|e| format!("write tmp: {}", e))?;
-    let pages = convert_pdf_to_pngs(&tmp_pdf).map_err(|e| format!("render: {}", e))?;
-    let field_names = crate::tax_pdf::list_field_names(pdf_bytes)
-        .map_err(|e| format!("field walk: {}", e))?;
+/// Compute the union of state codes the AI returned in *complete* address
+/// groups (states + both 3-line addresses present). A group with state
+/// codes but missing payment addresses doesn't count toward coverage —
+/// otherwise we'd think the chart was done and not re-prompt.
+fn covered_states(parsed: &serde_json::Value) -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    let addrs = match parsed.get("addresses").and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => return set,
+    };
+    let valid3 = |obj: &serde_json::Value, key: &str| -> bool {
+        obj.get(key).and_then(|v| v.as_array())
+            .map(|a| a.len() >= 3 && a.iter().all(|s| s.as_str().map(|t| !t.is_empty()).unwrap_or(false)))
+            .unwrap_or(false)
+    };
+    for a in addrs {
+        if !valid3(a, "with_payment") || !valid3(a, "without_payment") { continue; }
+        if let Some(states) = a.get("states").and_then(|v| v.as_array()) {
+            for s in states {
+                if let Some(code) = s.as_str() {
+                    set.insert(code.trim().to_uppercase());
+                }
+            }
+        }
+    }
+    set
+}
 
-    // 3. Dispatch to the configured LLM provider.
+/// Single LLM call to the form analyzer. Returns the parsed JSON
+/// response. Caller handles retry / completeness logic.
+async fn call_form_analyzer_llm(
+    state: &AppState, year: i64, field_names: &[String], pages: &[Vec<u8>], extra_hint: &str,
+) -> Result<serde_json::Value, String> {
     let provider = state.config.models.providers.iter()
         .find(|(_, p)| p.base_url.contains("openrouter") || p.base_url.contains("openai") || p.base_url.contains("anthropic"))
         .or_else(|| state.config.models.providers.iter().next())
@@ -3009,7 +3027,9 @@ Available AcroForm field paths on this PDF:
 Also extract the COMPLETE "Where to File a Paper Form 4868" chart from
 the last page. The chart has multiple rows grouping states by region.
 For EACH row, list the USPS state codes plus the full 3-line addresses
-for "with payment" and "without payment". Do not stop after one row.
+for "with payment" and "without payment". Do not stop after one row —
+the chart typically has 4-6 US groups + 1-2 foreign groups, and the
+union of all state codes must cover all 50 US states + DC.{extra_hint}
 
 Respond ONLY with this JSON shape (use null when a semantic field isn't
 present on this form):
@@ -3026,17 +3046,18 @@ present on this form):
   "notes": "any caveats or changes you noticed vs prior years"
 }}"#,
         year = year,
-        field_list = field_names.join("\n"));
+        field_list = field_names.join("\n"),
+        extra_hint = extra_hint);
 
     let mut content_parts: Vec<serde_json::Value> = vec![serde_json::json!({"type":"text","text":prompt})];
-    for png in &pages {
+    for png in pages {
         let b64 = base64::engine::general_purpose::STANDARD.encode(png);
         content_parts.push(serde_json::json!({"type":"image_url","image_url":{"url":format!("data:image/png;base64,{}",b64)}}));
     }
     let payload = serde_json::json!({
         "model": model,
         "messages": [{"role":"user","content":content_parts}],
-        "max_tokens": 4000,
+        "max_tokens": 6000,
         "temperature": 0.1,
     });
     let resp = state.client.post(&url)
@@ -3054,8 +3075,75 @@ present on this form):
     let content = body["choices"][0]["message"]["content"].as_str().unwrap_or("");
     let cleaned = content.trim().trim_start_matches("```json").trim_start_matches("```")
         .trim_end_matches("```").trim();
-    let parsed: serde_json::Value = serde_json::from_str(cleaned)
-        .map_err(|e| format!("LLM response parse: {} - first 300 chars: {}", e, &content[..content.len().min(300)]))?;
+    serde_json::from_str(cleaned)
+        .map_err(|e| format!("LLM response parse: {} - first 300 chars: {}", e, &content[..content.len().min(300)]))
+}
+
+/// Every USPS jurisdiction code the IRS Where-to-File chart can route to.
+/// Used for the AI's address-completeness self-check — the union of
+/// returned state groups must cover all of these.
+const ALL_US_JURISDICTIONS: &[&str] = &[
+    "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA",
+    "KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ",
+    "NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT",
+    "VA","WA","WV","WI","WY","DC",
+];
+
+async fn analyze_form_4868_with_pdf(
+    state: &AppState, year: i64, pdf_bytes: &[u8],
+) -> Result<crate::tax_pdf::FormOverrides, String> {
+    let tmp_pdf = format!("/tmp/f4868-analyze-{}.pdf", year);
+    std::fs::write(&tmp_pdf, pdf_bytes).map_err(|e| format!("write tmp: {}", e))?;
+    let pages = convert_pdf_to_pngs(&tmp_pdf).map_err(|e| format!("render: {}", e))?;
+    let field_names = crate::tax_pdf::list_field_names(pdf_bytes)
+        .map_err(|e| format!("field walk: {}", e))?;
+
+    // Up to 2 LLM attempts. First with no extra hint; if state coverage
+    // is incomplete, retry with an explicit "you missed: X, Y, Z" list.
+    let mut last_err: Option<String> = None;
+    let mut best: Option<serde_json::Value> = None;
+    let mut best_coverage: usize = 0;
+
+    for attempt in 0..2 {
+        let missing_hint = if attempt == 0 {
+            String::new()
+        } else if let Some(prev) = best.as_ref() {
+            let covered = covered_states(prev);
+            let missing: Vec<&&str> = ALL_US_JURISDICTIONS.iter().filter(|s| !covered.contains(**s)).collect();
+            format!("\n\nIMPORTANT: Your previous response only covered {} of {} jurisdictions. \
+                     You missed these state codes: {}. \
+                     The full Where-to-File chart on the IRS PDF lists every state — please \
+                     re-read it and return ALL groups. Each group covers multiple states; \
+                     a typical 2025 chart has 4-6 groups for US states + 1-2 for foreign.",
+                covered.len(), ALL_US_JURISDICTIONS.len(),
+                missing.iter().map(|s| **s).collect::<Vec<_>>().join(", "))
+        } else {
+            String::new()
+        };
+
+        match call_form_analyzer_llm(state, year, &field_names, &pages, &missing_hint).await {
+            Ok(parsed) => {
+                let coverage = covered_states(&parsed).len();
+                if coverage > best_coverage {
+                    best_coverage = coverage;
+                    best = Some(parsed.clone());
+                }
+                if coverage >= ALL_US_JURISDICTIONS.len() {
+                    log::info!("[tax] AI form analysis: full state coverage on attempt {}", attempt + 1);
+                    break;
+                }
+                log::warn!("[tax] AI form analysis attempt {}: covered {} of {} jurisdictions; retrying",
+                    attempt + 1, coverage, ALL_US_JURISDICTIONS.len());
+            }
+            Err(e) => {
+                log::warn!("[tax] AI form analysis attempt {} failed: {}", attempt + 1, e);
+                last_err = Some(e);
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&tmp_pdf);
+
+    let parsed = best.ok_or_else(|| last_err.unwrap_or_else(|| "AI analysis returned no usable response".to_string()))?;
 
     // 4. Build + persist the overrides.
     let mut overrides = crate::tax_pdf::FormOverrides::default();

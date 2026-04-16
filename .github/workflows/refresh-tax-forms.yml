@@ -1,0 +1,153 @@
+name: Refresh bundled IRS Form 4868
+
+# Keeps the bundled fallback at syntaur-gateway/assets/f4868-2025.pdf
+# in sync with whatever the IRS currently publishes. The runtime loader
+# fetches a fresh copy on demand anyway — this workflow is for the
+# "offline / first-run" fallback that ships in the binary.
+#
+# Schedule: 1st of every month + on demand. The IRS releases a new
+# year's form in late January / early February.
+
+on:
+  schedule:
+    # 09:00 UTC on the 1st of every month — well outside any peak load.
+    - cron: '0 9 1 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download latest Form 4868 from IRS
+        id: fetch
+        run: |
+          set -euo pipefail
+          curl -fsSL https://www.irs.gov/pub/irs-pdf/f4868.pdf -o /tmp/f4868-latest.pdf
+          # IRS PDF metadata Title is "YYYY Form 4868" — extract via pdfinfo.
+          sudo apt-get update && sudo apt-get install -y poppler-utils
+          TITLE=$(pdfinfo /tmp/f4868-latest.pdf | awk -F': +' '/^Title:/{print $2}')
+          # Year is the first 4-digit number in the title.
+          YEAR=$(echo "$TITLE" | grep -oE '[0-9]{4}' | head -1)
+          if [ -z "$YEAR" ]; then
+            echo "::error::Could not parse year from PDF Title: '$TITLE'"
+            exit 1
+          fi
+          echo "year=$YEAR" >> "$GITHUB_OUTPUT"
+          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+
+          # Hash both for comparison.
+          NEW_HASH=$(sha256sum /tmp/f4868-latest.pdf | awk '{print $1}')
+          BUNDLED=$(ls syntaur-gateway/assets/f4868-*.pdf 2>/dev/null | head -1 || echo "")
+          if [ -z "$BUNDLED" ]; then
+            echo "no bundled fallback yet — adding"
+            echo "needs_update=true" >> "$GITHUB_OUTPUT"
+            echo "old_hash=NONE" >> "$GITHUB_OUTPUT"
+          else
+            OLD_HASH=$(sha256sum "$BUNDLED" | awk '{print $1}')
+            echo "old_hash=$OLD_HASH" >> "$GITHUB_OUTPUT"
+            if [ "$NEW_HASH" = "$OLD_HASH" ]; then
+              echo "Bundled fallback is already up to date (sha256 $NEW_HASH)."
+              echo "needs_update=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "Bundled fallback is stale — refresh needed."
+              echo "needs_update=true" >> "$GITHUB_OUTPUT"
+              echo "old_path=$BUNDLED" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+          echo "new_hash=$NEW_HASH" >> "$GITHUB_OUTPUT"
+          echo "size=$(stat -c%s /tmp/f4868-latest.pdf)" >> "$GITHUB_OUTPUT"
+
+      - name: Validate the new PDF before committing
+        if: steps.fetch.outputs.needs_update == 'true'
+        run: |
+          # Minimum sanity: it must contain the AcroForm field paths our
+          # default map expects. If those are missing, the runtime loader
+          # would fall back to AI re-derivation anyway — but for the
+          # bundled fallback we want a known-good shape. If validation
+          # fails we still open the PR (with a warning) so a human can
+          # inspect the IRS redesign.
+          python3 - <<'PY'
+          from pypdf import PdfReader
+          r = PdfReader('/tmp/f4868-latest.pdf')
+          fields = r.get_fields() or {}
+          want = [
+              "topmostSubform[0].Page1[0].PartI_ReadOrder[0].f1_4[0]",
+              "topmostSubform[0].Page1[0].f1_11[0]",
+          ]
+          missing = [w for w in want if w not in fields]
+          if missing:
+              print(f"::warning::IRS redesigned the form — missing default field paths: {missing}")
+              print(f"::warning::Total fields found: {len(fields)}")
+          else:
+              print("Default field map intact.")
+          PY
+        env:
+          PYPDF_FALLBACK: "1"
+        continue-on-error: true
+
+      - name: Install pypdf
+        if: steps.fetch.outputs.needs_update == 'true'
+        run: pip install --quiet pypdf
+
+      - name: Replace bundled file + open PR
+        if: steps.fetch.outputs.needs_update == 'true'
+        env:
+          YEAR: ${{ steps.fetch.outputs.year }}
+          OLD_PATH: ${{ steps.fetch.outputs.old_path }}
+          NEW_HASH: ${{ steps.fetch.outputs.new_hash }}
+          OLD_HASH: ${{ steps.fetch.outputs.old_hash }}
+          SIZE: ${{ steps.fetch.outputs.size }}
+        run: |
+          set -euo pipefail
+          NEW_PATH="syntaur-gateway/assets/f4868-${YEAR}.pdf"
+          # Remove any prior years' bundled copy — the runtime cache and AI
+          # analyzer handle multi-year support already.
+          if [ -n "${OLD_PATH:-}" ] && [ "$OLD_PATH" != "$NEW_PATH" ]; then
+            git rm "$OLD_PATH"
+          fi
+          mkdir -p syntaur-gateway/assets
+          cp /tmp/f4868-latest.pdf "$NEW_PATH"
+
+          # Bump the bundled-year constant in tax_pdf.rs so the runtime
+          # warning logs reference the correct year when fallback fires.
+          sed -i -E "s/include_bytes!\(\"\.\.\/assets\/f4868-[0-9]{4}\.pdf\"\)/include_bytes!(\"..\/assets\/f4868-${YEAR}.pdf\")/" syntaur-gateway/src/tax_pdf.rs
+          sed -i -E "s/^const FORM_4868_BUNDLED_YEAR: i64 = [0-9]{4};/const FORM_4868_BUNDLED_YEAR: i64 = ${YEAR};/" syntaur-gateway/src/tax_pdf.rs
+
+      - name: Create pull request
+        if: steps.fetch.outputs.needs_update == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "chore(tax): refresh bundled Form 4868 to ${{ steps.fetch.outputs.year }}"
+          branch: tax/refresh-f4868-${{ steps.fetch.outputs.year }}
+          delete-branch: true
+          title: "Refresh bundled IRS Form 4868 to ${{ steps.fetch.outputs.year }}"
+          body: |
+            Auto-refresh of `syntaur-gateway/assets/f4868-${{ steps.fetch.outputs.year }}.pdf`.
+
+            - Title: `${{ steps.fetch.outputs.title }}`
+            - Year: `${{ steps.fetch.outputs.year }}`
+            - Size: `${{ steps.fetch.outputs.size }}` bytes
+            - SHA256 (new): `${{ steps.fetch.outputs.new_hash }}`
+            - SHA256 (old): `${{ steps.fetch.outputs.old_hash }}`
+
+            The runtime loader in `tax_pdf.rs::load_form_4868()` already
+            fetches a fresh copy from `irs.gov/pub/irs-pdf/f4868.pdf` on
+            first use and caches it under `~/.syntaur/forms/`. This PR only
+            updates the *offline / first-run* fallback that ships in the
+            binary.
+
+            ### Field-map sanity check
+            The validation step above ran a probe for our two known
+            AcroForm paths. If the workflow logged a `::warning::` about
+            missing fields, the IRS likely redesigned the XFA template —
+            and the AI auto-recovery path in `handle_extension` will kick
+            in at runtime. Worth a manual review before merging.
+          labels: |
+            tax-module
+            auto-refresh
