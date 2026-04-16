@@ -1211,6 +1211,85 @@ const MIGRATIONS: &[&str] = &[
         UNIQUE(user_id, tax_year, vehicle_description)
     );
     "#,
+
+    // Migration 33: Investment tax engine — cost basis, wash sales, K-1, carryforward.
+    r#"
+    -- Per-lot cost basis tracking
+    CREATE TABLE IF NOT EXISTS tax_lots (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id             INTEGER NOT NULL,
+        symbol              TEXT NOT NULL,
+        asset_type          TEXT NOT NULL DEFAULT 'stock',
+        quantity            REAL NOT NULL,
+        cost_per_unit_cents INTEGER NOT NULL,
+        acquisition_date    TEXT NOT NULL,
+        acquisition_method  TEXT NOT NULL DEFAULT 'purchase',
+        account_id          INTEGER,
+        broker              TEXT,
+        adjusted_basis_cents INTEGER,
+        wash_sale_adj_cents INTEGER NOT NULL DEFAULT 0,
+        status              TEXT NOT NULL DEFAULT 'open',
+        created_at          INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_lots_user ON tax_lots(user_id, symbol);
+
+    -- Lot dispositions (sales, exchanges)
+    CREATE TABLE IF NOT EXISTS lot_dispositions (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        lot_id              INTEGER NOT NULL REFERENCES tax_lots(id),
+        user_id             INTEGER NOT NULL,
+        sell_date           TEXT NOT NULL,
+        quantity_sold       REAL NOT NULL,
+        proceeds_cents      INTEGER NOT NULL,
+        cost_basis_cents    INTEGER NOT NULL,
+        wash_sale_adj_cents INTEGER NOT NULL DEFAULT 0,
+        gain_loss_cents     INTEGER NOT NULL,
+        holding_period      TEXT NOT NULL,
+        form_8949_code      TEXT NOT NULL DEFAULT 'A',
+        created_at          INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_dispositions_user ON lot_dispositions(user_id);
+
+    -- Wash sale matches (30-day rule)
+    CREATE TABLE IF NOT EXISTS wash_sale_matches (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id             INTEGER NOT NULL,
+        sell_disposition_id INTEGER NOT NULL REFERENCES lot_dispositions(id),
+        replacement_lot_id  INTEGER NOT NULL REFERENCES tax_lots(id),
+        disallowed_cents    INTEGER NOT NULL,
+        basis_adj_cents     INTEGER NOT NULL,
+        created_at          INTEGER NOT NULL
+    );
+
+    -- K-1 income from partnerships/trusts/S-corps
+    CREATE TABLE IF NOT EXISTS k1_income (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id             INTEGER NOT NULL,
+        tax_year            INTEGER NOT NULL,
+        entity_name         TEXT NOT NULL,
+        entity_type         TEXT NOT NULL DEFAULT 'partnership',
+        ordinary_cents      INTEGER NOT NULL DEFAULT 0,
+        rental_cents        INTEGER NOT NULL DEFAULT 0,
+        interest_cents      INTEGER NOT NULL DEFAULT 0,
+        dividend_cents      INTEGER NOT NULL DEFAULT 0,
+        capital_gain_cents  INTEGER NOT NULL DEFAULT 0,
+        section_179_cents   INTEGER NOT NULL DEFAULT 0,
+        se_income_cents     INTEGER NOT NULL DEFAULT 0,
+        other_json          TEXT DEFAULT '{}',
+        created_at          INTEGER NOT NULL
+    );
+
+    -- Capital loss carryforward across years
+    CREATE TABLE IF NOT EXISTS capital_loss_carryforward (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id             INTEGER NOT NULL,
+        tax_year            INTEGER NOT NULL,
+        short_term_cents    INTEGER NOT NULL DEFAULT 0,
+        long_term_cents     INTEGER NOT NULL DEFAULT 0,
+        created_at          INTEGER NOT NULL,
+        UNIQUE(user_id, tax_year)
+    );
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

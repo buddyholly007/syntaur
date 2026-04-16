@@ -5853,3 +5853,436 @@ pub async fn handle_vehicle_usage_create(
         "rate_per_mile": format!("${:.2}", rate as f64 / 100.0),
     })))
 }
+
+// ── Investment Tax Engine ───────────────────────────────────────────────────
+
+/// Detect wash sales: any loss sale where the same symbol was purchased
+/// within 30 days before or after the sale date.
+fn detect_wash_sales(conn: &rusqlite::Connection, user_id: i64, tax_year: i64) -> Vec<serde_json::Value> {
+    let start = format!("{}-01-01", tax_year);
+    let end = format!("{}-12-31", tax_year);
+    let mut results = Vec::new();
+
+    // Find all loss dispositions for the year
+    let mut stmt = match conn.prepare(
+        "SELECT d.id, d.lot_id, d.sell_date, d.gain_loss_cents, l.symbol, d.quantity_sold \
+         FROM lot_dispositions d JOIN tax_lots l ON l.id = d.lot_id \
+         WHERE d.user_id = ? AND d.sell_date >= ? AND d.sell_date <= ? AND d.gain_loss_cents < 0"
+    ) { Ok(s) => s, Err(_) => return results };
+
+    let losses: Vec<(i64, i64, String, i64, String, f64)> = stmt.query_map(
+        rusqlite::params![user_id, &start, &end], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get::<_,String>(2)?, r.get(3)?, r.get::<_,String>(4)?, r.get(5)?))
+    }).ok().map(|rows| rows.filter_map(|r| r.ok()).collect()).unwrap_or_default();
+
+    for (disp_id, _lot_id, sell_date, loss, symbol, _qty) in &losses {
+        // Check for purchases of same symbol within 30 days
+        let mut check = match conn.prepare(
+            "SELECT id, acquisition_date, quantity FROM tax_lots \
+             WHERE user_id = ? AND symbol = ? AND status = 'open' \
+             AND julianday(acquisition_date) BETWEEN julianday(?) - 30 AND julianday(?) + 30"
+        ) { Ok(s) => s, Err(_) => continue };
+
+        let replacements: Vec<(i64, String)> = check.query_map(
+            rusqlite::params![user_id, symbol, sell_date, sell_date], |r| {
+            Ok((r.get(0)?, r.get::<_,String>(1)?))
+        }).ok().map(|rows| rows.filter_map(|r| r.ok()).collect()).unwrap_or_default();
+
+        for (repl_lot_id, repl_date) in &replacements {
+            results.push(serde_json::json!({
+                "disposition_id": disp_id,
+                "sell_date": sell_date,
+                "symbol": symbol,
+                "loss_cents": loss.abs(),
+                "loss": cents_to_display(loss.abs()),
+                "replacement_lot_id": repl_lot_id,
+                "replacement_date": repl_date,
+                "disallowed": true,
+            }));
+        }
+    }
+    results
+}
+
+/// Generate Form 8949 data from lot dispositions.
+fn generate_form_8949(conn: &rusqlite::Connection, user_id: i64, tax_year: i64) -> serde_json::Value {
+    let start = format!("{}-01-01", tax_year);
+    let end = format!("{}-12-31", tax_year);
+
+    let mut stmt = match conn.prepare(
+        "SELECT l.symbol, l.acquisition_date, d.sell_date, d.proceeds_cents, d.cost_basis_cents, \
+         d.wash_sale_adj_cents, d.gain_loss_cents, d.holding_period, d.form_8949_code \
+         FROM lot_dispositions d JOIN tax_lots l ON l.id = d.lot_id \
+         WHERE d.user_id = ? AND d.sell_date >= ? AND d.sell_date <= ? ORDER BY d.sell_date"
+    ) { Ok(s) => s, Err(_) => return serde_json::json!({"short_term": [], "long_term": []}) };
+
+    let mut short_term = Vec::new();
+    let mut long_term = Vec::new();
+    let mut st_total = 0i64;
+    let mut lt_total = 0i64;
+
+    let rows: Vec<_> = stmt.query_map(rusqlite::params![user_id, &start, &end], |r| {
+        Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?, r.get::<_,String>(2)?,
+            r.get::<_,i64>(3)?, r.get::<_,i64>(4)?, r.get::<_,i64>(5)?,
+            r.get::<_,i64>(6)?, r.get::<_,String>(7)?, r.get::<_,String>(8)?))
+    }).ok().map(|r| r.filter_map(|x| x.ok()).collect()).unwrap_or_default();
+
+    for (sym, acq, sell, proceeds, basis, wash_adj, gain, period, code) in rows {
+        let entry = serde_json::json!({
+            "symbol": sym, "acquired": acq, "sold": sell,
+            "proceeds": cents_to_display(proceeds), "basis": cents_to_display(basis),
+            "wash_sale_adj": cents_to_display(wash_adj),
+            "gain_loss": cents_to_display(gain), "code": code,
+        });
+        if period == "short" {
+            st_total += gain;
+            short_term.push(entry);
+        } else {
+            lt_total += gain;
+            long_term.push(entry);
+        }
+    }
+
+    serde_json::json!({
+        "short_term": short_term, "long_term": long_term,
+        "short_term_total": cents_to_display(st_total),
+        "long_term_total": cents_to_display(lt_total),
+        "net_gain_loss": cents_to_display(st_total + lt_total),
+    })
+}
+
+// ── Investment API endpoints ────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct AddLotReq {
+    token: String,
+    symbol: String,
+    asset_type: Option<String>,
+    quantity: f64,
+    cost_per_unit_cents: i64,
+    acquisition_date: String,
+    acquisition_method: Option<String>,
+    broker: Option<String>,
+}
+
+pub async fn handle_lot_create(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AddLotReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &req.token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    require_tax_module(&state, uid).await?;
+    let db = state.db_path.clone();
+    let now = chrono::Utc::now().timestamp();
+    let total_basis = (req.quantity * req.cost_per_unit_cents as f64) as i64;
+
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO tax_lots (user_id, symbol, asset_type, quantity, cost_per_unit_cents, \
+             acquisition_date, acquisition_method, broker, adjusted_basis_cents, status, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)",
+            rusqlite::params![uid, req.symbol, req.asset_type.as_deref().unwrap_or("stock"),
+                req.quantity, req.cost_per_unit_cents, req.acquisition_date,
+                req.acquisition_method.as_deref().unwrap_or("purchase"),
+                req.broker, total_basis, now],
+        ).map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({"ok": true, "lot_id": conn.last_insert_rowid(),
+            "total_basis": cents_to_display(total_basis)}))
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(result))
+}
+
+#[derive(serde::Deserialize)]
+pub struct SellLotReq {
+    token: String,
+    lot_id: i64,
+    sell_date: String,
+    quantity_sold: f64,
+    proceeds_cents: i64,
+}
+
+pub async fn handle_lot_sell(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SellLotReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &req.token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    require_tax_module(&state, uid).await?;
+    let db = state.db_path.clone();
+    let now = chrono::Utc::now().timestamp();
+
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+
+        // Get the lot
+        let (symbol, qty, cpu, acq_date): (String, f64, i64, String) = conn.query_row(
+            "SELECT symbol, quantity, cost_per_unit_cents, acquisition_date FROM tax_lots WHERE id = ? AND user_id = ?",
+            rusqlite::params![req.lot_id, uid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_,String>(3)?)),
+        ).map_err(|e| format!("lot not found: {e}"))?;
+
+        let cost_basis = (req.quantity_sold * cpu as f64) as i64;
+        let gain_loss = req.proceeds_cents - cost_basis;
+
+        // Determine holding period
+        let holding = if days_between(&acq_date, &req.sell_date) > 365 { "long" } else { "short" };
+        let code = if holding == "short" { "A" } else { "D" }; // Box A=short reported, D=long reported
+
+        conn.execute(
+            "INSERT INTO lot_dispositions (lot_id, user_id, sell_date, quantity_sold, proceeds_cents, \
+             cost_basis_cents, gain_loss_cents, holding_period, form_8949_code, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rusqlite::params![req.lot_id, uid, req.sell_date, req.quantity_sold,
+                req.proceeds_cents, cost_basis, gain_loss, holding, code, now],
+        ).map_err(|e| e.to_string())?;
+
+        // Update lot status if fully sold
+        let remaining = qty - req.quantity_sold;
+        if remaining <= 0.001 {
+            conn.execute("UPDATE tax_lots SET status = 'closed' WHERE id = ?",
+                rusqlite::params![req.lot_id]).map_err(|e| e.to_string())?;
+        } else {
+            conn.execute("UPDATE tax_lots SET quantity = ? WHERE id = ?",
+                rusqlite::params![remaining, req.lot_id]).map_err(|e| e.to_string())?;
+        }
+
+        Ok(serde_json::json!({
+            "ok": true, "symbol": symbol,
+            "proceeds": cents_to_display(req.proceeds_cents),
+            "cost_basis": cents_to_display(cost_basis),
+            "gain_loss": cents_to_display(gain_loss),
+            "holding_period": holding,
+            "type": if gain_loss >= 0 { "gain" } else { "loss" },
+        }))
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(result))
+}
+
+pub async fn handle_lots_list(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    require_tax_module(&state, uid).await?;
+    let status = params.get("status").cloned().unwrap_or_else(|| "open".to_string());
+    let db = state.db_path.clone();
+
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT id, symbol, asset_type, quantity, cost_per_unit_cents, acquisition_date, \
+             acquisition_method, broker, adjusted_basis_cents, wash_sale_adj_cents, status \
+             FROM tax_lots WHERE user_id = ? AND status = ? ORDER BY symbol, acquisition_date"
+        ).map_err(|e| e.to_string())?;
+        let lots: Vec<serde_json::Value> = stmt.query_map(rusqlite::params![uid, &status], |r| {
+            let qty: f64 = r.get(3)?;
+            let cpu: i64 = r.get(4)?;
+            Ok(serde_json::json!({
+                "id": r.get::<_,i64>(0)?, "symbol": r.get::<_,String>(1)?,
+                "asset_type": r.get::<_,String>(2)?, "quantity": qty,
+                "cost_per_unit": cents_to_display(cpu),
+                "total_basis": cents_to_display((qty * cpu as f64) as i64),
+                "acquisition_date": r.get::<_,String>(5)?,
+                "method": r.get::<_,String>(6)?, "broker": r.get::<_,Option<String>>(7)?,
+                "wash_sale_adj": cents_to_display(r.get::<_,i64>(9)?),
+                "status": r.get::<_,String>(10)?,
+            }))
+        }).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
+        Ok(serde_json::json!({"lots": lots}))
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(result))
+}
+
+pub async fn handle_wash_sales(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    require_tax_module(&state, uid).await?;
+    let year: i64 = params.get("year").and_then(|s| s.parse().ok()).unwrap_or(2025);
+    let db = state.db_path.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let matches = detect_wash_sales(&conn, uid, year);
+        Ok(serde_json::json!({"wash_sales": matches, "count": matches.len(), "year": year}))
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(result))
+}
+
+pub async fn handle_form_8949(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    require_tax_module(&state, uid).await?;
+    let year: i64 = params.get("year").and_then(|s| s.parse().ok()).unwrap_or(2025);
+    let db = state.db_path.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        Ok(generate_form_8949(&conn, uid, year))
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(result))
+}
+
+#[derive(serde::Deserialize)]
+pub struct K1IncomeReq {
+    token: String,
+    tax_year: i64,
+    entity_name: String,
+    entity_type: Option<String>,
+    ordinary_cents: Option<i64>,
+    rental_cents: Option<i64>,
+    interest_cents: Option<i64>,
+    dividend_cents: Option<i64>,
+    capital_gain_cents: Option<i64>,
+    section_179_cents: Option<i64>,
+    se_income_cents: Option<i64>,
+}
+
+pub async fn handle_k1_create(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<K1IncomeReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &req.token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    require_tax_module(&state, uid).await?;
+    let db = state.db_path.clone();
+    let now = chrono::Utc::now().timestamp();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO k1_income (user_id, tax_year, entity_name, entity_type, ordinary_cents, \
+             rental_cents, interest_cents, dividend_cents, capital_gain_cents, section_179_cents, \
+             se_income_cents, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rusqlite::params![uid, req.tax_year, req.entity_name,
+                req.entity_type.as_deref().unwrap_or("partnership"),
+                req.ordinary_cents.unwrap_or(0), req.rental_cents.unwrap_or(0),
+                req.interest_cents.unwrap_or(0), req.dividend_cents.unwrap_or(0),
+                req.capital_gain_cents.unwrap_or(0), req.section_179_cents.unwrap_or(0),
+                req.se_income_cents.unwrap_or(0), now],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+pub async fn handle_k1_list(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    require_tax_module(&state, uid).await?;
+    let year: i64 = params.get("year").and_then(|s| s.parse().ok()).unwrap_or(2025);
+    let db = state.db_path.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT id, entity_name, entity_type, ordinary_cents, rental_cents, interest_cents, \
+             dividend_cents, capital_gain_cents, section_179_cents, se_income_cents \
+             FROM k1_income WHERE user_id = ? AND tax_year = ? ORDER BY entity_name"
+        ).map_err(|e| e.to_string())?;
+        let k1s: Vec<serde_json::Value> = stmt.query_map(rusqlite::params![uid, year], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_,i64>(0)?, "entity": r.get::<_,String>(1)?,
+                "type": r.get::<_,String>(2)?,
+                "ordinary": cents_to_display(r.get::<_,i64>(3)?),
+                "rental": cents_to_display(r.get::<_,i64>(4)?),
+                "interest": cents_to_display(r.get::<_,i64>(5)?),
+                "dividends": cents_to_display(r.get::<_,i64>(6)?),
+                "capital_gains": cents_to_display(r.get::<_,i64>(7)?),
+                "section_179": cents_to_display(r.get::<_,i64>(8)?),
+                "se_income": cents_to_display(r.get::<_,i64>(9)?),
+            }))
+        }).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
+        Ok(serde_json::json!({"k1s": k1s, "year": year}))
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(result))
+}
+
+pub async fn handle_capital_gains_summary(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    require_tax_module(&state, uid).await?;
+    let year: i64 = params.get("year").and_then(|s| s.parse().ok()).unwrap_or(2025);
+    let db = state.db_path.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let start = format!("{year}-01-01");
+        let end = format!("{year}-12-31");
+
+        let st_gains: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(gain_loss_cents),0) FROM lot_dispositions WHERE user_id=? AND sell_date>=? AND sell_date<=? AND holding_period='short' AND gain_loss_cents>0",
+            rusqlite::params![uid, &start, &end], |r| r.get(0)).unwrap_or(0);
+        let st_losses: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(gain_loss_cents),0) FROM lot_dispositions WHERE user_id=? AND sell_date>=? AND sell_date<=? AND holding_period='short' AND gain_loss_cents<0",
+            rusqlite::params![uid, &start, &end], |r| r.get(0)).unwrap_or(0);
+        let lt_gains: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(gain_loss_cents),0) FROM lot_dispositions WHERE user_id=? AND sell_date>=? AND sell_date<=? AND holding_period='long' AND gain_loss_cents>0",
+            rusqlite::params![uid, &start, &end], |r| r.get(0)).unwrap_or(0);
+        let lt_losses: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(gain_loss_cents),0) FROM lot_dispositions WHERE user_id=? AND sell_date>=? AND sell_date<=? AND holding_period='long' AND gain_loss_cents<0",
+            rusqlite::params![uid, &start, &end], |r| r.get(0)).unwrap_or(0);
+
+        let net = st_gains + st_losses + lt_gains + lt_losses;
+        // Capital loss limitation: $3,000/year
+        let loss_limit = -300_000i64;
+        let usable = if net < loss_limit { loss_limit } else { net };
+        let carryforward = if net < loss_limit { net - loss_limit } else { 0 };
+
+        let wash_sales = detect_wash_sales(&conn, uid, year);
+
+        Ok(serde_json::json!({
+            "year": year,
+            "short_term_gains": cents_to_display(st_gains),
+            "short_term_losses": cents_to_display(st_losses.abs()),
+            "long_term_gains": cents_to_display(lt_gains),
+            "long_term_losses": cents_to_display(lt_losses.abs()),
+            "net_gain_loss": cents_to_display(net),
+            "usable_loss": cents_to_display(usable),
+            "carryforward_loss": cents_to_display(carryforward.abs()),
+            "wash_sale_count": wash_sales.len(),
+        }))
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(result))
+}
+
+/// Helper: approximate days between two YYYY-MM-DD dates.
+fn days_between(d1: &str, d2: &str) -> i64 {
+    let parse = |s: &str| -> i64 {
+        let parts: Vec<&str> = s.split('-').collect();
+        if parts.len() != 3 { return 0; }
+        let y: i64 = parts[0].parse().unwrap_or(0);
+        let m: i64 = parts[1].parse().unwrap_or(1);
+        let d: i64 = parts[2].parse().unwrap_or(1);
+        y * 365 + m * 30 + d // rough approximation
+    };
+    (parse(d2) - parse(d1)).abs()
+}
