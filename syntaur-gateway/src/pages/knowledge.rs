@@ -7,7 +7,7 @@
 use axum::response::Html;
 use maud::{html, Markup, PreEscaped};
 
-use super::shared::{shell, top_bar_standard, Page};
+use super::shared::{shell, Page};
 
 pub async fn render() -> Html<String> {
     let page = Page {
@@ -15,8 +15,9 @@ pub async fn render() -> Html<String> {
         authed: true,
         extra_style: Some(EXTRA_STYLE),
     };
+    // Custom in-page top bar instead of the shared one — the library
+    // theme needs parchment + sepia tones, not the standard gray.
     let body = html! {
-        (top_bar_standard("Knowledge"))
         (page_body())
         script { (PreEscaped(PAGE_JS)) }
     };
@@ -25,114 +26,479 @@ pub async fn render() -> Html<String> {
 
 fn page_body() -> Markup {
     html! {
-        div class="max-w-5xl mx-auto px-4 py-6 space-y-6" {
-            div class="flex items-center justify-between" {
-                div {
-                    h1 class="text-2xl font-bold" { "Knowledge" }
-                    p class="text-gray-400 mt-1 text-sm" {
-                        "Search and manage the documents Syntaur has indexed. "
-                        "Connectors run in the background; uploads are ingested immediately."
+        // ── Top bar — leather-bound spine ──────────────────────────────
+        div class="lib-topbar" {
+            div class="lib-topbar-inner" {
+                div class="flex items-center gap-3 min-w-0" {
+                    a href="/" class="flex items-center gap-2 hover:opacity-80 flex-shrink-0" {
+                        img src="/app-icon.jpg" class="h-8 w-8 rounded" alt="";
+                        span class="lib-brand" { "Syntaur" }
                     }
+                    span class="lib-fleuron" aria-hidden="true" { "❦" }
+                    span class="lib-section-label" { "Codex Knowledge" }
                 }
-                div class="flex items-center gap-2" {
-                    label class="text-xs text-gray-500" { "Agent:" }
-                    select id="agent-filter"
-                        class="bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-300"
-                        onchange="onAgentChange()" {
+                div class="flex items-center gap-4 text-sm" {
+                    a href="/" class="lib-link" { "Home" }
+                    a href="/settings" class="lib-link" { "Settings" }
+                    a href="/profile" class="lib-link" { "Profile" }
+                    label class="lib-inline-label" { "Agent" }
+                    select id="agent-filter" class="lib-select" onchange="onAgentChange()" {
                         option value="" { "All agents" }
                     }
                 }
             }
+        }
 
-            // ── Stats row ─────────────────────────────────────────────
-            div class="grid grid-cols-3 gap-4" {
-                div class="card p-4" {
-                    div class="text-xs text-gray-500 uppercase tracking-wider" { "Documents" }
-                    div class="text-2xl font-semibold mt-1" id="stat-docs" { "…" }
-                }
-                div class="card p-4" {
-                    div class="text-xs text-gray-500 uppercase tracking-wider" { "Chunks" }
-                    div class="text-2xl font-semibold mt-1" id="stat-chunks" { "…" }
-                }
-                div class="card p-4" {
-                    div class="text-xs text-gray-500 uppercase tracking-wider" { "Sources" }
-                    div class="text-2xl font-semibold mt-1" id="stat-sources" { "…" }
+        // ── Body — 60/40 split, mirroring dashboard layout ─────────────
+        div class="lib-body" {
+            // LEFT (60%) — the inquiry: search + results
+            div class="lib-left" {
+                section class="lib-card" {
+                    div class="lib-card-eyebrow" { "Inquiry" }
+                    h2 class="lib-card-title" { "Search the Codex" }
+                    div class="lib-divider" aria-hidden="true" {}
+                    div class="lib-search-row" {
+                        input type="text" id="search-q"
+                            class="lib-input"
+                            placeholder="Pose a question of the index…"
+                            onkeydown="if(event.key==='Enter')runSearch()";
+                        select id="search-source" class="lib-select" {
+                            option value="" { "all sources" }
+                        }
+                        button onclick="runSearch()" class="lib-btn-primary" { "Inquire" }
+                    }
+                    div id="search-results" class="mt-5 space-y-3" {}
                 }
             }
 
-            // ── Search card ───────────────────────────────────────────
-            div class="card p-5" {
-                h2 class="text-sm font-medium text-gray-300 mb-3" { "Search" }
-                div class="flex gap-2" {
-                    input type="text" id="search-q"
-                        class="flex-1 bg-gray-900 border border-gray-700 rounded-lg px-4 py-2 text-white placeholder-gray-500 focus:border-oc-500 focus:ring-1 focus:ring-oc-500 outline-none"
-                        placeholder="Search the index…"
-                        onkeydown="if(event.key==='Enter')runSearch()";
-                    select id="search-source" class="bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-300" {
-                        option value="" { "all sources" }
+            // RIGHT (40%) — the reference shelf
+            div class="lib-right" {
+                // Stats — three illuminated medallions
+                div class="grid grid-cols-3 gap-3" {
+                    div class="lib-stat" {
+                        div class="lib-stat-label" { "Folios" }
+                        div class="lib-stat-value" id="stat-docs" { "·" }
                     }
-                    button onclick="runSearch()"
-                        class="bg-oc-600 hover:bg-oc-700 text-white font-medium px-4 py-2 rounded-lg transition-colors" {
-                        "Search"
+                    div class="lib-stat" {
+                        div class="lib-stat-label" { "Passages" }
+                        div class="lib-stat-value" id="stat-chunks" { "·" }
+                    }
+                    div class="lib-stat" {
+                        div class="lib-stat-label" { "Vaults" }
+                        div class="lib-stat-value" id="stat-sources" { "·" }
                     }
                 }
-                div id="search-results" class="mt-4 space-y-3" {}
-            }
 
-            // ── Upload card ───────────────────────────────────────────
-            div class="card p-5" {
-                h2 class="text-sm font-medium text-gray-300 mb-1" { "Upload a document" }
-                p class="text-xs text-gray-500 mb-3" {
-                    "Supported: PDF, DOCX, XLSX, PPTX, ODT, ODS, EPUB, RTF, EML, "
-                    "CSV, JSON, YAML, Markdown, HTML, source code (60+ languages), "
-                    "and plain text. Extracted text is chunked, embedded, and added to the index immediately."
-                }
-                div class="flex items-center gap-2 mb-3" {
-                    label class="text-xs text-gray-500" { "Upload to:" }
-                    select id="upload-agent"
-                        class="bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-gray-300" {
-                        option value="shared" { "Shared (all agents)" }
+                // Upload — a scribe's in-tray
+                section class="lib-card" {
+                    div class="lib-card-eyebrow" { "Add a folio" }
+                    h2 class="lib-card-title" { "Inscribe new knowledge" }
+                    div class="lib-divider" aria-hidden="true" {}
+                    p class="lib-prose" {
+                        "PDF, DOCX, XLSX, PPTX, ODT, ODS, EPUB, RTF, EML, CSV, JSON, "
+                        "YAML, Markdown, HTML, source code, and plain text. The text is "
+                        "extracted, divided into passages, embedded, and added to the "
+                        "index without delay."
                     }
+                    div class="flex items-center gap-2 mt-3 mb-3" {
+                        label class="lib-inline-label" { "Place into" }
+                        select id="upload-agent" class="lib-select" {
+                            option value="shared" { "Shared (all agents)" }
+                        }
+                    }
+                    div id="drop-zone"
+                        class="lib-drop-zone"
+                        onclick="document.getElementById('file-input').click()" {
+                        svg class="lib-drop-quill" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.25" {
+                            // Stylized quill — generic clip-art convention, not anyone's IP
+                            path d="M3 21l3-3M6 18c4-4 9-9 13-13l2 2C17 11 12 16 8 20l-2-2z";
+                            path d="M14 6l2 2";
+                        }
+                        div class="lib-drop-headline" { "Place a folio here" }
+                        div class="lib-drop-sub" { "Click, or set it down upon this tray" }
+                        input type="file" id="file-input" multiple class="hidden" onchange="handleFiles(this.files)";
+                    }
+                    div id="upload-status" class="mt-3 space-y-1 text-sm" {}
                 }
-                div id="drop-zone"
-                    class="border-2 border-dashed border-gray-700 rounded-xl p-6 text-center cursor-pointer hover:border-oc-600 transition-colors"
-                    onclick="document.getElementById('file-input').click()" {
-                    div class="text-4xl mb-2" { "⬆" }
-                    div class="text-sm text-gray-400" { "Click or drop files here" }
-                    input type="file" id="file-input" multiple class="hidden" onchange="handleFiles(this.files)";
-                }
-                div id="upload-status" class="mt-3 space-y-1 text-sm" {}
-            }
 
-            // ── Sources card ──────────────────────────────────────────
-            div class="card p-5" {
-                div class="flex items-center justify-between mb-3" {
-                    h2 class="text-sm font-medium text-gray-300" { "Connectors & sources" }
-                    button onclick="loadStats()" class="text-xs text-gray-500 hover:text-gray-300" {
-                        "Refresh"
+                // Sources — the catalog
+                section class="lib-card" {
+                    div class="flex items-center justify-between" {
+                        div {
+                            div class="lib-card-eyebrow" { "Catalog" }
+                            h2 class="lib-card-title" { "Connectors & vaults" }
+                        }
+                        button onclick="loadStats()" class="lib-btn-ghost" { "Refresh" }
                     }
+                    div class="lib-divider" aria-hidden="true" {}
+                    div id="sources-list" class="space-y-2" {}
                 }
-                div id="sources-list" class="space-y-2" {}
-            }
 
-            // ── Recent docs card ──────────────────────────────────────
-            div class="card p-5" {
-                div class="flex items-center justify-between mb-3" {
-                    h2 class="text-sm font-medium text-gray-300" { "Recently indexed" }
-                    select id="docs-source-filter" class="bg-gray-900 border border-gray-700 rounded-lg px-3 py-1 text-xs text-gray-300" onchange="loadDocs()" {
-                        option value="" { "all sources" }
+                // Recent docs — the day's intake
+                section class="lib-card" {
+                    div class="flex items-center justify-between" {
+                        div {
+                            div class="lib-card-eyebrow" { "Recently inscribed" }
+                            h2 class="lib-card-title" { "New folios" }
+                        }
+                        select id="docs-source-filter" class="lib-select" onchange="loadDocs()" {
+                            option value="" { "all vaults" }
+                        }
                     }
+                    div class="lib-divider" aria-hidden="true" {}
+                    div id="docs-list" class="space-y-2" {}
                 }
-                div id="docs-list" class="space-y-2" {}
             }
         }
     }
 }
 
-const EXTRA_STYLE: &str = r#"
-.hit-snippet { font-size: 0.875rem; line-height: 1.4; color: #d1d5db; }
-.hit-snippet mark { background: rgba(14,165,233,0.3); color: #e0f2fe; padding: 0 2px; border-radius: 2px; }
-"#;
+const EXTRA_STYLE: &str = r##"
+  /* EB Garamond — Open Font License (free) — Renaissance serif. Used for
+     all display + body text on the Knowledge page so it reads like a
+     scholar's notebook, not the rest of the dashboard. */
+  @import url('https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500&display=swap');
+
+  /* ── Library palette ─────────────────────────────────────────────
+     Aged leather background; parchment-cream cards; sepia ink for text;
+     gold + burgundy for accents. Dark theme but warm — candlelit study,
+     not a back-lit screen. */
+  :root {
+    --lib-bg:        #1d1408;
+    --lib-bg-2:      #251a0c;
+    --lib-paper:     #f4ead5;
+    --lib-paper-2:   #ede1c4;
+    --lib-paper-edge: #d9c89e;
+    --lib-ink:       #2a1f0e;
+    --lib-ink-mute:  #6b5a3e;
+    --lib-ink-faint: #a08e6a;
+    --lib-gold:      #c89b3c;
+    --lib-gold-soft: rgba(200, 155, 60, 0.4);
+    --lib-burgundy:  #762a2a;
+    --lib-line:      #b8a578;
+    --lib-rule:      rgba(106, 84, 42, 0.35);
+  }
+
+  body {
+    background: var(--lib-bg);
+    background-image:
+      /* faint candle warmth in opposing corners */
+      radial-gradient(ellipse 700px 500px at 0% 0%, rgba(200,155,60,0.10), transparent 60%),
+      radial-gradient(ellipse 600px 400px at 100% 100%, rgba(118,42,42,0.08), transparent 60%),
+      /* leather grain — large soft noise via two diagonal gradients */
+      linear-gradient(135deg, rgba(255,255,255,0.012) 0px, transparent 1px, transparent 4px),
+      linear-gradient(45deg,  rgba(0,0,0,0.06) 0px, transparent 1px, transparent 6px);
+    background-attachment: fixed;
+    color: var(--lib-paper);
+    font-family: 'EB Garamond', 'Iowan Old Style', Georgia, serif;
+  }
+
+  /* ── Top bar — leather spine with gold tooling ──────────────────── */
+  .lib-topbar {
+    border-bottom: 1px solid var(--lib-gold);
+    background: linear-gradient(180deg, #1d1408 0%, #110a04 100%);
+    box-shadow: 0 1px 0 rgba(200,155,60,0.25), 0 4px 12px rgba(0,0,0,0.5);
+    position: sticky; top: 0; z-index: 40;
+  }
+  .lib-topbar-inner {
+    max-width: 1280px;
+    margin: 0 auto;
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+  }
+  .lib-brand {
+    font-family: 'EB Garamond', serif;
+    font-weight: 600;
+    font-size: 18px;
+    letter-spacing: 0.04em;
+    color: var(--lib-paper);
+  }
+  .lib-fleuron {
+    font-size: 18px;
+    color: var(--lib-gold);
+    margin: 0 4px;
+  }
+  .lib-section-label {
+    font-family: 'EB Garamond', serif;
+    font-weight: 500;
+    font-style: italic;
+    font-size: 17px;
+    color: var(--lib-paper-edge);
+    letter-spacing: 0.02em;
+  }
+  .lib-link {
+    font-family: 'EB Garamond', serif;
+    color: var(--lib-paper-edge);
+    text-decoration: none;
+    transition: color 0.15s;
+  }
+  .lib-link:hover { color: var(--lib-gold); }
+
+  /* ── Body shell + 60/40 split ─────────────────────────────────── */
+  .lib-body {
+    display: flex;
+    height: calc(100vh - 53px);
+    max-width: 1280px;
+    margin: 0 auto;
+  }
+  .lib-left  { width: 60%; overflow-y: auto; padding: 24px 18px 24px 24px; }
+  .lib-right { width: 40%; overflow-y: auto; padding: 24px 24px 24px 18px; display: flex; flex-direction: column; gap: 16px; }
+  .lib-left  > section { margin-bottom: 16px; }
+
+  /* Custom scrollbars — sepia thumbs to match the theme. */
+  .lib-left::-webkit-scrollbar, .lib-right::-webkit-scrollbar { width: 8px; }
+  .lib-left::-webkit-scrollbar-track, .lib-right::-webkit-scrollbar-track { background: transparent; }
+  .lib-left::-webkit-scrollbar-thumb, .lib-right::-webkit-scrollbar-thumb { background: var(--lib-ink-faint); border-radius: 4px; }
+  .lib-left::-webkit-scrollbar-thumb:hover, .lib-right::-webkit-scrollbar-thumb:hover { background: var(--lib-gold); }
+
+  /* ── Cards — parchment sheets ─────────────────────────────────── */
+  .lib-card {
+    background: var(--lib-paper);
+    background-image:
+      radial-gradient(ellipse at 20% 30%, rgba(216,194,148,0.4), transparent 50%),
+      radial-gradient(ellipse at 80% 70%, rgba(216,194,148,0.3), transparent 55%);
+    color: var(--lib-ink);
+    padding: 22px 26px;
+    /* Deckled-edge hint via thin border + inner shadow + outer drop. */
+    border: 1px solid var(--lib-paper-edge);
+    box-shadow:
+      0 1px 0 rgba(255,255,255,0.4) inset,
+      0 0 0 4px rgba(244,234,213,0.05),
+      0 6px 14px rgba(0,0,0,0.45);
+    border-radius: 2px;
+    position: relative;
+  }
+  .lib-card-eyebrow {
+    font-family: 'EB Garamond', serif;
+    font-style: italic;
+    font-size: 12px;
+    color: var(--lib-burgundy);
+    letter-spacing: 0.08em;
+    text-transform: lowercase;
+  }
+  .lib-card-title {
+    font-family: 'EB Garamond', serif;
+    font-weight: 600;
+    font-size: 22px;
+    color: var(--lib-ink);
+    margin-top: 2px;
+    letter-spacing: 0.005em;
+  }
+  /* Divider: gold rule with a centered fleuron — gives a manuscript
+     section break feel instead of the usual flat horizontal line. */
+  .lib-divider {
+    margin: 14px 0 18px 0;
+    height: 12px;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='12' viewBox='0 0 200 12'><line x1='0' y1='6' x2='86' y2='6' stroke='%23c89b3c' stroke-width='0.6'/><line x1='114' y1='6' x2='200' y2='6' stroke='%23c89b3c' stroke-width='0.6'/><text x='100' y='10' font-family='Georgia' font-size='12' fill='%23c89b3c' text-anchor='middle'>❦</text></svg>");
+    background-repeat: no-repeat;
+    background-position: center;
+    background-size: 100% 12px;
+  }
+  .lib-prose {
+    font-family: 'EB Garamond', serif;
+    font-size: 15px;
+    line-height: 1.55;
+    color: var(--lib-ink);
+  }
+  .lib-prose-mute { color: var(--lib-ink-mute); }
+
+  /* ── Stats — illuminated medallions ───────────────────────────── */
+  .lib-stat {
+    background: var(--lib-paper);
+    border: 1px solid var(--lib-paper-edge);
+    color: var(--lib-ink);
+    padding: 14px 12px;
+    text-align: center;
+    box-shadow: 0 4px 8px rgba(0,0,0,0.35);
+    border-radius: 2px;
+    position: relative;
+  }
+  .lib-stat-label {
+    font-family: 'EB Garamond', serif;
+    font-style: italic;
+    font-size: 11px;
+    color: var(--lib-burgundy);
+    letter-spacing: 0.1em;
+    text-transform: lowercase;
+  }
+  .lib-stat-value {
+    font-family: 'EB Garamond', serif;
+    font-weight: 600;
+    font-size: 28px;
+    color: var(--lib-ink);
+    margin-top: 4px;
+    line-height: 1;
+  }
+
+  /* ── Inputs / forms ───────────────────────────────────────────── */
+  .lib-search-row { display: flex; gap: 8px; }
+  .lib-input {
+    flex: 1;
+    background: #fffaf0 !important;
+    border: 1px solid var(--lib-line) !important;
+    border-radius: 2px !important;
+    padding: 9px 12px;
+    font-family: 'EB Garamond', serif;
+    font-size: 16px;
+    color: var(--lib-ink);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.1) inset;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .lib-input::placeholder { color: var(--lib-ink-faint); font-style: italic; }
+  .lib-input:focus {
+    border-color: var(--lib-gold) !important;
+    outline: none;
+    box-shadow: 0 0 0 2px var(--lib-gold-soft), 0 1px 2px rgba(0,0,0,0.1) inset;
+  }
+  .lib-select {
+    appearance: none;
+    -webkit-appearance: none;
+    background: #fffaf0 !important;
+    border: 1px solid var(--lib-line) !important;
+    border-radius: 2px !important;
+    color: var(--lib-ink) !important;
+    font-family: 'EB Garamond', serif !important;
+    font-size: 14px !important;
+    padding: 7px 26px 7px 10px !important;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10' fill='none' stroke='%236b5a3e' stroke-width='1.5'><path d='M2 4l3 3 3-3'/></svg>") !important;
+    background-repeat: no-repeat !important;
+    background-position: right 8px center !important;
+    background-size: 10px 10px !important;
+    cursor: pointer;
+    transition: border-color 0.15s;
+  }
+  .lib-select:hover, .lib-select:focus {
+    border-color: var(--lib-gold) !important;
+    outline: none !important;
+  }
+  .lib-select option { background: #fffaf0; color: var(--lib-ink); }
+
+  /* Top-bar variant of the agent filter — sepia on dark leather. */
+  .lib-topbar .lib-select {
+    background: rgba(244,234,213,0.06) !important;
+    color: var(--lib-paper) !important;
+    border-color: var(--lib-ink-faint) !important;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10' fill='none' stroke='%23c89b3c' stroke-width='1.5'><path d='M2 4l3 3 3-3'/></svg>") !important;
+  }
+  .lib-topbar .lib-select option { background: #1d1408; color: var(--lib-paper); }
+
+  .lib-inline-label {
+    font-family: 'EB Garamond', serif;
+    font-style: italic;
+    font-size: 13px;
+    color: var(--lib-ink-mute);
+  }
+  .lib-topbar .lib-inline-label { color: var(--lib-paper-edge); }
+
+  /* ── Buttons — wax-seal primary, ghost secondary ──────────────── */
+  .lib-btn-primary {
+    background: linear-gradient(180deg, var(--lib-burgundy) 0%, #5e2020 100%);
+    color: #f4ead5;
+    border: 1px solid #4a1818;
+    border-radius: 2px;
+    padding: 8px 18px;
+    font-family: 'EB Garamond', serif;
+    font-size: 15px;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+    box-shadow:
+      0 1px 0 rgba(255,255,255,0.15) inset,
+      0 2px 4px rgba(0,0,0,0.3);
+    transition: all 0.15s;
+  }
+  .lib-btn-primary:hover {
+    background: linear-gradient(180deg, #8a3232 0%, var(--lib-burgundy) 100%);
+    box-shadow:
+      0 1px 0 rgba(255,255,255,0.2) inset,
+      0 3px 6px rgba(0,0,0,0.4);
+  }
+  .lib-btn-ghost {
+    font-family: 'EB Garamond', serif;
+    font-style: italic;
+    font-size: 13px;
+    color: var(--lib-ink-mute);
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    padding: 4px 8px;
+    transition: color 0.15s;
+  }
+  .lib-btn-ghost:hover { color: var(--lib-burgundy); }
+
+  /* ── Drop zone — a scribe's tray ──────────────────────────────── */
+  .lib-drop-zone {
+    border: 1px dashed var(--lib-line);
+    border-radius: 2px;
+    padding: 24px;
+    text-align: center;
+    cursor: pointer;
+    background: rgba(255,250,240,0.5);
+    color: var(--lib-ink-mute);
+    transition: all 0.15s;
+  }
+  .lib-drop-zone:hover {
+    border-color: var(--lib-gold);
+    background: rgba(255,250,240,0.85);
+    color: var(--lib-burgundy);
+  }
+  .lib-drop-quill {
+    color: var(--lib-burgundy);
+    margin: 0 auto 4px;
+    display: block;
+    opacity: 0.8;
+  }
+  .lib-drop-headline {
+    font-family: 'EB Garamond', serif;
+    font-size: 16px;
+    color: var(--lib-ink);
+    margin-bottom: 2px;
+  }
+  .lib-drop-sub {
+    font-family: 'EB Garamond', serif;
+    font-style: italic;
+    font-size: 13px;
+    color: var(--lib-ink-faint);
+  }
+
+  /* ── Search results / source rows / docs rows ─────────────────── */
+  /* These get populated by the existing JS as plain HTML — we override
+     the gray-on-dark default colors so they read on parchment. */
+  .lib-card #search-results > *,
+  .lib-card #sources-list > *,
+  .lib-card #docs-list > * {
+    color: var(--lib-ink) !important;
+    border-color: var(--lib-rule) !important;
+  }
+  .hit-snippet {
+    font-family: 'EB Garamond', serif;
+    font-size: 15px;
+    line-height: 1.5;
+    color: var(--lib-ink) !important;
+  }
+  .hit-snippet mark {
+    background: rgba(200,155,60,0.35);
+    color: var(--lib-ink);
+    padding: 0 2px;
+    border-radius: 2px;
+    font-weight: 500;
+  }
+  /* Anything Tailwind-classed inside the populated lists gets the
+     sepia palette. The JS uses .text-gray-400, .text-gray-500, etc.
+     A few !important overrides keep us from touching the JS. */
+  .lib-card .text-gray-400,
+  .lib-card .text-gray-500 { color: var(--lib-ink-mute) !important; }
+  .lib-card .text-gray-300,
+  .lib-card .text-gray-200 { color: var(--lib-ink) !important; }
+  .lib-card .text-white     { color: var(--lib-ink) !important; }
+  .lib-card .bg-gray-800,
+  .lib-card .bg-gray-900    { background: var(--lib-paper-2) !important; }
+  .lib-card .border-gray-700,
+  .lib-card .border-gray-800 { border-color: var(--lib-rule) !important; }
+"##;
 
 const PAGE_JS: &str = r#"
 const token = sessionStorage.getItem('syntaur_token') || '';
