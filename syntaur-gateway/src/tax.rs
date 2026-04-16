@@ -1358,7 +1358,7 @@ async fn classify_and_extract(state: &AppState, doc_id: i64) -> Result<(), Strin
 
 Document types: w2, 1099_int, 1099_div, 1099_b, 1099_misc, 1099_nec, 1095_c, property_tax_statement, mortgage_statement, bank_statement, credit_card_statement, receipt, invoice, insurance_policy, other
 
-For W-2 forms, extract: employer_name, employer_ein, employee_name, employee_ssn_last4, box1_wages, box2_fed_withheld, box3_ss_wages, box4_ss_withheld, box5_medicare_wages, box6_medicare_withheld, box12_codes, box14_other, state, box16_state_wages, box17_state_withheld
+For W-2 forms, extract: employer_name, employer_ein, employee_name, employee_ssn_last4, employee_ssn_full (the full ###-##-#### if visible — leave null if redacted), employee_address_line1, employee_city, employee_state, employee_zip, box1_wages, box2_fed_withheld, box3_ss_wages, box4_ss_withheld, box5_medicare_wages, box6_medicare_withheld, box12_codes, box14_other, state, box16_state_wages, box17_state_withheld
 For 1099-INT: payer, box1_interest, box4_fed_withheld
 For 1099-DIV: payer, box1a_ordinary, box1b_qualified, box2a_capital_gains, box4_fed_withheld
 For 1099-B: broker, total_proceeds, total_cost_basis, total_gain_loss
@@ -2567,6 +2567,131 @@ pub async fn handle_csv_irs_export(
 
 // ── Form 4868 Extension Generator ───────────────────────────────────────────
 
+/// Identification data we can scrape from already-scanned tax documents
+/// when the taxpayer profile is missing or incomplete. Only fields that the
+/// vision pipeline reliably extracts (W-2 employee_name + last-4 SSN,
+/// mortgage statement property_address) appear here.
+#[derive(Default, Debug)]
+struct ScannedIdentity {
+    primary_name: Option<String>,
+    spouse_name: Option<String>,
+    /// SSN in the form `XXX-XX-####` — derived from employee_ssn_last4 since
+    /// the vision prompt currently only asks for the last 4 digits.
+    primary_ssn_masked: Option<String>,
+    spouse_ssn_masked: Option<String>,
+    address: Option<String>,
+    city: Option<String>,
+    state: Option<String>,
+    zip: Option<String>,
+}
+
+/// Walk this user's scanned tax documents for the year and pull out
+/// anything that maps onto a Form 4868 identification field. Returns the
+/// most-recent non-empty values; missing fields stay None.
+///
+/// Sources we mine:
+/// - **W-2** (`doc_type='w2'`): `employee_name`, `employee_ssn_last4`, `state`
+/// - **1095-C** (`doc_type='1095_c'`): `employee` (fallback name)
+/// - **Mortgage statement** (`doc_type='mortgage_statement'`):
+///   `property_address` — multi-line "STREET\nCITY, ST ZIP" string we parse
+fn pull_scan_identity(conn: &rusqlite::Connection, uid: i64, year: i64) -> ScannedIdentity {
+    let mut id = ScannedIdentity::default();
+
+    // ---- Names + SSN-last-4 from W-2s + 1095-C ----
+    // Order by created_at DESC so the *most recent* scan wins. The first
+    // W-2 we see becomes the primary; a second one with a different name
+    // becomes the spouse. 1095-C is a weaker fallback for the primary name.
+    let mut stmt = match conn.prepare(
+        "SELECT doc_type, extracted_fields FROM tax_documents \
+         WHERE user_id = ? AND tax_year = ? AND status = 'scanned' \
+           AND extracted_fields IS NOT NULL \
+           AND doc_type IN ('w2', '1095_c', 'mortgage_statement') \
+         ORDER BY created_at DESC"
+    ) { Ok(s) => s, Err(_) => return id };
+
+    let rows = stmt.query_map(rusqlite::params![uid, year], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    });
+    let rows = match rows { Ok(r) => r, Err(_) => return id };
+
+    let pick = |s: &serde_json::Value| -> Option<String> {
+        s.as_str().map(|x| x.trim().to_string()).filter(|x| !x.is_empty())
+    };
+
+    for row in rows.flatten() {
+        let (doc_type, fields_json) = row;
+        let fields: serde_json::Value = match serde_json::from_str(&fields_json) {
+            Ok(v) => v, Err(_) => continue,
+        };
+
+        match doc_type.as_str() {
+            "w2" => {
+                let name = pick(&fields["employee_name"]);
+                // Prefer full SSN if vision could read it, fall back to
+                // last-4 in masked form. We send "XXX-XX-####" for masked
+                // so the form at least shows recognizable digits.
+                let ssn = pick(&fields["employee_ssn_full"])
+                    .or_else(|| pick(&fields["employee_ssn_last4"]).map(|s| format!("XXX-XX-{}", s)));
+                let state_v = pick(&fields["employee_state"]).or_else(|| pick(&fields["state"]));
+                let addr_v = pick(&fields["employee_address_line1"]);
+                let city_v = pick(&fields["employee_city"]);
+                let zip_v = pick(&fields["employee_zip"]);
+
+                if id.primary_name.is_none() {
+                    id.primary_name = name.clone();
+                    id.primary_ssn_masked = ssn.clone();
+                } else if id.spouse_name.is_none() {
+                    // Only treat as spouse if the name actually differs.
+                    if name.as_deref().map(|n| Some(n.to_lowercase()) != id.primary_name.as_deref().map(str::to_lowercase)).unwrap_or(false) {
+                        id.spouse_name = name;
+                        id.spouse_ssn_masked = ssn;
+                    }
+                }
+                if id.state.is_none() { id.state = state_v; }
+                if id.address.is_none() { id.address = addr_v; }
+                if id.city.is_none() { id.city = city_v; }
+                if id.zip.is_none() { id.zip = zip_v; }
+            }
+            "1095_c" => {
+                if id.primary_name.is_none() {
+                    id.primary_name = pick(&fields["employee"]);
+                }
+            }
+            "mortgage_statement" => {
+                // property_address is typically "STREET\nCITY, ST ZIP".
+                if let Some(addr) = pick(&fields["property_address"]) {
+                    let mut lines = addr.lines();
+                    let line1 = lines.next().map(str::trim).unwrap_or("");
+                    let line2 = lines.next().map(str::trim).unwrap_or("");
+                    if id.address.is_none() && !line1.is_empty() {
+                        id.address = Some(line1.to_string());
+                    }
+                    // Parse "City, ST ZIP" — last whitespace-token is ZIP,
+                    // the token before is the 2-char state, the rest before
+                    // the comma is the city.
+                    if !line2.is_empty() {
+                        if let Some((city_part, st_zip)) = line2.rsplit_once(',') {
+                            let city = city_part.trim().to_string();
+                            let mut tokens: Vec<&str> = st_zip.split_whitespace().collect();
+                            let zip_tok = tokens.pop();
+                            let st_tok = tokens.pop();
+                            if id.city.is_none() && !city.is_empty() { id.city = Some(city); }
+                            if id.state.is_none() {
+                                if let Some(s) = st_tok { id.state = Some(s.to_string()); }
+                            }
+                            if id.zip.is_none() {
+                                if let Some(z) = zip_tok { id.zip = Some(z.to_string()); }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    id
+}
+
 /// Render the user's Form 4868 as a real fillable PDF — bundled blank IRS
 /// template with /V values set from the user's profile + tax estimate. The
 /// reader regenerates appearances on open thanks to /NeedAppearances=true.
@@ -2657,17 +2782,23 @@ pub async fn handle_extension(
             rusqlite::params![uid], |r| r.get(0),
         ).unwrap_or_default();
 
+        // Mine scanned tax documents (W-2 / 1095-C / mortgage statement) so
+        // a user who's only uploaded paperwork — no profile yet — still
+        // gets a fully-filled form.
+        let scan = pull_scan_identity(&conn, uid, year);
+
         // Build the name line: "First Last & Spouse First Last" if joint,
-        // otherwise just the primary taxpayer.
+        // otherwise just the primary taxpayer. Prefer the profile, fall
+        // back to the W-2/1095-C employee name from scans.
         let primary = match (first.as_deref(), last.as_deref()) {
             (Some(f), Some(l)) if !f.is_empty() || !l.is_empty() => format!("{} {}", f, l).trim().to_string(),
-            _ => user_display.clone(),
+            _ => scan.primary_name.clone().unwrap_or_else(|| user_display.clone()),
         };
         let mut name_line = primary;
         if filing_status == "married_jointly" {
             let spouse = match (sp_first.as_deref(), sp_last.as_deref()) {
                 (Some(f), Some(l)) if !f.is_empty() || !l.is_empty() => format!("{} {}", f, l).trim().to_string(),
-                _ => String::new(),
+                _ => scan.spouse_name.clone().unwrap_or_default(),
             };
             if !spouse.is_empty() {
                 name_line = format!("{} & {}", name_line, spouse);
@@ -2684,8 +2815,9 @@ pub async fn handle_extension(
 
         // Spouse SSN is only meaningful on a joint return — leave it blank
         // for non-joint filers so the IRS doesn't reject for an extra SSN.
+        // Layer: explicit override > profile column > W-2 last4 (masked).
         let spouse_ssn_final = if filing_status == "married_jointly" {
-            spouse_ssn_override.or(sp_ssn_db)
+            spouse_ssn_override.or(sp_ssn_db).or(scan.spouse_ssn_masked.clone())
         } else {
             None
         };
@@ -2700,13 +2832,22 @@ pub async fn handle_extension(
             rusqlite::params![uid, year], |r| r.get(0),
         ).ok();
 
+        // Identification fallback chain (highest priority first):
+        //   1. URL override (?name=, ?address=, etc.) — user typed it now
+        //   2. taxpayer_profiles row — saved earlier
+        //   3. Scanned tax documents (W-2 / 1095-C / mortgage)
+        let or_blank = |s: String| if s.is_empty() { None } else { Some(s) };
         let data = crate::tax_pdf::Form4868Data {
-            name: name_override.or_else(|| if name_line.is_empty() { None } else { Some(name_line) }),
-            address: address_override.or_else(|| if address_combined.is_empty() { None } else { Some(address_combined) }),
-            city: city_override.or(city),
-            state: state_override.or(st),
-            zip: zip_override.or(zip),
-            ssn: ssn_override.or(ssn_db),
+            name: name_override
+                .or_else(|| or_blank(name_line))
+                .or(scan.primary_name.clone()),
+            address: address_override
+                .or_else(|| or_blank(address_combined))
+                .or(scan.address.clone()),
+            city: city_override.or(city).or(scan.city.clone()),
+            state: state_override.or(st).or(scan.state.clone()),
+            zip: zip_override.or(zip).or(scan.zip.clone()),
+            ssn: ssn_override.or(ssn_db).or(scan.primary_ssn_masked.clone()),
             spouse_ssn: spouse_ssn_final,
             total_tax: Some(dollars(est.total_tax)),
             total_payments: Some(dollars(est.total_payments)),
