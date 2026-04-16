@@ -2889,9 +2889,34 @@ pub async fn handle_extension(
     .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let (data, paying, balance_due_display) = pdf_bytes; // tuple from blocking task
-    let pdf_bytes = crate::tax_pdf::fill_form_4868_with_cover(&data, paying, &balance_due_display, year)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let pdf_bytes = match crate::tax_pdf::fill_form_4868_with_cover(&data, paying, &balance_due_display, year).await {
+        Ok(b) => b,
+        Err(e) if e.contains("no Form 4868 fields matched") => {
+            // Auto-recovery: hardcoded paths don't match this year's PDF
+            // (likely IRS redesigned the XFA template). Run the local
+            // tax AI analyzer once to derive a fresh field map, persist
+            // overrides, and retry the fill.
+            log::warn!("[tax] field-map miss for {}; invoking local AI to re-derive: {}", year, e);
+            match analyze_form_4868_internal(&state, year).await {
+                Ok(ov) => {
+                    log::info!("[tax] AI overrides for {} produced {} field paths + {} address groups; retrying fill",
+                        year,
+                        ov.field_map.as_ref().map(|m| m.len()).unwrap_or(0),
+                        ov.addresses.as_ref().map(|a| a.len()).unwrap_or(0));
+                    crate::tax_pdf::fill_form_4868_with_cover(&data, paying, &balance_due_display, year)
+                        .await
+                        .map_err(|e2| (StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("Form fill failed even after AI recovery: {}", e2)))?
+                }
+                Err(ai_err) => {
+                    return Err((StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Form fill failed ({}); AI recovery also failed ({}). \
+                                 IRS may have made an unsupported redesign.", e, ai_err)));
+                }
+            }
+        }
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e)),
+    };
 
     let mut headers = axum::http::HeaderMap::new();
     headers.insert("content-type", "application/pdf".parse().unwrap());
@@ -2913,41 +2938,38 @@ pub async fn handle_extension(
 ///
 /// Use this after the IRS publishes a new tax year, or when our default
 /// field paths stop matching (the warning is logged on every fill).
-pub async fn handle_analyze_form_4868(
-    State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
-    let _principal = crate::resolve_principal(&state, token).await
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
-    let year: i64 = params.get("year").and_then(|y| y.parse().ok())
-        .unwrap_or_else(default_tax_year);
-
+/// Run the AI form analyzer for a given tax year. Returns the persisted
+/// overrides on success. Used by both the manual endpoint and the
+/// auto-recovery path inside handle_extension.
+pub async fn analyze_form_4868_internal(
+    state: &AppState, year: i64,
+) -> Result<crate::tax_pdf::FormOverrides, String> {
     // 1. Get the PDF — may trigger an IRS download.
     let pdf_bytes = crate::tax_pdf::load_form_4868(year).await;
+    analyze_form_4868_with_pdf(state, year, &pdf_bytes).await
+}
 
+/// Same as `analyze_form_4868_internal` but accepts pre-loaded bytes —
+/// avoids a second IRS round-trip when the caller already has them.
+async fn analyze_form_4868_with_pdf(
+    state: &AppState, year: i64, pdf_bytes: &[u8],
+) -> Result<crate::tax_pdf::FormOverrides, String> {
     // 2. Render to PNGs for vision (AcroForm field annotations are visible
     //    on the form itself; vision can map "the box next to '1 Your name(s)'"
     //    to a field-position which we then cross-reference with field names).
     //    Plus, page 4 has the printable Where-to-File chart we want to
     //    re-extract into JSON.
     let tmp_pdf = format!("/tmp/f4868-analyze-{}.pdf", year);
-    std::fs::write(&tmp_pdf, &pdf_bytes)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("write tmp: {}", e)))?;
-    let pages = convert_pdf_to_pngs(&tmp_pdf)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("render: {}", e)))?;
+    std::fs::write(&tmp_pdf, pdf_bytes).map_err(|e| format!("write tmp: {}", e))?;
+    let pages = convert_pdf_to_pngs(&tmp_pdf).map_err(|e| format!("render: {}", e))?;
+    let field_names = crate::tax_pdf::list_field_names(pdf_bytes)
+        .map_err(|e| format!("field walk: {}", e))?;
 
-    // 3. Walk the PDF's AcroForm tree to enumerate every field path. Vision
-    //    only sees the visual form, so we feed the field-name list as
-    //    context — the AI's job is to match each to its semantic purpose.
-    let field_names = crate::tax_pdf::list_field_names(&pdf_bytes)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("field walk: {}", e)))?;
-
-    // 4. Dispatch to the configured LLM provider, same way classify_and_extract does.
+    // 3. Dispatch to the configured LLM provider.
     let provider = state.config.models.providers.iter()
         .find(|(_, p)| p.base_url.contains("openrouter") || p.base_url.contains("openai") || p.base_url.contains("anthropic"))
         .or_else(|| state.config.models.providers.iter().next())
-        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "No LLM provider".to_string()))?;
+        .ok_or_else(|| "No LLM provider configured".to_string())?;
     let (_, pcfg) = provider;
     let model = if pcfg.base_url.contains("openrouter") { "google/gemini-2.0-flash-001" }
         else if pcfg.base_url.contains("anthropic") { "claude-sonnet-4-6" }
@@ -2961,32 +2983,33 @@ page of the {year} edition for you, and I'll give you the list of AcroForm
 field paths the PDF declares. Match each visible labeled box on the form
 to one of these semantic names:
 
-  name             — Line 1 taxpayer name(s)
-  address          — Line 1 street + apt
-  city             — Line 1 city
-  state            — Line 1 state (2-char USPS code)
-  zip              — Line 1 ZIP code
-  ssn              — Line 2 your SSN
-  spouse_ssn       — Line 3 spouse's SSN (joint returns)
-  total_tax        — Line 4 estimate of total tax liability
-  total_payments   — Line 5 total payments
-  balance_due      — Line 6 balance due
-  amount_paying    — Line 7 amount paying with this extension
-  confirmation_number — Page-3 "Enter confirmation number here" slot
-  fy_begin         — voucher header: fiscal year beginning date
-  fy_end           — voucher header: fiscal year ending date
-  fy_end_year      — voucher header: 20__ fiscal year end year
+  name             - Line 1 taxpayer name(s)
+  address          - Line 1 street + apt
+  city             - Line 1 city
+  state            - Line 1 state (2-char USPS code)
+  zip              - Line 1 ZIP code
+  ssn              - Line 2 your SSN
+  spouse_ssn       - Line 3 spouse's SSN (joint returns)
+  total_tax        - Line 4 estimate of total tax liability
+  total_payments   - Line 5 total payments
+  balance_due      - Line 6 balance due
+  amount_paying    - Line 7 amount paying with this extension
+  confirmation_number - Page-3 "Enter confirmation number here" slot
+  fy_begin         - voucher header: fiscal year beginning date
+  fy_end           - voucher header: fiscal year ending date
+  fy_end_year      - voucher header: 20__ fiscal year end year
 
 And for the two checkboxes:
-  out_of_country   — Line 8 (US citizen abroad)
-  is_1040nr        — Line 9 (1040-NR no withheld wages)
+  out_of_country   - Line 8 (US citizen abroad)
+  is_1040nr        - Line 9 (1040-NR no withheld wages)
 
 Available AcroForm field paths on this PDF:
 {field_list}
 
-Also extract the "Where to File a Paper Form 4868" chart from the last
-page — for each row, list the USPS state codes plus the full 3-line
-addresses for "with payment" and "without payment".
+Also extract the COMPLETE "Where to File a Paper Form 4868" chart from
+the last page. The chart has multiple rows grouping states by region.
+For EACH row, list the USPS state codes plus the full 3-line addresses
+for "with payment" and "without payment". Do not stop after one row.
 
 Respond ONLY with this JSON shape (use null when a semantic field isn't
 present on this form):
@@ -2998,8 +3021,7 @@ present on this form):
       "states": ["AL","FL","GA","LA","MS","NC","SC","TN","TX"],
       "with_payment": ["Internal Revenue Service", "P.O. Box 1302", "Charlotte, NC 28201-1302"],
       "without_payment": ["Department of the Treasury", "Internal Revenue Service Center", "Austin, TX 73301-0045"]
-    }},
-    ...
+    }}
   ],
   "notes": "any caveats or changes you noticed vs prior years"
 }}"#,
@@ -3022,22 +3044,20 @@ present on this form):
         .header("Content-Type", "application/json")
         .json(&payload)
         .timeout(std::time::Duration::from_secs(120))
-        .send().await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("LLM: {}", e)))?;
+        .send().await.map_err(|e| format!("LLM: {}", e))?;
     if !resp.status().is_success() {
         let s = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("LLM HTTP {}: {}", s, &body[..body.len().min(300)])));
+        return Err(format!("LLM HTTP {}: {}", s, &body[..body.len().min(300)]));
     }
-    let body: serde_json::Value = resp.json().await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     let content = body["choices"][0]["message"]["content"].as_str().unwrap_or("");
     let cleaned = content.trim().trim_start_matches("```json").trim_start_matches("```")
         .trim_end_matches("```").trim();
     let parsed: serde_json::Value = serde_json::from_str(cleaned)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR,
-            format!("LLM response parse: {} — first 300 chars: {}", e, &content[..content.len().min(300)])))?;
+        .map_err(|e| format!("LLM response parse: {} - first 300 chars: {}", e, &content[..content.len().min(300)]))?;
 
-    // 5. Build + persist the overrides.
+    // 4. Build + persist the overrides.
     let mut overrides = crate::tax_pdf::FormOverrides::default();
     if let Some(map) = parsed.get("field_map").and_then(|v| v.as_object()) {
         let mut hm = std::collections::HashMap::new();
@@ -3071,16 +3091,26 @@ present on this form):
     }
     overrides.notes = parsed.get("notes").and_then(|v| v.as_str()).map(str::to_string);
     overrides.generated_at = Some(chrono::Utc::now().to_rfc3339());
-
-    crate::tax_pdf::save_overrides(year, &overrides)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    crate::tax_pdf::save_overrides(year, &overrides)?;
 
     let _ = std::fs::remove_file(&tmp_pdf);
+    Ok(overrides)
+}
 
+pub async fn handle_analyze_form_4868(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let _principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let year: i64 = params.get("year").and_then(|y| y.parse().ok())
+        .unwrap_or_else(default_tax_year);
+    let overrides = analyze_form_4868_internal(&state, year).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(serde_json::json!({
         "ok": true,
         "year": year,
-        "model_used": model,
         "field_map_size": overrides.field_map.as_ref().map(|m| m.len()).unwrap_or(0),
         "checkbox_map_size": overrides.checkbox_map.as_ref().map(|m| m.len()).unwrap_or(0),
         "address_groups": overrides.addresses.as_ref().map(|a| a.len()).unwrap_or(0),
@@ -3088,6 +3118,7 @@ present on this form):
         "saved_to": format!("~/.syntaur/forms/f4868-{}-overrides.json", year),
     })))
 }
+
 
 /// Generate a #10 envelope PDF (9.5" × 4.125") with the user's return
 /// address top-left and the correct IRS service-center address center-right,
