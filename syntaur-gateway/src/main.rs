@@ -5030,6 +5030,11 @@ async fn main() {
         .route("/api/tax/estimated-payments", post(tax::handle_estimated_payment_create))
         .route("/api/tax/estimated-payments/recommended", get(tax::handle_estimated_recommended))
         .route("/api/tax/projection", get(tax::handle_tax_projection))
+        // Depreciation / assets (Phase 2A)
+        .route("/api/tax/assets", get(tax::handle_asset_list))
+        .route("/api/tax/assets", post(tax::handle_asset_create))
+        .route("/api/tax/assets/{id}/schedule", get(tax::handle_depreciation_schedule))
+        .route("/api/tax/vehicle-usage", post(tax::handle_vehicle_usage_create))
         // Module licensing
         .route("/api/modules/status", get(tax::handle_module_status))
         .route("/api/modules/trial", post(tax::handle_start_trial))

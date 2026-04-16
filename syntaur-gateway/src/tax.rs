@@ -5536,3 +5536,320 @@ pub async fn handle_tax_projection(
     }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(result))
 }
+
+// ── MACRS Depreciation Engine ───────────────────────────────────────────────
+
+/// MACRS GDS half-year convention percentages (in basis points).
+/// Index 0 = year 1, etc. Source: IRS Publication 946 Table A-1 through A-6.
+fn macrs_rates(life_years: i64) -> Vec<i64> {
+    match life_years {
+        3 => vec![3333, 4445, 1481, 741],
+        5 => vec![2000, 3200, 1920, 1152, 1152, 576],
+        7 => vec![1429, 2449, 1749, 1249, 893, 892, 893, 446],
+        10 => vec![1000, 1800, 1440, 1152, 922, 737, 655, 655, 656, 655, 328],
+        15 => vec![500, 950, 855, 770, 693, 623, 590, 590, 591, 590, 591, 590, 591, 590, 591, 295],
+        20 => vec![375, 722, 668, 618, 571, 528, 489, 452, 447, 447, 446, 447, 446, 447, 446, 447, 446, 447, 446, 447, 223],
+        // 27.5 year residential (mid-month, simplified to monthly fraction)
+        275 | 27 => {
+            let mut rates = vec![3636; 28]; // ~3.636% per year
+            rates[0] = 3485; // first year (mid-month)
+            rates[27] = 1515; // last partial year
+            rates
+        }
+        // 39 year non-residential (mid-month, simplified)
+        39 | 390 => {
+            let mut rates = vec![2564; 40]; // ~2.564% per year
+            rates[0] = 2461; // first year
+            rates[39] = 1068; // last partial year
+            rates
+        }
+        _ => vec![10000], // fallback: expense fully in year 1
+    }
+}
+
+/// Bonus depreciation percentage for the placed-in-service year (2022-2027 schedule).
+fn bonus_depreciation_pct(year: i64) -> i64 {
+    match year {
+        ..=2022 => 10000, // 100%
+        2023 => 8000,     // 80%
+        2024 => 6000,     // 60%
+        2025 => 4000,     // 40%
+        2026 => 2000,     // 20%
+        _ => 0,           // 0% after 2026
+    }
+}
+
+/// Section 179 annual limit (2025: $1,250,000; phase-out at $3,130,000).
+fn section_179_limit(year: i64) -> (i64, i64) {
+    // Returns (max_deduction_cents, phase_out_start_cents)
+    match year {
+        2025 => (125_000_000, 313_000_000),
+        2026 => (130_000_000, 320_000_000), // estimated
+        _ => (125_000_000, 313_000_000),    // fallback to 2025
+    }
+}
+
+/// Compute current-year depreciation for a single asset.
+fn compute_asset_depreciation(
+    cost_basis_cents: i64,
+    section_179: i64,
+    bonus_depr: i64,
+    prior_depr: i64,
+    macrs_life: i64,
+    placed_year: i64,
+    current_year: i64,
+    business_use_pct: i64,
+) -> i64 {
+    let depreciable_basis = cost_basis_cents - section_179 - bonus_depr;
+    if depreciable_basis <= 0 { return 0; }
+
+    let year_index = (current_year - placed_year) as usize;
+    let rates = macrs_rates(macrs_life);
+    if year_index >= rates.len() { return 0; }
+
+    let raw = depreciable_basis * rates[year_index] / 10000;
+    let accumulated = prior_depr + raw;
+    let max_remaining = depreciable_basis - prior_depr;
+    let capped = std::cmp::min(raw, max_remaining).max(0);
+
+    // Apply business use percentage
+    capped * business_use_pct / 100
+}
+
+/// Standard mileage rate per mile in cents (2025: $0.70/mile).
+fn standard_mileage_rate(year: i64) -> i64 {
+    match year {
+        2025 => 70,  // $0.70
+        2024 => 67,  // $0.67
+        2023 => 66,  // $0.655 rounded
+        _ => 70,     // default to 2025
+    }
+}
+
+// ── Depreciation API ────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct AddAssetReq {
+    token: String,
+    description: String,
+    asset_class: String,
+    macrs_life_years: i64,
+    cost_basis_cents: i64,
+    placed_in_service: String,
+    business_use_pct: Option<i64>,
+    section_179_cents: Option<i64>,
+    use_bonus: Option<bool>,
+    is_vehicle: Option<bool>,
+}
+
+pub async fn handle_asset_create(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AddAssetReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &req.token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    require_tax_module(&state, uid).await?;
+    let db = state.db_path.clone();
+    let now = chrono::Utc::now().timestamp();
+
+    let placed_year: i64 = req.placed_in_service.split('-').next()
+        .and_then(|s| s.parse().ok()).unwrap_or(2025);
+    let biz_pct = req.business_use_pct.unwrap_or(100).clamp(0, 100);
+    let s179 = req.section_179_cents.unwrap_or(0);
+    let bonus = if req.use_bonus.unwrap_or(false) {
+        let pct = bonus_depreciation_pct(placed_year);
+        (req.cost_basis_cents - s179) * pct / 10000
+    } else { 0 };
+
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO depreciable_assets (user_id, description, asset_class, macrs_life_years, \
+             convention, cost_basis_cents, placed_in_service, business_use_pct, section_179_cents, \
+             bonus_depr_cents, is_vehicle, status, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, 'half_year', ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+            rusqlite::params![uid, req.description, req.asset_class, req.macrs_life_years,
+                req.cost_basis_cents, req.placed_in_service, biz_pct, s179, bonus,
+                req.is_vehicle.unwrap_or(false) as i64, now, now],
+        ).map_err(|e| e.to_string())?;
+        let id = conn.last_insert_rowid();
+
+        // Generate depreciation schedule for all years
+        let depreciable = req.cost_basis_cents - s179 - bonus;
+        if depreciable > 0 {
+            let rates = macrs_rates(req.macrs_life_years);
+            let mut accumulated = 0i64;
+            for (i, rate) in rates.iter().enumerate() {
+                let year = placed_year + i as i64;
+                let raw = depreciable * rate / 10000;
+                let remaining = depreciable - accumulated;
+                let depr = std::cmp::min(raw, remaining).max(0) * biz_pct / 100;
+                accumulated += depr;
+                conn.execute(
+                    "INSERT INTO depreciation_schedule (asset_id, tax_year, depreciation_cents, method, accumulated_cents, remaining_cents) \
+                     VALUES (?, ?, ?, 'MACRS_GDS', ?, ?)",
+                    rusqlite::params![id, year, depr, accumulated, depreciable - accumulated],
+                ).map_err(|e| e.to_string())?;
+            }
+        }
+
+        // First-year total: section 179 + bonus + MACRS year 1
+        let year1_macrs = if depreciable > 0 {
+            let rates = macrs_rates(req.macrs_life_years);
+            depreciable * rates[0] / 10000 * biz_pct / 100
+        } else { 0 };
+        let first_year_total = s179 + bonus + year1_macrs;
+
+        Ok(serde_json::json!({
+            "ok": true, "asset_id": id,
+            "section_179": cents_to_display(s179),
+            "bonus_depreciation": cents_to_display(bonus),
+            "first_year_macrs": cents_to_display(year1_macrs),
+            "first_year_total": cents_to_display(first_year_total),
+        }))
+    }).await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(result))
+}
+
+pub async fn handle_asset_list(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    require_tax_module(&state, uid).await?;
+    let year: i64 = params.get("year").and_then(|s| s.parse().ok()).unwrap_or(2025);
+    let db = state.db_path.clone();
+
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT a.id, a.description, a.asset_class, a.macrs_life_years, a.cost_basis_cents, \
+             a.placed_in_service, a.business_use_pct, a.section_179_cents, a.bonus_depr_cents, \
+             a.is_vehicle, a.status, \
+             COALESCE((SELECT depreciation_cents FROM depreciation_schedule WHERE asset_id = a.id AND tax_year = ?), 0), \
+             COALESCE((SELECT accumulated_cents FROM depreciation_schedule WHERE asset_id = a.id AND tax_year = ?), 0), \
+             COALESCE((SELECT remaining_cents FROM depreciation_schedule WHERE asset_id = a.id AND tax_year = ?), 0) \
+             FROM depreciable_assets a WHERE a.user_id = ? AND a.status = 'active' ORDER BY a.placed_in_service"
+        ).map_err(|e| e.to_string())?;
+        let assets: Vec<serde_json::Value> = stmt.query_map(
+            rusqlite::params![year, year, year, uid], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_,i64>(0)?, "description": r.get::<_,String>(1)?,
+                "asset_class": r.get::<_,String>(2)?, "macrs_life": r.get::<_,i64>(3)?,
+                "cost_basis": cents_to_display(r.get::<_,i64>(4)?),
+                "placed_in_service": r.get::<_,String>(5)?,
+                "business_use_pct": r.get::<_,i64>(6)?,
+                "section_179": cents_to_display(r.get::<_,i64>(7)?),
+                "bonus_depr": cents_to_display(r.get::<_,i64>(8)?),
+                "is_vehicle": r.get::<_,i64>(9)? != 0,
+                "current_year_depr": cents_to_display(r.get::<_,i64>(11)?),
+                "accumulated_depr": cents_to_display(r.get::<_,i64>(12)?),
+                "remaining_basis": cents_to_display(r.get::<_,i64>(13)?),
+            }))
+        }).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
+
+        let total_current_year: i64 = assets.iter()
+            .filter_map(|a| a.get("current_year_depr").and_then(|v| v.as_str())
+                .and_then(|s| s.replace(['$',','], "").parse::<f64>().ok())
+                .map(|f| (f * 100.0) as i64))
+            .sum();
+
+        Ok(serde_json::json!({
+            "assets": assets,
+            "total_current_year": cents_to_display(total_current_year),
+            "year": year,
+        }))
+    }).await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(result))
+}
+
+pub async fn handle_depreciation_schedule(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(asset_id): axum::extract::Path<i64>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let _principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let db = state.db_path.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT tax_year, depreciation_cents, method, accumulated_cents, remaining_cents \
+             FROM depreciation_schedule WHERE asset_id = ? ORDER BY tax_year"
+        ).map_err(|e| e.to_string())?;
+        let schedule: Vec<serde_json::Value> = stmt.query_map(rusqlite::params![asset_id], |r| {
+            Ok(serde_json::json!({
+                "year": r.get::<_,i64>(0)?, "depreciation": cents_to_display(r.get::<_,i64>(1)?),
+                "method": r.get::<_,String>(2)?, "accumulated": cents_to_display(r.get::<_,i64>(3)?),
+                "remaining": cents_to_display(r.get::<_,i64>(4)?),
+            }))
+        }).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
+        Ok(serde_json::json!({"schedule": schedule}))
+    }).await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(result))
+}
+
+#[derive(serde::Deserialize)]
+pub struct VehicleUsageReq {
+    token: String,
+    tax_year: i64,
+    vehicle_description: String,
+    total_miles: i64,
+    business_miles: i64,
+    commuting_miles: Option<i64>,
+    actual_expenses_cents: Option<i64>,
+}
+
+pub async fn handle_vehicle_usage_create(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<VehicleUsageReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &req.token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    require_tax_module(&state, uid).await?;
+    let db = state.db_path.clone();
+    let now = chrono::Utc::now().timestamp();
+
+    let rate = standard_mileage_rate(req.tax_year);
+    let standard_deduction = req.business_miles * rate;
+    let actual = req.actual_expenses_cents.unwrap_or(0);
+    let method = if actual > standard_deduction && actual > 0 { "actual" } else { "standard" };
+    let deduction = if method == "actual" { actual } else { standard_deduction };
+
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR REPLACE INTO vehicle_usage (user_id, tax_year, vehicle_description, \
+             total_miles, business_miles, commuting_miles, personal_miles, standard_rate_cents, \
+             actual_expenses_cents, method_used, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rusqlite::params![uid, req.tax_year, req.vehicle_description, req.total_miles,
+                req.business_miles, req.commuting_miles.unwrap_or(0),
+                req.total_miles - req.business_miles - req.commuting_miles.unwrap_or(0),
+                rate, actual, method, now],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "standard_deduction": cents_to_display(standard_deduction),
+        "actual_deduction": cents_to_display(actual),
+        "method_used": method,
+        "deduction": cents_to_display(deduction),
+        "rate_per_mile": format!("${:.2}", rate as f64 / 100.0),
+    })))
+}

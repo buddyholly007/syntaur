@@ -1153,6 +1153,64 @@ const MIGRATIONS: &[&str] = &[
         created_at        INTEGER NOT NULL
     );
     "#,
+
+    // Migration 32: MACRS depreciation engine.
+    r#"
+    -- Depreciable assets (equipment, vehicles, buildings, improvements)
+    CREATE TABLE IF NOT EXISTS depreciable_assets (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id             INTEGER NOT NULL,
+        description         TEXT NOT NULL,
+        asset_class         TEXT NOT NULL,
+        macrs_life_years    INTEGER NOT NULL,
+        convention          TEXT NOT NULL DEFAULT 'half_year',
+        cost_basis_cents    INTEGER NOT NULL,
+        placed_in_service   TEXT NOT NULL,
+        business_use_pct    INTEGER NOT NULL DEFAULT 100,
+        section_179_cents   INTEGER NOT NULL DEFAULT 0,
+        bonus_depr_cents    INTEGER NOT NULL DEFAULT 0,
+        prior_depr_cents    INTEGER NOT NULL DEFAULT 0,
+        property_id         INTEGER,
+        is_vehicle          INTEGER NOT NULL DEFAULT 0,
+        disposed_date       TEXT,
+        disposition_type    TEXT,
+        sale_proceeds_cents INTEGER,
+        status              TEXT NOT NULL DEFAULT 'active',
+        created_at          INTEGER NOT NULL,
+        updated_at          INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_assets_user ON depreciable_assets(user_id);
+
+    -- Per-year depreciation schedule (auto-computed)
+    CREATE TABLE IF NOT EXISTS depreciation_schedule (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        asset_id            INTEGER NOT NULL REFERENCES depreciable_assets(id) ON DELETE CASCADE,
+        tax_year            INTEGER NOT NULL,
+        depreciation_cents  INTEGER NOT NULL,
+        method              TEXT NOT NULL DEFAULT 'MACRS_GDS',
+        accumulated_cents   INTEGER NOT NULL DEFAULT 0,
+        remaining_cents     INTEGER NOT NULL DEFAULT 0,
+        UNIQUE(asset_id, tax_year)
+    );
+
+    -- Vehicle mileage log
+    CREATE TABLE IF NOT EXISTS vehicle_usage (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id             INTEGER NOT NULL,
+        tax_year            INTEGER NOT NULL,
+        vehicle_description TEXT NOT NULL,
+        total_miles         INTEGER NOT NULL DEFAULT 0,
+        business_miles      INTEGER NOT NULL DEFAULT 0,
+        commuting_miles     INTEGER NOT NULL DEFAULT 0,
+        personal_miles      INTEGER NOT NULL DEFAULT 0,
+        standard_rate_cents INTEGER NOT NULL DEFAULT 70,
+        actual_expenses_cents INTEGER NOT NULL DEFAULT 0,
+        method_used         TEXT NOT NULL DEFAULT 'standard',
+        asset_id            INTEGER,
+        created_at          INTEGER NOT NULL,
+        UNIQUE(user_id, tax_year, vehicle_description)
+    );
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
