@@ -34,18 +34,86 @@ body.bg-gray-950 { background: var(--bg) !important; color: var(--ink) !importan
 /* ======== Digital rain canvas — fixed behind everything ======== */
 #rain-canvas { position: fixed; inset: 0; z-index: 0; pointer-events: none; opacity: 0.18; mix-blend-mode: screen; }
 
-/* ======== CRT scanline + vignette overlays — on top, clicks pass through ======== */
-.crt-scan { position: fixed; inset: 0; pointer-events: none; z-index: 10;
+/* ======== CRT scanline + vignette overlays — inside the glass area ======== */
+.crt-scan { position: fixed; inset: 18px 22px 48px 22px; pointer-events: none; z-index: 10;
     background: repeating-linear-gradient(to bottom, transparent 0, transparent 2px, rgba(0,0,0,0.35) 3px, transparent 4px);
-    mix-blend-mode: multiply; }
-.crt-vignette { position: fixed; inset: 0; pointer-events: none; z-index: 11;
-    background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.55) 100%); }
-.crt-flicker { position: fixed; inset: 0; pointer-events: none; z-index: 12;
-    background: rgba(51,255,102,0.02); animation: flicker 3.5s infinite; }
+    mix-blend-mode: multiply; border-radius: 12px; }
+.crt-vignette { position: fixed; inset: 18px 22px 48px 22px; pointer-events: none; z-index: 11;
+    background: radial-gradient(ellipse at center, transparent 45%, rgba(0,0,0,0.7) 100%);
+    border-radius: 12px; }
+.crt-flicker { position: fixed; inset: 18px 22px 48px 22px; pointer-events: none; z-index: 12;
+    background: rgba(51,255,102,0.02); animation: flicker 3.5s infinite; border-radius: 12px; }
 @keyframes flicker { 0%,19%,21%,23%,25%,54%,56%,100% { opacity: 0.98; } 20%,24%,55% { opacity: 0.88; } }
 
-/* Main layout sits above the rain, below the overlays */
-.workshop-root { position: relative; z-index: 5; }
+/* ======== 90s CRT monitor bezel — plastic frame wrapping the viewport ======== */
+body.bg-gray-950 { overflow: hidden; }
+.crt-bezel {
+    position: fixed; inset: 0; pointer-events: none; z-index: 20;
+    /* Plastic frame — thicker at the bottom for the brand plate */
+    border-style: solid;
+    border-width: 18px 22px 48px 22px;
+    /* Graphite plastic with subtle vertical shading */
+    border-color: #1a1815;
+    border-image: linear-gradient(to bottom,
+        #302c28 0%, #201d1a 8%, #15120f 55%, #0c0a08 85%, #2a2623 100%) 1;
+    /* Inner glass curvature — the recessed CRT tube look */
+    box-shadow:
+        inset 0 0 0 2px #000,                      /* sharp inner lip */
+        inset 0 0 0 3px #090705,                   /* dark ledge */
+        inset 0 0 12px 1px rgba(0,0,0,0.9),        /* inner glass shadow */
+        inset 0 0 90px 40px rgba(0,0,0,0.45),      /* subtle curvature darkening */
+        0 0 40px rgba(0,0,0,0.9);                  /* drop shadow behind the monitor */
+    /* Rounded glass corners */
+    border-radius: 30px;
+}
+/* Subtle diagonal glass sheen — upper-left to lower-right */
+.crt-bezel::before {
+    content: ''; position: absolute; inset: 18px 22px 48px 22px; pointer-events: none;
+    border-radius: 12px;
+    background: linear-gradient(128deg,
+        rgba(255,255,255,0.045) 0%,
+        rgba(255,255,255,0.015) 22%,
+        transparent 40%,
+        transparent 72%,
+        rgba(255,255,255,0.01) 100%);
+}
+/* Brand plate on the lower bezel */
+.crt-bezel::after {
+    content: 'SYNTAUR  CRT-9000  //  PAIR PROGRAMMER EDITION';
+    position: absolute; left: 0; right: 0; bottom: 12px;
+    text-align: center;
+    font-family: 'VT323', monospace; font-size: 0.78rem; letter-spacing: 0.22em;
+    color: #4d4743; text-shadow: 0 1px 0 rgba(0,0,0,0.85), 0 -1px 0 rgba(255,255,255,0.03);
+    pointer-events: none;
+}
+/* Power LED — phosphor green, bottom-right on the bezel */
+.crt-led {
+    position: fixed; bottom: 16px; right: 42px; z-index: 22; pointer-events: none;
+    width: 6px; height: 6px; border-radius: 50%;
+    background: #33ff66;
+    box-shadow: 0 0 6px rgba(51,255,102,0.95), 0 0 12px rgba(51,255,102,0.45), inset 0 0 1px rgba(255,255,255,0.7);
+    animation: led-pulse 4s ease-in-out infinite;
+}
+@keyframes led-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.75; } }
+/* Power-label next to LED */
+.crt-led-label {
+    position: fixed; bottom: 13px; right: 54px; z-index: 22; pointer-events: none;
+    font-family: 'VT323', monospace; font-size: 0.72rem; letter-spacing: 0.15em;
+    color: #3d3834;
+}
+/* Corner screws — tiny debossed dots */
+.crt-screw { position: fixed; width: 4px; height: 4px; border-radius: 50%; z-index: 21; pointer-events: none;
+    background: radial-gradient(circle at 35% 35%, #0a0806, #060504 60%, #1a1714 100%);
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.7), inset 0 0 1px rgba(255,255,255,0.04);
+}
+.crt-screw.tl { top: 6px;  left: 8px; }
+.crt-screw.tr { top: 6px;  right: 8px; }
+.crt-screw.bl { bottom: 18px; left: 8px; }
+.crt-screw.br { bottom: 18px; right: 8px; }
+
+/* Main layout sits above the rain, below the overlays, inside the bezel */
+.workshop-root { position: relative; z-index: 5; padding: 18px 22px 48px 22px; box-sizing: border-box; height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
+.workshop-root .workshop-body { flex: 1; display: flex; min-height: 0; overflow: hidden; }
 
 /* ======== Top bar override — phosphor/rust treatment ======== */
 .workshop-root .border-b.border-gray-800 { border-color: var(--phos-deep) !important; background: rgba(6,9,5,0.82) !important; backdrop-filter: blur(3px); }
@@ -941,12 +1009,20 @@ pub async fn render() -> Html<String> {
         div class="crt-scan" {}
         div class="crt-vignette" {}
         div class="crt-flicker" {}
+        // 90s CRT monitor bezel — plastic frame + screws + power LED + brand plate
+        div class="crt-bezel" {}
+        div class="crt-screw tl" {}
+        div class="crt-screw tr" {}
+        div class="crt-screw bl" {}
+        div class="crt-screw br" {}
+        div class="crt-led-label" { "PWR" }
+        div class="crt-led" {}
 
         div class="workshop-root" {
             (top_bar_standard("Coders"))
 
             // Main layout: sidebar + terminal + context panel
-            div style="display:flex; height:calc(100vh - 57px); overflow:hidden" {
+            div class="workshop-body" {
                 // Host sidebar
                 div class="host-sidebar" id="host-sidebar" style="width:220px" {
                     div id="sidebar-content" {}
