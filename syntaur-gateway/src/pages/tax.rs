@@ -3374,17 +3374,31 @@ function updateAssetLife() {
   document.getElementById('asset-is-vehicle').checked = (cls === 'vehicle');
 }
 
+let _assetCache = [];
 async function loadDepreciationTab() {
   try {
     const resp = await authFetch(`/api/tax/assets?token=${token}&year=${selectedYear}`);
     const data = await resp.json();
     const assets = data.assets || [];
+    _assetCache = assets;
     const list = document.getElementById('assets-list');
     const vehSelect = document.getElementById('veh-asset');
     const currentVehVal = vehSelect.value;
     vehSelect.innerHTML = '<option value="">-- pick vehicle --</option>' +
       assets.filter(a => a.is_vehicle).map(a => `<option value="${a.id}">${escapeHtml(a.description)}</option>`).join('');
     if (currentVehVal) vehSelect.value = currentVehVal;
+
+    // Handler returns total_current_year; §179 and bonus are on each asset as display strings.
+    // Sum by parsing display strings since no *_cents fields are exposed.
+    const parseDisplay = s => {
+      if (!s) return 0;
+      const n = parseFloat(String(s).replace(/[$,]/g, ''));
+      return isFinite(n) ? Math.round(n * 100) : 0;
+    };
+    let s179 = 0, bonus = 0;
+    assets.forEach(a => { s179 += parseDisplay(a.section_179); bonus += parseDisplay(a.bonus_depr); });
+    const totalYear = parseDisplay(data.total_current_year);
+    const macrs = Math.max(totalYear - s179 - bonus, 0); // approximate, since totalYear is current_year_depr sum
 
     if (assets.length === 0) {
       list.innerHTML = '<p class="text-xs text-gray-600">No assets yet. Add a laptop, vehicle, equipment, or building above.</p>';
@@ -3395,27 +3409,21 @@ async function loadDepreciationTab() {
       return;
     }
 
-    let s179 = 0, bonus = 0, macrs = 0;
-    list.innerHTML = assets.map(a => {
-      s179 += a.section_179_cents || 0;
-      bonus += a.bonus_depr_cents || 0;
-      macrs += a.this_year_depr_cents || 0;
-      return `<div class="flex items-center justify-between p-2 bg-gray-900/40 rounded-lg">
-        <div>
-          <p class="text-sm font-medium text-gray-200">${escapeHtml(a.description)} ${a.is_vehicle ? '<span class="text-xs text-blue-400 ml-1">vehicle</span>' : ''}</p>
-          <p class="text-xs text-gray-500">${escapeHtml(a.asset_class)} · ${a.macrs_life}yr MACRS · placed ${escapeHtml(a.placed_in_service)} · ${a.business_use_pct}% biz</p>
-        </div>
-        <div class="text-right">
-          <p class="text-sm text-gray-300">${escapeHtml(a.cost_basis)}</p>
-          <p class="text-xs text-gray-500">yr depr: ${escapeHtml(a.this_year_depr || '$0.00')}</p>
-          <button onclick="viewSchedule(${a.id})" class="text-xs text-oc-400 hover:text-oc-300">schedule →</button>
-        </div>
-      </div>`;
-    }).join('');
+    list.innerHTML = assets.map(a => `<div class="flex items-center justify-between p-2 bg-gray-900/40 rounded-lg">
+      <div>
+        <p class="text-sm font-medium text-gray-200">${escapeHtml(a.description)} ${a.is_vehicle ? '<span class="text-xs text-blue-400 ml-1">vehicle</span>' : ''}</p>
+        <p class="text-xs text-gray-500">${escapeHtml(a.asset_class)} · ${a.macrs_life}yr MACRS · placed ${escapeHtml(a.placed_in_service)} · ${a.business_use_pct}% biz</p>
+      </div>
+      <div class="text-right">
+        <p class="text-sm text-gray-300">${escapeHtml(a.cost_basis)}</p>
+        <p class="text-xs text-gray-500">yr depr: ${escapeHtml(a.current_year_depr || '$0.00')}</p>
+        <button onclick="viewSchedule(${a.id})" class="text-xs text-oc-400 hover:text-oc-300">schedule →</button>
+      </div>
+    </div>`).join('');
     document.getElementById('depr-179').textContent = fmtCents(s179);
     document.getElementById('depr-bonus').textContent = fmtCents(bonus);
     document.getElementById('depr-macrs').textContent = fmtCents(macrs);
-    document.getElementById('depr-total').textContent = fmtCents(s179 + bonus + macrs);
+    document.getElementById('depr-total').textContent = data.total_current_year || fmtCents(totalYear);
   } catch(e) {
     document.getElementById('assets-list').innerHTML = '<p class="text-xs text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
   }
@@ -3425,10 +3433,12 @@ async function viewSchedule(id) {
   try {
     const resp = await authFetch(`/api/tax/assets/${id}/schedule?token=${token}`);
     const data = await resp.json();
+    const asset = _assetCache.find(a => a.id === id);
+    const title = asset ? asset.description : ('Asset #' + id);
     const rows = (data.schedule || []).map(r => `<tr><td class="py-1 pr-3">${r.year}</td><td class="py-1 pr-3 text-right">${escapeHtml(r.depreciation)}</td><td class="py-1 pr-3 text-right">${escapeHtml(r.accumulated)}</td><td class="py-1 text-right">${escapeHtml(r.remaining)}</td></tr>`).join('');
     const html = `<div class="fixed inset-0 bg-black/70 z-50 flex items-center justify-center" onclick="this.remove()">
       <div class="bg-gray-900 border border-gray-700 rounded-xl p-4 max-w-xl w-full" onclick="event.stopPropagation()">
-        <div class="flex items-center justify-between mb-3"><h3 class="font-medium">MACRS Schedule — ${escapeHtml(data.description || '')}</h3><button onclick="this.closest('.fixed').remove()" class="text-gray-400 hover:text-white">✕</button></div>
+        <div class="flex items-center justify-between mb-3"><h3 class="font-medium">MACRS Schedule — ${escapeHtml(title)}</h3><button onclick="this.closest('.fixed').remove()" class="text-gray-400 hover:text-white">✕</button></div>
         <table class="w-full text-xs"><thead><tr class="text-gray-500 border-b border-gray-700"><th class="py-1 pr-3 text-left">Year</th><th class="py-1 pr-3 text-right">Depreciation</th><th class="py-1 pr-3 text-right">Accumulated</th><th class="py-1 text-right">Remaining</th></tr></thead><tbody>${rows}</tbody></table>
       </div>
     </div>`;
@@ -3695,21 +3705,33 @@ async function loadEntityComparison() {
   try {
     const resp = await authFetch('/api/tax/entity-comparison' + qs);
     const data = await resp.json();
-    const scenarios = data.scenarios || [];
-    const best = data.best_structure;
     const container = document.getElementById('ent-comparison');
-    if (scenarios.length === 0) {
-      container.innerHTML = '<p class="text-xs text-gray-600">No comparison data. Provide income above or log 1099/SE income first.</p>';
+    if (data.error) {
+      container.innerHTML = `<p class="text-xs text-gray-600">${escapeHtml(data.error)}</p>`;
       return;
     }
-    container.innerHTML = `<p class="text-xs text-gray-400 mb-2">Compared at SE income ${escapeHtml(data.se_income || '--')}. Best: <span class="text-green-400">${escapeHtml(best || '--')}</span></p>` +
-      scenarios.map(s => `<div class="p-2 bg-gray-900/40 rounded-lg">
-        <div class="flex items-center justify-between">
-          <span class="text-sm font-medium text-gray-200">${escapeHtml(s.structure)}</span>
-          <span class="text-sm ${s.structure === best ? 'text-green-400' : 'text-gray-300'}">${escapeHtml(s.total_tax)}</span>
+    const sp = data.sole_proprietorship || {};
+    const sc = data.s_corp || {};
+    const savings = sc.savings_vs_sole_prop || '$0.00';
+    const scIsBetter = savings && !savings.startsWith('-') && savings !== '$0.00';
+    container.innerHTML = `<p class="text-xs text-gray-400 mb-3">Compared at SE income <span class="text-gray-200">${escapeHtml(data.income || '--')}</span></p>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div class="p-3 bg-gray-900/40 rounded-lg border ${scIsBetter ? 'border-gray-700' : 'border-green-600/40'}">
+          <p class="text-sm font-medium text-gray-200 mb-2">Sole Proprietorship</p>
+          <p class="text-xs text-gray-500">SE tax</p>
+          <p class="text-xl font-semibold ${scIsBetter ? 'text-red-400' : 'text-green-400'}">${escapeHtml(sp.se_tax || '--')}</p>
+          <p class="text-xs text-gray-500 mt-2">${escapeHtml(sp.notes || '')}</p>
         </div>
-        <p class="text-xs text-gray-500">${escapeHtml(s.notes || '')}</p>
-      </div>`).join('');
+        <div class="p-3 bg-gray-900/40 rounded-lg border ${scIsBetter ? 'border-green-600/40' : 'border-gray-700'}">
+          <p class="text-sm font-medium text-gray-200 mb-2">S-Corporation</p>
+          <p class="text-xs text-gray-500">Total FICA (salary portion)</p>
+          <p class="text-xl font-semibold ${scIsBetter ? 'text-green-400' : 'text-red-400'}">${escapeHtml(sc.total_fica || '--')}</p>
+          <p class="text-xs text-gray-500 mt-1">Reasonable salary ${escapeHtml(sc.reasonable_salary || '--')} · distribution ${escapeHtml(sc.distribution || '--')}</p>
+          <p class="text-xs text-oc-400 mt-2">Savings vs Sole Prop: <span class="font-medium">${escapeHtml(savings)}</span></p>
+          <p class="text-xs text-gray-500 mt-1">${escapeHtml(sc.notes || '')}</p>
+        </div>
+      </div>
+      ${data.recommendation ? `<p class="text-xs text-gray-300 mt-3 p-2 bg-oc-500/10 border border-oc-600/30 rounded-lg">${escapeHtml(data.recommendation)}</p>` : ''}`;
   } catch(e) { document.getElementById('ent-comparison').innerHTML = '<p class="text-xs text-red-400">Failed: ' + escapeHtml(e.message) + '</p>'; }
 }
 
@@ -3725,26 +3747,33 @@ async function loadAuditRisk() {
     const resp = await authFetch(`/api/tax/audit-risk?token=${token}&year=${selectedYear}`);
     const data = await resp.json();
     const factors = data.factors || [];
-    const totalScore = factors.reduce((s,f) => s + (f.score || 0), 0);
+    // The overall risk comes from the "overall" factor; others are individual factors.
+    const overall = factors.find(f => f.factor === 'overall');
+    const detail = factors.filter(f => f.factor !== 'overall');
+    const riskLabel = (overall && overall.risk) || (detail.length === 0 ? 'low' : 'low');
     const ring = document.getElementById('audit-score-ring');
     const label = document.getElementById('audit-score-label');
-    ring.textContent = totalScore;
-    let color = 'border-green-500 text-green-400';
-    let text = 'Low audit risk';
-    if (totalScore > 50) { color = 'border-red-500 text-red-400'; text = 'High audit risk'; }
-    else if (totalScore > 25) { color = 'border-yellow-500 text-yellow-400'; text = 'Moderate audit risk'; }
+    let color, text;
+    if (riskLabel === 'high') { color = 'border-red-500 text-red-400'; text = 'High audit risk'; }
+    else if (riskLabel === 'medium') { color = 'border-yellow-500 text-yellow-400'; text = 'Moderate audit risk'; }
+    else { color = 'border-green-500 text-green-400'; text = 'Low audit risk'; }
+    ring.textContent = detail.length;
     ring.className = 'w-20 h-20 rounded-full border-4 flex items-center justify-center text-2xl font-semibold ' + color;
     label.textContent = text;
-    document.getElementById('audit-score-summary').textContent = factors.length > 0 ? `${factors.length} factor${factors.length===1?'':'s'} identified` : 'No risk factors detected';
+    document.getElementById('audit-score-summary').textContent = (overall && overall.description) || (detail.length > 0 ? `${detail.length} factor${detail.length===1?'':'s'} identified` : 'No risk factors detected');
 
-    document.getElementById('audit-factors').innerHTML = factors.length === 0 ? '' :
-      factors.map(f => `<div class="p-2 bg-gray-900/40 rounded-lg text-xs">
-        <div class="flex items-center justify-between">
-          <span class="text-gray-200 font-medium">${escapeHtml(f.name || f.factor || 'Factor')}</span>
-          <span class="text-gray-400">+${f.score || 0} pts</span>
-        </div>
-        <p class="text-gray-500 mt-0.5">${escapeHtml(f.description || f.detail || '')}</p>
-      </div>`).join('');
+    document.getElementById('audit-factors').innerHTML = detail.length === 0 ? '' :
+      detail.map(f => {
+        const r = (f.risk || 'low').toLowerCase();
+        const rcolor = r === 'high' ? 'text-red-400' : r === 'medium' ? 'text-yellow-400' : 'text-green-400';
+        return `<div class="p-2 bg-gray-900/40 rounded-lg text-xs">
+          <div class="flex items-center justify-between">
+            <span class="text-gray-200 font-medium">${escapeHtml((f.factor || 'Factor').replace(/_/g,' '))}</span>
+            <span class="${rcolor} uppercase">${escapeHtml(r)}</span>
+          </div>
+          <p class="text-gray-500 mt-0.5">${escapeHtml(f.description || '')}</p>
+        </div>`;
+      }).join('');
   } catch(e) {
     document.getElementById('audit-score-label').textContent = 'Failed to load';
     document.getElementById('audit-score-summary').textContent = e.message;
@@ -3762,15 +3791,16 @@ async function loadInsightsList() {
       return;
     }
     list.innerHTML = insights.map(i => {
-      const severity = (i.severity || 'info').toLowerCase();
-      const bg = severity === 'high' ? 'bg-red-500/10 border-red-600/30' : severity === 'medium' ? 'bg-yellow-500/10 border-yellow-600/30' : 'bg-oc-500/10 border-oc-600/30';
+      // Priority 8+ = high, 5-7 = medium, <5 = low
+      const p = i.priority || 0;
+      const bg = p >= 8 ? 'bg-red-500/10 border-red-600/30' : p >= 5 ? 'bg-yellow-500/10 border-yellow-600/30' : 'bg-oc-500/10 border-oc-600/30';
+      const typeLabel = (i.type || '').replace(/_/g, ' ');
       return `<div class="p-3 rounded-lg border ${bg}">
         <div class="flex items-center justify-between mb-1">
-          <span class="text-sm font-medium text-gray-200">${escapeHtml(i.title || i.category || 'Insight')}</span>
-          ${i.savings_potential ? `<span class="text-xs text-green-400">save ${escapeHtml(i.savings_potential)}</span>` : ''}
+          <span class="text-sm font-medium text-gray-200">${escapeHtml(i.title || 'Insight')}</span>
+          ${typeLabel ? `<span class="text-xs text-gray-500 uppercase">${escapeHtml(typeLabel)}</span>` : ''}
         </div>
-        <p class="text-xs text-gray-400">${escapeHtml(i.message || i.description || '')}</p>
-        ${i.action ? `<p class="text-xs text-oc-400 mt-1">→ ${escapeHtml(i.action)}</p>` : ''}
+        <p class="text-xs text-gray-400">${escapeHtml(i.body || i.message || '')}</p>
       </div>`;
     }).join('');
   } catch(e) { document.getElementById('insights-list').innerHTML = '<p class="text-xs text-red-400">Failed: ' + escapeHtml(e.message) + '</p>'; }
@@ -3908,22 +3938,29 @@ async function loadForm8949() {
   try {
     const resp = await authFetch(`/api/tax/form-8949?token=${token}&year=${selectedYear}`);
     const data = await resp.json();
-    const rows = data.dispositions || data.rows || [];
-    document.getElementById('form8949-count').textContent = rows.length + ' disposition' + (rows.length===1?'':'s');
+    const shortRows = data.short_term || [];
+    const longRows = data.long_term || [];
+    const total = shortRows.length + longRows.length;
+    document.getElementById('form8949-count').textContent = total + ' disposition' + (total===1?'':'s');
     const list = document.getElementById('form8949-list');
-    if (rows.length === 0) {
+    if (total === 0) {
       list.innerHTML = '<p class="text-xs text-gray-600">No dispositions this year. Sell a lot to populate Form 8949.</p>';
       return;
     }
-    list.innerHTML = '<table class="w-full text-xs"><thead><tr class="text-gray-500 border-b border-gray-700"><th class="py-1 text-left">Description</th><th class="py-1 text-right">Acquired</th><th class="py-1 text-right">Sold</th><th class="py-1 text-right">Proceeds</th><th class="py-1 text-right">Basis</th><th class="py-1 text-right">Gain/Loss</th></tr></thead><tbody>' +
-      rows.map(r => `<tr class="border-b border-gray-800/50">
-        <td class="py-1 text-gray-300">${escapeHtml(r.description || r.symbol || '')}</td>
-        <td class="py-1 text-right text-gray-400">${escapeHtml(r.acquisition_date || r.acquired || '')}</td>
-        <td class="py-1 text-right text-gray-400">${escapeHtml(r.sell_date || r.sold || '')}</td>
-        <td class="py-1 text-right text-gray-300">${escapeHtml(r.proceeds || '')}</td>
-        <td class="py-1 text-right text-gray-300">${escapeHtml(r.basis || '')}</td>
-        <td class="py-1 text-right ${(r.gain_loss || '').startsWith('-') ? 'text-red-400' : 'text-green-400'}">${escapeHtml(r.gain_loss || '')}</td>
-      </tr>`).join('') + '</tbody></table>';
+    const row = r => `<tr class="border-b border-gray-800/50">
+      <td class="py-1 text-gray-300">${escapeHtml(r.description || r.symbol || '')}</td>
+      <td class="py-1 text-right text-gray-400">${escapeHtml(r.acquisition_date || r.acquired || '')}</td>
+      <td class="py-1 text-right text-gray-400">${escapeHtml(r.sell_date || r.sold || '')}</td>
+      <td class="py-1 text-right text-gray-300">${escapeHtml(r.proceeds || '')}</td>
+      <td class="py-1 text-right text-gray-300">${escapeHtml(r.basis || '')}</td>
+      <td class="py-1 text-right ${(r.gain_loss || '').startsWith('-') ? 'text-red-400' : 'text-green-400'}">${escapeHtml(r.gain_loss || '')}</td>
+    </tr>`;
+    const section = (label, rows, total) => rows.length === 0 ? '' :
+      `<div class="mb-3"><p class="text-xs font-medium text-gray-400 uppercase mt-2 mb-1">${label} <span class="text-gray-500 normal-case">— total ${escapeHtml(total || '')}</span></p>
+       <table class="w-full text-xs"><thead><tr class="text-gray-500 border-b border-gray-700"><th class="py-1 text-left">Description</th><th class="py-1 text-right">Acquired</th><th class="py-1 text-right">Sold</th><th class="py-1 text-right">Proceeds</th><th class="py-1 text-right">Basis</th><th class="py-1 text-right">Gain/Loss</th></tr></thead><tbody>${rows.map(row).join('')}</tbody></table></div>`;
+    const net = data.net_gain_loss || '';
+    list.innerHTML = section('Short-Term (held ≤ 1 year)', shortRows, data.short_term_total) + section('Long-Term (held > 1 year)', longRows, data.long_term_total) +
+      (net ? `<p class="text-xs text-gray-300 mt-2 pt-2 border-t border-gray-700">Net gain/loss: <span class="${net.startsWith('-') ? 'text-red-400' : 'text-green-400'} font-medium">${escapeHtml(net)}</span></p>` : '');
   } catch(e) { document.getElementById('form8949-list').innerHTML = '<p class="text-xs text-red-400">Failed</p>'; }
 }
 
