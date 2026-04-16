@@ -1234,12 +1234,14 @@ async fn handle_api_message(
     // Build messages — start with system prompt, then optional conversation history
     let sharing_mode = state.sharing_mode.read().await.clone();
     let scope = state.users.visible_user_ids(principal.user_id(), &sharing_mode, "conversations", Some(&agent_id)).await;
+    // Agent-level conversation scoping: main sees all except journal; specialists see only their own
+    let agent_scope_for_conv = if agent_id == "main" { None } else { Some(agent_id.clone()) };
     let mut messages = vec![llm::ChatMessage::system(&system_prompt)];
     if let (Some(cid), Some(mgr)) = (req.conversation_id.as_deref(), &state.conversations) {
-        if mgr.get(cid, scope.clone()).await.is_none() {
+        if mgr.get(cid, scope.clone(), agent_scope_for_conv.clone()).await.is_none() {
             return Err(axum::http::StatusCode::NOT_FOUND);
         }
-        let prior = mgr.messages(cid, scope.clone()).await;
+        let prior = mgr.messages(cid, scope.clone(), agent_scope_for_conv.clone()).await;
         for m in prior {
             match m.role.as_str() {
                 "user" => messages.push(llm::ChatMessage::user(&m.content)),
@@ -1465,11 +1467,12 @@ async fn handle_conv_get(
     };
     let sharing_mode = state.sharing_mode.read().await.clone();
     let scope = state.users.visible_user_ids(principal.user_id(), &sharing_mode, "conversations", None).await;
-    let conv = mgr.get(&id, scope.clone()).await;
+    let agent_scope_api = params.get("agent").cloned();
+    let conv = mgr.get(&id, scope.clone(), agent_scope_api.clone()).await;
     if conv.is_none() {
         return Err(axum::http::StatusCode::NOT_FOUND);
     }
-    let messages = mgr.messages(&id, scope).await;
+    let messages = mgr.messages(&id, scope, agent_scope_api).await;
     Ok(Json(serde_json::json!({
         "conversation": conv,
         "messages": messages,
@@ -1586,8 +1589,9 @@ async fn handle_message_start(
 
         let mut messages = vec![llm::ChatMessage::system(&system_prompt)];
         if let (Some(cid), Some(mgr)) = (conv_id.as_deref(), &state_clone.conversations) {
-            if mgr.get(cid, principal_scope.clone()).await.is_some() {
-                let prior = mgr.messages(cid, principal_scope.clone()).await;
+            let agent_scope_for_conv2 = if agent_for_task == "main" { None } else { Some(agent_for_task.clone()) };
+            if mgr.get(cid, principal_scope.clone(), agent_scope_for_conv2.clone()).await.is_some() {
+                let prior = mgr.messages(cid, principal_scope.clone(), agent_scope_for_conv2).await;
                 for m in prior {
                     match m.role.as_str() {
                         "user" => messages.push(llm::ChatMessage::user(&m.content)),
