@@ -2002,11 +2002,10 @@ for s in [48, 64, 128, 256]:
             .filter(|p| p.exists())
             .map(|p| p.to_string_lossy().to_string())
             .or_else(|| {
-                let candidates = [
-                    format!("{}/.local/bin/syntaur-viewer", home),
-                    "/tmp/syntaur-viewer".to_string(),
-                ];
-                candidates.into_iter().find(|p| std::path::Path::new(p).exists())
+                // Only consider persistent install locations — never /tmp,
+                // which clears on reboot and would silently break the shortcut.
+                let candidate = format!("{}/.local/bin/syntaur-viewer", home);
+                std::path::Path::new(&candidate).exists().then_some(candidate)
             })
             .unwrap_or_else(|| format!("xdg-open {}", dashboard_url));
 
