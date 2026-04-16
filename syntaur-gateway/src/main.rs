@@ -5659,13 +5659,18 @@ async fn try_default_persona(
     };
     let db = state.db_path.clone();
     let key = agent_key;
-    let (template, display_name, default_humor) = tokio::task::spawn_blocking(move || {
-        let conn = rusqlite::Connection::open(&db).ok()?;
-        crate::agents::templates::load_default(&conn, &key).ok().flatten()
-    })
-    .await
-    .ok()
-    .flatten()?;
+    let uid = user_id;
+    let (template, display_name, default_humor, module_vars) =
+        tokio::task::spawn_blocking(move || {
+            let conn = rusqlite::Connection::open(&db).ok()?;
+            let (tmpl, name, humor) =
+                crate::agents::templates::load_default(&conn, &key).ok().flatten()?;
+            let mvars = crate::agents::templates::module_context(&conn, &key, uid);
+            Some((tmpl, name, humor, mvars))
+        })
+        .await
+        .ok()
+        .flatten()?;
 
     let first_name = state
         .users
@@ -5681,13 +5686,17 @@ async fn try_default_persona(
         Some(personality)
     };
     let humor = default_humor.unwrap_or(3);
-    let ctx = crate::agents::templates::base_context(
+    let mut ctx = crate::agents::templates::base_context(
         first_name.as_deref(),
         personality_opt.as_deref(),
         &display_name,
         "Kyron",
         humor,
     );
+    // Merge module-specific vars (tax profile, calendar snapshot, etc.)
+    for (k, v) in module_vars {
+        ctx.insert(k, v);
+    }
     Some(crate::agents::templates::substitute(&template, &ctx))
 }
 
@@ -5716,15 +5725,18 @@ async fn handle_api_agent_resolve_prompt(
 
     let db = state.db_path.clone();
     let key = agent_key.clone();
+    let debug_uid = uid;
     let loaded = tokio::task::spawn_blocking(move || {
         let conn = rusqlite::Connection::open(&db).ok()?;
-        crate::agents::templates::load_default(&conn, &key).ok().flatten()
+        let default = crate::agents::templates::load_default(&conn, &key).ok().flatten()?;
+        let mvars = crate::agents::templates::module_context(&conn, &key, debug_uid);
+        Some((default.0, default.1, default.2, mvars))
     })
     .await
     .ok()
     .flatten();
 
-    let (template, display_name, default_humor) =
+    let (template, display_name, default_humor, module_vars) =
         loaded.ok_or(axum::http::StatusCode::NOT_FOUND)?;
 
     let first_name = state.users.get_user(uid).await.ok().flatten().map(|u| u.name);
@@ -5736,13 +5748,16 @@ async fn handle_api_agent_resolve_prompt(
     };
     let humor = default_humor.unwrap_or(3);
 
-    let ctx = crate::agents::templates::base_context(
+    let mut ctx = crate::agents::templates::base_context(
         first_name.as_deref(),
         personality_opt.as_deref(),
         &display_name,
         "Kyron",
         humor,
     );
+    for (k, v) in module_vars {
+        ctx.insert(k, v);
+    }
 
     let prompt = crate::agents::templates::substitute(&template, &ctx);
 

@@ -92,6 +92,143 @@ pub fn base_context(
     ctx
 }
 
+// ── Module-specific context ──────────────────────────────────────────────────
+
+/// Populate module-specific template variables by querying the gateway DB.
+/// Called inside `spawn_blocking` — all operations are synchronous.
+///
+/// Returns additional vars to merge into the base context before substitution.
+/// Keys that produce empty results are omitted (template defaults apply).
+pub fn module_context(
+    conn: &rusqlite::Connection,
+    agent_key: &str,
+    user_id: i64,
+) -> HashMap<&'static str, String> {
+    let mut ctx = HashMap::new();
+    match agent_key {
+        "module_tax" => populate_tax(&mut ctx, conn, user_id),
+        "module_research" => populate_research(&mut ctx, conn),
+        "module_music" => populate_music(&mut ctx, conn, user_id),
+        "module_scheduler" => populate_scheduler(&mut ctx, conn, user_id),
+        "module_coders" => populate_coders(&mut ctx, conn),
+        _ => {}
+    }
+    ctx
+}
+
+fn populate_tax(ctx: &mut HashMap<&'static str, String>, conn: &rusqlite::Connection, user_id: i64) {
+    let year: i64 = chrono::Utc::now().format("%Y").to_string().parse().unwrap_or(2025);
+    let row = conn.query_row(
+        "SELECT first_name, last_name, filing_status, state, city \
+         FROM taxpayer_profiles WHERE user_id = ?1 AND tax_year = ?2",
+        rusqlite::params![user_id, year],
+        |r| Ok((
+            r.get::<_, Option<String>>(0)?,
+            r.get::<_, Option<String>>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            r.get::<_, Option<String>>(3)?,
+            r.get::<_, Option<String>>(4)?,
+        )),
+    );
+    if let Ok((first, last, filing, state, city)) = row {
+        let mut parts = Vec::new();
+        if let (Some(f), Some(l)) = (&first, &last) {
+            parts.push(format!("{} {}", f, l));
+        }
+        if let Some(f) = &filing { parts.push(format!("Filing: {}", f)); }
+        if let (Some(c), Some(s)) = (&city, &state) {
+            parts.push(format!("{}, {}", c, s));
+        } else if let Some(s) = &state {
+            parts.push(s.clone());
+        }
+        if !parts.is_empty() {
+            ctx.insert("tax_profile_summary", parts.join(" | "));
+        }
+    }
+    let receipt_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM receipts WHERE user_id = ?1", rusqlite::params![user_id], |r| r.get(0))
+        .unwrap_or(0);
+    if receipt_count > 0 {
+        let summary = ctx.entry("tax_profile_summary").or_insert_with(String::new);
+        if !summary.is_empty() { summary.push_str(" | "); }
+        summary.push_str(&format!("{} receipts on file", receipt_count));
+    }
+}
+
+fn populate_research(ctx: &mut HashMap<&'static str, String>, conn: &rusqlite::Connection) {
+    let doc_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
+        .unwrap_or(0);
+    let source_count: i64 = conn
+        .query_row("SELECT COUNT(DISTINCT source) FROM documents", [], |r| r.get(0))
+        .unwrap_or(0);
+    if doc_count > 0 {
+        ctx.insert("kb_summary", format!("{} documents from {} sources", doc_count, source_count));
+    }
+    let session_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM research_sessions WHERE status = 'complete'", [], |r| r.get(0))
+        .unwrap_or(0);
+    if session_count > 0 {
+        ctx.insert("research_sessions_summary", format!("{} completed research sessions", session_count));
+    }
+}
+
+fn populate_music(ctx: &mut HashMap<&'static str, String>, conn: &rusqlite::Connection, user_id: i64) {
+    let mut providers = Vec::new();
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT provider, display_name FROM sync_connections \
+         WHERE (user_id = ?1 OR user_id = 0) AND status = 'active'"
+    ) {
+        if let Ok(rows) = stmt.query_map(rusqlite::params![user_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        }) {
+            for row in rows.flatten() {
+                let p = row.0.to_lowercase();
+                if ["spotify", "apple_music", "tidal", "youtube_music", "plex", "music_assistant"]
+                    .iter().any(|k| p.contains(k))
+                {
+                    providers.push(row.1.unwrap_or(row.0));
+                }
+            }
+        }
+    }
+    if !providers.is_empty() {
+        ctx.insert("music_providers", providers.join(", "));
+    }
+}
+
+fn populate_scheduler(ctx: &mut HashMap<&'static str, String>, conn: &rusqlite::Connection, user_id: i64) {
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let day_after = (chrono::Utc::now() + chrono::Duration::days(2)).format("%Y-%m-%d").to_string();
+    let mut events = Vec::new();
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT title, start_time FROM calendar_events \
+         WHERE (user_id = ?1 OR user_id = 0) AND start_time >= ?2 AND start_time < ?3 \
+         ORDER BY start_time LIMIT 10"
+    ) {
+        if let Ok(rows) = stmt.query_map(rusqlite::params![user_id, &today, &day_after], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        }) {
+            for row in rows.flatten() {
+                events.push(format!("{} ({})", row.0, row.1));
+            }
+        }
+    }
+    if events.is_empty() {
+        ctx.insert("calendar_snapshot", "No events scheduled in the next 48 hours.".to_string());
+    } else {
+        ctx.insert("calendar_snapshot", format!("Next 48h: {}", events.join("; ")));
+    }
+}
+
+fn populate_coders(ctx: &mut HashMap<&'static str, String>, conn: &rusqlite::Connection) {
+    // Terminal hosts are in a separate DB (terminal module), so we can only
+    // report what's in the main index. Leave the placeholder for now —
+    // the template default applies.
+    let _ = conn;
+    let _ = ctx;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
