@@ -5030,6 +5030,9 @@ async fn main() {
         .route("/api/agents/seed_defaults", axum::routing::post(handle_api_agent_seed_defaults))
         .route("/api/agents/rename", axum::routing::put(handle_api_agent_rename))
         .route("/api/agents/list", get(handle_api_agent_list))
+        .route("/api/agents/dismiss_escalation", axum::routing::post(handle_api_dismiss_escalation))
+        .route("/api/agents/handoff", axum::routing::post(handle_api_agent_handoff))
+        .route("/api/agents/reentry", axum::routing::post(handle_api_agent_reentry))
         .route("/api/modules/toggle", post(setup::handle_module_toggle))
         .route("/api/license/status", get(setup::handle_license_status))
         .route("/api/license/activate", post(setup::handle_license_activate))
@@ -5665,6 +5668,106 @@ fn open_browser(url: &str) -> std::io::Result<()> {
 
 
 // ── Agent onboarding endpoints ──────────────────────────────────────────────
+
+
+/// POST /api/agents/dismiss_escalation
+async fn handle_api_dismiss_escalation(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let conv_id = body["conversation_id"].as_str().unwrap_or("ephemeral");
+    let module = body["module"].as_str().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
+    let _principal = resolve_principal(&state, token).await?;
+    state.escalation.dismiss(conv_id, module);
+    Ok(Json(serde_json::json!({"dismissed": true, "module": module})))
+}
+
+/// POST /api/agents/handoff — carry context from main agent to a specialist.
+async fn handle_api_agent_handoff(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let from_conv = body["from_conversation_id"].as_str().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
+    let to_module = body["to_module"].as_str().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
+    let context_count = body["context_messages"].as_u64().unwrap_or(6) as usize;
+
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let mgr = state.conversations.as_ref().ok_or(axum::http::StatusCode::SERVICE_UNAVAILABLE)?;
+
+    let sharing_mode = state.sharing_mode.read().await.clone();
+    let scope = state.users.visible_user_ids(uid, &sharing_mode, "conversations", None).await;
+    let all_msgs = mgr.messages(from_conv, scope, None).await;
+    let recent: Vec<(String, String)> = all_msgs
+        .iter().rev().take(context_count).rev()
+        .map(|m| (m.role.clone(), m.content.clone())).collect();
+
+    let from_name = state.users.get_user_agent(uid, "main").await.ok().flatten()
+        .map(|ua| ua.display_name).unwrap_or_else(|| "Kyron".to_string());
+    let to_name = state.users.get_user_agent(uid, to_module).await.ok().flatten()
+        .map(|ua| ua.display_name)
+        .unwrap_or_else(|| crate::agents::handoff::agent_display_for_module(to_module).to_string());
+
+    let context = crate::agents::handoff::build_handoff_context(&recent, &from_name, &to_name);
+
+    let topic = recent.iter().rev().find(|(r, _)| r == "user")
+        .map(|(_, c)| if c.len() > 60 { format!("{}...", &c[..57]) } else { c.clone() })
+        .unwrap_or_else(|| "Handoff from main".to_string());
+    let new_conv_id = mgr.create(to_module, &topic, uid).await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let _ = mgr.append(&new_conv_id, "system", &context).await;
+
+    let greeting = format!("{} passed you over. You were asking about: {}. How can I help?", from_name, topic);
+
+    Ok(Json(serde_json::json!({
+        "conversation_id": new_conv_id,
+        "agent": to_module,
+        "agent_name": to_name,
+        "greeting": greeting,
+        "context_messages_carried": recent.len(),
+    })))
+}
+
+/// POST /api/agents/reentry — summarize specialist session, carry back to main.
+async fn handle_api_agent_reentry(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let specialist_conv = body["specialist_conversation_id"].as_str().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
+    let main_conv = body["main_conversation_id"].as_str();
+    let specialist_module = body["module"].as_str().unwrap_or("unknown");
+
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let mgr = state.conversations.as_ref().ok_or(axum::http::StatusCode::SERVICE_UNAVAILABLE)?;
+
+    let sharing_mode = state.sharing_mode.read().await.clone();
+    let scope = state.users.visible_user_ids(uid, &sharing_mode, "conversations", None).await;
+    let spec_scope = Some(specialist_module.to_string());
+    let msgs = mgr.messages(specialist_conv, scope, spec_scope).await;
+    let msg_pairs: Vec<(String, String)> = msgs.iter().map(|m| (m.role.clone(), m.content.clone())).collect();
+
+    let spec_name = state.users.get_user_agent(uid, specialist_module).await.ok().flatten()
+        .map(|ua| ua.display_name)
+        .unwrap_or_else(|| crate::agents::handoff::agent_display_for_module(specialist_module).to_string());
+
+    let summary = crate::agents::handoff::build_reentry_summary(&spec_name, &msg_pairs);
+
+    let appended_to = if let Some(main_cid) = main_conv {
+        let _ = mgr.append(main_cid, "system", &summary).await;
+        Some(main_cid.to_string())
+    } else {
+        None
+    };
+
+    Ok(Json(serde_json::json!({
+        "summary": summary,
+        "appended_to": appended_to,
+    })))
+}
 
 /// POST /api/agents/seed_defaults — clone all product-default personas into
 /// the caller's user_agents. Idempotent — safe to call repeatedly. Existing
