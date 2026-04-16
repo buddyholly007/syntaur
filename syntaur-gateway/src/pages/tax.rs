@@ -74,18 +74,26 @@ const BODY_HTML: &str = r##"<!-- Module paywall overlay (hidden by default, show
       <span class="text-gray-500">/</span>
       <span class="text-gray-300 font-medium">Tax & Expenses</span>
     </div>
-    <div class="flex items-center gap-3 text-sm">
-      <button onclick="showTab('overview')" class="tab text-white" id="tab-btn-overview">Overview</button>
-      <button onclick="showTab('expenses')" class="tab text-gray-400" id="tab-btn-expenses">Expenses</button>
-      <button onclick="showTab('receipts')" class="tab text-gray-400" id="tab-btn-receipts">Receipts</button>
-      <button onclick="showTab('documents')" class="tab text-gray-400" id="tab-btn-documents">Documents</button>
-      <button onclick="showTab('property')" class="tab text-gray-400" id="tab-btn-property">Property</button>
-      <button onclick="showTab('connections')" class="tab text-gray-400" id="tab-btn-connections">Connections</button>
-      <button onclick="showTab('investments')" class="tab text-gray-400" id="tab-btn-investments">Investments</button>
-      <button onclick="showTab('deductions')" class="tab text-gray-400 relative" id="tab-btn-deductions">Deductions <span id="ded-badge" class="hidden absolute -top-1 -right-2 bg-green-500 text-white text-[9px] rounded-full w-4 h-4 flex items-center justify-center"></span></button>
-      <button onclick="showTab('wizard')" class="tab text-gray-400" id="tab-btn-wizard">Wizard</button>
-      <select id="year-select" class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-sm text-gray-300 outline-none" onchange="changeYear()"></select>
-      <a href="/" class="text-gray-500 hover:text-gray-300">Home</a>
+    <div class="flex items-center gap-3 text-sm min-w-0">
+      <div class="flex items-center gap-3 overflow-x-auto whitespace-nowrap scrollbar-thin min-w-0">
+        <button onclick="showTab('overview')" class="tab text-white" id="tab-btn-overview">Overview</button>
+        <button onclick="showTab('expenses')" class="tab text-gray-400" id="tab-btn-expenses">Expenses</button>
+        <button onclick="showTab('receipts')" class="tab text-gray-400" id="tab-btn-receipts">Receipts</button>
+        <button onclick="showTab('documents')" class="tab text-gray-400" id="tab-btn-documents">Documents</button>
+        <button onclick="showTab('property')" class="tab text-gray-400" id="tab-btn-property">Property</button>
+        <button onclick="showTab('connections')" class="tab text-gray-400" id="tab-btn-connections">Connections</button>
+        <button onclick="showTab('credits')" class="tab text-gray-400" id="tab-btn-credits">Credits</button>
+        <button onclick="showTab('quarterly')" class="tab text-gray-400" id="tab-btn-quarterly">Quarterly</button>
+        <button onclick="showTab('investments')" class="tab text-gray-400" id="tab-btn-investments">Investments</button>
+        <button onclick="showTab('depreciation')" class="tab text-gray-400" id="tab-btn-depreciation">Depreciation</button>
+        <button onclick="showTab('state')" class="tab text-gray-400" id="tab-btn-state">State</button>
+        <button onclick="showTab('entities')" class="tab text-gray-400" id="tab-btn-entities">Entities</button>
+        <button onclick="showTab('insights')" class="tab text-gray-400" id="tab-btn-insights">Insights</button>
+        <button onclick="showTab('deductions')" class="tab text-gray-400 relative" id="tab-btn-deductions">Deductions <span id="ded-badge" class="hidden absolute -top-1 -right-2 bg-green-500 text-white text-[9px] rounded-full w-4 h-4 flex items-center justify-center"></span></button>
+        <button onclick="showTab('wizard')" class="tab text-gray-400" id="tab-btn-wizard">Wizard</button>
+      </div>
+      <select id="year-select" class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-sm text-gray-300 outline-none flex-shrink-0" onchange="changeYear()"></select>
+      <a href="/" class="text-gray-500 hover:text-gray-300 flex-shrink-0">Home</a>
     </div>
   </div>
 </div>
@@ -837,7 +845,7 @@ const BODY_HTML: &str = r##"<!-- Module paywall overlay (hidden by default, show
       <div class="flex items-center justify-between mb-4"><h3 class="font-medium">Holdings</h3><span class="text-xs text-gray-500" id="holdings-as-of">--</span></div>
       <div id="holdings-list" class="space-y-1"><p class="text-xs text-gray-600">Connect a brokerage to see holdings.</p></div>
     </div>
-    <div class="card">
+    <div class="card mb-6">
       <div class="flex items-center justify-between mb-4">
         <h3 class="font-medium">Investment Transactions</h3>
         <div class="flex items-center gap-2">
@@ -847,6 +855,396 @@ const BODY_HTML: &str = r##"<!-- Module paywall overlay (hidden by default, show
         </div>
       </div>
       <div id="inv-txn-list" class="space-y-1 max-h-[500px] overflow-y-auto"><p class="text-xs text-gray-600">No transactions yet.</p></div>
+    </div>
+    <div class="card mb-6">
+      <h3 class="font-medium mb-3">Capital Gains Summary</h3>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3" id="cap-gains-grid">
+        <p class="text-xs text-gray-600 col-span-full">Loading...</p>
+      </div>
+      <p class="text-xs text-gray-500 mt-3" id="cap-gains-note"></p>
+    </div>
+    <div class="card mb-6">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-medium">Tax Lots (Open Positions)</h3>
+        <div class="flex items-center gap-2">
+          <select id="lots-status" class="input w-auto" onchange="loadLots()"><option value="open">Open</option><option value="closed">Closed</option></select>
+          <button onclick="showAddLotForm()" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-2.5 py-1 rounded-lg">+ Add Lot</button>
+        </div>
+      </div>
+      <div id="add-lot-form" class="hidden mb-4 p-3 bg-gray-900/40 rounded-lg">
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-2">
+          <div><label class="label">Symbol</label><input id="lot-symbol" class="input" placeholder="AAPL"></div>
+          <div><label class="label">Type</label><select id="lot-asset-type" class="input"><option value="stock">Stock</option><option value="etf">ETF</option><option value="crypto">Crypto</option><option value="option">Option</option></select></div>
+          <div><label class="label">Quantity</label><input id="lot-qty" type="number" step="any" class="input" placeholder="100"></div>
+          <div><label class="label">Cost per Unit ($)</label><input id="lot-cpu" type="number" step="0.01" class="input" placeholder="150.25"></div>
+          <div><label class="label">Acquisition Date</label><input id="lot-date" type="date" class="input"></div>
+          <div><label class="label">Broker</label><input id="lot-broker" class="input" placeholder="Alpaca"></div>
+          <div class="col-span-2 flex items-end gap-2"><button onclick="saveLot()" class="btn-primary">Save Lot</button><button onclick="document.getElementById('add-lot-form').classList.add('hidden')" class="text-xs text-gray-400 hover:text-gray-200">Cancel</button></div>
+        </div>
+      </div>
+      <div id="lots-list" class="space-y-1 max-h-[400px] overflow-y-auto"><p class="text-xs text-gray-600">Loading lots...</p></div>
+    </div>
+    <div class="card mb-6">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-medium">Wash Sales</h3>
+        <span class="text-xs text-gray-500" id="wash-count">--</span>
+      </div>
+      <div id="wash-list" class="space-y-1"><p class="text-xs text-gray-600">Loading...</p></div>
+    </div>
+    <div class="card mb-6">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-medium">Form 8949 (Capital Gains Detail)</h3>
+        <span class="text-xs text-gray-500" id="form8949-count">--</span>
+      </div>
+      <div id="form8949-list" class="space-y-1 max-h-[300px] overflow-y-auto"><p class="text-xs text-gray-600">Loading dispositions...</p></div>
+    </div>
+    <div class="card">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-medium">K-1 Income (Partnerships, S-Corps)</h3>
+        <button onclick="showAddK1Form()" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-2.5 py-1 rounded-lg">+ Add K-1</button>
+      </div>
+      <div id="add-k1-form" class="hidden mb-4 p-3 bg-gray-900/40 rounded-lg">
+        <div class="grid grid-cols-2 md:grid-cols-3 gap-2">
+          <div class="col-span-2"><label class="label">Entity Name</label><input id="k1-name" class="input" placeholder="Acme Partners LLC"></div>
+          <div><label class="label">Type</label><select id="k1-type" class="input"><option value="partnership">Partnership</option><option value="s_corp">S-Corp</option></select></div>
+          <div><label class="label">Ordinary Income ($)</label><input id="k1-ordinary" type="number" step="0.01" class="input" placeholder="0"></div>
+          <div><label class="label">Rental Income ($)</label><input id="k1-rental" type="number" step="0.01" class="input" placeholder="0"></div>
+          <div><label class="label">Interest ($)</label><input id="k1-interest" type="number" step="0.01" class="input" placeholder="0"></div>
+          <div><label class="label">Dividends ($)</label><input id="k1-dividend" type="number" step="0.01" class="input" placeholder="0"></div>
+          <div><label class="label">Capital Gain ($)</label><input id="k1-capgain" type="number" step="0.01" class="input" placeholder="0"></div>
+          <div><label class="label">SE Income ($)</label><input id="k1-se" type="number" step="0.01" class="input" placeholder="0"></div>
+          <div class="col-span-full flex gap-2"><button onclick="saveK1()" class="btn-primary">Save K-1</button><button onclick="document.getElementById('add-k1-form').classList.add('hidden')" class="text-xs text-gray-400 hover:text-gray-200">Cancel</button></div>
+        </div>
+      </div>
+      <div id="k1-list" class="space-y-1"><p class="text-xs text-gray-600">Loading K-1s...</p></div>
+    </div>
+  </div>
+
+  <!-- Credits tab -->
+  <div id="tab-credits" class="hidden">
+    <div class="card mb-6">
+      <h3 class="font-medium mb-2">Tax Credit Eligibility</h3>
+      <p class="text-xs text-gray-500 mb-4">Credits directly reduce your tax owed, dollar for dollar. Based on your dependents, income, and expenses entered so far.</p>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3" id="credits-eligibility-grid">
+        <p class="text-xs text-gray-600 col-span-full">Loading credit eligibility...</p>
+      </div>
+      <div class="mt-4 pt-4 border-t border-gray-700 flex items-center justify-between">
+        <span class="text-sm text-gray-400">Estimated total credits:</span>
+        <span class="text-xl font-semibold text-green-400" id="credits-total">$0.00</span>
+      </div>
+    </div>
+
+    <div class="card mb-6">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-medium">Education Expenses <span class="text-xs text-gray-500 font-normal">— AOTC / Lifetime Learning</span></h3>
+        <button onclick="toggleForm('edu-form')" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-2.5 py-1 rounded-lg">+ Add</button>
+      </div>
+      <div id="edu-form" class="hidden mb-3 p-3 bg-gray-900/40 rounded-lg">
+        <div class="grid grid-cols-2 gap-2">
+          <div><label class="label">Student Name</label><input id="edu-student" class="input" placeholder="Jane Doe"></div>
+          <div><label class="label">Institution</label><input id="edu-school" class="input" placeholder="Acme University"></div>
+          <div><label class="label">Tuition ($)</label><input id="edu-tuition" type="number" step="0.01" class="input" placeholder="12000"></div>
+          <div><label class="label">Required Fees ($)</label><input id="edu-fees" type="number" step="0.01" class="input" placeholder="0"></div>
+          <div><label class="label">Books &amp; Supplies ($)</label><input id="edu-books" type="number" step="0.01" class="input" placeholder="0"></div>
+          <div class="flex items-end gap-2"><button onclick="saveEducation()" class="btn-primary">Save</button></div>
+        </div>
+      </div>
+      <p class="text-xs text-gray-500">Up to $2,500 credit per student for first 4 years of college (AOTC), or 20% of first $10,000 for graduate/continuing (LLC).</p>
+    </div>
+
+    <div class="card mb-6">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-medium">Dependent Care <span class="text-xs text-gray-500 font-normal">— Child &amp; Dependent Care Credit</span></h3>
+        <button onclick="toggleForm('care-form')" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-2.5 py-1 rounded-lg">+ Add</button>
+      </div>
+      <div id="care-form" class="hidden mb-3 p-3 bg-gray-900/40 rounded-lg">
+        <div class="grid grid-cols-2 gap-2">
+          <div><label class="label">Provider Name</label><input id="care-provider" class="input" placeholder="Sunshine Daycare"></div>
+          <div><label class="label">Amount Paid ($)</label><input id="care-amount" type="number" step="0.01" class="input" placeholder="5000"></div>
+          <div><label class="label">For Dependent (optional id)</label><input id="care-dep" type="number" class="input" placeholder=""></div>
+          <div class="flex items-end gap-2"><button onclick="saveChildcare()" class="btn-primary">Save</button></div>
+        </div>
+      </div>
+      <p class="text-xs text-gray-500">20-35% credit on up to $3,000 (one child) or $6,000 (two+) of care expenses for children under 13 or disabled dependents.</p>
+    </div>
+
+    <div class="card">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-medium">Energy Improvements <span class="text-xs text-gray-500 font-normal">— Residential Clean Energy / Efficient Home</span></h3>
+        <button onclick="toggleForm('energy-form')" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-2.5 py-1 rounded-lg">+ Add</button>
+      </div>
+      <div id="energy-form" class="hidden mb-3 p-3 bg-gray-900/40 rounded-lg">
+        <div class="grid grid-cols-2 gap-2">
+          <div><label class="label">Type</label><select id="energy-type" class="input">
+            <option value="solar">Solar panels / solar water heater</option>
+            <option value="wind">Small wind</option>
+            <option value="geothermal">Geothermal heat pump</option>
+            <option value="battery">Battery storage</option>
+            <option value="heat_pump">Heat pump</option>
+            <option value="windows">Windows/doors/insulation</option>
+            <option value="ev_charger">EV charger</option>
+          </select></div>
+          <div><label class="label">Vendor</label><input id="energy-vendor" class="input" placeholder="Installer name"></div>
+          <div><label class="label">Total Cost ($)</label><input id="energy-cost" type="number" step="0.01" class="input" placeholder="15000"></div>
+          <div><label class="label">Qualifying Portion ($)</label><input id="energy-qual" type="number" step="0.01" class="input" placeholder="leave blank = full"></div>
+          <div class="flex items-end gap-2"><button onclick="saveEnergy()" class="btn-primary">Save</button></div>
+        </div>
+      </div>
+      <p class="text-xs text-gray-500">30% residential clean energy credit (solar, wind, geothermal). Energy efficient home improvement credit up to $1,200-$3,200/year depending on type.</p>
+    </div>
+  </div>
+
+  <!-- Quarterly tab -->
+  <div id="tab-quarterly" class="hidden">
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+      <div class="card">
+        <p class="text-xs text-gray-500 uppercase">Projected Full-Year Tax</p>
+        <p class="text-2xl font-semibold mt-1" id="qtr-projected-tax">--</p>
+        <p class="text-xs text-gray-500 mt-1" id="qtr-effective-rate"></p>
+      </div>
+      <div class="card">
+        <p class="text-xs text-gray-500 uppercase">Projected Owed at Year End</p>
+        <p class="text-2xl font-semibold mt-1" id="qtr-owed">--</p>
+        <p class="text-xs text-gray-500 mt-1">Before estimated payments</p>
+      </div>
+      <div class="card">
+        <p class="text-xs text-gray-500 uppercase">Per-Quarter Recommended</p>
+        <p class="text-2xl font-semibold mt-1 text-oc-400" id="qtr-per-quarter">--</p>
+        <p class="text-xs text-gray-500 mt-1" id="qtr-safe-harbor"></p>
+      </div>
+    </div>
+
+    <div class="card mb-6">
+      <h3 class="font-medium mb-3">Quarterly Estimated Payments (Form 1040-ES)</h3>
+      <div id="qtr-list" class="space-y-2"><p class="text-xs text-gray-600">Loading...</p></div>
+      <p class="text-xs text-gray-500 mt-3">Deadlines: Q1 Apr 15, Q2 Jun 15, Q3 Sep 15, Q4 Jan 15. Safe harbor: pay 100% of prior year's tax (110% if AGI &gt; $150K) OR 90% of current year.</p>
+    </div>
+
+    <div class="card">
+      <h3 class="font-medium mb-3">Record a Payment</h3>
+      <div class="grid grid-cols-2 md:grid-cols-5 gap-2">
+        <div><label class="label">Quarter</label><select id="qtr-q" class="input"><option value="1">Q1</option><option value="2">Q2</option><option value="3">Q3</option><option value="4">Q4</option></select></div>
+        <div><label class="label">Amount ($)</label><input id="qtr-amt" type="number" step="0.01" class="input"></div>
+        <div><label class="label">Payment Date</label><input id="qtr-date" type="date" class="input"></div>
+        <div><label class="label">Method</label><select id="qtr-method" class="input"><option value="IRS Direct Pay">IRS Direct Pay</option><option value="EFTPS">EFTPS</option><option value="Check">Check</option><option value="Credit Card">Credit Card</option></select></div>
+        <div><label class="label">Confirmation #</label><input id="qtr-conf" class="input" placeholder="EFTPS#"></div>
+        <div class="col-span-full"><button onclick="saveEstimatedPayment()" class="btn-primary">Record Payment</button></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Depreciation tab -->
+  <div id="tab-depreciation" class="hidden">
+    <div class="card mb-6">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-medium">Depreciable Assets</h3>
+        <button onclick="toggleForm('asset-form')" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-2.5 py-1 rounded-lg">+ Add Asset</button>
+      </div>
+      <div id="asset-form" class="hidden mb-4 p-3 bg-gray-900/40 rounded-lg">
+        <div class="grid grid-cols-2 md:grid-cols-3 gap-2">
+          <div class="col-span-2"><label class="label">Description</label><input id="asset-desc" class="input" placeholder="Dell XPS laptop"></div>
+          <div><label class="label">Asset Class</label><select id="asset-class" class="input" onchange="updateAssetLife()">
+            <option value="computer" data-life="5">Computer / Software (5yr)</option>
+            <option value="office_equipment" data-life="7">Office Equipment (7yr)</option>
+            <option value="vehicle" data-life="5">Vehicle (5yr)</option>
+            <option value="machinery" data-life="7">Machinery (7yr)</option>
+            <option value="furniture" data-life="7">Furniture (7yr)</option>
+            <option value="improvement" data-life="15">Leasehold Improvement (15yr)</option>
+            <option value="building_residential" data-life="27">Residential Rental Bldg (27.5yr)</option>
+            <option value="building_commercial" data-life="39">Commercial Building (39yr)</option>
+          </select></div>
+          <div><label class="label">MACRS Life (yrs)</label><input id="asset-life" type="number" class="input" value="5"></div>
+          <div><label class="label">Cost Basis ($)</label><input id="asset-cost" type="number" step="0.01" class="input" placeholder="2500"></div>
+          <div><label class="label">Placed in Service</label><input id="asset-date" type="date" class="input"></div>
+          <div><label class="label">Business Use %</label><input id="asset-biz-pct" type="number" min="0" max="100" class="input" value="100"></div>
+          <div><label class="label">Section 179 ($)</label><input id="asset-179" type="number" step="0.01" class="input" placeholder="0"></div>
+          <div class="flex items-end gap-2">
+            <label class="flex items-center gap-2 text-xs text-gray-300"><input id="asset-bonus" type="checkbox"> Bonus Depreciation</label>
+            <label class="flex items-center gap-2 text-xs text-gray-300"><input id="asset-is-vehicle" type="checkbox"> Vehicle</label>
+          </div>
+          <div class="col-span-full flex gap-2"><button onclick="saveAsset()" class="btn-primary">Save Asset</button><button onclick="document.getElementById('asset-form').classList.add('hidden')" class="text-xs text-gray-400 hover:text-gray-200">Cancel</button></div>
+        </div>
+      </div>
+      <div id="assets-list" class="space-y-1"><p class="text-xs text-gray-600">Loading assets...</p></div>
+    </div>
+
+    <div class="card mb-6">
+      <h3 class="font-medium mb-2">This Year's Depreciation</h3>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div><p class="text-xs text-gray-500 uppercase">Section 179</p><p class="text-xl font-semibold mt-1" id="depr-179">--</p></div>
+        <div><p class="text-xs text-gray-500 uppercase">Bonus Depreciation</p><p class="text-xl font-semibold mt-1" id="depr-bonus">--</p></div>
+        <div><p class="text-xs text-gray-500 uppercase">MACRS Yr 1</p><p class="text-xl font-semibold mt-1" id="depr-macrs">--</p></div>
+        <div><p class="text-xs text-gray-500 uppercase">Total Year 1</p><p class="text-xl font-semibold mt-1 text-oc-400" id="depr-total">--</p></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 class="font-medium mb-3">Vehicle Mileage Log</h3>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
+        <div><label class="label">Asset</label><select id="veh-asset" class="input"><option value="">-- pick vehicle --</option></select></div>
+        <div><label class="label">Tax Year</label><input id="veh-year" type="number" class="input" value="2025"></div>
+        <div><label class="label">Business Miles</label><input id="veh-biz-miles" type="number" class="input"></div>
+        <div><label class="label">Total Miles</label><input id="veh-total-miles" type="number" class="input"></div>
+        <div class="col-span-full"><button onclick="saveVehicleUsage()" class="btn-primary">Save Usage</button></div>
+      </div>
+      <p class="text-xs text-gray-500">IRS standard mileage rate 2025: $0.70/business mile. Use actual expense method if higher (gas, maintenance, depreciation, insurance).</p>
+    </div>
+  </div>
+
+  <!-- State tab -->
+  <div id="tab-state" class="hidden">
+    <div class="card mb-6">
+      <h3 class="font-medium mb-3">State Tax Estimates</h3>
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div class="p-3 bg-gray-900/40 rounded-lg"><p class="text-xs text-gray-500 uppercase">Federal AGI</p><p class="text-xl font-semibold mt-1" id="st-federal-agi">--</p></div>
+        <div class="p-3 bg-gray-900/40 rounded-lg"><p class="text-xs text-gray-500 uppercase">Total State Tax</p><p class="text-xl font-semibold mt-1" id="st-total-state-tax">--</p></div>
+        <div class="p-3 bg-gray-900/40 rounded-lg"><p class="text-xs text-gray-500 uppercase">Combined Effective Rate</p><p class="text-xl font-semibold mt-1" id="st-combined-rate">--</p></div>
+      </div>
+      <div id="state-breakdown" class="mt-4 space-y-2"><p class="text-xs text-gray-600">Add a state residency below to estimate state taxes.</p></div>
+    </div>
+
+    <div class="card">
+      <h3 class="font-medium mb-3">Add State Residency</h3>
+      <p class="text-xs text-gray-500 mb-3">Full-year resident, part-year (moved), or non-resident (worked in another state). Multi-state supported.</p>
+      <div class="grid grid-cols-2 md:grid-cols-3 gap-2">
+        <div><label class="label">State</label><select id="st-state" class="input"></select></div>
+        <div><label class="label">Residency</label><select id="st-residency" class="input"><option value="full_year">Full Year</option><option value="part_year">Part Year</option><option value="nonresident">Non-Resident</option></select></div>
+        <div><label class="label">Months in State</label><input id="st-months" type="number" min="0" max="12" class="input" value="12"></div>
+        <div><label class="label">State Wages ($)</label><input id="st-wages" type="number" step="0.01" class="input" placeholder="0"></div>
+        <div><label class="label">State Tax Withheld ($)</label><input id="st-withheld" type="number" step="0.01" class="input" placeholder="0"></div>
+        <div class="flex items-end gap-2"><button onclick="saveStateProfile()" class="btn-primary">Save</button></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Entities tab -->
+  <div id="tab-entities" class="hidden">
+    <div class="card mb-6">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-medium">Business Entities</h3>
+        <button onclick="toggleForm('ent-form')" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-2.5 py-1 rounded-lg">+ Add Entity</button>
+      </div>
+      <div id="ent-form" class="hidden mb-4 p-3 bg-gray-900/40 rounded-lg">
+        <div class="grid grid-cols-2 md:grid-cols-3 gap-2">
+          <div class="col-span-2"><label class="label">Entity Name</label><input id="ent-name" class="input" placeholder="Acme Woodworks LLC"></div>
+          <div><label class="label">Type</label><select id="ent-type" class="input">
+            <option value="sole_prop">Sole Proprietorship</option>
+            <option value="s_corp">S-Corp</option>
+            <option value="c_corp">C-Corp</option>
+            <option value="partnership">Partnership</option>
+            <option value="llc_single">Single-Member LLC</option>
+            <option value="llc_multi">Multi-Member LLC</option>
+          </select></div>
+          <div><label class="label">EIN (optional)</label><input id="ent-ein" class="input" placeholder="XX-XXXXXXX"></div>
+          <div><label class="label">State of Formation</label><input id="ent-state" class="input" placeholder="NC"></div>
+          <div><label class="label">Formation Date</label><input id="ent-formed" type="date" class="input"></div>
+          <div><label class="label">Your Ownership %</label><input id="ent-own" type="number" class="input" value="100"></div>
+          <div class="col-span-full flex gap-2"><button onclick="saveEntity()" class="btn-primary">Save Entity</button><button onclick="document.getElementById('ent-form').classList.add('hidden')" class="text-xs text-gray-400 hover:text-gray-200">Cancel</button></div>
+        </div>
+      </div>
+      <div id="entities-list" class="space-y-1"><p class="text-xs text-gray-600">Loading entities...</p></div>
+    </div>
+
+    <div id="entity-detail" class="hidden card mb-6">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-medium" id="ent-detail-name">--</h3>
+        <button onclick="hideEntityDetail()" class="text-xs text-gray-400 hover:text-gray-200">Close</button>
+      </div>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+        <div><p class="text-xs text-gray-500 uppercase">Income</p><p class="text-xl font-semibold mt-1 text-green-400" id="ent-d-income">--</p></div>
+        <div><p class="text-xs text-gray-500 uppercase">Expenses</p><p class="text-xl font-semibold mt-1 text-red-400" id="ent-d-expenses">--</p></div>
+        <div><p class="text-xs text-gray-500 uppercase">Net Income</p><p class="text-xl font-semibold mt-1" id="ent-d-net">--</p></div>
+        <div><p class="text-xs text-gray-500 uppercase">Entity Tax</p><p class="text-xl font-semibold mt-1" id="ent-d-tax">--</p><p class="text-xs text-gray-500" id="ent-d-passthrough"></p></div>
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <h4 class="text-xs uppercase text-gray-500 mb-2">Shareholders / Partners</h4>
+          <div id="ent-d-shareholders" class="space-y-1"></div>
+          <button onclick="showAddShareholder()" class="text-xs text-oc-400 hover:text-oc-300 mt-2">+ Add Shareholder</button>
+          <div id="ent-sh-form" class="hidden mt-2 p-2 bg-gray-900/40 rounded-lg grid grid-cols-2 gap-2">
+            <div><label class="label">Name</label><input id="ent-sh-name" class="input"></div>
+            <div><label class="label">Ownership %</label><input id="ent-sh-pct" type="number" class="input"></div>
+            <div><label class="label">Salary ($)</label><input id="ent-sh-salary" type="number" step="0.01" class="input"></div>
+            <div><label class="label">Distributions ($)</label><input id="ent-sh-dist" type="number" step="0.01" class="input"></div>
+            <div class="col-span-full"><button onclick="saveShareholder()" class="btn-primary">Save</button></div>
+          </div>
+        </div>
+        <div>
+          <h4 class="text-xs uppercase text-gray-500 mb-2">Expense Breakdown</h4>
+          <div id="ent-d-categories" class="space-y-1"><p class="text-xs text-gray-600">No expenses yet</p></div>
+        </div>
+      </div>
+      <div class="mt-4 pt-4 border-t border-gray-700 flex items-center gap-3">
+        <button onclick="generateK1s()" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-3 py-1.5 rounded-lg">Generate K-1s</button>
+        <button onclick="toggleForm('ent-1099-form')" class="text-xs bg-gray-700 hover:bg-gray-600 text-white px-3 py-1.5 rounded-lg">Issue 1099-NEC</button>
+        <button onclick="loadEntity1099List()" class="text-xs text-gray-400 hover:text-gray-200">View issued 1099s</button>
+      </div>
+      <div id="ent-1099-form" class="hidden mt-3 p-3 bg-gray-900/40 rounded-lg grid grid-cols-2 gap-2">
+        <div class="col-span-2"><label class="label">Recipient Name</label><input id="ent-1099-name" class="input"></div>
+        <div class="col-span-2"><label class="label">Recipient Address</label><input id="ent-1099-addr" class="input" placeholder="Street, City, ST ZIP"></div>
+        <div><label class="label">Amount Paid ($)</label><input id="ent-1099-amt" type="number" step="0.01" class="input" placeholder="min $600"></div>
+        <div class="flex items-end"><button onclick="issue1099()" class="btn-primary">Issue</button></div>
+      </div>
+      <div id="ent-k1-results" class="mt-3"></div>
+      <div id="ent-1099-results" class="mt-3"></div>
+    </div>
+
+    <div class="card">
+      <h3 class="font-medium mb-3">Entity Structure Comparison</h3>
+      <p class="text-xs text-gray-500 mb-3">Compare Sole Proprietorship vs S-Corp vs LLC based on projected SE income. Shows SE tax savings opportunities.</p>
+      <div class="flex items-end gap-2 mb-3">
+        <div class="flex-1"><label class="label">SE Income ($, optional override)</label><input id="ent-cmp-income" type="number" step="0.01" class="input" placeholder="Leave blank to use actual"></div>
+        <button onclick="loadEntityComparison()" class="btn-primary">Compare</button>
+      </div>
+      <div id="ent-comparison" class="space-y-2"><p class="text-xs text-gray-600">Click Compare to see structure analysis.</p></div>
+    </div>
+  </div>
+
+  <!-- Insights tab -->
+  <div id="tab-insights" class="hidden">
+    <div class="card mb-6">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-medium">Audit Risk Score</h3>
+        <button onclick="loadAuditRisk()" class="text-xs text-oc-400 hover:text-oc-300">Refresh</button>
+      </div>
+      <div class="flex items-center gap-4 mb-3">
+        <div id="audit-score-ring" class="w-20 h-20 rounded-full border-4 border-gray-700 flex items-center justify-center text-2xl font-semibold">--</div>
+        <div>
+          <p class="text-sm text-gray-300" id="audit-score-label">Loading...</p>
+          <p class="text-xs text-gray-500 mt-1" id="audit-score-summary"></p>
+        </div>
+      </div>
+      <div id="audit-factors" class="space-y-1 mt-3"></div>
+    </div>
+
+    <div class="card mb-6">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-medium">AI Tax Insights</h3>
+        <button onclick="loadInsightsList()" class="text-xs text-oc-400 hover:text-oc-300">Refresh</button>
+      </div>
+      <div id="insights-list" class="space-y-2"><p class="text-xs text-gray-600">Loading insights...</p></div>
+    </div>
+
+    <div class="card mb-6">
+      <h3 class="font-medium mb-3">What-If Scenario</h3>
+      <p class="text-xs text-gray-500 mb-3">Model a tax change: raise, bonus, marriage, new dependent, IRA contribution.</p>
+      <div class="grid grid-cols-2 md:grid-cols-3 gap-2 mb-3">
+        <div class="col-span-2"><label class="label">Scenario Name</label><input id="wi-name" class="input" placeholder="10k raise + max IRA"></div>
+        <div><label class="label">Additional Income ($)</label><input id="wi-income" type="number" step="0.01" class="input" placeholder="0"></div>
+        <div><label class="label">Additional Deductions ($)</label><input id="wi-ded" type="number" step="0.01" class="input" placeholder="0"></div>
+        <div><label class="label">Retirement Contribution ($)</label><input id="wi-ret" type="number" step="0.01" class="input" placeholder="0"></div>
+        <div><label class="label">Filing Status Override</label><select id="wi-fs" class="input"><option value="">-- keep current --</option><option value="single">Single</option><option value="married_jointly">Married Jointly</option><option value="married_separately">Married Separately</option><option value="head_of_household">Head of Household</option></select></div>
+        <div class="col-span-full"><button onclick="runWhatIf()" class="btn-primary">Run Scenario</button></div>
+      </div>
+      <div id="wi-result"></div>
+    </div>
+
+    <div class="card">
+      <div class="flex items-center justify-between mb-2">
+        <h3 class="font-medium">Injected Tax Context (what the AI sees)</h3>
+        <button onclick="loadTaxContext()" class="text-xs text-oc-400 hover:text-oc-300">Refresh</button>
+      </div>
+      <pre id="tax-context-text" class="text-xs text-gray-400 whitespace-pre-wrap max-h-[300px] overflow-y-auto bg-gray-900/40 rounded p-3">Loading...</pre>
     </div>
   </div>
 
@@ -969,7 +1367,7 @@ function authFetch(url, opts = {}) {
 }
 
 function showTab(name) {
-  ['overview', 'expenses', 'receipts', 'documents', 'property', 'connections', 'investments', 'deductions', 'wizard'].forEach(t => {
+  ['overview', 'expenses', 'receipts', 'documents', 'property', 'connections', 'credits', 'quarterly', 'investments', 'depreciation', 'state', 'entities', 'insights', 'deductions', 'wizard'].forEach(t => {
     const el = document.getElementById('tab-' + t);
     if (el) el.classList.toggle('hidden', t !== name);
     const btn = document.getElementById('tab-btn-' + t);
@@ -980,7 +1378,13 @@ function showTab(name) {
   if (name === 'documents') loadDocuments();
   if (name === 'property') loadPropertyProfile();
   if (name === 'connections') loadConnections();
-  if (name === 'investments') { loadInvestmentAccounts(); loadInvestmentSummary(); loadInvestmentTransactions(); loadHoldings(); }
+  if (name === 'credits') loadCreditsTab();
+  if (name === 'quarterly') loadQuarterlyTab();
+  if (name === 'investments') { loadInvestmentAccounts(); loadInvestmentSummary(); loadInvestmentTransactions(); loadHoldings(); loadLots(); loadWashSales(); loadForm8949(); loadK1s(); loadCapitalGains(); }
+  if (name === 'depreciation') loadDepreciationTab();
+  if (name === 'state') loadStateTab();
+  if (name === 'entities') loadEntitiesTab();
+  if (name === 'insights') loadInsightsTab();
   if (name === 'deductions') loadDeductionsTab();
   if (name === 'wizard') loadWizard();
 }
@@ -2789,6 +3193,797 @@ async function reviewAction(action) {
     selectCandidate(dedSelectedIdx);
     loadDeductionSummary();
   } catch(e) {}
+}
+
+// ── Helpers for new tabs ──
+function toggleForm(id) {
+  const el = document.getElementById(id);
+  if (el) el.classList.toggle('hidden');
+}
+function fmtCents(c) {
+  if (c === undefined || c === null) return '$0.00';
+  const sign = c < 0 ? '-' : '';
+  const abs = Math.abs(c) / 100;
+  return sign + '$' + abs.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+function parseCurrencyInput(id) {
+  const v = parseFloat(document.getElementById(id).value || '0');
+  return Math.round(v * 100);
+}
+function escapeHtml(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+// ── Credits tab ──
+async function loadCreditsTab() {
+  try {
+    const resp = await authFetch(`/api/tax/credits/eligibility?token=${token}&year=${selectedYear}`);
+    const data = await resp.json();
+    const grid = document.getElementById('credits-eligibility-grid');
+    const credits = data.credits || [];
+    if (credits.length === 0) {
+      grid.innerHTML = '<p class="text-xs text-gray-600 col-span-full">No credit data available.</p>';
+    } else {
+      grid.innerHTML = credits.map(c => `
+        <div class="p-3 rounded-lg ${c.eligible ? 'bg-green-500/10 border border-green-600/30' : 'bg-gray-900/40 border border-gray-700'}">
+          <div class="flex items-center justify-between mb-1">
+            <span class="text-sm font-medium text-gray-200">${escapeHtml(c.name)}</span>
+            <span class="text-xs ${c.eligible ? 'text-green-400' : 'text-gray-500'}">${c.eligible ? 'Eligible' : 'Not eligible'}</span>
+          </div>
+          <p class="text-lg font-semibold ${c.eligible ? 'text-green-400' : 'text-gray-500'}">${escapeHtml(c.amount || '$0.00')}</p>
+          <p class="text-xs text-gray-500 mt-1">${escapeHtml(c.reason || '')}</p>
+        </div>
+      `).join('');
+    }
+    document.getElementById('credits-total').textContent = data.total || '$0.00';
+  } catch(e) {
+    document.getElementById('credits-eligibility-grid').innerHTML = '<p class="text-xs text-red-400 col-span-full">Failed to load credits: ' + escapeHtml(e.message) + '</p>';
+  }
+}
+
+async function saveEducation() {
+  const body = {
+    token, tax_year: selectedYear,
+    student_name: document.getElementById('edu-student').value,
+    institution: document.getElementById('edu-school').value,
+    tuition_cents: parseCurrencyInput('edu-tuition'),
+    fees_cents: parseCurrencyInput('edu-fees'),
+    books_cents: parseCurrencyInput('edu-books'),
+  };
+  if (!body.student_name || !body.institution || body.tuition_cents === 0) {
+    alert('Student name, institution, and tuition are required.');
+    return;
+  }
+  const resp = await authFetch('/api/tax/credits/education', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  const data = await resp.json();
+  if (data.ok) {
+    ['edu-student','edu-school','edu-tuition','edu-fees','edu-books'].forEach(id => document.getElementById(id).value = '');
+    document.getElementById('edu-form').classList.add('hidden');
+    loadCreditsTab();
+  } else {
+    alert('Save failed: ' + (data.error || 'unknown error'));
+  }
+}
+
+async function saveChildcare() {
+  const body = {
+    token, tax_year: selectedYear,
+    provider_name: document.getElementById('care-provider').value,
+    amount_cents: parseCurrencyInput('care-amount'),
+    dependent_id: parseInt(document.getElementById('care-dep').value) || null,
+  };
+  if (!body.provider_name || body.amount_cents === 0) { alert('Provider and amount required.'); return; }
+  const resp = await authFetch('/api/tax/credits/childcare', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  const data = await resp.json();
+  if (data.ok) {
+    ['care-provider','care-amount','care-dep'].forEach(id => document.getElementById(id).value = '');
+    document.getElementById('care-form').classList.add('hidden');
+    loadCreditsTab();
+  } else { alert('Save failed'); }
+}
+
+async function saveEnergy() {
+  const cost = parseCurrencyInput('energy-cost');
+  const qual = parseCurrencyInput('energy-qual');
+  const body = {
+    token, tax_year: selectedYear,
+    improvement_type: document.getElementById('energy-type').value,
+    cost_cents: cost,
+    qualifying_cents: qual > 0 ? qual : null,
+    vendor: document.getElementById('energy-vendor').value || null,
+  };
+  if (cost === 0) { alert('Cost is required.'); return; }
+  const resp = await authFetch('/api/tax/credits/energy', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  const data = await resp.json();
+  if (data.ok) {
+    ['energy-cost','energy-qual','energy-vendor'].forEach(id => document.getElementById(id).value = '');
+    document.getElementById('energy-form').classList.add('hidden');
+    loadCreditsTab();
+  } else { alert('Save failed'); }
+}
+
+// ── Quarterly tab ──
+async function loadQuarterlyTab() {
+  try {
+    const fs = 'single'; // TODO: from profile; handler defaults this anyway
+    const [recResp, listResp, projResp] = await Promise.all([
+      authFetch(`/api/tax/estimated-payments/recommended?token=${token}&year=${selectedYear}&filing_status=${fs}`),
+      authFetch(`/api/tax/estimated-payments?token=${token}&year=${selectedYear}`),
+      authFetch(`/api/tax/projection?token=${token}&year=${selectedYear}`),
+    ]);
+    const rec = await recResp.json();
+    const list = await listResp.json();
+    const proj = await projResp.json().catch(() => ({}));
+
+    document.getElementById('qtr-projected-tax').textContent = rec.projected_tax || '--';
+    document.getElementById('qtr-owed').textContent = rec.projected_owed || '--';
+    document.getElementById('qtr-per-quarter').textContent = rec.per_quarter || '--';
+    document.getElementById('qtr-safe-harbor').textContent = rec.safe_harbor ? 'Safe harbor: ' + rec.safe_harbor : '';
+    if (proj && proj.effective_rate) {
+      document.getElementById('qtr-effective-rate').textContent = 'Effective rate: ' + proj.effective_rate;
+    }
+
+    const deadlines = list.deadlines || [];
+    const byQ = {};
+    (list.payments || []).forEach(p => { byQ[p.quarter] = p; });
+
+    const qtrList = document.getElementById('qtr-list');
+    qtrList.innerHTML = [1,2,3,4].map(q => {
+      const p = byQ[q];
+      const deadline = deadlines[q-1] || '';
+      if (p) {
+        return `<div class="flex items-center justify-between p-2 bg-gray-900/40 rounded-lg">
+          <div><span class="text-sm font-medium text-gray-200">Q${q}</span> <span class="text-xs text-gray-500 ml-2">due ${escapeHtml(deadline)}</span></div>
+          <div class="text-right">
+            <p class="text-sm font-semibold text-green-400">${escapeHtml(p.amount)}</p>
+            <p class="text-xs text-gray-500">${escapeHtml(p.payment_date || '')} · ${escapeHtml(p.method || '')} ${p.confirmation ? '· #' + escapeHtml(p.confirmation) : ''}</p>
+          </div>
+        </div>`;
+      }
+      return `<div class="flex items-center justify-between p-2 bg-gray-900/20 rounded-lg border border-gray-800">
+        <div><span class="text-sm text-gray-400">Q${q}</span> <span class="text-xs text-gray-600 ml-2">due ${escapeHtml(deadline)}</span></div>
+        <div class="text-xs text-gray-600">Not paid</div>
+      </div>`;
+    }).join('');
+  } catch(e) {
+    document.getElementById('qtr-list').innerHTML = '<p class="text-xs text-red-400">Failed to load: ' + escapeHtml(e.message) + '</p>';
+  }
+}
+
+async function saveEstimatedPayment() {
+  const body = {
+    token, tax_year: selectedYear,
+    quarter: parseInt(document.getElementById('qtr-q').value),
+    amount_cents: parseCurrencyInput('qtr-amt'),
+    payment_date: document.getElementById('qtr-date').value || null,
+    payment_method: document.getElementById('qtr-method').value,
+    confirmation_id: document.getElementById('qtr-conf').value || null,
+  };
+  if (body.amount_cents === 0) { alert('Amount required.'); return; }
+  const resp = await authFetch('/api/tax/estimated-payments', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  const data = await resp.json();
+  if (data.ok) {
+    ['qtr-amt','qtr-date','qtr-conf'].forEach(id => document.getElementById(id).value = '');
+    loadQuarterlyTab();
+  } else { alert('Save failed: ' + (data.error || 'unknown')); }
+}
+
+// ── Depreciation tab ──
+const ASSET_CLASS_LIFE = { computer: 5, office_equipment: 7, vehicle: 5, machinery: 7, furniture: 7, improvement: 15, building_residential: 27, building_commercial: 39 };
+function updateAssetLife() {
+  const cls = document.getElementById('asset-class').value;
+  document.getElementById('asset-life').value = ASSET_CLASS_LIFE[cls] || 5;
+  document.getElementById('asset-is-vehicle').checked = (cls === 'vehicle');
+}
+
+async function loadDepreciationTab() {
+  try {
+    const resp = await authFetch(`/api/tax/assets?token=${token}&year=${selectedYear}`);
+    const data = await resp.json();
+    const assets = data.assets || [];
+    const list = document.getElementById('assets-list');
+    const vehSelect = document.getElementById('veh-asset');
+    const currentVehVal = vehSelect.value;
+    vehSelect.innerHTML = '<option value="">-- pick vehicle --</option>' +
+      assets.filter(a => a.is_vehicle).map(a => `<option value="${a.id}">${escapeHtml(a.description)}</option>`).join('');
+    if (currentVehVal) vehSelect.value = currentVehVal;
+
+    if (assets.length === 0) {
+      list.innerHTML = '<p class="text-xs text-gray-600">No assets yet. Add a laptop, vehicle, equipment, or building above.</p>';
+      document.getElementById('depr-179').textContent = '$0.00';
+      document.getElementById('depr-bonus').textContent = '$0.00';
+      document.getElementById('depr-macrs').textContent = '$0.00';
+      document.getElementById('depr-total').textContent = '$0.00';
+      return;
+    }
+
+    let s179 = 0, bonus = 0, macrs = 0;
+    list.innerHTML = assets.map(a => {
+      s179 += a.section_179_cents || 0;
+      bonus += a.bonus_depr_cents || 0;
+      macrs += a.this_year_depr_cents || 0;
+      return `<div class="flex items-center justify-between p-2 bg-gray-900/40 rounded-lg">
+        <div>
+          <p class="text-sm font-medium text-gray-200">${escapeHtml(a.description)} ${a.is_vehicle ? '<span class="text-xs text-blue-400 ml-1">vehicle</span>' : ''}</p>
+          <p class="text-xs text-gray-500">${escapeHtml(a.asset_class)} · ${a.macrs_life}yr MACRS · placed ${escapeHtml(a.placed_in_service)} · ${a.business_use_pct}% biz</p>
+        </div>
+        <div class="text-right">
+          <p class="text-sm text-gray-300">${escapeHtml(a.cost_basis)}</p>
+          <p class="text-xs text-gray-500">yr depr: ${escapeHtml(a.this_year_depr || '$0.00')}</p>
+          <button onclick="viewSchedule(${a.id})" class="text-xs text-oc-400 hover:text-oc-300">schedule →</button>
+        </div>
+      </div>`;
+    }).join('');
+    document.getElementById('depr-179').textContent = fmtCents(s179);
+    document.getElementById('depr-bonus').textContent = fmtCents(bonus);
+    document.getElementById('depr-macrs').textContent = fmtCents(macrs);
+    document.getElementById('depr-total').textContent = fmtCents(s179 + bonus + macrs);
+  } catch(e) {
+    document.getElementById('assets-list').innerHTML = '<p class="text-xs text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+  }
+}
+
+async function viewSchedule(id) {
+  try {
+    const resp = await authFetch(`/api/tax/assets/${id}/schedule?token=${token}`);
+    const data = await resp.json();
+    const rows = (data.schedule || []).map(r => `<tr><td class="py-1 pr-3">${r.year}</td><td class="py-1 pr-3 text-right">${escapeHtml(r.depreciation)}</td><td class="py-1 pr-3 text-right">${escapeHtml(r.accumulated)}</td><td class="py-1 text-right">${escapeHtml(r.remaining)}</td></tr>`).join('');
+    const html = `<div class="fixed inset-0 bg-black/70 z-50 flex items-center justify-center" onclick="this.remove()">
+      <div class="bg-gray-900 border border-gray-700 rounded-xl p-4 max-w-xl w-full" onclick="event.stopPropagation()">
+        <div class="flex items-center justify-between mb-3"><h3 class="font-medium">MACRS Schedule — ${escapeHtml(data.description || '')}</h3><button onclick="this.closest('.fixed').remove()" class="text-gray-400 hover:text-white">✕</button></div>
+        <table class="w-full text-xs"><thead><tr class="text-gray-500 border-b border-gray-700"><th class="py-1 pr-3 text-left">Year</th><th class="py-1 pr-3 text-right">Depreciation</th><th class="py-1 pr-3 text-right">Accumulated</th><th class="py-1 text-right">Remaining</th></tr></thead><tbody>${rows}</tbody></table>
+      </div>
+    </div>`;
+    document.body.insertAdjacentHTML('beforeend', html);
+  } catch(e) { alert('Failed to load schedule: ' + e.message); }
+}
+
+async function saveAsset() {
+  const body = {
+    token,
+    description: document.getElementById('asset-desc').value,
+    asset_class: document.getElementById('asset-class').value,
+    macrs_life_years: parseInt(document.getElementById('asset-life').value),
+    cost_basis_cents: parseCurrencyInput('asset-cost'),
+    placed_in_service: document.getElementById('asset-date').value,
+    business_use_pct: parseInt(document.getElementById('asset-biz-pct').value) || 100,
+    section_179_cents: parseCurrencyInput('asset-179'),
+    use_bonus: document.getElementById('asset-bonus').checked,
+    is_vehicle: document.getElementById('asset-is-vehicle').checked,
+  };
+  if (!body.description || !body.placed_in_service || body.cost_basis_cents === 0) {
+    alert('Description, placed-in-service date, and cost are required.');
+    return;
+  }
+  const resp = await authFetch('/api/tax/assets', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  const data = await resp.json();
+  if (data.ok) {
+    ['asset-desc','asset-cost','asset-date','asset-179'].forEach(id => document.getElementById(id).value = '');
+    document.getElementById('asset-form').classList.add('hidden');
+    alert(`Saved. First-year total: ${data.first_year_total} (§179 ${data.section_179} + bonus ${data.bonus_depreciation} + MACRS ${data.first_year_macrs})`);
+    loadDepreciationTab();
+  } else { alert('Save failed'); }
+}
+
+async function saveVehicleUsage() {
+  const body = {
+    token,
+    asset_id: parseInt(document.getElementById('veh-asset').value),
+    tax_year: parseInt(document.getElementById('veh-year').value),
+    business_miles: parseInt(document.getElementById('veh-biz-miles').value) || 0,
+    total_miles: parseInt(document.getElementById('veh-total-miles').value) || 0,
+  };
+  if (!body.asset_id) { alert('Pick a vehicle.'); return; }
+  const resp = await authFetch('/api/tax/vehicle-usage', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  const data = await resp.json();
+  if (data.ok !== false) {
+    ['veh-biz-miles','veh-total-miles'].forEach(id => document.getElementById(id).value = '');
+    alert('Vehicle usage saved.');
+  } else { alert('Save failed: ' + (data.error || 'unknown')); }
+}
+
+// ── State tab ──
+async function loadStateTab() {
+  try {
+    const [supResp, estResp, profResp] = await Promise.all([
+      authFetch('/api/tax/state/supported'),
+      authFetch(`/api/tax/state/estimate?token=${token}&year=${selectedYear}`),
+      authFetch(`/api/tax/state/profile?token=${token}&year=${selectedYear}`),
+    ]);
+    const sup = await supResp.json();
+    const est = await estResp.json();
+    const prof = await profResp.json();
+
+    // Populate state picker
+    const sel = document.getElementById('st-state');
+    if (sel.children.length === 0) {
+      const bracketStates = new Set(sup.brackets_available || []);
+      sel.innerHTML = (sup.states || []).map(s => {
+        const label = s.has_income_tax ? (bracketStates.has(s.code) ? ` (${s.code})` : ` (${s.code}, flat/no brackets)`) : ` (${s.code}, no income tax)`;
+        return `<option value="${s.code}">${escapeHtml(s.name)}${label}</option>`;
+      }).join('');
+    }
+
+    document.getElementById('st-federal-agi').textContent = est.federal_agi || '--';
+    document.getElementById('st-total-state-tax').textContent = est.total_state_tax || '--';
+    document.getElementById('st-combined-rate').textContent = est.combined_effective_rate || '--';
+
+    const bd = document.getElementById('state-breakdown');
+    const states = est.states || [];
+    const profiles = prof.profiles || [];
+    if (profiles.length === 0) {
+      bd.innerHTML = '<p class="text-xs text-gray-600">No state residencies added yet.</p>';
+    } else {
+      bd.innerHTML = profiles.map(p => {
+        const s = states.find(x => x.state === p.state) || {};
+        return `<div class="p-3 bg-gray-900/40 rounded-lg">
+          <div class="flex items-center justify-between">
+            <span class="text-sm font-medium text-gray-200">${escapeHtml(p.state)} — ${escapeHtml(p.residency)} (${p.months} mo)</span>
+            <span class="text-sm text-oc-400">${escapeHtml(s.state_tax || '$0.00')}</span>
+          </div>
+          <p class="text-xs text-gray-500 mt-1">Wages ${escapeHtml(p.wages)} · Withheld ${escapeHtml(p.withheld)} · Owed ${escapeHtml(s.owed || '$0.00')}</p>
+        </div>`;
+      }).join('');
+    }
+  } catch(e) {
+    document.getElementById('state-breakdown').innerHTML = '<p class="text-xs text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+  }
+}
+
+async function saveStateProfile() {
+  const body = {
+    token, tax_year: selectedYear,
+    state: document.getElementById('st-state').value,
+    residency_type: document.getElementById('st-residency').value,
+    months_resident: parseInt(document.getElementById('st-months').value) || 12,
+    state_wages_cents: parseCurrencyInput('st-wages'),
+    state_withheld_cents: parseCurrencyInput('st-withheld'),
+  };
+  const resp = await authFetch('/api/tax/state/profile', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  const data = await resp.json();
+  if (data.ok) {
+    ['st-wages','st-withheld'].forEach(id => document.getElementById(id).value = '');
+    loadStateTab();
+  } else { alert('Save failed'); }
+}
+
+// ── Entities tab ──
+let currentEntityId = null;
+async function loadEntitiesTab() {
+  try {
+    const resp = await authFetch(`/api/tax/entities?token=${token}`);
+    const data = await resp.json();
+    const list = document.getElementById('entities-list');
+    const entities = data.entities || [];
+    if (entities.length === 0) {
+      list.innerHTML = '<p class="text-xs text-gray-600">No business entities. Add an S-Corp, LLC, or partnership to track P&amp;L separately from personal.</p>';
+      return;
+    }
+    const typeLabels = { sole_prop:'Sole Prop', s_corp:'S-Corp', c_corp:'C-Corp', partnership:'Partnership', llc_single:'Single-Member LLC', llc_multi:'Multi-Member LLC' };
+    list.innerHTML = entities.map(e => `<button onclick="showEntityDetail(${e.id})" class="w-full text-left p-2 bg-gray-900/40 hover:bg-gray-900/70 rounded-lg flex items-center justify-between transition-colors">
+      <div>
+        <p class="text-sm font-medium text-gray-200">${escapeHtml(e.name)}</p>
+        <p class="text-xs text-gray-500">${escapeHtml(typeLabels[e.type] || e.type)} · ${escapeHtml(e.state || '')} · ${e.ownership_pct}% owned</p>
+      </div>
+      <span class="text-xs text-oc-400">open →</span>
+    </button>`).join('');
+  } catch(e) {
+    document.getElementById('entities-list').innerHTML = '<p class="text-xs text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+  }
+}
+
+async function saveEntity() {
+  const body = {
+    token,
+    entity_name: document.getElementById('ent-name').value,
+    entity_type: document.getElementById('ent-type').value,
+    ein: document.getElementById('ent-ein').value || null,
+    state_of_formation: document.getElementById('ent-state').value || null,
+    formation_date: document.getElementById('ent-formed').value || null,
+    ownership_pct: parseInt(document.getElementById('ent-own').value) || 100,
+  };
+  if (!body.entity_name) { alert('Entity name required.'); return; }
+  const resp = await authFetch('/api/tax/entities', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  const data = await resp.json();
+  if (data.ok) {
+    ['ent-name','ent-ein','ent-state','ent-formed'].forEach(id => document.getElementById(id).value = '');
+    document.getElementById('ent-form').classList.add('hidden');
+    loadEntitiesTab();
+  } else { alert('Save failed: ' + (data.error || 'unknown')); }
+}
+
+async function showEntityDetail(id) {
+  currentEntityId = id;
+  try {
+    const resp = await authFetch(`/api/tax/entities/${id}/summary?token=${token}&year=${selectedYear}`);
+    const data = await resp.json();
+    document.getElementById('entity-detail').classList.remove('hidden');
+    // Fetch name from the list
+    const allResp = await authFetch(`/api/tax/entities?token=${token}`);
+    const all = await allResp.json();
+    const ent = (all.entities || []).find(e => e.id === id);
+    document.getElementById('ent-detail-name').textContent = ent ? ent.name : 'Entity #' + id;
+    document.getElementById('ent-d-income').textContent = data.income || '$0.00';
+    document.getElementById('ent-d-expenses').textContent = data.expenses || '$0.00';
+    document.getElementById('ent-d-net').textContent = data.net_income || '$0.00';
+    document.getElementById('ent-d-tax').textContent = data.entity_tax || '$0.00';
+    document.getElementById('ent-d-passthrough').textContent = data.is_pass_through ? 'Pass-through to shareholders' : 'Taxed at entity level (21%)';
+
+    const sh = data.shareholders || [];
+    document.getElementById('ent-d-shareholders').innerHTML = sh.length === 0 ? '<p class="text-xs text-gray-600">No shareholders yet.</p>' :
+      sh.map(s => `<div class="p-2 bg-gray-900/40 rounded-lg text-xs">
+        <div class="flex items-center justify-between"><span class="text-gray-200 font-medium">${escapeHtml(s.name)}</span><span class="text-gray-400">${s.ownership_pct}%</span></div>
+        <p class="text-gray-500">Salary ${escapeHtml(s.salary)} · Distributions ${escapeHtml(s.distributions)} · K-1 ordinary ${escapeHtml(s.k1_ordinary)}</p>
+      </div>`).join('');
+
+    const cats = data.expense_categories || [];
+    document.getElementById('ent-d-categories').innerHTML = cats.length === 0 ? '<p class="text-xs text-gray-600">No expenses yet</p>' :
+      cats.map(c => `<div class="flex items-center justify-between text-xs"><span class="text-gray-300">${escapeHtml(c.category)}</span><span class="text-gray-400">${escapeHtml(c.amount)}</span></div>`).join('');
+  } catch(e) { alert('Failed to load entity: ' + e.message); }
+}
+function hideEntityDetail() {
+  currentEntityId = null;
+  document.getElementById('entity-detail').classList.add('hidden');
+}
+
+function showAddShareholder() { document.getElementById('ent-sh-form').classList.toggle('hidden'); }
+async function saveShareholder() {
+  if (!currentEntityId) { alert('No entity selected.'); return; }
+  const body = {
+    token, entity_id: currentEntityId, tax_year: selectedYear,
+    name: document.getElementById('ent-sh-name').value,
+    ownership_pct: parseInt(document.getElementById('ent-sh-pct').value) || 0,
+    salary_cents: parseCurrencyInput('ent-sh-salary'),
+    distribution_cents: parseCurrencyInput('ent-sh-dist'),
+  };
+  if (!body.name) { alert('Name required.'); return; }
+  const resp = await authFetch(`/api/tax/entities/${currentEntityId}/shareholders`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  const data = await resp.json();
+  if (data.ok) {
+    ['ent-sh-name','ent-sh-pct','ent-sh-salary','ent-sh-dist'].forEach(id => document.getElementById(id).value = '');
+    document.getElementById('ent-sh-form').classList.add('hidden');
+    showEntityDetail(currentEntityId);
+  } else { alert('Save failed'); }
+}
+
+async function generateK1s() {
+  if (!currentEntityId) return;
+  try {
+    const resp = await authFetch(`/api/tax/entities/${currentEntityId}/k1?token=${token}&year=${selectedYear}`);
+    const data = await resp.json();
+    const k1s = data.k1s || [];
+    document.getElementById('ent-k1-results').innerHTML = k1s.length === 0 ? '<p class="text-xs text-gray-600">No shareholders — add one to generate K-1s.</p>' :
+      '<div class="space-y-2">' + k1s.map(k => `<div class="p-2 bg-gray-900/40 rounded-lg text-xs">
+        <p class="font-medium text-gray-200">${escapeHtml(k.form)} — ${escapeHtml(k.shareholder)} (${k.ownership_pct}%)</p>
+        <p class="text-gray-500">Ordinary ${escapeHtml(k.ordinary_income)} · Salary ${escapeHtml(k.salary)} · Distributions ${escapeHtml(k.distributions)}</p>
+      </div>`).join('') + '</div>';
+  } catch(e) { alert('Failed: ' + e.message); }
+}
+
+async function issue1099() {
+  if (!currentEntityId) return;
+  const body = {
+    token, entity_id: currentEntityId, tax_year: selectedYear,
+    recipient_name: document.getElementById('ent-1099-name').value,
+    recipient_address: document.getElementById('ent-1099-addr').value || null,
+    amount_cents: parseCurrencyInput('ent-1099-amt'),
+  };
+  const resp = await authFetch(`/api/tax/entities/${currentEntityId}/1099`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  const data = await resp.json();
+  if (data.ok) {
+    ['ent-1099-name','ent-1099-addr','ent-1099-amt'].forEach(id => document.getElementById(id).value = '');
+    document.getElementById('ent-1099-form').classList.add('hidden');
+    loadEntity1099List();
+  } else { alert('Issue failed: ' + (data.error || 'unknown')); }
+}
+
+async function loadEntity1099List() {
+  if (!currentEntityId) return;
+  try {
+    const resp = await authFetch(`/api/tax/entities/${currentEntityId}/1099?token=${token}&year=${selectedYear}`);
+    const data = await resp.json();
+    const forms = data.forms || [];
+    document.getElementById('ent-1099-results').innerHTML = forms.length === 0 ? '<p class="text-xs text-gray-600">No 1099s issued yet.</p>' :
+      '<div class="space-y-1">' + forms.map(f => `<div class="flex items-center justify-between text-xs p-2 bg-gray-900/40 rounded-lg">
+        <span class="text-gray-200">${escapeHtml(f.recipient)} <span class="text-gray-500">${escapeHtml(f.form)}</span></span>
+        <span class="text-gray-300">${escapeHtml(f.amount)} <span class="text-xs text-gray-500">${escapeHtml(f.status)}</span></span>
+      </div>`).join('') + '</div>';
+  } catch(e) {}
+}
+
+async function loadEntityComparison() {
+  const income = parseCurrencyInput('ent-cmp-income');
+  const qs = `?token=${token}&year=${selectedYear}${income ? '&income=' + income : ''}`;
+  try {
+    const resp = await authFetch('/api/tax/entity-comparison' + qs);
+    const data = await resp.json();
+    const scenarios = data.scenarios || [];
+    const best = data.best_structure;
+    const container = document.getElementById('ent-comparison');
+    if (scenarios.length === 0) {
+      container.innerHTML = '<p class="text-xs text-gray-600">No comparison data. Provide income above or log 1099/SE income first.</p>';
+      return;
+    }
+    container.innerHTML = `<p class="text-xs text-gray-400 mb-2">Compared at SE income ${escapeHtml(data.se_income || '--')}. Best: <span class="text-green-400">${escapeHtml(best || '--')}</span></p>` +
+      scenarios.map(s => `<div class="p-2 bg-gray-900/40 rounded-lg">
+        <div class="flex items-center justify-between">
+          <span class="text-sm font-medium text-gray-200">${escapeHtml(s.structure)}</span>
+          <span class="text-sm ${s.structure === best ? 'text-green-400' : 'text-gray-300'}">${escapeHtml(s.total_tax)}</span>
+        </div>
+        <p class="text-xs text-gray-500">${escapeHtml(s.notes || '')}</p>
+      </div>`).join('');
+  } catch(e) { document.getElementById('ent-comparison').innerHTML = '<p class="text-xs text-red-400">Failed: ' + escapeHtml(e.message) + '</p>'; }
+}
+
+// ── Insights tab ──
+async function loadInsightsTab() {
+  loadAuditRisk();
+  loadInsightsList();
+  loadTaxContext();
+}
+
+async function loadAuditRisk() {
+  try {
+    const resp = await authFetch(`/api/tax/audit-risk?token=${token}&year=${selectedYear}`);
+    const data = await resp.json();
+    const factors = data.factors || [];
+    const totalScore = factors.reduce((s,f) => s + (f.score || 0), 0);
+    const ring = document.getElementById('audit-score-ring');
+    const label = document.getElementById('audit-score-label');
+    ring.textContent = totalScore;
+    let color = 'border-green-500 text-green-400';
+    let text = 'Low audit risk';
+    if (totalScore > 50) { color = 'border-red-500 text-red-400'; text = 'High audit risk'; }
+    else if (totalScore > 25) { color = 'border-yellow-500 text-yellow-400'; text = 'Moderate audit risk'; }
+    ring.className = 'w-20 h-20 rounded-full border-4 flex items-center justify-center text-2xl font-semibold ' + color;
+    label.textContent = text;
+    document.getElementById('audit-score-summary').textContent = factors.length > 0 ? `${factors.length} factor${factors.length===1?'':'s'} identified` : 'No risk factors detected';
+
+    document.getElementById('audit-factors').innerHTML = factors.length === 0 ? '' :
+      factors.map(f => `<div class="p-2 bg-gray-900/40 rounded-lg text-xs">
+        <div class="flex items-center justify-between">
+          <span class="text-gray-200 font-medium">${escapeHtml(f.name || f.factor || 'Factor')}</span>
+          <span class="text-gray-400">+${f.score || 0} pts</span>
+        </div>
+        <p class="text-gray-500 mt-0.5">${escapeHtml(f.description || f.detail || '')}</p>
+      </div>`).join('');
+  } catch(e) {
+    document.getElementById('audit-score-label').textContent = 'Failed to load';
+    document.getElementById('audit-score-summary').textContent = e.message;
+  }
+}
+
+async function loadInsightsList() {
+  try {
+    const resp = await authFetch(`/api/tax/insights?token=${token}&year=${selectedYear}`);
+    const data = await resp.json();
+    const insights = data.insights || [];
+    const list = document.getElementById('insights-list');
+    if (insights.length === 0) {
+      list.innerHTML = '<p class="text-xs text-gray-600">No AI insights yet. Add receipts, income, and profile data so the advisor has something to analyze.</p>';
+      return;
+    }
+    list.innerHTML = insights.map(i => {
+      const severity = (i.severity || 'info').toLowerCase();
+      const bg = severity === 'high' ? 'bg-red-500/10 border-red-600/30' : severity === 'medium' ? 'bg-yellow-500/10 border-yellow-600/30' : 'bg-oc-500/10 border-oc-600/30';
+      return `<div class="p-3 rounded-lg border ${bg}">
+        <div class="flex items-center justify-between mb-1">
+          <span class="text-sm font-medium text-gray-200">${escapeHtml(i.title || i.category || 'Insight')}</span>
+          ${i.savings_potential ? `<span class="text-xs text-green-400">save ${escapeHtml(i.savings_potential)}</span>` : ''}
+        </div>
+        <p class="text-xs text-gray-400">${escapeHtml(i.message || i.description || '')}</p>
+        ${i.action ? `<p class="text-xs text-oc-400 mt-1">→ ${escapeHtml(i.action)}</p>` : ''}
+      </div>`;
+    }).join('');
+  } catch(e) { document.getElementById('insights-list').innerHTML = '<p class="text-xs text-red-400">Failed: ' + escapeHtml(e.message) + '</p>'; }
+}
+
+async function runWhatIf() {
+  const body = {
+    token, tax_year: selectedYear,
+    scenario_name: document.getElementById('wi-name').value || 'Scenario',
+    additional_income_cents: parseCurrencyInput('wi-income'),
+    additional_deduction_cents: parseCurrencyInput('wi-ded'),
+    retirement_contribution_cents: parseCurrencyInput('wi-ret'),
+    filing_status_override: document.getElementById('wi-fs').value || null,
+  };
+  try {
+    const resp = await authFetch('/api/tax/what-if', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    const data = await resp.json();
+    const b = data.baseline || {}, s = data.scenario_result || {}, d = data.difference || {};
+    document.getElementById('wi-result').innerHTML = `<div class="mt-3 p-3 bg-gray-900/40 rounded-lg text-xs">
+      <p class="font-medium text-gray-200 mb-2">${escapeHtml(data.scenario || 'Scenario')}</p>
+      <div class="grid grid-cols-3 gap-2">
+        <div><p class="text-gray-500 uppercase">Baseline tax</p><p class="text-gray-300 text-sm">${escapeHtml(b.total_tax || '--')}</p></div>
+        <div><p class="text-gray-500 uppercase">Scenario tax</p><p class="text-gray-300 text-sm">${escapeHtml(s.total_tax || '--')}</p></div>
+        <div><p class="text-gray-500 uppercase">Change</p><p class="text-sm ${(d.tax_change||'').startsWith('-') ? 'text-green-400' : 'text-red-400'}">${escapeHtml(d.tax_change || '--')}</p></div>
+      </div>
+      ${d.savings && d.savings !== '$0.00' ? `<p class="mt-2 text-green-400">Potential savings: ${escapeHtml(d.savings)}</p>` : ''}
+    </div>`;
+  } catch(e) { document.getElementById('wi-result').innerHTML = '<p class="text-xs text-red-400 mt-2">Failed: ' + escapeHtml(e.message) + '</p>'; }
+}
+
+async function loadTaxContext() {
+  try {
+    const resp = await authFetch(`/api/tax/context?token=${token}&year=${selectedYear}`);
+    const data = await resp.json();
+    document.getElementById('tax-context-text').textContent = data.context || '(empty — no tax data to inject)';
+  } catch(e) {
+    document.getElementById('tax-context-text').textContent = 'Failed to load: ' + e.message;
+  }
+}
+
+// ── Investments tab extensions ──
+function showAddLotForm() { document.getElementById('add-lot-form').classList.toggle('hidden'); }
+function showAddK1Form() { document.getElementById('add-k1-form').classList.toggle('hidden'); }
+
+async function loadLots() {
+  try {
+    const status = document.getElementById('lots-status').value || 'open';
+    const resp = await authFetch(`/api/tax/lots?token=${token}&status=${status}`);
+    const data = await resp.json();
+    const lots = data.lots || [];
+    const list = document.getElementById('lots-list');
+    if (lots.length === 0) {
+      list.innerHTML = '<p class="text-xs text-gray-600">No tax lots. Auto-imported from brokerage syncs or manually added.</p>';
+      return;
+    }
+    list.innerHTML = lots.map(l => `<div class="flex items-center justify-between p-2 bg-gray-900/40 rounded-lg">
+      <div>
+        <p class="text-sm font-medium text-gray-200">${escapeHtml(l.symbol)} <span class="text-xs text-gray-500">${escapeHtml(l.asset_type)}</span></p>
+        <p class="text-xs text-gray-500">${l.quantity} @ ${escapeHtml(l.cost_per_unit)} · acquired ${escapeHtml(l.acquisition_date)} · ${escapeHtml(l.broker || 'manual')} · ${escapeHtml(l.method)}</p>
+      </div>
+      <div class="text-right">
+        <p class="text-sm text-gray-300">${escapeHtml(l.total_basis)}</p>
+        ${l.wash_sale_adj && l.wash_sale_adj !== '$0.00' ? `<p class="text-xs text-yellow-400">wash: ${escapeHtml(l.wash_sale_adj)}</p>` : ''}
+        ${status === 'open' ? `<button onclick="sellLot(${l.id},'${escapeHtml(l.symbol)}',${l.quantity})" class="text-xs text-oc-400 hover:text-oc-300">sell →</button>` : ''}
+      </div>
+    </div>`).join('');
+  } catch(e) { document.getElementById('lots-list').innerHTML = '<p class="text-xs text-red-400">Failed: ' + escapeHtml(e.message) + '</p>'; }
+}
+
+async function saveLot() {
+  const body = {
+    token,
+    symbol: document.getElementById('lot-symbol').value.toUpperCase(),
+    asset_type: document.getElementById('lot-asset-type').value,
+    quantity: parseFloat(document.getElementById('lot-qty').value),
+    cost_per_unit_cents: Math.round(parseFloat(document.getElementById('lot-cpu').value || '0') * 100),
+    acquisition_date: document.getElementById('lot-date').value,
+    broker: document.getElementById('lot-broker').value || null,
+  };
+  if (!body.symbol || !body.quantity || !body.cost_per_unit_cents || !body.acquisition_date) {
+    alert('Symbol, quantity, cost per unit, and date are required.');
+    return;
+  }
+  const resp = await authFetch('/api/tax/lots', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  const data = await resp.json();
+  if (data.ok !== false) {
+    ['lot-symbol','lot-qty','lot-cpu','lot-date','lot-broker'].forEach(id => document.getElementById(id).value = '');
+    document.getElementById('add-lot-form').classList.add('hidden');
+    loadLots();
+  } else { alert('Save failed'); }
+}
+
+async function sellLot(lotId, symbol, maxQty) {
+  const qtyStr = prompt(`Sell ${symbol} — quantity (max ${maxQty}):`, maxQty);
+  if (!qtyStr) return;
+  const priceStr = prompt('Sell price per unit ($):');
+  if (!priceStr) return;
+  const dateStr = prompt('Sell date (YYYY-MM-DD):', new Date().toISOString().slice(0,10));
+  if (!dateStr) return;
+  const body = {
+    token, lot_id: lotId,
+    quantity: parseFloat(qtyStr),
+    sell_price_cents: Math.round(parseFloat(priceStr) * 100),
+    sell_date: dateStr,
+  };
+  const resp = await authFetch('/api/tax/lots/sell', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  const data = await resp.json();
+  if (data.ok !== false) {
+    loadLots();
+    loadCapitalGains();
+    loadForm8949();
+    loadWashSales();
+  } else { alert('Sell failed: ' + (data.error || 'unknown')); }
+}
+
+async function loadWashSales() {
+  try {
+    const resp = await authFetch(`/api/tax/wash-sales?token=${token}&year=${selectedYear}`);
+    const data = await resp.json();
+    const matches = data.wash_sales || [];
+    document.getElementById('wash-count').textContent = matches.length + ' match' + (matches.length===1?'':'es');
+    const list = document.getElementById('wash-list');
+    if (matches.length === 0) {
+      list.innerHTML = '<p class="text-xs text-gray-600">No wash sales detected.</p>';
+      return;
+    }
+    list.innerHTML = matches.map(m => `<div class="p-2 bg-yellow-500/10 border border-yellow-600/30 rounded-lg text-xs">
+      <p class="text-gray-200 font-medium">${escapeHtml(m.symbol || m.asset || '')}</p>
+      <p class="text-gray-400">Loss disallowed: ${escapeHtml(m.disallowed_loss || m.adjustment || '')} · sold ${escapeHtml(m.sell_date || '')} · repurchased ${escapeHtml(m.repurchase_date || '')}</p>
+    </div>`).join('');
+  } catch(e) { document.getElementById('wash-list').innerHTML = '<p class="text-xs text-red-400">Failed</p>'; }
+}
+
+async function loadForm8949() {
+  try {
+    const resp = await authFetch(`/api/tax/form-8949?token=${token}&year=${selectedYear}`);
+    const data = await resp.json();
+    const rows = data.dispositions || data.rows || [];
+    document.getElementById('form8949-count').textContent = rows.length + ' disposition' + (rows.length===1?'':'s');
+    const list = document.getElementById('form8949-list');
+    if (rows.length === 0) {
+      list.innerHTML = '<p class="text-xs text-gray-600">No dispositions this year. Sell a lot to populate Form 8949.</p>';
+      return;
+    }
+    list.innerHTML = '<table class="w-full text-xs"><thead><tr class="text-gray-500 border-b border-gray-700"><th class="py-1 text-left">Description</th><th class="py-1 text-right">Acquired</th><th class="py-1 text-right">Sold</th><th class="py-1 text-right">Proceeds</th><th class="py-1 text-right">Basis</th><th class="py-1 text-right">Gain/Loss</th></tr></thead><tbody>' +
+      rows.map(r => `<tr class="border-b border-gray-800/50">
+        <td class="py-1 text-gray-300">${escapeHtml(r.description || r.symbol || '')}</td>
+        <td class="py-1 text-right text-gray-400">${escapeHtml(r.acquisition_date || r.acquired || '')}</td>
+        <td class="py-1 text-right text-gray-400">${escapeHtml(r.sell_date || r.sold || '')}</td>
+        <td class="py-1 text-right text-gray-300">${escapeHtml(r.proceeds || '')}</td>
+        <td class="py-1 text-right text-gray-300">${escapeHtml(r.basis || '')}</td>
+        <td class="py-1 text-right ${(r.gain_loss || '').startsWith('-') ? 'text-red-400' : 'text-green-400'}">${escapeHtml(r.gain_loss || '')}</td>
+      </tr>`).join('') + '</tbody></table>';
+  } catch(e) { document.getElementById('form8949-list').innerHTML = '<p class="text-xs text-red-400">Failed</p>'; }
+}
+
+async function loadK1s() {
+  try {
+    const resp = await authFetch(`/api/tax/k1?token=${token}&year=${selectedYear}`);
+    const data = await resp.json();
+    const k1s = data.k1s || [];
+    const list = document.getElementById('k1-list');
+    if (k1s.length === 0) {
+      list.innerHTML = '<p class="text-xs text-gray-600">No K-1 income. Add partnership or S-Corp distributions you received.</p>';
+      return;
+    }
+    list.innerHTML = k1s.map(k => `<div class="p-2 bg-gray-900/40 rounded-lg">
+      <div class="flex items-center justify-between">
+        <span class="text-sm font-medium text-gray-200">${escapeHtml(k.entity)} <span class="text-xs text-gray-500">${escapeHtml(k.type)}</span></span>
+        <span class="text-sm text-gray-300">ordinary ${escapeHtml(k.ordinary)}</span>
+      </div>
+      <p class="text-xs text-gray-500">rental ${escapeHtml(k.rental)} · interest ${escapeHtml(k.interest)} · dividends ${escapeHtml(k.dividends)} · capgain ${escapeHtml(k.capital_gains)} · SE ${escapeHtml(k.se_income)}</p>
+    </div>`).join('');
+  } catch(e) { document.getElementById('k1-list').innerHTML = '<p class="text-xs text-red-400">Failed</p>'; }
+}
+
+async function saveK1() {
+  const body = {
+    token, tax_year: selectedYear,
+    entity_name: document.getElementById('k1-name').value,
+    entity_type: document.getElementById('k1-type').value,
+    ordinary_cents: parseCurrencyInput('k1-ordinary'),
+    rental_cents: parseCurrencyInput('k1-rental'),
+    interest_cents: parseCurrencyInput('k1-interest'),
+    dividend_cents: parseCurrencyInput('k1-dividend'),
+    capital_gain_cents: parseCurrencyInput('k1-capgain'),
+    se_income_cents: parseCurrencyInput('k1-se'),
+  };
+  if (!body.entity_name) { alert('Entity name required.'); return; }
+  const resp = await authFetch('/api/tax/k1', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  const data = await resp.json();
+  if (data.ok) {
+    ['k1-name','k1-ordinary','k1-rental','k1-interest','k1-dividend','k1-capgain','k1-se'].forEach(id => document.getElementById(id).value = '');
+    document.getElementById('add-k1-form').classList.add('hidden');
+    loadK1s();
+  } else { alert('Save failed'); }
+}
+
+async function loadCapitalGains() {
+  try {
+    const resp = await authFetch(`/api/tax/capital-gains/summary?token=${token}&year=${selectedYear}`);
+    const data = await resp.json();
+    const grid = document.getElementById('cap-gains-grid');
+    grid.innerHTML = `
+      <div><p class="text-xs text-gray-500 uppercase">Short-Term</p><p class="text-lg font-semibold mt-1 text-gray-200">${escapeHtml(data.short_term_gains || '$0.00')}</p><p class="text-xs text-red-400">losses ${escapeHtml(data.short_term_losses || '$0.00')}</p></div>
+      <div><p class="text-xs text-gray-500 uppercase">Long-Term</p><p class="text-lg font-semibold mt-1 text-oc-400">${escapeHtml(data.long_term_gains || '$0.00')}</p><p class="text-xs text-red-400">losses ${escapeHtml(data.long_term_losses || '$0.00')}</p></div>
+      <div><p class="text-xs text-gray-500 uppercase">Net Gain/Loss</p><p class="text-lg font-semibold mt-1 ${(data.net_gain_loss||'').startsWith('-') ? 'text-red-400' : 'text-green-400'}">${escapeHtml(data.net_gain_loss || '$0.00')}</p></div>
+      <div><p class="text-xs text-gray-500 uppercase">Usable / Carryforward</p><p class="text-lg font-semibold mt-1 text-gray-200">${escapeHtml(data.usable_loss || '$0.00')}</p><p class="text-xs text-gray-500">carry ${escapeHtml(data.carryforward_loss || '$0.00')}</p></div>
+    `;
+    const note = document.getElementById('cap-gains-note');
+    const ws = data.wash_sale_count || 0;
+    note.textContent = ws > 0 ? `${ws} wash sale match${ws===1?'':'es'} detected. Capital loss limit: $3,000/year; excess carries forward.` : 'Capital loss limit: $3,000/year; excess carries forward.';
+  } catch(e) { document.getElementById('cap-gains-grid').innerHTML = '<p class="text-xs text-red-400 col-span-full">Failed</p>'; }
 }
 
 // Keyboard shortcuts for review mode
