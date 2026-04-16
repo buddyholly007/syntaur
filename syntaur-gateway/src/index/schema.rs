@@ -1453,6 +1453,39 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX IF NOT EXISTS idx_mad_module ON module_agent_defaults(module_name);
     "#,
+
+    // Migration 38: Voice identity — per-user wake words, voiceprint embeddings,
+    // TTS voice clones, and house-level voice defaults for the multi-user
+    // satellite architecture. See vault/projects/syntaur_personas.md for design.
+    r#"
+    CREATE TABLE IF NOT EXISTS user_voice_models (
+        id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id                 INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        wake_word_name          TEXT NOT NULL,
+        wake_model_path         TEXT,
+        voiceprint_embedding    BLOB,
+        voiceprint_confidence   REAL NOT NULL DEFAULT 0.0,
+        tts_voice_sample_path   TEXT,
+        tts_model_path          TEXT,
+        satellite_id            TEXT,
+        enabled                 INTEGER NOT NULL DEFAULT 1,
+        created_at              INTEGER NOT NULL,
+        updated_at              INTEGER NOT NULL,
+        UNIQUE(user_id, wake_word_name)
+    );
+    CREATE INDEX IF NOT EXISTS idx_voice_user ON user_voice_models(user_id);
+    CREATE INDEX IF NOT EXISTS idx_voice_satellite ON user_voice_models(satellite_id);
+
+    CREATE TABLE IF NOT EXISTS voice_settings (
+        key         TEXT PRIMARY KEY,
+        value       TEXT NOT NULL,
+        updated_at  INTEGER NOT NULL
+    );
+
+    INSERT OR IGNORE INTO voice_settings (key, value, updated_at) VALUES
+        ('default_tts_voice', 'system', 0),
+        ('default_wake_word', 'Hey Kyron', 0);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

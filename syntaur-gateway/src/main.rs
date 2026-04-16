@@ -5033,6 +5033,11 @@ async fn main() {
         .route("/api/agents/dismiss_escalation", axum::routing::post(handle_api_dismiss_escalation))
         .route("/api/agents/handoff", axum::routing::post(handle_api_agent_handoff))
         .route("/api/agents/reentry", axum::routing::post(handle_api_agent_reentry))
+        .route("/api/voice/models", get(handle_api_voice_models_list))
+        .route("/api/voice/models", axum::routing::post(handle_api_voice_models_create))
+        .route("/api/voice/models/delete", axum::routing::post(handle_api_voice_models_delete))
+        .route("/api/voice/settings", get(handle_api_voice_settings_get))
+        .route("/api/voice/settings", axum::routing::put(handle_api_voice_settings_set))
         .route("/api/modules/toggle", post(setup::handle_module_toggle))
         .route("/api/license/status", get(setup::handle_license_status))
         .route("/api/license/activate", post(setup::handle_license_activate))
@@ -5767,6 +5772,157 @@ async fn handle_api_agent_reentry(
         "summary": summary,
         "appended_to": appended_to,
     })))
+}
+
+
+// ── Voice model CRUD ────────────────────────────────────────────────────────
+
+/// GET /api/voice/models — list the caller's voice models.
+async fn handle_api_voice_models_list(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").cloned().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let principal = resolve_principal(&state, &token).await?;
+    let uid = principal.user_id();
+
+    let db = state.db_path.clone();
+    let models = tokio::task::spawn_blocking(move || -> Vec<serde_json::Value> {
+        let conn = match rusqlite::Connection::open(&db) { Ok(c) => c, Err(_) => return vec![] };
+        let mut stmt = match conn.prepare(
+            "SELECT id, wake_word_name, wake_model_path, tts_voice_sample_path,              tts_model_path, satellite_id, enabled, voiceprint_confidence, created_at              FROM user_voice_models WHERE user_id = ? ORDER BY created_at"
+        ) { Ok(s) => s, Err(_) => return vec![] };
+        stmt.query_map(rusqlite::params![uid], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?,
+                "wake_word": r.get::<_, String>(1)?,
+                "wake_model": r.get::<_, Option<String>>(2)?,
+                "tts_sample": r.get::<_, Option<String>>(3)?,
+                "tts_model": r.get::<_, Option<String>>(4)?,
+                "satellite": r.get::<_, Option<String>>(5)?,
+                "enabled": r.get::<_, bool>(6)?,
+                "confidence": r.get::<_, f64>(7)?,
+                "created_at": r.get::<_, i64>(8)?,
+            }))
+        }).ok().map(|iter| iter.filter_map(Result::ok).collect()).unwrap_or_default()
+    }).await.unwrap_or_default();
+
+    Ok(Json(serde_json::json!({"models": models, "count": models.len()})))
+}
+
+/// POST /api/voice/models — register a new voice model for the caller.
+/// Body: {"token", "wake_word", "satellite_id"?, "tts_sample_path"?}
+async fn handle_api_voice_models_create(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let wake_word = body["wake_word"].as_str().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
+    if wake_word.trim().is_empty() || wake_word.len() > 50 {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+    let satellite_id = body["satellite_id"].as_str().map(|s| s.to_string());
+    let tts_sample = body["tts_sample_path"].as_str().map(|s| s.to_string());
+
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+
+    let db = state.db_path.clone();
+    let ww = wake_word.to_string();
+    let result = tokio::task::spawn_blocking(move || -> Result<i64, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let now = chrono::Utc::now().timestamp();
+        conn.execute(
+            "INSERT INTO user_voice_models              (user_id, wake_word_name, satellite_id, tts_voice_sample_path, enabled, created_at, updated_at)              VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5)",
+            rusqlite::params![uid, ww, satellite_id, tts_sample, now],
+        ).map_err(|e| e.to_string())?;
+        Ok(conn.last_insert_rowid())
+    }).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| axum::http::StatusCode::CONFLICT)?;
+
+    Ok(Json(serde_json::json!({"id": result, "wake_word": wake_word, "created": true})))
+}
+
+/// POST /api/voice/models/delete — remove a voice model by id.
+/// Body: {"token", "model_id"}
+async fn handle_api_voice_models_delete(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let model_id = body["model_id"].as_i64().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
+
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+
+    let db = state.db_path.clone();
+    let deleted = tokio::task::spawn_blocking(move || -> usize {
+        let conn = match rusqlite::Connection::open(&db) { Ok(c) => c, Err(_) => return 0 };
+        conn.execute(
+            "DELETE FROM user_voice_models WHERE id = ? AND user_id = ?",
+            rusqlite::params![model_id, uid],
+        ).unwrap_or(0)
+    }).await.unwrap_or(0);
+
+    if deleted == 0 { return Err(axum::http::StatusCode::NOT_FOUND); }
+    Ok(Json(serde_json::json!({"deleted": true, "model_id": model_id})))
+}
+
+/// GET /api/voice/settings — get house-level voice defaults.
+async fn handle_api_voice_settings_get(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").cloned().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let _principal = resolve_principal(&state, &token).await?;
+
+    let db = state.db_path.clone();
+    let settings = tokio::task::spawn_blocking(move || -> serde_json::Value {
+        let conn = match rusqlite::Connection::open(&db) { Ok(c) => c, Err(_) => return serde_json::json!({}) };
+        let mut map = serde_json::Map::new();
+        if let Ok(mut stmt) = conn.prepare("SELECT key, value FROM voice_settings") {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            }) {
+                for row in rows.flatten() {
+                    map.insert(row.0, serde_json::Value::String(row.1));
+                }
+            }
+        }
+        serde_json::Value::Object(map)
+    }).await.unwrap_or(serde_json::json!({}));
+
+    Ok(Json(serde_json::json!({"settings": settings})))
+}
+
+/// PUT /api/voice/settings — update house-level voice defaults (admin only).
+/// Body: {"token", "key", "value"}
+async fn handle_api_voice_settings_set(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let key = body["key"].as_str().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
+    let value = body["value"].as_str().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
+
+    let principal = resolve_principal(&state, token).await?;
+    if principal.role() != "admin" {
+        return Err(axum::http::StatusCode::FORBIDDEN);
+    }
+
+    let db = state.db_path.clone();
+    let k = key.to_string();
+    let v = value.to_string();
+    tokio::task::spawn_blocking(move || {
+        let conn = rusqlite::Connection::open(&db).ok()?;
+        let now = chrono::Utc::now().timestamp();
+        conn.execute(
+            "INSERT INTO voice_settings (key, value, updated_at) VALUES (?1, ?2, ?3)              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            rusqlite::params![k, v, now],
+        ).ok()
+    }).await.ok();
+
+    Ok(Json(serde_json::json!({"updated": true, "key": key, "value": value})))
 }
 
 /// POST /api/agents/seed_defaults — clone all product-default personas into
