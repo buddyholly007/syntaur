@@ -487,11 +487,25 @@ async function send(msg) {
       });
       const data = await resp.json();
       const secs = ((Date.now() - t0) / 1000).toFixed(1);
-      responseEl.innerHTML = data.response
+      let replyHtml = data.response
         ? `<div class="text-gray-300 leading-relaxed text-sm chat-md">${md(data.response)}</div>
            <div class="flex items-center gap-3 mt-2"><span class="text-xs text-gray-600">${secs}s</span>
            <button onclick="copy(this)" class="text-xs text-gray-600 hover:text-gray-400" data-t="${escAttr(data.response)}">Copy</button></div>`
         : `<p class="text-red-400 text-sm">${esc(data.error || 'No response')}</p>`;
+      if (data.escalation) {
+        const e = data.escalation;
+        replyHtml += `<div class="mt-3 p-3 rounded-lg border border-sky-800/50 bg-sky-900/20">
+          <p class="text-sky-300 text-sm mb-2">${esc(e.message)}</p>
+          <div class="flex gap-2">
+            <button onclick="acceptHandoff('${e.module}')"
+              class="px-3 py-1 text-xs font-medium rounded bg-sky-600 hover:bg-sky-500 text-white transition-colors">
+              Open ${esc(e.agent_name)} module</button>
+            <button onclick="dismissEscalation('${e.module}')"
+              class="px-3 py-1 text-xs font-medium rounded bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors">
+              Keep going here</button>
+          </div></div>`;
+      }
+      responseEl.innerHTML = replyHtml;
     } else {
       // Stream events via SSE
       const evtSource = new EventSource(`/api/message/${turnId}/stream?token=${token}`);
@@ -568,7 +582,27 @@ function clearMessages() {
   newConversation();
 }
 
-function copy(btn) {
+function acceptHandoff(module) {
+      // Navigate to the specialist module page
+      const moduleUrls = {
+        tax: '/tax', research: '/knowledge', music: '/music',
+        scheduler: '/settings', coders: '/coders', journal: '/journal'
+      };
+      const url = moduleUrls[module] || '/' + module;
+      window.location.href = url;
+    }
+    function dismissEscalation(module) {
+      // Tell the backend to suppress this escalation
+      const token = localStorage.getItem('syntaur_token') || '';
+      fetch('/api/agents/dismiss_escalation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, conversation_id: conversationId || 'ephemeral', module })
+      }).catch(() => {});
+      // Remove the escalation UI from the current message
+      event.target.closest('.border-sky-800\\/50')?.remove();
+    }
+    function copy(btn) {
   navigator.clipboard.writeText(btn.dataset.t).then(() => {
     btn.textContent = 'Copied!';
     setTimeout(() => btn.textContent = 'Copy', 1500);
