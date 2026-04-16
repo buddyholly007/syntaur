@@ -2572,17 +2572,17 @@ pub async fn handle_csv_irs_export(
 /// vision pipeline reliably extracts (W-2 employee_name + last-4 SSN,
 /// mortgage statement property_address) appear here.
 #[derive(Default, Debug)]
-struct ScannedIdentity {
-    primary_name: Option<String>,
-    spouse_name: Option<String>,
+pub struct ScannedIdentity {
+    pub primary_name: Option<String>,
+    pub spouse_name: Option<String>,
     /// SSN in the form `XXX-XX-####` — derived from employee_ssn_last4 since
     /// the vision prompt currently only asks for the last 4 digits.
-    primary_ssn_masked: Option<String>,
-    spouse_ssn_masked: Option<String>,
-    address: Option<String>,
-    city: Option<String>,
-    state: Option<String>,
-    zip: Option<String>,
+    pub primary_ssn_masked: Option<String>,
+    pub spouse_ssn_masked: Option<String>,
+    pub address: Option<String>,
+    pub city: Option<String>,
+    pub state: Option<String>,
+    pub zip: Option<String>,
 }
 
 /// Walk this user's scanned tax documents for the year and pull out
@@ -2594,7 +2594,7 @@ struct ScannedIdentity {
 /// - **1095-C** (`doc_type='1095_c'`): `employee` (fallback name)
 /// - **Mortgage statement** (`doc_type='mortgage_statement'`):
 ///   `property_address` — multi-line "STREET\nCITY, ST ZIP" string we parse
-fn pull_scan_identity(conn: &rusqlite::Connection, uid: i64, year: i64) -> ScannedIdentity {
+pub fn pull_scan_identity(conn: &rusqlite::Connection, uid: i64, year: i64) -> ScannedIdentity {
     let mut id = ScannedIdentity::default();
 
     // ---- Names + SSN-last-4 from W-2s + 1095-C ----
@@ -2872,6 +2872,71 @@ pub async fn handle_extension(
         format!("attachment; filename=\"form-4868-{}.pdf\"", year).parse().unwrap(),
     );
     Ok((headers, pdf_bytes))
+}
+
+/// Suggest taxpayer profile values mined from this user's scanned tax
+/// documents (W-2, 1095-C, mortgage statement). The UI's "Auto-fill from
+/// scans" button uses this to pre-populate empty profile inputs without
+/// silently overwriting anything the user has already typed.
+pub async fn handle_profile_suggest_from_scans(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    let year: i64 = params.get("year").and_then(|y| y.parse().ok()).unwrap_or_else(default_tax_year);
+    let db = state.db_path.clone();
+
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let id = pull_scan_identity(&conn, uid, year);
+
+        // Split "First Last" → first + last so we can populate the two
+        // profile inputs separately.
+        let split_name = |full: &Option<String>| -> (Option<String>, Option<String>) {
+            match full {
+                Some(n) => {
+                    let trimmed = n.trim();
+                    if trimmed.is_empty() { return (None, None); }
+                    let mut parts = trimmed.splitn(2, char::is_whitespace);
+                    let first = parts.next().map(str::to_string);
+                    let last = parts.next().map(str::trim).map(str::to_string);
+                    (first, last)
+                }
+                None => (None, None),
+            }
+        };
+        let (first, last) = split_name(&id.primary_name);
+        let (sp_first, sp_last) = split_name(&id.spouse_name);
+
+        // Tell the UI which scanned docs sourced each value so the user can
+        // decide whether to trust it.
+        let mut sources: Vec<String> = Vec::new();
+        if id.primary_name.is_some() { sources.push("W-2 / 1095-C employee name".into()); }
+        if id.address.is_some() || id.city.is_some() {
+            sources.push("Mortgage statement property address or W-2 employee address".into());
+        }
+        if id.primary_ssn_masked.is_some() { sources.push("W-2 SSN (last 4)".into()); }
+
+        Ok(serde_json::json!({
+            "first_name": first,
+            "last_name": last,
+            "ssn": id.primary_ssn_masked,
+            "address_line1": id.address,
+            "city": id.city,
+            "state": id.state,
+            "zip": id.zip,
+            "spouse_first": sp_first,
+            "spouse_last": sp_last,
+            "spouse_ssn": id.spouse_ssn_masked,
+            "sources": sources,
+        }))
+    }).await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(result))
 }
 
 // ── Extension Filing Workflow (stateful) ────────────────────────────────────

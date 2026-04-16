@@ -5030,6 +5030,7 @@ async fn main() {
         // Taxpayer profile + dependents
         .route("/api/tax/profile", get(tax::handle_taxpayer_profile_get))
         .route("/api/tax/profile", post(tax::handle_taxpayer_profile_save))
+        .route("/api/tax/profile/suggest", get(tax::handle_profile_suggest_from_scans))
         .route("/api/tax/dependents", post(tax::handle_dependent_save))
         .route("/api/tax/dependents/{id}", axum::routing::delete(tax::handle_dependent_delete))
         // Items 10-16: smart routing, statements, property, deduction, insurance, wizard, brackets

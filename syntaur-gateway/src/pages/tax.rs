@@ -158,11 +158,13 @@ const BODY_HTML: &str = r##"<!-- Module paywall overlay (hidden by default, show
             <div><label class="text-xs text-gray-500">Spouse DOB</label><input class="input text-sm" id="pf-sp-dob" type="date"></div>
           </div>
         </details>
-        <div class="flex gap-2 mt-3">
+        <div class="flex gap-2 mt-3 items-center">
           <button onclick="saveProfile()" class="btn-primary text-xs">Save Profile</button>
+          <button onclick="autoFillProfileFromScans()" class="text-xs bg-gray-700 hover:bg-gray-600 text-gray-100 px-3 py-1.5 rounded-lg" title="Pull values from scanned W-2, 1095-C, mortgage statement">Auto-fill from scans</button>
           <button onclick="toggleProfileEdit()" class="text-xs text-gray-500 hover:text-gray-300">Cancel</button>
           <span id="profile-save-result" class="text-xs self-center"></span>
         </div>
+        <p id="profile-suggest-sources" class="text-xs text-gray-500 mt-2"></p>
       </div>
     </div>
 
@@ -2593,6 +2595,55 @@ async function saveProfile() {
     result.textContent = 'Auto-saved'; result.className = 'text-xs self-center text-green-400';
     setTimeout(() => { result.textContent = ''; }, 2000);
   } catch(e) { result.textContent = 'Error'; result.className = 'text-xs self-center text-red-400'; }
+}
+
+async function autoFillProfileFromScans() {
+  const yr = selectedYear || yearStart().slice(0,4);
+  const result = document.getElementById('profile-save-result');
+  const sources = document.getElementById('profile-suggest-sources');
+  result.textContent = 'Reading scans...'; result.className = 'text-xs self-center text-gray-400';
+  sources.textContent = '';
+  try {
+    const resp = await authFetch(`/api/tax/profile/suggest?token=${token}&year=${yr}`);
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+    // Map suggestion field → input id. Order matters for the spouse section
+    // (we open it if any spouse field has a value).
+    const map = [
+      ['first_name', 'pf-first'], ['last_name', 'pf-last'], ['ssn', 'pf-ssn'],
+      ['address_line1', 'pf-addr'], ['city', 'pf-city'], ['state', 'pf-state'], ['zip', 'pf-zip'],
+      ['spouse_first', 'pf-sp-first'], ['spouse_last', 'pf-sp-last'], ['spouse_ssn', 'pf-sp-ssn'],
+    ];
+    let filled = 0, skipped = 0;
+    for (const [key, id] of map) {
+      const el = document.getElementById(id);
+      if (!el) continue;
+      const val = data[key];
+      if (val == null || val === '') continue;
+      // Don't overwrite anything the user already typed.
+      if (el.value && el.value.trim() !== '') { skipped++; continue; }
+      el.value = val;
+      filled++;
+    }
+    // Open the spouse disclosure if we filled anything in it.
+    if (data.spouse_first || data.spouse_last || data.spouse_ssn) {
+      const det = document.getElementById('spouse-section');
+      if (det) det.open = true;
+    }
+    if (filled === 0 && skipped === 0) {
+      result.textContent = 'No scan data available — upload a W-2 or mortgage statement first.';
+      result.className = 'text-xs self-center text-gray-400';
+    } else {
+      result.textContent = `Filled ${filled} field${filled===1?'':'s'}` + (skipped > 0 ? ` (${skipped} kept)` : '') + ' — review and click Save Profile';
+      result.className = 'text-xs self-center text-oc-400';
+    }
+    if (Array.isArray(data.sources) && data.sources.length > 0) {
+      sources.textContent = 'Sources: ' + data.sources.join('; ');
+    }
+  } catch(e) {
+    result.textContent = 'Error: ' + e.message;
+    result.className = 'text-xs self-center text-red-400';
+  }
 }
 
 // Auto-save profile on field blur (so closing the app doesn't lose data)
