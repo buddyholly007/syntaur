@@ -421,8 +421,13 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
     padding: 4px 22px 4px 10px !important;
     /* Inline SVG cyan caret as the dropdown arrow. */
     background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10' fill='none' stroke='%2300f0ff' stroke-width='1.5'><path d='M2 4l3 3 3-3'/></svg>") !important;
-    background-repeat: no-repeat;
-    background-position: right 6px center;
+    /* !important needed on every longhand because the generic select
+       rule above uses the background: shorthand, which forces every
+       background-* property to !important. Without these the arrow
+       SVG tiles across the whole control. */
+    background-repeat: no-repeat !important;
+    background-position: right 6px center !important;
+    background-size: 10px 10px !important;
     clip-path: polygon(5px 0, 100% 0, 100% calc(100% - 5px), calc(100% - 5px) 100%, 0 100%, 0 5px);
     cursor: pointer;
     transition: border-color 0.15s, box-shadow 0.15s;
