@@ -11,4 +11,5 @@
 pub mod defaults;
 pub mod escalation;
 pub mod handoff;
+pub mod tasks;
 pub mod templates;

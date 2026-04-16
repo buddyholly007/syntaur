@@ -5038,6 +5038,8 @@ async fn main() {
         .route("/api/voice/models/delete", axum::routing::post(handle_api_voice_models_delete))
         .route("/api/voice/settings", get(handle_api_voice_settings_get))
         .route("/api/voice/settings", axum::routing::put(handle_api_voice_settings_set))
+        .route("/api/journal/extract_tasks", axum::routing::post(handle_api_journal_extract_tasks))
+        .route("/api/journal/route_tasks", axum::routing::post(handle_api_journal_route_tasks))
         .route("/api/modules/toggle", post(setup::handle_module_toggle))
         .route("/api/license/status", get(setup::handle_license_status))
         .route("/api/license/activate", post(setup::handle_license_activate))
@@ -5923,6 +5925,92 @@ async fn handle_api_voice_settings_set(
     }).await.ok();
 
     Ok(Json(serde_json::json!({"updated": true, "key": key, "value": value})))
+}
+
+
+// ── Journal task extraction (Mushi → Thaddeus) ──────────────────────────────
+
+/// POST /api/journal/extract_tasks — scan a journal conversation for task-like
+/// items. Returns a list of candidate tasks for user approval. Does NOT create
+/// any todos or share any journal content — this is a read-only scan.
+/// Body: {"token", "conversation_id"}
+async fn handle_api_journal_extract_tasks(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let conv_id = body["conversation_id"].as_str().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
+
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+
+    let mgr = state.conversations.as_ref().ok_or(axum::http::StatusCode::SERVICE_UNAVAILABLE)?;
+
+    // Load journal conversation messages (agent_scope = journal only)
+    let sharing_mode = state.sharing_mode.read().await.clone();
+    let scope = state.users.visible_user_ids(uid, &sharing_mode, "conversations", None).await;
+    let msgs = mgr.messages(conv_id, scope, Some("journal".to_string())).await;
+
+    if msgs.is_empty() {
+        return Err(axum::http::StatusCode::NOT_FOUND);
+    }
+
+    // Combine all user messages into one text block for scanning
+    let text: String = msgs.iter()
+        .filter(|m| m.role == "user")
+        .map(|m| m.content.as_str())
+        .collect::<Vec<_>>()
+        .join("
+");
+
+    let tasks = crate::agents::tasks::extract_tasks(&text);
+
+    Ok(Json(serde_json::json!({
+        "conversation_id": conv_id,
+        "tasks": tasks,
+        "count": tasks.len(),
+    })))
+}
+
+/// POST /api/journal/route_tasks — create todos from user-approved task texts.
+/// Only the task text travels — no journal context, no conversation reference.
+/// Body: {"token", "tasks": ["call the dentist", "order filters"]}
+async fn handle_api_journal_route_tasks(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let tasks = body["tasks"].as_array().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
+
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+
+    let task_texts: Vec<String> = tasks.iter()
+        .filter_map(|t| t.as_str().map(|s| s.to_string()))
+        .filter(|s| !s.trim().is_empty() && s.len() <= 500)
+        .collect();
+
+    if task_texts.is_empty() {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    let db = state.db_path.clone();
+    let created = tokio::task::spawn_blocking(move || -> Vec<serde_json::Value> {
+        let conn = match rusqlite::Connection::open(&db) { Ok(c) => c, Err(_) => return vec![] };
+        let mut results = Vec::new();
+        for text in &task_texts {
+            match crate::agents::tasks::create_todo(&conn, uid, text) {
+                Ok(id) => results.push(serde_json::json!({"id": id, "text": text, "created": true})),
+                Err(e) => results.push(serde_json::json!({"text": text, "error": e.to_string()})),
+            }
+        }
+        results
+    }).await.unwrap_or_default();
+
+    Ok(Json(serde_json::json!({
+        "routed": created.len(),
+        "results": created,
+    })))
 }
 
 /// POST /api/agents/seed_defaults — clone all product-default personas into
