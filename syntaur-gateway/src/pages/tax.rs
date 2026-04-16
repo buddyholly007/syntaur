@@ -653,7 +653,7 @@ const BODY_HTML: &str = r##"<!-- Module paywall overlay (hidden by default, show
               <div><p class="text-sm text-white font-medium">IRS Direct Pay</p><p class="text-[11px] text-gray-500">Payment auto-files your extension. Instant confirmation number.</p></div>
               <span class="text-oc-500 text-xs font-medium">Recommended &rarr;</span>
             </div>
-          </div>
+          </a>
           <a href="javascript:void(0)" onclick="startExtFiling('free_file')" class="block p-3 rounded-lg bg-gray-900 border border-gray-700 hover:border-gray-600 cursor-pointer transition-colors no-underline">
             <div class="flex items-center justify-between">
               <div><p class="text-sm text-white font-medium">IRS Free File</p><p class="text-[11px] text-gray-500">E-file Form 4868 free. Confirmation via email within 24-48h.</p></div>
