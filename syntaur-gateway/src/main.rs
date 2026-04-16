@@ -1195,16 +1195,21 @@ async fn handle_api_message(
             }
         }
     }
-    let mut system_prompt = if context_parts.is_empty() {
-        format!("You are agent {}", agent_id)
+    let (mut system_prompt, used_persona_template) = if context_parts.is_empty() {
+        match try_default_persona(&state, &agent_id, principal.user_id()).await {
+            Some(prompt) => (prompt, true),
+            None => (format!("You are agent {}", agent_id), false),
+        }
     } else {
-        context_parts.join("\n\n---\n\n")
+        (context_parts.join("\n\n---\n\n"), false)
     };
-    // Inject per-user personality docs (bio, preferences, writing style)
-    let personality = state.users.personality_prompt(principal.user_id(), &agent_id, 4000).await;
-    if !personality.is_empty() {
-        system_prompt.push_str("\n\n---\n\n");
-        system_prompt.push_str(&personality);
+    // Inject per-user personality docs (skip if persona template already includes them)
+    if !used_persona_template {
+        let personality = state.users.personality_prompt(principal.user_id(), &agent_id, 4000).await;
+        if !personality.is_empty() {
+            system_prompt.push_str("\n\n---\n\n");
+            system_prompt.push_str(&personality);
+        }
     }
     // Inject tax context so the agent has full financial awareness
     {
@@ -1544,16 +1549,21 @@ async fn handle_message_start(
                 }
             }
         }
-        let mut system_prompt = if context_parts.is_empty() {
-            format!("You are agent {}", agent_for_task)
+        let (mut system_prompt, used_persona_template) = if context_parts.is_empty() {
+            match try_default_persona(&state_clone, &agent_for_task, principal_user_id).await {
+                Some(prompt) => (prompt, true),
+                None => (format!("You are agent {}", agent_for_task), false),
+            }
         } else {
-            context_parts.join("\n\n---\n\n")
+            (context_parts.join("\n\n---\n\n"), false)
         };
-        // Inject per-user personality docs
-        let personality = state_clone.users.personality_prompt(principal_user_id, &agent_for_task, 4000).await;
-        if !personality.is_empty() {
-            system_prompt.push_str("\n\n---\n\n");
-            system_prompt.push_str(&personality);
+        // Inject per-user personality docs (skip if persona template already includes them)
+        if !used_persona_template {
+            let personality = state_clone.users.personality_prompt(principal_user_id, &agent_for_task, 4000).await;
+            if !personality.is_empty() {
+                system_prompt.push_str("\n\n---\n\n");
+                system_prompt.push_str(&personality);
+            }
         }
         // Tax context injection
         {
@@ -5626,6 +5636,59 @@ fn open_browser(url: &str) -> std::io::Result<()> {
         std::process::Command::new("cmd").args(["/c", "start", url]).spawn()?;
     }
     Ok(())
+}
+
+
+/// When no custom_prompt or workspace files exist for an agent, try to resolve
+/// a system prompt from `module_agent_defaults`. Returns the substituted prompt
+/// string or None if no matching default exists.
+///
+/// This is the bridge between the persona registry (seeded in defaults.rs) and
+/// the live chat path. It only activates for agents with NO workspace files and
+/// NO custom prompt — i.e., fresh users or module-specific agents that haven't
+/// been customized yet. Existing agents with SOUL.md/IDENTITY.md (like Felix/
+/// Peter on Sean's deployment) are unaffected.
+async fn try_default_persona(
+    state: &AppState,
+    agent_id: &str,
+    user_id: i64,
+) -> Option<String> {
+    let agent_key = match agent_id {
+        "main" => "main_default".to_string(),
+        other => format!("module_{}", other),
+    };
+    let db = state.db_path.clone();
+    let key = agent_key;
+    let (template, display_name, default_humor) = tokio::task::spawn_blocking(move || {
+        let conn = rusqlite::Connection::open(&db).ok()?;
+        crate::agents::templates::load_default(&conn, &key).ok().flatten()
+    })
+    .await
+    .ok()
+    .flatten()?;
+
+    let first_name = state
+        .users
+        .get_user(user_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|u| u.name);
+    let personality = state.users.personality_prompt(user_id, agent_id, 4000).await;
+    let personality_opt = if personality.is_empty() {
+        None
+    } else {
+        Some(personality)
+    };
+    let humor = default_humor.unwrap_or(3);
+    let ctx = crate::agents::templates::base_context(
+        first_name.as_deref(),
+        personality_opt.as_deref(),
+        &display_name,
+        "Kyron",
+        humor,
+    );
+    Some(crate::agents::templates::substitute(&template, &ctx))
 }
 
 // -- Debug: resolve a default persona's system prompt with substitution ------
