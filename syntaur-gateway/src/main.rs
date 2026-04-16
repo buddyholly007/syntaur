@@ -1204,6 +1204,22 @@ async fn handle_api_message(
         system_prompt.push_str("\n\n---\n\n");
         system_prompt.push_str(&personality);
     }
+    // Inject tax context so the agent has full financial awareness
+    {
+        let db = state.db_path.clone();
+        let uid = principal.user_id();
+        let year: i64 = chrono::Utc::now().format("%Y").to_string().parse().unwrap_or(2025);
+        if let Ok(ctx) = tokio::task::spawn_blocking(move || {
+            let conn = rusqlite::Connection::open(&db).ok()?;
+            let ctx = crate::tax::build_tax_context(&conn, uid, year);
+            if ctx.is_empty() { None } else { Some(ctx) }
+        }).await {
+            if let Some(tax_ctx) = ctx {
+                system_prompt.push_str("\n\n---\n\n");
+                system_prompt.push_str(&tax_ctx);
+            }
+        }
+    }
 
     // Build LLM chain — use llm_agent_id (base agent for user agents)
     let llm_chain = std::sync::Arc::new(llm::LlmChain::from_config(&state.config, &resolved.llm_agent_id, state.client.clone()));
@@ -1536,6 +1552,20 @@ async fn handle_message_start(
         if !personality.is_empty() {
             system_prompt.push_str("\n\n---\n\n");
             system_prompt.push_str(&personality);
+        }
+        // Tax context injection
+        {
+            let db = state_clone.db_path.clone();
+            let uid = principal_user_id;
+            let year: i64 = chrono::Utc::now().format("%Y").to_string().parse().unwrap_or(2025);
+            if let Ok(Some(tax_ctx)) = tokio::task::spawn_blocking(move || {
+                let conn = rusqlite::Connection::open(&db).ok()?;
+                let ctx = crate::tax::build_tax_context(&conn, uid, year);
+                if ctx.is_empty() { None } else { Some(ctx) }
+            }).await {
+                system_prompt.push_str("\n\n---\n\n");
+                system_prompt.push_str(&tax_ctx);
+            }
         }
 
         let llm_chain = std::sync::Arc::new(
@@ -5044,6 +5074,11 @@ async fn main() {
         .route("/api/tax/k1", get(tax::handle_k1_list))
         .route("/api/tax/k1", post(tax::handle_k1_create))
         .route("/api/tax/capital-gains/summary", get(tax::handle_capital_gains_summary))
+        // AI Tax Advisor (Phase 4)
+        .route("/api/tax/context", get(tax::handle_tax_context))
+        .route("/api/tax/audit-risk", get(tax::handle_audit_risk))
+        .route("/api/tax/insights", get(tax::handle_tax_insights))
+        .route("/api/tax/what-if", post(tax::handle_what_if))
         // Module licensing
         .route("/api/modules/status", get(tax::handle_module_status))
         .route("/api/modules/trial", post(tax::handle_start_trial))

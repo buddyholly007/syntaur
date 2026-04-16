@@ -6286,3 +6286,429 @@ fn days_between(d1: &str, d2: &str) -> i64 {
     };
     (parse(d2) - parse(d1)).abs()
 }
+
+// ── AI Tax Advisor ──────────────────────────────────────────────────────────
+
+/// Build a comprehensive tax context summary for injection into the agent's
+/// system prompt. This gives the AI full awareness of the user's financial
+/// situation so it can answer tax questions with real numbers.
+pub fn build_tax_context(conn: &rusqlite::Connection, user_id: i64, year: i64) -> String {
+    let fs_row: Option<String> = conn.query_row(
+        "SELECT filing_status FROM taxpayer_profiles WHERE user_id = ? AND tax_year = ?",
+        rusqlite::params![user_id, year], |r| r.get(0),
+    ).ok();
+    let filing_status = fs_row.as_deref().unwrap_or("single");
+
+    let estimate = match compute_tax_estimate(conn, user_id, year, filing_status) {
+        Ok(e) => e,
+        Err(_) => return String::new(),
+    };
+
+    let deps: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM dependents WHERE user_id = ? AND tax_year = ?",
+        rusqlite::params![user_id, year], |r| r.get(0),
+    ).unwrap_or(0);
+
+    let receipts: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM receipts WHERE user_id = ?",
+        rusqlite::params![user_id], |r| r.get(0),
+    ).unwrap_or(0);
+
+    let docs: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM tax_documents WHERE user_id = ? AND tax_year = ? AND status = 'scanned'",
+        rusqlite::params![user_id, year], |r| r.get(0),
+    ).unwrap_or(0);
+
+    let lots: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM tax_lots WHERE user_id = ? AND status = 'open'",
+        rusqlite::params![user_id], |r| r.get(0),
+    ).unwrap_or(0);
+
+    let assets: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM depreciable_assets WHERE user_id = ? AND status = 'active'",
+        rusqlite::params![user_id], |r| r.get(0),
+    ).unwrap_or(0);
+
+    format!(
+        "# User's Tax Situation ({year})\n\
+         Filing status: {filing_status} | Dependents: {deps}\n\
+         Gross income: {gi} | W-2: {w2} | Self-employment: {se}\n\
+         Business deductions: {bd} | AGI: {agi}\n\
+         Deduction: {dt} ({dd})\n\
+         Taxable income: {ti}\n\
+         Tax: {tt} (ordinary {ot} + LTCG {lt} + SE {st})\n\
+         Credits: {tc} (CTC {ctc}, EITC {eitc}, CDCC {cdcc}, education {edu}, saver's {sav}, energy {eng})\n\
+         Payments: {tp} (W-2 withheld {wh} + estimated {ep})\n\
+         {owed_label}: {owed}\n\
+         Effective rate: {er}\n\
+         Documents: {docs} scanned | Receipts: {receipts} | Open lots: {lots} | Assets: {assets}",
+        gi=cents_to_display(estimate.gross_income), w2=cents_to_display(estimate.w2_income),
+        se=cents_to_display(estimate.se_income), bd=cents_to_display(estimate.biz_deductions),
+        agi=cents_to_display(estimate.agi), dt=estimate.deduction_type,
+        dd=cents_to_display(estimate.deduction_used), ti=cents_to_display(estimate.taxable_income),
+        tt=cents_to_display(estimate.total_tax), ot=cents_to_display(estimate.ordinary_tax),
+        lt=cents_to_display(estimate.ltcg_tax), st=cents_to_display(estimate.se_tax),
+        tc=cents_to_display(estimate.total_credits), ctc=cents_to_display(estimate.child_credit),
+        eitc=cents_to_display(estimate.eitc), cdcc=cents_to_display(estimate.cdcc),
+        edu=cents_to_display(estimate.education_credits), sav=cents_to_display(estimate.savers_credit),
+        eng=cents_to_display(estimate.energy_credits),
+        tp=cents_to_display(estimate.total_payments), wh=cents_to_display(estimate.w2_withheld),
+        ep=cents_to_display(estimate.estimated_payments),
+        owed_label=if estimate.owed >= 0 { "Owed" } else { "Refund" },
+        owed=cents_to_display(estimate.owed.abs()),
+        er=format!("{:.1}%", estimate.effective_rate),
+    )
+}
+
+/// Compute audit risk factors for a user's return.
+pub fn compute_audit_risk(conn: &rusqlite::Connection, user_id: i64, year: i64) -> Vec<serde_json::Value> {
+    let fs: String = conn.query_row(
+        "SELECT filing_status FROM taxpayer_profiles WHERE user_id = ? AND tax_year = ?",
+        rusqlite::params![user_id, year], |r| r.get(0),
+    ).unwrap_or_else(|_| "single".to_string());
+
+    let estimate = match compute_tax_estimate(conn, user_id, year, &fs) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut factors = Vec::new();
+
+    // High income (AGI > $200K increases audit rate ~4x)
+    if estimate.agi > 20_000_000 {
+        factors.push(serde_json::json!({
+            "factor": "high_income", "risk": "medium",
+            "description": format!("AGI of {} is above $200K — IRS audit rate increases significantly at this level", cents_to_display(estimate.agi)),
+        }));
+    }
+
+    // Schedule C with high deduction ratio
+    if estimate.se_income > 0 && estimate.biz_deductions > 0 {
+        let ratio = estimate.biz_deductions as f64 / estimate.se_income as f64;
+        if ratio > 0.80 {
+            factors.push(serde_json::json!({
+                "factor": "high_sch_c_deductions", "risk": "high",
+                "description": format!("Business deductions are {:.0}% of SE income — ratios above 80% draw IRS attention", ratio * 100.0),
+            }));
+        }
+    }
+
+    // Home office deduction
+    let home_office: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(e.amount_cents),0) FROM expenses e JOIN expense_categories c ON e.category_id=c.id \
+         WHERE e.user_id=? AND c.name LIKE '%Home Office%' AND e.entity='business'",
+        rusqlite::params![user_id], |r| r.get(0),
+    ).unwrap_or(0);
+    if home_office > 0 {
+        factors.push(serde_json::json!({
+            "factor": "home_office", "risk": "low",
+            "description": format!("Home office deduction of {} — ensure exclusive business use documentation", cents_to_display(home_office)),
+        }));
+    }
+
+    // Large charitable deductions relative to income
+    let charitable: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(e.amount_cents),0) FROM expenses e JOIN expense_categories c ON e.category_id=c.id \
+         WHERE e.user_id=? AND (c.name LIKE '%Charit%' OR c.name LIKE '%Donat%') AND e.entity='personal'",
+        rusqlite::params![user_id], |r| r.get(0),
+    ).unwrap_or(0);
+    if estimate.agi > 0 && charitable > 0 {
+        let pct = charitable as f64 / estimate.agi as f64;
+        if pct > 0.05 {
+            factors.push(serde_json::json!({
+                "factor": "large_charitable", "risk": if pct > 0.10 { "medium" } else { "low" },
+                "description": format!("Charitable deductions are {:.1}% of AGI ({}) — keep receipts for all donations over $250", pct * 100.0, cents_to_display(charitable)),
+            }));
+        }
+    }
+
+    // Unreported income risk (large cash business)
+    if estimate.se_income > 10_000_000 {
+        let has_1099: bool = conn.query_row(
+            "SELECT COUNT(*) FROM tax_documents WHERE user_id=? AND tax_year=? AND doc_type LIKE '1099%'",
+            rusqlite::params![user_id, year], |r| r.get::<_,i64>(0),
+        ).unwrap_or(0) > 0;
+        if !has_1099 {
+            factors.push(serde_json::json!({
+                "factor": "no_1099_docs", "risk": "medium",
+                "description": "Self-employment income over $100K with no 1099 documents uploaded — ensure all income is reported",
+            }));
+        }
+    }
+
+    // Zero tax liability
+    if estimate.total_tax == 0 && estimate.gross_income > 5_000_000 {
+        factors.push(serde_json::json!({
+            "factor": "zero_tax", "risk": "medium",
+            "description": format!("Zero tax on {} income — while legal, this pattern may attract scrutiny", cents_to_display(estimate.gross_income)),
+        }));
+    }
+
+    // Overall risk score
+    let risk_score: usize = factors.iter().map(|f| {
+        match f.get("risk").and_then(|r| r.as_str()).unwrap_or("low") {
+            "high" => 3, "medium" => 2, "low" => 1, _ => 0,
+        }
+    }).sum();
+    let overall = if risk_score >= 6 { "high" } else if risk_score >= 3 { "medium" } else { "low" };
+
+    // Prepend overall summary
+    let mut result = vec![serde_json::json!({
+        "factor": "overall", "risk": overall,
+        "description": format!("{} risk factors identified (score: {})", factors.len(), risk_score),
+    })];
+    result.extend(factors);
+    result
+}
+
+/// Generate optimization insights based on the user's current tax data.
+pub fn generate_tax_insights(conn: &rusqlite::Connection, user_id: i64, year: i64) -> Vec<serde_json::Value> {
+    let fs: String = conn.query_row(
+        "SELECT filing_status FROM taxpayer_profiles WHERE user_id = ? AND tax_year = ?",
+        rusqlite::params![user_id, year], |r| r.get(0),
+    ).unwrap_or_else(|_| "single".to_string());
+
+    let estimate = match compute_tax_estimate(conn, user_id, year, &fs) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut insights = Vec::new();
+
+    // Itemized vs standard comparison
+    if estimate.deduction_type == "Standard" && estimate.itemized_deduction > 0 {
+        let gap = estimate.standard_deduction - estimate.itemized_deduction;
+        if gap < 500_000 { // within $5K of itemizing
+            insights.push(serde_json::json!({
+                "type": "optimization", "priority": 8,
+                "title": "Close to itemizing",
+                "body": format!("Your itemized deductions ({}) are {} below the standard deduction. Consider bunching charitable donations or prepaying property tax to cross the threshold.",
+                    cents_to_display(estimate.itemized_deduction), cents_to_display(gap)),
+                "estimated_savings_cents": gap * estimate.ordinary_tax / std::cmp::max(estimate.taxable_income, 1),
+            }));
+        }
+    }
+
+    // Medical expense threshold
+    let medical: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(e.amount_cents),0) FROM expenses e JOIN expense_categories c ON e.category_id=c.id \
+         WHERE e.user_id=? AND c.name='Medical' AND e.entity='personal'",
+        rusqlite::params![user_id], |r| r.get(0),
+    ).unwrap_or(0);
+    if medical > 0 && estimate.agi > 0 {
+        let floor = (estimate.agi as f64 * 0.075) as i64;
+        let gap = floor - medical;
+        if gap > 0 && gap < 200_000 {
+            insights.push(serde_json::json!({
+                "type": "optimization", "priority": 7,
+                "title": "Medical expense threshold",
+                "body": format!("You have {} in medical expenses — {} more would cross the 7.5% AGI floor for deductibility. Schedule elective procedures before year-end if applicable.",
+                    cents_to_display(medical), cents_to_display(gap)),
+            }));
+        }
+    }
+
+    // Retirement contribution opportunity
+    if estimate.savers_credit == 0 && estimate.agi < 4_000_000 {
+        insights.push(serde_json::json!({
+            "type": "optimization", "priority": 9,
+            "title": "Saver's Credit available",
+            "body": "You may qualify for the Saver's Credit (up to $1,000) by contributing to an IRA or 401(k). Even a small contribution could reduce your tax.",
+            "estimated_savings_cents": 100_000,
+        }));
+    }
+
+    // EITC eligibility check
+    if estimate.eitc > 0 {
+        insights.push(serde_json::json!({
+            "type": "milestone", "priority": 10,
+            "title": format!("EITC: {} credit", cents_to_display(estimate.eitc)),
+            "body": "You qualify for the Earned Income Tax Credit. This is a refundable credit — you'll receive it even if you owe no tax.",
+        }));
+    }
+
+    // Estimated tax underpayment warning
+    if estimate.owed > 100_000 { // owes more than $1K
+        insights.push(serde_json::json!({
+            "type": "warning", "priority": 9,
+            "title": format!("Projected underpayment: {}", cents_to_display(estimate.owed)),
+            "body": "You're on track to owe at filing. Consider making an estimated tax payment to avoid underpayment penalties. Go to IRS Direct Pay to pay online.",
+        }));
+    }
+
+    // Large refund = overwithholding
+    if estimate.owed < -200_000 { // refund over $2K
+        insights.push(serde_json::json!({
+            "type": "optimization", "priority": 6,
+            "title": format!("Large refund projected: {}", cents_to_display(estimate.owed.abs())),
+            "body": "A large refund means you're lending money to the IRS interest-free. Consider adjusting your W-4 to reduce withholding and increase your take-home pay.",
+        }));
+    }
+
+    // HSA contribution opportunity
+    if estimate.se_income > 0 || estimate.w2_income > 0 {
+        let hsa: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(e.amount_cents),0) FROM expenses e JOIN expense_categories c ON e.category_id=c.id \
+             WHERE e.user_id=? AND c.name LIKE '%HSA%'",
+            rusqlite::params![user_id], |r| r.get(0),
+        ).unwrap_or(0);
+        if hsa == 0 {
+            insights.push(serde_json::json!({
+                "type": "optimization", "priority": 7,
+                "title": "HSA contribution opportunity",
+                "body": "If you have a high-deductible health plan, HSA contributions are triple-tax-advantaged: deductible, grow tax-free, and withdrawals for medical expenses are tax-free. 2025 limit: $4,300 individual / $8,550 family.",
+            }));
+        }
+    }
+
+    insights.sort_by(|a, b| {
+        let pa = a.get("priority").and_then(|v| v.as_i64()).unwrap_or(0);
+        let pb = b.get("priority").and_then(|v| v.as_i64()).unwrap_or(0);
+        pb.cmp(&pa)
+    });
+    insights
+}
+
+// ── AI Tax Advisor API ──────────────────────────────────────────────────────
+
+pub async fn handle_tax_context(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized".to_string()))?;
+    let uid = principal.user_id();
+    let year: i64 = params.get("year").and_then(|s| s.parse().ok()).unwrap_or(2025);
+    let db = state.db_path.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let context = build_tax_context(&conn, uid, year);
+        Ok(serde_json::json!({"context": context, "year": year}))
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(result))
+}
+
+pub async fn handle_audit_risk(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized".to_string()))?;
+    let uid = principal.user_id();
+    require_tax_module(&state, uid).await?;
+    let year: i64 = params.get("year").and_then(|s| s.parse().ok()).unwrap_or(2025);
+    let db = state.db_path.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let factors = compute_audit_risk(&conn, uid, year);
+        Ok(serde_json::json!({"factors": factors, "year": year}))
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(result))
+}
+
+pub async fn handle_tax_insights(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized".to_string()))?;
+    let uid = principal.user_id();
+    require_tax_module(&state, uid).await?;
+    let year: i64 = params.get("year").and_then(|s| s.parse().ok()).unwrap_or(2025);
+    let db = state.db_path.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let insights = generate_tax_insights(&conn, uid, year);
+        Ok(serde_json::json!({"insights": insights, "year": year}))
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(result))
+}
+
+#[derive(serde::Deserialize)]
+pub struct WhatIfReq {
+    token: String,
+    tax_year: i64,
+    scenario_name: String,
+    additional_income_cents: Option<i64>,
+    additional_deduction_cents: Option<i64>,
+    filing_status_override: Option<String>,
+    additional_dependents: Option<i64>,
+    retirement_contribution_cents: Option<i64>,
+}
+
+pub async fn handle_what_if(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<WhatIfReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &req.token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized".to_string()))?;
+    let uid = principal.user_id();
+    require_tax_module(&state, uid).await?;
+    let db = state.db_path.clone();
+
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+
+        // Get current filing status
+        let current_fs: String = conn.query_row(
+            "SELECT filing_status FROM taxpayer_profiles WHERE user_id = ? AND tax_year = ?",
+            rusqlite::params![uid, req.tax_year], |r| r.get(0),
+        ).unwrap_or_else(|_| "single".to_string());
+
+        // Baseline
+        let baseline = compute_tax_estimate(&conn, uid, req.tax_year, &current_fs)?;
+
+        // For the what-if, we compute a modified estimate
+        // This is simplified: we adjust the baseline numbers directly
+        let scenario_fs = req.filing_status_override.as_deref().unwrap_or(&current_fs);
+        let scenario = compute_tax_estimate(&conn, uid, req.tax_year, scenario_fs)?;
+
+        // Apply what-if adjustments to the scenario
+        let adj_income = req.additional_income_cents.unwrap_or(0);
+        let adj_deduction = req.additional_deduction_cents.unwrap_or(0);
+        let adj_retirement = req.retirement_contribution_cents.unwrap_or(0);
+
+        // Rough recalculation with adjustments
+        let new_agi = scenario.agi + adj_income - adj_deduction - adj_retirement;
+        let new_taxable = std::cmp::max(new_agi - scenario.deduction_used, 0);
+
+        // Re-estimate tax at the new taxable income level using marginal rate
+        let marginal_rate = if scenario.taxable_income > 0 {
+            (scenario.ordinary_tax as f64 / scenario.taxable_income as f64 * 10000.0) as i64
+        } else { 2200 }; // default 22% bracket
+
+        let tax_change = (new_taxable - scenario.taxable_income) * marginal_rate / 10000;
+        let new_tax = scenario.total_tax + tax_change;
+        let new_owed = new_tax - scenario.total_payments;
+
+        Ok(serde_json::json!({
+            "scenario": req.scenario_name,
+            "baseline": {
+                "agi": cents_to_display(baseline.agi),
+                "taxable_income": cents_to_display(baseline.taxable_income),
+                "total_tax": cents_to_display(baseline.total_tax),
+                "owed": cents_to_display(baseline.owed),
+                "effective_rate": format!("{:.1}%", baseline.effective_rate),
+            },
+            "scenario_result": {
+                "agi": cents_to_display(new_agi),
+                "taxable_income": cents_to_display(new_taxable),
+                "total_tax": cents_to_display(new_tax),
+                "owed": cents_to_display(new_owed),
+            },
+            "difference": {
+                "tax_change": cents_to_display(tax_change),
+                "owed_change": cents_to_display(new_owed - baseline.owed),
+                "savings": if tax_change < 0 { cents_to_display(tax_change.abs()) } else { "$0.00".to_string() },
+            },
+        }))
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(result))
+}

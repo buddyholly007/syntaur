@@ -1290,6 +1290,47 @@ const MIGRATIONS: &[&str] = &[
         UNIQUE(user_id, tax_year)
     );
     "#,
+
+    // Migration 34: AI tax advisor — insights, audit risk, scenarios.
+    r#"
+    CREATE TABLE IF NOT EXISTS tax_insights (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id             INTEGER NOT NULL,
+        tax_year            INTEGER NOT NULL,
+        insight_type        TEXT NOT NULL,
+        title               TEXT NOT NULL,
+        body                TEXT NOT NULL,
+        estimated_savings_cents INTEGER NOT NULL DEFAULT 0,
+        priority            INTEGER NOT NULL DEFAULT 5,
+        status              TEXT NOT NULL DEFAULT 'new',
+        dismissed_at        INTEGER,
+        created_at          INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_insights_user ON tax_insights(user_id, tax_year);
+
+    CREATE TABLE IF NOT EXISTS audit_risk_factors (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id             INTEGER NOT NULL,
+        tax_year            INTEGER NOT NULL,
+        factor_type         TEXT NOT NULL,
+        description         TEXT NOT NULL,
+        risk_level          TEXT NOT NULL DEFAULT 'low',
+        details_json        TEXT DEFAULT '{}',
+        created_at          INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS tax_scenarios (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id             INTEGER NOT NULL,
+        tax_year            INTEGER NOT NULL,
+        scenario_name       TEXT NOT NULL,
+        parameters_json     TEXT NOT NULL DEFAULT '{}',
+        baseline_json       TEXT NOT NULL DEFAULT '{}',
+        result_json         TEXT NOT NULL DEFAULT '{}',
+        difference_json     TEXT NOT NULL DEFAULT '{}',
+        created_at          INTEGER NOT NULL
+    );
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
