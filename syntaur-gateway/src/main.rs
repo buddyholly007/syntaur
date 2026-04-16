@@ -5006,6 +5006,9 @@ async fn main() {
         .route("/api/setup/test-ha", post(setup::handle_test_ha))
         .route("/api/setup/modules", get(setup::handle_setup_modules))
         .route("/api/agents/resolve_prompt", get(handle_api_agent_resolve_prompt))
+        .route("/api/agents/seed_defaults", axum::routing::post(handle_api_agent_seed_defaults))
+        .route("/api/agents/rename", axum::routing::put(handle_api_agent_rename))
+        .route("/api/agents/list", get(handle_api_agent_list))
         .route("/api/modules/toggle", post(setup::handle_module_toggle))
         .route("/api/license/status", get(setup::handle_license_status))
         .route("/api/license/activate", post(setup::handle_license_activate))
@@ -5639,6 +5642,100 @@ fn open_browser(url: &str) -> std::io::Result<()> {
 }
 
 
+
+// ── Agent onboarding endpoints ──────────────────────────────────────────────
+
+/// POST /api/agents/seed_defaults — clone all product-default personas into
+/// the caller's user_agents. Idempotent — safe to call repeatedly. Existing
+/// agents are not overwritten (INSERT OR IGNORE).
+async fn handle_api_agent_seed_defaults(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").cloned().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let principal = resolve_principal(&state, &token).await?;
+    let uid = principal.user_id();
+
+    let db = state.db_path.clone();
+    let count = tokio::task::spawn_blocking(move || {
+        let conn = rusqlite::Connection::open(&db).ok()?;
+        crate::agents::defaults::clone_for_user(&conn, uid).ok()
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(0);
+
+    Ok(Json(serde_json::json!({
+        "seeded": count,
+        "user_id": uid,
+    })))
+}
+
+/// PUT /api/agents/rename — rename a user's agent display name.
+/// Body: {"token": "...", "agent_id": "main", "name": "MyAssistant"}
+async fn handle_api_agent_rename(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let agent_id = body["agent_id"].as_str().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
+    let new_name = body["name"].as_str().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
+    if new_name.trim().is_empty() || new_name.len() > 50 {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+
+    let db = state.db_path.clone();
+    let aid = agent_id.to_string();
+    let nn = new_name.to_string();
+    let updated = tokio::task::spawn_blocking(move || {
+        let conn = rusqlite::Connection::open(&db).ok()?;
+        crate::agents::defaults::rename_agent(&conn, uid, &aid, &nn).ok()
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(0);
+
+    if updated == 0 {
+        return Err(axum::http::StatusCode::NOT_FOUND);
+    }
+    Ok(Json(serde_json::json!({
+        "renamed": true,
+        "agent_id": agent_id,
+        "new_name": new_name,
+    })))
+}
+
+/// GET /api/agents/list — list the caller's agents with display names and roles.
+async fn handle_api_agent_list(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").cloned().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let principal = resolve_principal(&state, &token).await?;
+    let uid = principal.user_id();
+    let agents = state.users.list_user_agents(uid).await.unwrap_or_default();
+
+    let list: Vec<serde_json::Value> = agents
+        .iter()
+        .map(|a| {
+            serde_json::json!({
+                "agent_id": a.agent_id,
+                "display_name": a.display_name,
+                "base_agent": a.base_agent,
+                "enabled": a.enabled,
+                "has_custom_prompt": a.system_prompt.is_some(),
+            })
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({ "agents": list })))
+}
+
 /// When no custom_prompt or workspace files exist for an agent, try to resolve
 /// a system prompt from `module_agent_defaults`. Returns the substituted prompt
 /// string or None if no matching default exists.
@@ -5686,11 +5783,29 @@ async fn try_default_persona(
         Some(personality)
     };
     let humor = default_humor.unwrap_or(3);
+    // If the user renamed this agent, use their name instead of the default
+    let user_display_override = state
+        .users
+        .get_user_agent(user_id, agent_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|ua| ua.display_name);
+    let effective_name = user_display_override.as_deref().unwrap_or(&display_name);
+    // Resolve the user's main agent name (for {{main_agent_name}} in specialist prompts)
+    let main_agent_display = state
+        .users
+        .get_user_agent(user_id, "main")
+        .await
+        .ok()
+        .flatten()
+        .map(|ua| ua.display_name)
+        .unwrap_or_else(|| "Kyron".to_string());
     let mut ctx = crate::agents::templates::base_context(
         first_name.as_deref(),
         personality_opt.as_deref(),
-        &display_name,
-        "Kyron",
+        effective_name,
+        &main_agent_display,
         humor,
     );
     // Merge module-specific vars (tax profile, calendar snapshot, etc.)
@@ -5748,11 +5863,35 @@ async fn handle_api_agent_resolve_prompt(
     };
     let humor = default_humor.unwrap_or(3);
 
+    // Check if user renamed this agent (map agent_key → agent_id)
+    let debug_agent_id = match agent_key.as_str() {
+        "main_default" => "main".to_string(),
+        k if k.starts_with("module_") => k[7..].to_string(),
+        k => k.to_string(),
+    };
+    let debug_user_display = state
+        .users
+        .get_user_agent(uid, &debug_agent_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|ua| ua.display_name);
+    let effective_name = debug_user_display.as_deref().unwrap_or(&display_name);
+    // Resolve user's main agent name for {{main_agent_name}}
+    let debug_main_display = state
+        .users
+        .get_user_agent(uid, "main")
+        .await
+        .ok()
+        .flatten()
+        .map(|ua| ua.display_name)
+        .unwrap_or_else(|| "Kyron".to_string());
+
     let mut ctx = crate::agents::templates::base_context(
         first_name.as_deref(),
         personality_opt.as_deref(),
-        &display_name,
-        "Kyron",
+        effective_name,
+        &debug_main_display,
         humor,
     );
     for (k, v) in module_vars {
@@ -5764,7 +5903,7 @@ async fn handle_api_agent_resolve_prompt(
     Ok(Json(serde_json::json!({
         "agent_key": agent_key,
         "user_id": uid,
-        "display_name": display_name,
+        "display_name": effective_name,
         "humor_level": humor,
         "length": prompt.len(),
         "placeholders_remaining": prompt.matches("{{").count(),

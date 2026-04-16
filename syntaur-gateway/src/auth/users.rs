@@ -133,6 +133,10 @@ impl UserStore {
         )
         .map_err(|e| format!("create user '{}': {}", name, e))?;
         let id = db.last_insert_rowid();
+        // Seed default persona agents for the new user
+        if let Err(e) = crate::agents::defaults::clone_for_user(&db, id) {
+            log::warn!("failed to clone default agents for user {}: {}", id, e);
+        }
         Ok(User {
             id,
             name: name.to_string(),

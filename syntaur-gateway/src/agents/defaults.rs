@@ -522,3 +522,54 @@ pub fn seed(conn: &Connection) -> rusqlite::Result<()> {
     }
     Ok(())
 }
+
+/// Clone the product-default agents into a specific user's `user_agents` table.
+/// Called during onboarding so every new user starts with the 7 canonical
+/// personas (Peter is excluded — Sean's local-only deployment).
+///
+/// Each cloned row has `system_prompt = NULL`, which means the live chat path
+/// falls through to `try_default_persona()` and resolves the template
+/// dynamically with the user's current context. This way, updates to the
+/// default templates take effect immediately without re-cloning.
+///
+/// Idempotent — uses INSERT OR IGNORE so re-calling is safe.
+pub fn clone_for_user(conn: &rusqlite::Connection, user_id: i64) -> rusqlite::Result<usize> {
+    let now = chrono::Utc::now().timestamp();
+    conn.execute(
+        r#"
+        INSERT OR IGNORE INTO user_agents
+            (user_id, agent_id, display_name, base_agent, system_prompt,
+             tool_profile, enabled, created_at, updated_at)
+        SELECT
+            ?1,
+            CASE
+                WHEN agent_key = 'main_default' THEN 'main'
+                WHEN agent_key LIKE 'module_%' THEN SUBSTR(agent_key, 8)
+                ELSE agent_key
+            END,
+            default_display_name,
+            'main',
+            NULL,
+            'full',
+            1,
+            ?2, ?2
+        FROM module_agent_defaults
+        WHERE agent_key != 'main_peter_local'
+        "#,
+        rusqlite::params![user_id, now],
+    )
+}
+
+/// Rename a user's agent display name. Used during onboarding or from settings.
+pub fn rename_agent(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+    agent_id: &str,
+    new_name: &str,
+) -> rusqlite::Result<usize> {
+    let now = chrono::Utc::now().timestamp();
+    conn.execute(
+        "UPDATE user_agents SET display_name = ?1, updated_at = ?2 WHERE user_id = ?3 AND agent_id = ?4",
+        rusqlite::params![new_name, now, user_id, agent_id],
+    )
+}
