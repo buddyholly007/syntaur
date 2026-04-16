@@ -35,84 +35,104 @@ body.bg-gray-950 { background: var(--bg) !important; color: var(--ink) !importan
 #rain-canvas { position: fixed; inset: 0; z-index: 0; pointer-events: none; opacity: 0.18; mix-blend-mode: screen; }
 
 /* ======== CRT scanline + vignette overlays — inside the glass area ======== */
-.crt-scan { position: fixed; inset: 18px 22px 48px 22px; pointer-events: none; z-index: 10;
+.crt-scan { position: fixed; inset: 32px 38px 62px 38px; pointer-events: none; z-index: 10;
     background: repeating-linear-gradient(to bottom, transparent 0, transparent 2px, rgba(0,0,0,0.35) 3px, transparent 4px);
-    mix-blend-mode: multiply; border-radius: 12px; }
-.crt-vignette { position: fixed; inset: 18px 22px 48px 22px; pointer-events: none; z-index: 11;
-    background: radial-gradient(ellipse at center, transparent 45%, rgba(0,0,0,0.7) 100%);
-    border-radius: 12px; }
-.crt-flicker { position: fixed; inset: 18px 22px 48px 22px; pointer-events: none; z-index: 12;
-    background: rgba(51,255,102,0.02); animation: flicker 3.5s infinite; border-radius: 12px; }
+    mix-blend-mode: multiply; border-radius: 22px; }
+.crt-vignette { position: fixed; inset: 32px 38px 62px 38px; pointer-events: none; z-index: 11;
+    background: radial-gradient(ellipse at center, transparent 42%, rgba(0,0,0,0.78) 100%);
+    border-radius: 22px; }
+.crt-flicker { position: fixed; inset: 32px 38px 62px 38px; pointer-events: none; z-index: 12;
+    background: rgba(51,255,102,0.02); animation: flicker 3.5s infinite; border-radius: 22px; }
 @keyframes flicker { 0%,19%,21%,23%,25%,54%,56%,100% { opacity: 0.98; } 20%,24%,55% { opacity: 0.88; } }
 
-/* ======== 90s CRT monitor bezel — plastic frame wrapping the viewport ======== */
+/* ======== 90s beige CRT monitor bezel — warm cream plastic (Apple-style) ======== */
 body.bg-gray-950 { overflow: hidden; }
 .crt-bezel {
     position: fixed; inset: 0; pointer-events: none; z-index: 20;
-    /* Plastic frame — thicker at the bottom for the brand plate */
+    /* Chunky plastic frame — thick all around, extra-thick bottom for brand plate */
     border-style: solid;
-    border-width: 18px 22px 48px 22px;
-    /* Graphite plastic with subtle vertical shading */
-    border-color: #1a1815;
+    border-width: 32px 38px 62px 38px;
+    /* Warm aged-beige plastic with top-highlight + bottom-shadow shading */
+    border-color: #c7b791;
     border-image: linear-gradient(to bottom,
-        #302c28 0%, #201d1a 8%, #15120f 55%, #0c0a08 85%, #2a2623 100%) 1;
-    /* Inner glass curvature — the recessed CRT tube look */
+        #e2d4b0 0%,   /* top — lit, cream */
+        #d6c69c 12%,
+        #c7b88f 42%,  /* body — warm beige */
+        #b6a57d 72%,
+        #9c8a65 92%,  /* bottom — shadow, darker beige */
+        #867653 100%) 1;
+    /* Recessed CRT tube glass */
     box-shadow:
-        inset 0 0 0 2px #000,                      /* sharp inner lip */
-        inset 0 0 0 3px #090705,                   /* dark ledge */
-        inset 0 0 12px 1px rgba(0,0,0,0.9),        /* inner glass shadow */
-        inset 0 0 90px 40px rgba(0,0,0,0.45),      /* subtle curvature darkening */
-        0 0 40px rgba(0,0,0,0.9);                  /* drop shadow behind the monitor */
-    /* Rounded glass corners */
-    border-radius: 30px;
+        inset 0 0 0 3px #5c4f3a,                    /* dark seam where glass meets bezel */
+        inset 0 0 0 5px #2a231a,                    /* deep ledge */
+        inset 0 0 14px 2px rgba(0,0,0,0.85),        /* inner glass shadow */
+        inset 0 0 120px 60px rgba(0,0,0,0.35),      /* bulged-glass curvature darkening */
+        0 0 60px rgba(0,0,0,0.85);                  /* drop shadow behind the monitor */
+    /* Chunky rounded corners (late-90s Apple curvature) */
+    border-radius: 48px;
 }
-/* Subtle diagonal glass sheen — upper-left to lower-right */
+/* Glass curvature inner frame — the recessed tube with its own rounded corners */
 .crt-bezel::before {
-    content: ''; position: absolute; inset: 18px 22px 48px 22px; pointer-events: none;
-    border-radius: 12px;
-    background: linear-gradient(128deg,
-        rgba(255,255,255,0.045) 0%,
-        rgba(255,255,255,0.015) 22%,
-        transparent 40%,
-        transparent 72%,
-        rgba(255,255,255,0.01) 100%);
+    content: ''; position: absolute; inset: 32px 38px 62px 38px; pointer-events: none;
+    border-radius: 22px;
+    /* Diagonal bright reflection top-right + soft gradient across the glass */
+    background:
+        radial-gradient(ellipse 45% 30% at 78% 18%, rgba(255,255,255,0.14) 0%, rgba(255,255,255,0.05) 40%, transparent 70%),
+        linear-gradient(132deg,
+            rgba(255,255,255,0.04) 0%,
+            rgba(255,255,255,0.01) 25%,
+            transparent 45%,
+            transparent 72%,
+            rgba(255,255,255,0.015) 100%);
+    /* Seam shadow around the glass recess */
+    box-shadow:
+        0 0 0 1px rgba(0,0,0,0.5),
+        0 1px 0 rgba(255,255,255,0.08);
 }
-/* Brand plate on the lower bezel */
+/* Brand plate on the lower bezel — dark-beige lettering on cream */
 .crt-bezel::after {
     content: 'SYNTAUR  CRT-9000  //  PAIR PROGRAMMER EDITION';
-    position: absolute; left: 0; right: 0; bottom: 12px;
+    position: absolute; left: 0; right: 0; bottom: 18px;
     text-align: center;
-    font-family: 'VT323', monospace; font-size: 0.78rem; letter-spacing: 0.22em;
-    color: #4d4743; text-shadow: 0 1px 0 rgba(0,0,0,0.85), 0 -1px 0 rgba(255,255,255,0.03);
+    font-family: 'VT323', monospace; font-size: 0.8rem; letter-spacing: 0.22em;
+    color: #6b5a3e;
+    text-shadow: 0 1px 0 rgba(255,240,210,0.45), 0 -1px 0 rgba(40,30,15,0.1);
     pointer-events: none;
 }
-/* Power LED — phosphor green, bottom-right on the bezel */
+/* Power LED — phosphor green pinhole on the beige, bottom-right */
 .crt-led {
-    position: fixed; bottom: 16px; right: 42px; z-index: 22; pointer-events: none;
+    position: fixed; bottom: 22px; right: 62px; z-index: 22; pointer-events: none;
     width: 6px; height: 6px; border-radius: 50%;
     background: #33ff66;
-    box-shadow: 0 0 6px rgba(51,255,102,0.95), 0 0 12px rgba(51,255,102,0.45), inset 0 0 1px rgba(255,255,255,0.7);
+    box-shadow:
+        0 0 6px rgba(51,255,102,0.95),
+        0 0 14px rgba(51,255,102,0.5),
+        inset 0 0 1px rgba(255,255,255,0.7),
+        0 0 0 2px #a6925f,                         /* beige recess ring */
+        0 0 0 3px rgba(0,0,0,0.4);                 /* dark seam around recess */
     animation: led-pulse 4s ease-in-out infinite;
 }
-@keyframes led-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.75; } }
-/* Power-label next to LED */
+@keyframes led-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.72; } }
+/* "PWR" label next to LED, dark-beige on cream */
 .crt-led-label {
-    position: fixed; bottom: 13px; right: 54px; z-index: 22; pointer-events: none;
-    font-family: 'VT323', monospace; font-size: 0.72rem; letter-spacing: 0.15em;
-    color: #3d3834;
+    position: fixed; bottom: 19px; right: 76px; z-index: 22; pointer-events: none;
+    font-family: 'VT323', monospace; font-size: 0.78rem; letter-spacing: 0.18em;
+    color: #6b5a3e; text-shadow: 0 1px 0 rgba(255,240,210,0.45);
 }
-/* Corner screws — tiny debossed dots */
-.crt-screw { position: fixed; width: 4px; height: 4px; border-radius: 50%; z-index: 21; pointer-events: none;
-    background: radial-gradient(circle at 35% 35%, #0a0806, #060504 60%, #1a1714 100%);
-    box-shadow: 0 0 0 1px rgba(0,0,0,0.7), inset 0 0 1px rgba(255,255,255,0.04);
+/* Side vent slats — subtle horizontal striations on the left bezel, 90s styling */
+.crt-vents {
+    position: fixed; left: 10px; top: 50%; transform: translateY(-50%); z-index: 21; pointer-events: none;
+    width: 8px; height: 90px;
+    background: repeating-linear-gradient(to bottom,
+        transparent 0, transparent 3px,
+        rgba(60,45,25,0.35) 3px, rgba(60,45,25,0.35) 4px);
+    border-radius: 1px;
 }
-.crt-screw.tl { top: 6px;  left: 8px; }
-.crt-screw.tr { top: 6px;  right: 8px; }
-.crt-screw.bl { bottom: 18px; left: 8px; }
-.crt-screw.br { bottom: 18px; right: 8px; }
+/* Subtle speckle / noise on the plastic to simulate aged texture */
+.crt-bezel { background-color: transparent; }
 
 /* Main layout sits above the rain, below the overlays, inside the bezel */
-.workshop-root { position: relative; z-index: 5; padding: 18px 22px 48px 22px; box-sizing: border-box; height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
+.workshop-root { position: relative; z-index: 5; padding: 32px 38px 62px 38px; box-sizing: border-box; height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
 .workshop-root .workshop-body { flex: 1; display: flex; min-height: 0; overflow: hidden; }
 
 /* ======== Top bar override — phosphor/rust treatment ======== */
@@ -1009,12 +1029,9 @@ pub async fn render() -> Html<String> {
         div class="crt-scan" {}
         div class="crt-vignette" {}
         div class="crt-flicker" {}
-        // 90s CRT monitor bezel — plastic frame + screws + power LED + brand plate
+        // 90s beige CRT monitor bezel — plastic frame + side vents + power LED + brand plate
         div class="crt-bezel" {}
-        div class="crt-screw tl" {}
-        div class="crt-screw tr" {}
-        div class="crt-screw bl" {}
-        div class="crt-screw br" {}
+        div class="crt-vents" {}
         div class="crt-led-label" { "PWR" }
         div class="crt-led" {}
 
