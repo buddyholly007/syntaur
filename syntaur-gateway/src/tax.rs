@@ -2813,11 +2813,30 @@ pub async fn handle_extension(
             _ => String::new(),
         };
 
+        // A SSN is "masked" when it starts with XXX or is shorter than the
+        // 9 digits the IRS expects. Treat masked profile values as a weak
+        // fallback — a fully-extracted SSN from a re-scanned W-2 should
+        // win over the profile's redacted preview.
+        let is_full_ssn = |s: &Option<String>| -> bool {
+            s.as_deref().map(|v| {
+                let digits: String = v.chars().filter(|c| c.is_ascii_digit()).collect();
+                digits.len() == 9 && !v.to_uppercase().contains('X')
+            }).unwrap_or(false)
+        };
+        let prefer_full_ssn = |a: Option<String>, b: Option<String>| -> Option<String> {
+            // If `a` is full, use it; if `a` is masked but `b` is full, use `b`;
+            // otherwise fall back to whichever exists.
+            if is_full_ssn(&a) { a }
+            else if is_full_ssn(&b) { b }
+            else { a.or(b) }
+        };
+
         // Spouse SSN is only meaningful on a joint return — leave it blank
         // for non-joint filers so the IRS doesn't reject for an extra SSN.
-        // Layer: explicit override > profile column > W-2 last4 (masked).
+        // Layer: explicit override > whichever of (profile, scan) is full.
         let spouse_ssn_final = if filing_status == "married_jointly" {
-            spouse_ssn_override.or(sp_ssn_db).or(scan.spouse_ssn_masked.clone())
+            spouse_ssn_override
+                .or_else(|| prefer_full_ssn(sp_ssn_db.clone(), scan.spouse_ssn_masked.clone()))
         } else {
             None
         };
@@ -2847,7 +2866,8 @@ pub async fn handle_extension(
             city: city_override.or(city).or(scan.city.clone()),
             state: state_override.or(st).or(scan.state.clone()),
             zip: zip_override.or(zip).or(scan.zip.clone()),
-            ssn: ssn_override.or(ssn_db).or(scan.primary_ssn_masked.clone()),
+            ssn: ssn_override
+                .or_else(|| prefer_full_ssn(ssn_db.clone(), scan.primary_ssn_masked.clone())),
             spouse_ssn: spouse_ssn_final,
             total_tax: Some(dollars(est.total_tax)),
             total_payments: Some(dollars(est.total_payments)),
@@ -2860,7 +2880,11 @@ pub async fn handle_extension(
             fy_end_year,
             confirmation_number,
         };
-        crate::tax_pdf::fill_form_4868(&data)
+        // Whether the user is enclosing a payment (drives which IRS PO Box
+        // the cover page recommends).
+        let paying = amount_paying_cents > 0;
+        let balance_due_display = format!("${:.2}", balance_due_cents as f64 / 100.0);
+        crate::tax_pdf::fill_form_4868_with_cover(&data, paying, &balance_due_display, year)
     }).await
     .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -2872,6 +2896,81 @@ pub async fn handle_extension(
         format!("attachment; filename=\"form-4868-{}.pdf\"", year).parse().unwrap(),
     );
     Ok((headers, pdf_bytes))
+}
+
+/// Re-run the vision extractor on a previously-scanned tax document.
+///
+/// Useful when the extraction prompt has been extended (e.g., to capture
+/// full SSN + employee address on W-2s) and the user wants the existing
+/// docs backfilled without re-uploading the originals.
+pub async fn handle_tax_doc_rescan(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(doc_id): axum::extract::Path<i64>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+
+    // Verify the doc belongs to this user before touching it.
+    let owner: Option<i64> = {
+        let db = state.db_path.clone();
+        tokio::task::spawn_blocking(move || -> Option<i64> {
+            let conn = rusqlite::Connection::open(&db).ok()?;
+            conn.query_row(
+                "SELECT user_id FROM tax_documents WHERE id = ?",
+                rusqlite::params![doc_id], |r| r.get(0),
+            ).ok()
+        }).await.ok().flatten()
+    };
+    if owner != Some(uid) {
+        return Err((StatusCode::NOT_FOUND, "Document not found".into()));
+    }
+
+    classify_and_extract(&state, doc_id).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(serde_json::json!({"ok": true, "doc_id": doc_id})))
+}
+
+/// Re-scan every W-2 and mortgage-statement doc this user has, in
+/// sequence (LLM provider rate-limits make parallelism risky). Returns a
+/// summary of what was rescanned.
+pub async fn handle_tax_docs_rescan_all(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+
+    // Gather doc IDs the new prompt is most likely to enrich (W-2 + 1095-C
+    // for SSN, mortgage statement for address).
+    let ids: Vec<i64> = {
+        let db = state.db_path.clone();
+        tokio::task::spawn_blocking(move || -> Vec<i64> {
+            let conn = match rusqlite::Connection::open(&db) { Ok(c) => c, Err(_) => return vec![] };
+            let mut stmt = match conn.prepare(
+                "SELECT id FROM tax_documents WHERE user_id = ? AND status = 'scanned' \
+                 AND doc_type IN ('w2', '1095_c', 'mortgage_statement') ORDER BY id"
+            ) { Ok(s) => s, Err(_) => return vec![] };
+            stmt.query_map(rusqlite::params![uid], |r| r.get::<_, i64>(0))
+                .map(|rows| rows.filter_map(|r| r.ok()).collect()).unwrap_or_default()
+        }).await.unwrap_or_default()
+    };
+
+    let mut ok = 0; let mut failed: Vec<i64> = Vec::new();
+    for id in &ids {
+        match classify_and_extract(&state, *id).await {
+            Ok(_) => ok += 1,
+            Err(e) => { log::warn!("[tax] rescan doc {} failed: {}", id, e); failed.push(*id); }
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "ok": true, "rescanned": ok, "failed": failed, "total": ids.len(),
+    })))
 }
 
 /// Suggest taxpayer profile values mined from this user's scanned tax
