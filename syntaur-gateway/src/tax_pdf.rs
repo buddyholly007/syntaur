@@ -4,6 +4,28 @@
 //! 2025). We mutate the AcroForm field /V values, set /NeedAppearances on
 //! the /AcroForm dict so PDF readers regenerate the visual appearance, and
 //! re-emit the document.
+//!
+//! Field map (verified empirically by probing the 2025 PDF):
+//!
+//! | Path (under `topmostSubform[0]`) | Purpose |
+//! |---|---|
+//! | `Page1[0].VoucherHeader[0].f1_1[0]` | Fiscal year *beginning* date |
+//! | `Page1[0].VoucherHeader[0].f1_2[0]` | Fiscal year *ending* date |
+//! | `Page1[0].VoucherHeader[0].f1_3[0]` | Fiscal year ending year (20__) |
+//! | `Page1[0].PartI_ReadOrder[0].f1_4[0]` | Line 1: Name(s) |
+//! | `Page1[0].PartI_ReadOrder[0].f1_5[0]` | Line 1: Street address |
+//! | `Page1[0].PartI_ReadOrder[0].f1_6[0]` | Line 1: City |
+//! | `Page1[0].PartI_ReadOrder[0].f1_7[0]` | Line 1: State (2-char) |
+//! | `Page1[0].PartI_ReadOrder[0].f1_8[0]` | Line 1: ZIP |
+//! | `Page1[0].PartI_ReadOrder[0].f1_9[0]` | Line 2: Your SSN |
+//! | `Page1[0].PartI_ReadOrder[0].f1_10[0]` | Line 3: Spouse's SSN |
+//! | `Page1[0].f1_11[0]` | Line 4: Estimate of total tax liability |
+//! | `Page1[0].f1_12[0]` | Line 5: Total payments |
+//! | `Page1[0].f1_13[0]` | Line 6: Balance due |
+//! | `Page1[0].f1_14[0]` | Line 7: Amount you're paying |
+//! | `Page1[0].c1_1[0]` | Line 8: Out of country (checkbox) |
+//! | `Page1[0].c1_2[0]` | Line 9: 1040-NR no withheld wages (checkbox) |
+//! | `Page3[0].Col4[0].f3_1[0]` | Page 3: Direct Pay confirmation # |
 
 use lopdf::{Document, Object, ObjectId, StringFormat};
 
@@ -12,39 +34,71 @@ const FORM_4868_BLANK: &[u8] = include_bytes!("../assets/f4868-2025.pdf");
 
 /// Data needed to fill Form 4868. All fields are optional — missing values
 /// leave the form blank for the user to complete by hand.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct Form4868Data {
-    pub name: Option<String>,            // Line 1: name(s)
-    pub address: Option<String>,         // Line 1: street + apt
-    pub city_state_zip: Option<String>,  // Line 1: city, state, ZIP
-    /// Line 4: estimate of total tax liability, in display form ("32993.07").
+    // ── Part I: Identification ─────────────────────────────────────────
+    /// Line 1: Full taxpayer name(s). For joint returns, "First Last & First Last".
+    pub name: Option<String>,
+    /// Line 1: Street address (e.g. "123 Main St, Apt 4").
+    pub address: Option<String>,
+    /// Line 1: City (e.g. "Olympia").
+    pub city: Option<String>,
+    /// Line 1: State (2-char USPS code, e.g. "WA").
+    pub state: Option<String>,
+    /// Line 1: ZIP code (5 or 9 digits).
+    pub zip: Option<String>,
+    /// Line 2: Your SSN, formatted "###-##-####".
+    pub ssn: Option<String>,
+    /// Line 3: Spouse's SSN (only filled when filing jointly).
+    pub spouse_ssn: Option<String>,
+
+    // ── Part II: Individual Income Tax ─────────────────────────────────
+    /// Line 4: Estimate of total tax liability in display form ("32993.07").
     pub total_tax: Option<String>,
-    /// Line 5: total payments, in display form.
+    /// Line 5: Total payments in display form.
     pub total_payments: Option<String>,
-    /// Line 6: balance due (line 4 - line 5), in display form.
+    /// Line 6: Balance due (line 4 - line 5) in display form.
     pub balance_due: Option<String>,
-    /// Line 7: amount paying with this extension, in display form.
+    /// Line 7: Amount paying with this extension in display form.
     pub amount_paying: Option<String>,
-    /// Line 8: out-of-the-country US citizen/resident.
+
+    // ── Checkboxes (lines 8 + 9) ───────────────────────────────────────
+    /// Line 8: Out of country and a US citizen/resident.
     pub out_of_country: bool,
-    /// Line 9: file Form 1040-NR, no US-withheld wages.
+    /// Line 9: File Form 1040-NR with no withheld wages.
     pub is_1040nr_no_wages: bool,
+
+    // ── Fiscal-year filers (rare) ──────────────────────────────────────
+    /// "For tax year beginning" date (e.g. "07/01"). Calendar-year filers leave blank.
+    pub fy_begin: Option<String>,
+    /// "Ending" date (e.g. "06/30").
+    pub fy_end: Option<String>,
+    /// "20__" the year that the fiscal year ends in (e.g. "26").
+    pub fy_end_year: Option<String>,
+
+    // ── Page 3: confirmation tracking ──────────────────────────────────
+    /// Direct Pay confirmation number, recorded on page 3 once payment is made.
+    pub confirmation_number: Option<String>,
 }
 
-/// Map of canonical IRS field paths → which Form4868Data field to use.
-/// The paths come from the /T (title) chains in the PDF object tree.
-fn field_for(path: &str, d: &Form4868Data) -> Option<String> {
-    // The form lays Part I out top-to-bottom: name, address, city/state/ZIP.
-    // f1_4..f1_6 are nested inside `PartI_ReadOrder[0]`; f1_11..f1_14 are
-    // the dollar-amount lines on Page 1's root subform.
+/// Map a canonical IRS field path → text value to insert.
+fn text_for(path: &str, d: &Form4868Data) -> Option<String> {
     match path {
+        "topmostSubform[0].Page1[0].VoucherHeader[0].f1_1[0]" => d.fy_begin.clone(),
+        "topmostSubform[0].Page1[0].VoucherHeader[0].f1_2[0]" => d.fy_end.clone(),
+        "topmostSubform[0].Page1[0].VoucherHeader[0].f1_3[0]" => d.fy_end_year.clone(),
         "topmostSubform[0].Page1[0].PartI_ReadOrder[0].f1_4[0]" => d.name.clone(),
         "topmostSubform[0].Page1[0].PartI_ReadOrder[0].f1_5[0]" => d.address.clone(),
-        "topmostSubform[0].Page1[0].PartI_ReadOrder[0].f1_6[0]" => d.city_state_zip.clone(),
+        "topmostSubform[0].Page1[0].PartI_ReadOrder[0].f1_6[0]" => d.city.clone(),
+        "topmostSubform[0].Page1[0].PartI_ReadOrder[0].f1_7[0]" => d.state.clone(),
+        "topmostSubform[0].Page1[0].PartI_ReadOrder[0].f1_8[0]" => d.zip.clone(),
+        "topmostSubform[0].Page1[0].PartI_ReadOrder[0].f1_9[0]" => d.ssn.clone(),
+        "topmostSubform[0].Page1[0].PartI_ReadOrder[0].f1_10[0]" => d.spouse_ssn.clone(),
         "topmostSubform[0].Page1[0].f1_11[0]" => d.total_tax.clone(),
         "topmostSubform[0].Page1[0].f1_12[0]" => d.total_payments.clone(),
         "topmostSubform[0].Page1[0].f1_13[0]" => d.balance_due.clone(),
         "topmostSubform[0].Page1[0].f1_14[0]" => d.amount_paying.clone(),
+        "topmostSubform[0].Page3[0].Col4[0].f3_1[0]" => d.confirmation_number.clone(),
         _ => None,
     }
 }
@@ -57,9 +111,9 @@ fn checkbox_for(path: &str, d: &Form4868Data) -> Option<bool> {
     }
 }
 
-/// Decode a PDF text string. PDF spec: if it starts with the BOM
-/// `FE FF`, the bytes after are UTF-16BE; otherwise treat as PDFDocEncoding
-/// (we approximate with Latin-1, which round-trips ASCII fine).
+/// Decode a PDF text string. PDF spec: if it starts with the BOM `FE FF`,
+/// the bytes after are UTF-16BE; otherwise treat as PDFDocEncoding (we
+/// approximate with Latin-1, which round-trips ASCII fine).
 fn decode_pdf_string(bytes: &[u8]) -> String {
     if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
         let mut units = Vec::with_capacity((bytes.len() - 2) / 2);
@@ -85,7 +139,7 @@ fn encode_pdf_string(s: &str) -> Vec<u8> {
     out
 }
 
-/// Walk parent chain of a field dict, building the dotted path
+/// Walk the parent chain of a field dict, building the dotted path
 /// (e.g. `topmostSubform[0].Page1[0].f1_11[0]`).
 fn full_field_name(doc: &Document, id: ObjectId) -> Option<String> {
     let dict = doc.get_object(id).ok()?.as_dict().ok()?;
@@ -116,19 +170,21 @@ pub fn fill_form_4868(data: &Form4868Data) -> Result<Vec<u8>, String> {
             Some(p) => p,
             None => continue,
         };
-        if let Some(val) = field_for(&path, data) {
+        if let Some(val) = text_for(&path, data) {
             if val.is_empty() { continue; }
             let dict = doc.get_object_mut(id).map_err(|e| e.to_string())?
                 .as_dict_mut().map_err(|e| e.to_string())?;
             dict.set(b"V".to_vec(), Object::String(encode_pdf_string(&val), StringFormat::Literal));
             applied += 1;
         } else if let Some(checked) = checkbox_for(&path, data) {
-            // Checkbox AcroForm convention: /V = /Yes (or the box's specific
-            // export value) when checked, /Off when not. We use /Yes which is
-            // the IRS form's button value.
+            // Form 4868 checkboxes use the "1" export value when checked
+            // (verified by probing). /Off is the universal unchecked state.
+            // We set both /V (the value the form holds) and /AS (the
+            // appearance state shown right now) so readers without
+            // appearance regeneration also display the check.
             let dict = doc.get_object_mut(id).map_err(|e| e.to_string())?
                 .as_dict_mut().map_err(|e| e.to_string())?;
-            let v = if checked { "Yes" } else { "Off" };
+            let v = if checked { "1" } else { "Off" };
             dict.set(b"V".to_vec(), Object::Name(v.as_bytes().to_vec()));
             dict.set(b"AS".to_vec(), Object::Name(v.as_bytes().to_vec()));
             applied += 1;

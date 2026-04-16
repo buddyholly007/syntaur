@@ -280,6 +280,35 @@ const BODY_HTML: &str = r##"<!-- Module paywall overlay (hidden by default, show
             </div>
           </a>
         </div>
+        <details class="mt-3 text-xs text-gray-400">
+          <summary class="cursor-pointer hover:text-gray-200">Form 4868 options &amp; missing fields &rarr;</summary>
+          <div class="mt-3 p-3 bg-gray-900/40 rounded-lg space-y-3">
+            <p class="text-xs text-gray-500">Override anything missing from your tax profile, or check the boxes for less-common situations. These apply when you generate the PDF.</p>
+            <div class="grid grid-cols-2 gap-2">
+              <div><label class="label">Name(s) on return</label><input id="ext-opt-name" class="input" placeholder="leave blank = use profile"></div>
+              <div><label class="label">SSN</label><input id="ext-opt-ssn" class="input" placeholder='###-##-####'></div>
+              <div><label class="label">Spouse SSN (joint only)</label><input id="ext-opt-spouse-ssn" class="input" placeholder='###-##-####'></div>
+              <div><label class="label">Street address</label><input id="ext-opt-address" class="input" placeholder="leave blank = use profile"></div>
+              <div><label class="label">City</label><input id="ext-opt-city" class="input"></div>
+              <div class="grid grid-cols-2 gap-2">
+                <div><label class="label">State</label><input id="ext-opt-state" class="input" maxlength="2" placeholder="WA"></div>
+                <div><label class="label">ZIP</label><input id="ext-opt-zip" class="input" placeholder="98502"></div>
+              </div>
+            </div>
+            <div class="grid grid-cols-2 gap-2">
+              <label class="flex items-center gap-2 text-gray-300"><input type="checkbox" id="ext-opt-ooc"> Line 8: I'm "out of the country" (US citizen/resident abroad)</label>
+              <label class="flex items-center gap-2 text-gray-300"><input type="checkbox" id="ext-opt-1040nr"> Line 9: I file Form 1040-NR with no withheld wages</label>
+            </div>
+            <details class="text-xs text-gray-500">
+              <summary class="cursor-pointer hover:text-gray-300">Fiscal-year filer (rare) &rarr;</summary>
+              <div class="mt-2 grid grid-cols-3 gap-2">
+                <div><label class="label">FY beginning (MM/DD)</label><input id="ext-opt-fy-begin" class="input" placeholder="07/01"></div>
+                <div><label class="label">FY ending (MM/DD)</label><input id="ext-opt-fy-end" class="input" placeholder="06/30"></div>
+                <div><label class="label">FY ending year (YY)</label><input id="ext-opt-fy-end-year" class="input" placeholder="26"></div>
+              </div>
+            </details>
+          </div>
+        </details>
         <span id="ext-result" class="text-xs mt-2 block"></span>
       </div>
 
@@ -2853,7 +2882,17 @@ function addCopyRow(parent, label, value) {
 function openForm4868() {
   const yr = selectedYear || yearStart().slice(0,4);
   const payment = parseCents(document.getElementById('ext-payment').value);
-  window.location.href = '/api/tax/extension?token=' + token + '&year=' + yr + '&payment=' + payment;
+  const params = new URLSearchParams({ token, year: yr, payment });
+  // Optional overrides + checkboxes from the "Form 4868 options" section.
+  const opt = id => (document.getElementById(id) || {}).value || '';
+  [['name','ext-opt-name'],['address','ext-opt-address'],['city','ext-opt-city'],
+   ['state','ext-opt-state'],['zip','ext-opt-zip'],['ssn','ext-opt-ssn'],
+   ['spouse_ssn','ext-opt-spouse-ssn'],
+   ['fy_begin','ext-opt-fy-begin'],['fy_end','ext-opt-fy-end'],['fy_end_year','ext-opt-fy-end-year']
+  ].forEach(([k, id]) => { const v = opt(id).trim(); if (v) params.set(k, v); });
+  if (document.getElementById('ext-opt-ooc') && document.getElementById('ext-opt-ooc').checked) params.set('out_of_country', '1');
+  if (document.getElementById('ext-opt-1040nr') && document.getElementById('ext-opt-1040nr').checked) params.set('is_1040nr', '1');
+  window.location.href = '/api/tax/extension?' + params.toString();
 }
 
 async function confirmExtension() {

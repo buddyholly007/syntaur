@@ -2570,6 +2570,19 @@ pub async fn handle_csv_irs_export(
 /// Render the user's Form 4868 as a real fillable PDF — bundled blank IRS
 /// template with /V values set from the user's profile + tax estimate. The
 /// reader regenerates appearances on open thanks to /NeedAppearances=true.
+///
+/// Query parameters (all optional):
+/// - `payment` — amount in cents the user is paying with the extension (line 7).
+///   Falls back to the balance due so a user who owes sees their full
+///   amount preselected.
+/// - `out_of_country=1` — checks line 8 (US citizens/residents abroad get an
+///   automatic 2-month extension; this box claims the additional 4 months).
+/// - `is_1040nr=1` — checks line 9 (1040-NR filer with no withheld wages).
+/// - `name`, `address`, `city`, `state`, `zip`, `ssn`, `spouse_ssn` —
+///   override the values pulled from `taxpayer_profiles`. Useful when the
+///   profile is incomplete and the user types missing data into the UI.
+/// - `fy_begin`, `fy_end`, `fy_end_year` — fiscal-year filers (calendar
+///   filers leave blank).
 pub async fn handle_extension(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
@@ -2581,48 +2594,71 @@ pub async fn handle_extension(
     let uid = principal.user_id();
     let db = state.db_path.clone();
     let year: i64 = params.get("year").and_then(|y| y.parse().ok()).unwrap_or_else(|| default_tax_year());
-    let ext_payment: i64 = params.get("payment").and_then(|p| p.parse().ok()).unwrap_or(0);
+    let payment_override: Option<i64> = params.get("payment").and_then(|p| p.parse().ok());
+    let out_of_country = params.get("out_of_country").map(|s| s == "1" || s == "true").unwrap_or(false);
+    let is_1040nr = params.get("is_1040nr").map(|s| s == "1" || s == "true").unwrap_or(false);
+
+    // Optional UI-supplied overrides for any identification field. Empty
+    // strings are treated as "use profile value", not "force blank".
+    let q = |k: &str| -> Option<String> {
+        params.get(k).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    };
+    let name_override = q("name");
+    let address_override = q("address");
+    let city_override = q("city");
+    let state_override = q("state");
+    let zip_override = q("zip");
+    let ssn_override = q("ssn");
+    let spouse_ssn_override = q("spouse_ssn");
+    let fy_begin = q("fy_begin");
+    let fy_end = q("fy_end");
+    let fy_end_year = q("fy_end_year");
 
     let pdf_bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
         let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
 
-        // Pull filing status from the taxpayer profile so the estimate
-        // matches what we render on lines 4-7.
+        // Pull filing status so the estimate (and the spouse name + SSN
+        // logic) matches what's on file.
         let filing_status: String = conn.query_row(
             "SELECT filing_status FROM taxpayer_profiles WHERE user_id = ? AND tax_year = ?",
             rusqlite::params![uid, year], |r| r.get(0),
         ).unwrap_or_else(|_| "single".to_string());
 
         let est = compute_tax_estimate(&conn, uid, year, &filing_status)?;
-        let balance_due = std::cmp::max(est.total_tax - est.total_payments, 0);
-        // Display the dollar amounts as bare "1234.56" — the IRS form has
-        // its own dollar sign and column alignment.
+        let balance_due_cents = std::cmp::max(est.total_tax - est.total_payments, 0);
+        // The IRS form has its own dollar sign and column alignment, so we
+        // emit bare "1234.56" — no leading $ or thousands separators.
         let dollars = |c: i64| format!("{:.2}", c as f64 / 100.0);
+        // If the user didn't say what they're paying, default to the full
+        // balance due — that's what most filers want when extending.
+        let amount_paying_cents = payment_override.unwrap_or(balance_due_cents);
 
-        // Pull identification from taxpayer_profiles. Fall back to the user
-        // record when no profile has been saved yet.
+        // Pull identification from taxpayer_profiles. The "ssn_encrypted"
+        // and "spouse_ssn_encrypted" columns currently store plaintext —
+        // the encryption layer was never wired in. (Tracked separately;
+        // for the extension form we just read whatever's there.)
         type ProfileRow = (
             Option<String>, Option<String>, Option<String>, Option<String>,
             Option<String>, Option<String>, Option<String>, Option<String>,
-            Option<String>,
+            Option<String>, Option<String>, Option<String>,
         );
         let profile: ProfileRow = conn.query_row(
-            "SELECT first_name, last_name, address_line1, address_line2, city, state, zip, \
-                    spouse_first, spouse_last \
+            "SELECT first_name, last_name, ssn_encrypted, address_line1, address_line2, \
+                    city, state, zip, spouse_first, spouse_last, spouse_ssn_encrypted \
              FROM taxpayer_profiles WHERE user_id = ? AND tax_year = ?",
             rusqlite::params![uid, year],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?,
-                    r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?))
-        ).unwrap_or_else(|_| (None, None, None, None, None, None, None, None, None));
-        let (first, last, addr1, addr2, city, st, zip, sp_first, sp_last) = profile;
+                    r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?, r.get(10)?))
+        ).unwrap_or_else(|_| (None, None, None, None, None, None, None, None, None, None, None));
+        let (first, last, ssn_db, addr1, addr2, city, st, zip, sp_first, sp_last, sp_ssn_db) = profile;
 
         let user_display: String = conn.query_row(
             "SELECT COALESCE(display_name, username, '') FROM users WHERE id = ?",
             rusqlite::params![uid], |r| r.get(0),
         ).unwrap_or_default();
 
-        // Build the name line: "First Last & Spouse First Last" if married
-        // jointly, otherwise just the primary taxpayer.
+        // Build the name line: "First Last & Spouse First Last" if joint,
+        // otherwise just the primary taxpayer.
         let primary = match (first.as_deref(), last.as_deref()) {
             (Some(f), Some(l)) if !f.is_empty() || !l.is_empty() => format!("{} {}", f, l).trim().to_string(),
             _ => user_display.clone(),
@@ -2638,29 +2674,50 @@ pub async fn handle_extension(
             }
         }
 
-        // Address line: "addr1, addr2" or just addr1.
-        let address_line = match (addr1.as_deref(), addr2.as_deref()) {
+        // Combine address_line1 + address_line2 into the single Line 1
+        // street field — the form has one ~265pt-wide box, plenty for both.
+        let address_combined = match (addr1.as_deref(), addr2.as_deref()) {
             (Some(a1), Some(a2)) if !a2.is_empty() => format!("{}, {}", a1, a2),
             (Some(a1), _) => a1.to_string(),
             _ => String::new(),
         };
-        // City/state/ZIP line: "City, ST 12345".
-        let csz = match (city.as_deref(), st.as_deref(), zip.as_deref()) {
-            (Some(c), Some(s), Some(z)) if !c.is_empty() || !s.is_empty() || !z.is_empty() =>
-                format!("{}, {} {}", c.trim(), s.trim(), z.trim()).trim_matches(|c: char| c == ',' || c.is_whitespace()).to_string(),
-            _ => String::new(),
+
+        // Spouse SSN is only meaningful on a joint return — leave it blank
+        // for non-joint filers so the IRS doesn't reject for an extra SSN.
+        let spouse_ssn_final = if filing_status == "married_jointly" {
+            spouse_ssn_override.or(sp_ssn_db)
+        } else {
+            None
         };
 
+        // Pull the most-recent confirmation number for this year, if the
+        // user already filed and recorded it. Lets the form double as a
+        // record of the filed extension.
+        let confirmation_number: Option<String> = conn.query_row(
+            "SELECT confirmation_id FROM tax_extensions \
+             WHERE user_id = ? AND tax_year = ? AND confirmation_id IS NOT NULL \
+             ORDER BY confirmed_at DESC LIMIT 1",
+            rusqlite::params![uid, year], |r| r.get(0),
+        ).ok();
+
         let data = crate::tax_pdf::Form4868Data {
-            name: if name_line.is_empty() { None } else { Some(name_line) },
-            address: if address_line.is_empty() { None } else { Some(address_line) },
-            city_state_zip: if csz.is_empty() { None } else { Some(csz) },
+            name: name_override.or_else(|| if name_line.is_empty() { None } else { Some(name_line) }),
+            address: address_override.or_else(|| if address_combined.is_empty() { None } else { Some(address_combined) }),
+            city: city_override.or(city),
+            state: state_override.or(st),
+            zip: zip_override.or(zip),
+            ssn: ssn_override.or(ssn_db),
+            spouse_ssn: spouse_ssn_final,
             total_tax: Some(dollars(est.total_tax)),
             total_payments: Some(dollars(est.total_payments)),
-            balance_due: Some(dollars(balance_due)),
-            amount_paying: Some(dollars(ext_payment)),
-            out_of_country: false,
-            is_1040nr_no_wages: false,
+            balance_due: Some(dollars(balance_due_cents)),
+            amount_paying: Some(dollars(amount_paying_cents)),
+            out_of_country,
+            is_1040nr_no_wages: is_1040nr,
+            fy_begin,
+            fy_end,
+            fy_end_year,
+            confirmation_number,
         };
         crate::tax_pdf::fill_form_4868(&data)
     }).await
