@@ -316,35 +316,171 @@ pub struct Form4868Data {
     pub confirmation_number: Option<String>,
 }
 
-/// Map a canonical IRS field path → text value to insert.
-fn text_for(path: &str, d: &Form4868Data) -> Option<String> {
-    match path {
-        "topmostSubform[0].Page1[0].VoucherHeader[0].f1_1[0]" => d.fy_begin.clone(),
-        "topmostSubform[0].Page1[0].VoucherHeader[0].f1_2[0]" => d.fy_end.clone(),
-        "topmostSubform[0].Page1[0].VoucherHeader[0].f1_3[0]" => d.fy_end_year.clone(),
-        "topmostSubform[0].Page1[0].PartI_ReadOrder[0].f1_4[0]" => d.name.clone(),
-        "topmostSubform[0].Page1[0].PartI_ReadOrder[0].f1_5[0]" => d.address.clone(),
-        "topmostSubform[0].Page1[0].PartI_ReadOrder[0].f1_6[0]" => d.city.clone(),
-        "topmostSubform[0].Page1[0].PartI_ReadOrder[0].f1_7[0]" => d.state.clone(),
-        "topmostSubform[0].Page1[0].PartI_ReadOrder[0].f1_8[0]" => d.zip.clone(),
-        "topmostSubform[0].Page1[0].PartI_ReadOrder[0].f1_9[0]" => d.ssn.clone(),
-        "topmostSubform[0].Page1[0].PartI_ReadOrder[0].f1_10[0]" => d.spouse_ssn.clone(),
-        "topmostSubform[0].Page1[0].f1_11[0]" => d.total_tax.clone(),
-        "topmostSubform[0].Page1[0].f1_12[0]" => d.total_payments.clone(),
-        "topmostSubform[0].Page1[0].f1_13[0]" => d.balance_due.clone(),
-        "topmostSubform[0].Page1[0].f1_14[0]" => d.amount_paying.clone(),
-        "topmostSubform[0].Page3[0].Col4[0].f3_1[0]" => d.confirmation_number.clone(),
-        _ => None,
-    }
+// ── Per-year overrides (AI-derived) ────────────────────────────────────
+//
+// When the IRS publishes a redesigned Form 4868 and our hardcoded map
+// stops matching, the local tax AI can analyze the new PDF and emit a
+// per-year overrides JSON: a mapping from semantic field name (e.g.
+// "name", "total_tax") to the new AcroForm path. The loader applies
+// these overrides on top of the hardcoded defaults, so a single bad
+// year doesn't break the whole module.
+//
+// Stored at ~/.syntaur/forms/f4868-{year}-overrides.json. Format:
+//   {
+//     "field_map": { "name": "topmostSubform[0]....f1_4[0]", ... },
+//     "checkbox_map": { "out_of_country": "...c1_1[0]", ... },
+//     "addresses": { "no_payment": [...], "with_payment": [...] }
+//   }
+
+/// Path to the per-year AI-derived overrides JSON.
+fn overrides_path(year: i64) -> std::path::PathBuf {
+    cache_dir().join(format!("f4868-{}-overrides.json", year))
 }
 
-fn checkbox_for(path: &str, d: &Form4868Data) -> Option<bool> {
-    match path {
-        "topmostSubform[0].Page1[0].c1_1[0]" => Some(d.out_of_country),
-        "topmostSubform[0].Page1[0].c1_2[0]" => Some(d.is_1040nr_no_wages),
-        _ => None,
-    }
+/// AI-derived overrides for one tax year. Each field is optional — a
+/// partial override is fine, missing fields fall through to defaults.
+#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FormOverrides {
+    /// Map from our semantic name (`name`, `address`, `city`, `state`,
+    /// `zip`, `ssn`, `spouse_ssn`, `total_tax`, `total_payments`,
+    /// `balance_due`, `amount_paying`, `confirmation_number`, `fy_begin`,
+    /// `fy_end`, `fy_end_year`) → AcroForm path on this year's PDF.
+    pub field_map: Option<std::collections::HashMap<String, String>>,
+    /// Map from semantic name (`out_of_country`, `is_1040nr`) → AcroForm
+    /// checkbox path.
+    pub checkbox_map: Option<std::collections::HashMap<String, String>>,
+    /// Optional Where-to-File chart override; each entry is a state group
+    /// (USPS codes) plus the with-payment + without-payment addresses.
+    pub addresses: Option<Vec<AddressGroup>>,
+    /// When the AI generated this — useful for staleness checks.
+    pub generated_at: Option<String>,
+    /// Free-form note from the AI (e.g. "Form redesigned 2027 — added box 10").
+    pub notes: Option<String>,
 }
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AddressGroup {
+    pub states: Vec<String>,
+    pub with_payment: [String; 3],
+    pub without_payment: [String; 3],
+}
+
+/// Load AI-derived overrides for a given tax year, if present.
+pub fn load_overrides(year: i64) -> Option<FormOverrides> {
+    let path = overrides_path(year);
+    let bytes = std::fs::read(&path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Persist AI-derived overrides for a given year. Used by the analyzer
+/// endpoint after the LLM produces a fresh map.
+pub fn save_overrides(year: i64, ov: &FormOverrides) -> Result<(), String> {
+    let path = overrides_path(year);
+    let bytes = serde_json::to_vec_pretty(ov).map_err(|e| format!("serialize: {e}"))?;
+    std::fs::write(&path, bytes).map_err(|e| format!("write {:?}: {}", path, e))
+}
+
+/// The semantic field labels we recognize. Used by the AI prompt and the
+/// override resolver so both sides agree on the vocabulary.
+/// Walk the AcroForm tree of a Form 4868 PDF and return every field path
+/// the document declares. Used by the AI analyzer to give the LLM a list
+/// of candidate paths to map to semantic fields.
+pub fn list_field_names(pdf_bytes: &[u8]) -> Result<Vec<String>, String> {
+    let doc = Document::load_mem(pdf_bytes).map_err(|e| format!("load: {e}"))?;
+    let mut names = Vec::new();
+    for id in doc.objects.keys().copied().collect::<Vec<_>>() {
+        if let Some(name) = full_field_name(&doc, id) {
+            // Filter out container nodes (those without a /FT field type)
+            // — only leaf widgets are interesting to the AI.
+            if let Ok(dict) = doc.get_object(id).and_then(|o| o.as_dict()) {
+                if dict.get(b"FT").is_ok() { names.push(name); }
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
+pub const SEMANTIC_FIELDS: &[&str] = &[
+    "name", "address", "city", "state", "zip",
+    "ssn", "spouse_ssn",
+    "total_tax", "total_payments", "balance_due", "amount_paying",
+    "confirmation_number",
+    "fy_begin", "fy_end", "fy_end_year",
+];
+pub const SEMANTIC_CHECKBOXES: &[&str] = &["out_of_country", "is_1040nr"];
+
+/// Look up the AcroForm path for a semantic field, applying overrides
+/// first then falling back to the hardcoded defaults.
+fn semantic_to_acro_path(semantic: &str, overrides: Option<&FormOverrides>) -> Option<String> {
+    if let Some(ov) = overrides {
+        if let Some(map) = &ov.field_map {
+            if let Some(p) = map.get(semantic) { return Some(p.clone()); }
+        }
+    }
+    // Hardcoded defaults — same map text_for() used inline before.
+    Some(match semantic {
+        "name" => "topmostSubform[0].Page1[0].PartI_ReadOrder[0].f1_4[0]",
+        "address" => "topmostSubform[0].Page1[0].PartI_ReadOrder[0].f1_5[0]",
+        "city" => "topmostSubform[0].Page1[0].PartI_ReadOrder[0].f1_6[0]",
+        "state" => "topmostSubform[0].Page1[0].PartI_ReadOrder[0].f1_7[0]",
+        "zip" => "topmostSubform[0].Page1[0].PartI_ReadOrder[0].f1_8[0]",
+        "ssn" => "topmostSubform[0].Page1[0].PartI_ReadOrder[0].f1_9[0]",
+        "spouse_ssn" => "topmostSubform[0].Page1[0].PartI_ReadOrder[0].f1_10[0]",
+        "total_tax" => "topmostSubform[0].Page1[0].f1_11[0]",
+        "total_payments" => "topmostSubform[0].Page1[0].f1_12[0]",
+        "balance_due" => "topmostSubform[0].Page1[0].f1_13[0]",
+        "amount_paying" => "topmostSubform[0].Page1[0].f1_14[0]",
+        "confirmation_number" => "topmostSubform[0].Page3[0].Col4[0].f3_1[0]",
+        "fy_begin" => "topmostSubform[0].Page1[0].VoucherHeader[0].f1_1[0]",
+        "fy_end" => "topmostSubform[0].Page1[0].VoucherHeader[0].f1_2[0]",
+        "fy_end_year" => "topmostSubform[0].Page1[0].VoucherHeader[0].f1_3[0]",
+        _ => return None,
+    }.to_string())
+}
+
+fn semantic_to_checkbox_path(semantic: &str, overrides: Option<&FormOverrides>) -> Option<String> {
+    if let Some(ov) = overrides {
+        if let Some(map) = &ov.checkbox_map {
+            if let Some(p) = map.get(semantic) { return Some(p.clone()); }
+        }
+    }
+    Some(match semantic {
+        "out_of_country" => "topmostSubform[0].Page1[0].c1_1[0]",
+        "is_1040nr" => "topmostSubform[0].Page1[0].c1_2[0]",
+        _ => return None,
+    }.to_string())
+}
+
+/// Resolve the IRS mailing address — checks per-year overrides first,
+/// then falls back to the hardcoded chart from page 4 of the bundled PDF.
+pub fn irs_mailing_address_with_overrides(
+    state: &str, with_payment: bool, overrides: Option<&FormOverrides>,
+) -> IrsAddress {
+    let st = state.trim().to_uppercase();
+    if let Some(ov) = overrides {
+        if let Some(groups) = &ov.addresses {
+            for g in groups {
+                if g.states.iter().any(|s| s.eq_ignore_ascii_case(&st)) {
+                    let lines = if with_payment { &g.with_payment } else { &g.without_payment };
+                    // Leak the strings to keep IrsAddress's &'static lifetime.
+                    // The override config is loaded once per process and lives
+                    // for the life of the request (cheap leak, bounded set).
+                    let l1 = Box::leak(lines[0].clone().into_boxed_str());
+                    let l2 = Box::leak(lines[1].clone().into_boxed_str());
+                    let l3 = Box::leak(lines[2].clone().into_boxed_str());
+                    return IrsAddress { line1: l1, line2: l2, line3: l3 };
+                }
+            }
+        }
+    }
+    irs_mailing_address(&st, with_payment)
+}
+
+// (text_for / checkbox_for removed — superseded by semantic_to_acro_path
+// + apply_form_fields, which work uniformly for both default + override
+// paths.)
 
 /// Decode a PDF text string. PDF spec: if it starts with the BOM `FE FF`,
 /// the bytes after are UTF-16BE; otherwise treat as PDFDocEncoding (we
@@ -619,12 +755,13 @@ pub async fn fill_form_4868_with_cover(
     year: i64,
 ) -> Result<Vec<u8>, String> {
     let template = load_form_4868(year).await;
+    let overrides = load_overrides(year);
     let mut doc = Document::load_mem(&template).map_err(|e| format!("load: {e}"))?;
-    apply_form_fields(&mut doc, data)?;
+    apply_form_fields(&mut doc, data, overrides.as_ref())?;
 
     let state_code = data.state.as_deref().unwrap_or("").to_string();
-    let irs = irs_mailing_address(&state_code, false);
-    let irs_pay = irs_mailing_address(&state_code, true);
+    let irs = irs_mailing_address_with_overrides(&state_code, false, overrides.as_ref());
+    let irs_pay = irs_mailing_address_with_overrides(&state_code, true, overrides.as_ref());
     let csz = format!("{}, {} {}",
         data.city.as_deref().unwrap_or(""),
         data.state.as_deref().unwrap_or(""),
@@ -728,26 +865,68 @@ pub fn build_envelope_10(
 
 /// Apply the form-field values + checkboxes to a loaded Form 4868 PDF.
 /// Shared between `fill_form_4868` and `fill_form_4868_with_cover`.
-fn apply_form_fields(doc: &mut Document, data: &Form4868Data) -> Result<(), String> {
+///
+/// `overrides` (optional) lets per-year AI-derived field maps override
+/// the hardcoded defaults — used after a form redesign breaks the
+/// default paths.
+fn apply_form_fields(
+    doc: &mut Document, data: &Form4868Data, overrides: Option<&FormOverrides>,
+) -> Result<(), String> {
+    use std::collections::HashMap;
+
+    // Build path → value map by walking each semantic field and asking the
+    // resolver which AcroForm path it lives at on this year's form.
+    let mut text_by_path: HashMap<String, String> = HashMap::new();
+    for sem in SEMANTIC_FIELDS {
+        let val = match *sem {
+            "name" => data.name.clone(),
+            "address" => data.address.clone(),
+            "city" => data.city.clone(),
+            "state" => data.state.clone(),
+            "zip" => data.zip.clone(),
+            "ssn" => data.ssn.clone(),
+            "spouse_ssn" => data.spouse_ssn.clone(),
+            "total_tax" => data.total_tax.clone(),
+            "total_payments" => data.total_payments.clone(),
+            "balance_due" => data.balance_due.clone(),
+            "amount_paying" => data.amount_paying.clone(),
+            "confirmation_number" => data.confirmation_number.clone(),
+            "fy_begin" => data.fy_begin.clone(),
+            "fy_end" => data.fy_end.clone(),
+            "fy_end_year" => data.fy_end_year.clone(),
+            _ => None,
+        };
+        if let Some(v) = val.filter(|s| !s.is_empty()) {
+            if let Some(path) = semantic_to_acro_path(sem, overrides) {
+                text_by_path.insert(path, v);
+            }
+        }
+    }
+
+    let mut checkbox_by_path: HashMap<String, bool> = HashMap::new();
+    for sem in SEMANTIC_CHECKBOXES {
+        let checked = match *sem {
+            "out_of_country" => data.out_of_country,
+            "is_1040nr" => data.is_1040nr_no_wages,
+            _ => false,
+        };
+        if let Some(path) = semantic_to_checkbox_path(sem, overrides) {
+            checkbox_by_path.insert(path, checked);
+        }
+    }
+
     let ids: Vec<ObjectId> = doc.objects.keys().copied().collect();
     let mut applied = 0usize;
     for id in ids {
-        let path = match full_field_name(doc, id) {
-            Some(p) => p,
-            None => continue,
-        };
-        if let Some(val) = text_for(&path, data) {
-            if val.is_empty() { continue; }
+        let path = match full_field_name(doc, id) { Some(p) => p, None => continue };
+        if let Some(val) = text_by_path.get(&path) {
             let dict = doc.get_object_mut(id).map_err(|e| e.to_string())?
                 .as_dict_mut().map_err(|e| e.to_string())?;
-            dict.set(b"V".to_vec(), Object::String(encode_pdf_string(&val), StringFormat::Literal));
+            dict.set(b"V".to_vec(), Object::String(encode_pdf_string(val), StringFormat::Literal));
             applied += 1;
-        } else if let Some(checked) = checkbox_for(&path, data) {
+        } else if let Some(checked) = checkbox_by_path.get(&path).copied() {
             // Form 4868 checkboxes use the "1" export value when checked
             // (verified by probing). /Off is the universal unchecked state.
-            // We set both /V (the value the form holds) and /AS (the
-            // appearance state shown right now) so readers without
-            // appearance regeneration also display the check.
             let dict = doc.get_object_mut(id).map_err(|e| e.to_string())?
                 .as_dict_mut().map_err(|e| e.to_string())?;
             let v = if checked { "1" } else { "Off" };
@@ -769,17 +948,21 @@ fn apply_form_fields(doc: &mut Document, data: &Form4868Data) -> Result<(), Stri
     }
 
     if applied == 0 {
-        return Err("no Form 4868 fields matched — bundled template may be wrong version".into());
+        return Err("no Form 4868 fields matched — bundled template may be wrong version, \
+                    or per-year overrides need refresh".into());
     }
     Ok(())
 }
 
 /// Fill Form 4868 with the supplied data and return the resulting PDF bytes.
-/// Uses the year-aware loader (cache → IRS fetch → bundled fallback).
+/// Uses the year-aware loader (cache → IRS fetch → bundled fallback) and
+/// applies any AI-derived per-year field overrides on top of the
+/// hardcoded defaults.
 pub async fn fill_form_4868(data: &Form4868Data, year: i64) -> Result<Vec<u8>, String> {
     let template = load_form_4868(year).await;
+    let overrides = load_overrides(year);
     let mut doc = Document::load_mem(&template).map_err(|e| format!("load: {e}"))?;
-    apply_form_fields(&mut doc, data)?;
+    apply_form_fields(&mut doc, data, overrides.as_ref())?;
     let mut buf: Vec<u8> = Vec::with_capacity(template.len() + 4096);
     doc.save_to(&mut buf).map_err(|e| format!("save: {e}"))?;
     Ok(buf)

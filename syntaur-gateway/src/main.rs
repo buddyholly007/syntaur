@@ -5034,6 +5034,7 @@ async fn main() {
         .route("/api/tax/documents/{id}/rescan", post(tax::handle_tax_doc_rescan))
         .route("/api/tax/documents/rescan-all", post(tax::handle_tax_docs_rescan_all))
         .route("/api/tax/extension/envelope", get(tax::handle_extension_envelope))
+        .route("/api/tax/forms/4868/analyze", post(tax::handle_analyze_form_4868))
         .route("/api/tax/dependents", post(tax::handle_dependent_save))
         .route("/api/tax/dependents/{id}", axum::routing::delete(tax::handle_dependent_delete))
         // Items 10-16: smart routing, statements, property, deduction, insurance, wizard, brackets
