@@ -29,8 +29,174 @@
 
 use lopdf::{dictionary, Document, Object, ObjectId, Stream, StringFormat};
 
-/// The blank IRS Form 4868 (2025) PDF, bundled at compile time.
-const FORM_4868_BLANK: &[u8] = include_bytes!("../assets/f4868-2025.pdf");
+/// The blank IRS Form 4868 (2025) PDF, bundled at compile time as a
+/// last-resort fallback. The runtime loader prefers a fresh copy from
+/// `~/.syntaur/forms/f4868-{year}.pdf` (auto-fetched from irs.gov), and
+/// only falls back to this bundled copy when offline.
+const FORM_4868_BUNDLED: &[u8] = include_bytes!("../assets/f4868-2025.pdf");
+/// The tax year of the bundled fallback. When the user requests a different
+/// year and the IRS fetch fails, we still serve the bundled copy but log a
+/// warning so the user knows the labels won't match their year.
+const FORM_4868_BUNDLED_YEAR: i64 = 2025;
+
+/// Where to cache freshly-fetched IRS form PDFs.
+fn cache_dir() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let dir = std::path::PathBuf::from(format!("{}/.syntaur/forms", home));
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+/// Cache file path for a given tax year.
+fn cache_path(year: i64) -> std::path::PathBuf {
+    cache_dir().join(format!("f4868-{}.pdf", year))
+}
+
+/// Look up the IRS download URL for a given tax year. Returns None when
+/// the IRS hasn't published the requested year yet (so we don't serve a
+/// stale-but-different year's PDF mislabeled as the requested year).
+///
+/// IRS publishes the *current* tax year at the stable URL
+/// `https://www.irs.gov/pub/irs-pdf/f4868.pdf`. Older years (one year back
+/// or more) live at `https://www.irs.gov/pub/irs-prior/f4868--YYYY.pdf`.
+fn irs_download_url(year: i64, current_form_year: i64) -> Option<String> {
+    if year > current_form_year {
+        // Future year — IRS hasn't released it yet. Don't fetch, since the
+        // current URL would return the prior year's form mislabeled.
+        None
+    } else if year == current_form_year {
+        // Stable "current" URL — IRS replaces this file each January.
+        Some("https://www.irs.gov/pub/irs-pdf/f4868.pdf".to_string())
+    } else {
+        // Prior-year archive — IRS keeps these for amended-return filers.
+        Some(format!("https://www.irs.gov/pub/irs-prior/f4868--{}.pdf", year))
+    }
+}
+
+/// Best guess at the most recently published Form 4868 tax year, given
+/// today's calendar date. The IRS releases the new year's form in late
+/// January / early February of the following calendar year. Before that,
+/// the prior year is still "current".
+fn current_form_year_for_today() -> i64 {
+    let now = chrono::Utc::now().naive_utc().date();
+    let y: i64 = now.format("%Y").to_string().parse().unwrap_or(2025);
+    let m: i64 = now.format("%m").to_string().parse().unwrap_or(1);
+    // Before mid-February, the IRS hasn't published the prior calendar
+    // year's form yet — assume the year before that is still "current".
+    if m < 2 { y - 2 } else { y - 1 }
+}
+
+/// Attempt to validate that a downloaded PDF is actually a Form 4868 with
+/// the AcroForm field map we know how to fill. When `expected_year` is
+/// supplied, also confirm the PDF's metadata Title contains that year so
+/// we never mislabel the bundled fallback as a different year.
+fn validate_form_4868(bytes: &[u8], expected_year: Option<i64>) -> Result<(), String> {
+    let doc = Document::load_mem(bytes).map_err(|e| format!("not a valid PDF: {e}"))?;
+    let want = ["topmostSubform[0].Page1[0].PartI_ReadOrder[0].f1_4[0]",
+                "topmostSubform[0].Page1[0].f1_11[0]"];
+    let mut found = std::collections::HashSet::new();
+    for id in doc.objects.keys().copied().collect::<Vec<_>>() {
+        if let Some(name) = full_field_name(&doc, id) {
+            if want.contains(&name.as_str()) { found.insert(name); }
+        }
+    }
+    if found.len() != want.len() {
+        return Err(format!(
+            "Form 4868 field map missing — expected {:?}, found {:?}. \
+             IRS may have redesigned the form's XFA template.",
+            want, found
+        ));
+    }
+    if let Some(year) = expected_year {
+        // The IRS PDF metadata Title is "YYYY Form 4868". Read /Info /Title
+        // and confirm the year matches what we asked for.
+        if let Ok(title_obj) = doc.trailer.get(b"Info").and_then(|i| i.as_reference())
+            .and_then(|id| doc.get_object(id))
+            .and_then(|o| o.as_dict())
+            .and_then(|d| d.get(b"Title"))
+        {
+            if let Object::String(bytes, _) = title_obj {
+                let title = decode_pdf_string(bytes);
+                if !title.contains(&year.to_string()) {
+                    return Err(format!(
+                        "PDF /Info /Title is {:?} but we asked for tax year {} — \
+                         IRS may not have published it yet.", title, year));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Fetch the current Form 4868 PDF from irs.gov for the given tax year.
+/// Validates it has the expected AcroForm field map before caching.
+async fn fetch_irs_form(year: i64) -> Result<Vec<u8>, String> {
+    let url = irs_download_url(year, current_form_year_for_today())
+        .ok_or_else(|| format!("IRS hasn't released the {} Form 4868 yet (current is {})",
+            year, current_form_year_for_today()))?;
+    log::info!("[tax_pdf] fetching Form 4868 ({}) from {}", year, url);
+    let client = reqwest::Client::builder()
+        .user_agent("Syntaur Tax Module / Form 4868 fetcher")
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("client build: {e}"))?;
+    let resp = client.get(&url).send().await.map_err(|e| format!("fetch {url}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("IRS returned HTTP {} for {}", resp.status(), url));
+    }
+    let bytes = resp.bytes().await.map_err(|e| format!("read body: {e}"))?.to_vec();
+    validate_form_4868(&bytes, Some(year))?;
+    Ok(bytes)
+}
+
+/// Load the blank Form 4868 PDF for the requested tax year, preferring
+/// (in order):
+///   1. A cached copy at ~/.syntaur/forms/f4868-{year}.pdf younger than 30 days
+///   2. A fresh download from irs.gov (validated, then cached)
+///   3. The bundled fallback (for offline operation or new field-map
+///      regression — logged loudly so we know to investigate)
+pub async fn load_form_4868(year: i64) -> Vec<u8> {
+    let cache = cache_path(year);
+    // Step 1 — cache hit if file exists and is fresher than 30 days.
+    if let Ok(meta) = std::fs::metadata(&cache) {
+        let age_ok = meta.modified().ok()
+            .and_then(|t| t.elapsed().ok())
+            .map(|d| d < std::time::Duration::from_secs(30 * 24 * 3600))
+            .unwrap_or(false);
+        if age_ok {
+            if let Ok(bytes) = std::fs::read(&cache) {
+                if validate_form_4868(&bytes, Some(year)).is_ok() {
+                    return bytes;
+                }
+                log::warn!("[tax_pdf] cached {:?} failed validation; refetching", cache);
+            }
+        }
+    }
+    // Step 2 — fetch fresh from IRS.
+    match fetch_irs_form(year).await {
+        Ok(bytes) => {
+            if let Err(e) = std::fs::write(&cache, &bytes) {
+                log::warn!("[tax_pdf] failed to cache {:?}: {}", cache, e);
+            } else {
+                log::info!("[tax_pdf] cached fresh Form 4868 for {} at {:?} ({} bytes)",
+                    year, cache, bytes.len());
+            }
+            bytes
+        }
+        Err(e) => {
+            // Step 3 — fall back to bundled copy.
+            if year != FORM_4868_BUNDLED_YEAR {
+                log::warn!("[tax_pdf] IRS fetch for {} failed ({}); serving bundled \
+                            {} fallback — labels will say {} not {}",
+                    year, e, FORM_4868_BUNDLED_YEAR, FORM_4868_BUNDLED_YEAR, year);
+            } else {
+                log::warn!("[tax_pdf] IRS fetch failed ({}); using bundled {} fallback",
+                    e, FORM_4868_BUNDLED_YEAR);
+            }
+            FORM_4868_BUNDLED.to_vec()
+        }
+    }
+}
 
 // ── IRS Where-To-File chart (Form 4868 page 4, 2025) ───────────────────────
 // State groups taken verbatim from the official PDF. Every US state +
@@ -446,13 +612,14 @@ fn prepend_cover_page(doc: &mut Document, content_bytes: Vec<u8>) -> Result<(), 
 /// Same as `fill_form_4868` but also prepends a cover page with mailing
 /// instructions and the IRS service-center address resolved from the
 /// taxpayer's state and whether a payment is enclosed.
-pub fn fill_form_4868_with_cover(
+pub async fn fill_form_4868_with_cover(
     data: &Form4868Data,
     paying: bool,
     balance_due_display: &str,
     year: i64,
 ) -> Result<Vec<u8>, String> {
-    let mut doc = Document::load_mem(FORM_4868_BLANK).map_err(|e| format!("load: {e}"))?;
+    let template = load_form_4868(year).await;
+    let mut doc = Document::load_mem(&template).map_err(|e| format!("load: {e}"))?;
     apply_form_fields(&mut doc, data)?;
 
     let state_code = data.state.as_deref().unwrap_or("").to_string();
@@ -471,7 +638,7 @@ pub fn fill_form_4868_with_cover(
     let content = build_text_content_stream(&layout);
     prepend_cover_page(&mut doc, content)?;
 
-    let mut buf: Vec<u8> = Vec::with_capacity(FORM_4868_BLANK.len() + 8192);
+    let mut buf: Vec<u8> = Vec::with_capacity(template.len() + 8192);
     doc.save_to(&mut buf).map_err(|e| format!("save: {e}"))?;
     Ok(buf)
 }
@@ -608,10 +775,12 @@ fn apply_form_fields(doc: &mut Document, data: &Form4868Data) -> Result<(), Stri
 }
 
 /// Fill Form 4868 with the supplied data and return the resulting PDF bytes.
-pub fn fill_form_4868(data: &Form4868Data) -> Result<Vec<u8>, String> {
-    let mut doc = Document::load_mem(FORM_4868_BLANK).map_err(|e| format!("load: {e}"))?;
+/// Uses the year-aware loader (cache → IRS fetch → bundled fallback).
+pub async fn fill_form_4868(data: &Form4868Data, year: i64) -> Result<Vec<u8>, String> {
+    let template = load_form_4868(year).await;
+    let mut doc = Document::load_mem(&template).map_err(|e| format!("load: {e}"))?;
     apply_form_fields(&mut doc, data)?;
-    let mut buf: Vec<u8> = Vec::with_capacity(FORM_4868_BLANK.len() + 4096);
+    let mut buf: Vec<u8> = Vec::with_capacity(template.len() + 4096);
     doc.save_to(&mut buf).map_err(|e| format!("save: {e}"))?;
     Ok(buf)
 }

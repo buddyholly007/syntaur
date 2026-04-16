@@ -2739,7 +2739,7 @@ pub async fn handle_extension(
     let fy_end = q("fy_end");
     let fy_end_year = q("fy_end_year");
 
-    let pdf_bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+    let pdf_bytes = tokio::task::spawn_blocking(move || -> Result<(crate::tax_pdf::Form4868Data, bool, String), String> {
         let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
 
         // Pull filing status so the estimate (and the spouse name + SSN
@@ -2880,14 +2880,18 @@ pub async fn handle_extension(
             fy_end_year,
             confirmation_number,
         };
-        // Whether the user is enclosing a payment (drives which IRS PO Box
-        // the cover page recommends).
+        // Return the prepared data + flags. PDF fill (which may await
+        // an IRS download) runs outside this blocking task.
         let paying = amount_paying_cents > 0;
         let balance_due_display = format!("${:.2}", balance_due_cents as f64 / 100.0);
-        crate::tax_pdf::fill_form_4868_with_cover(&data, paying, &balance_due_display, year)
+        Ok::<_, String>((data, paying, balance_due_display))
     }).await
     .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let (data, paying, balance_due_display) = pdf_bytes; // tuple from blocking task
+    let pdf_bytes = crate::tax_pdf::fill_form_4868_with_cover(&data, paying, &balance_due_display, year)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let mut headers = axum::http::HeaderMap::new();
     headers.insert("content-type", "application/pdf".parse().unwrap());
