@@ -1068,10 +1068,90 @@ const MIGRATIONS: &[&str] = &[
     "#,
 
     // Migration 30: Per-user data directory.
-    // Allows each user to choose where their uploads, agent workspaces,
-    // and personality docs are stored on disk.
     r#"
     ALTER TABLE users ADD COLUMN data_dir TEXT;
+    "#,
+
+    // Migration 31: Tax credits + quarterly estimated payments + planning.
+    r#"
+    -- Computed tax credits
+    CREATE TABLE IF NOT EXISTS tax_credits (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id           INTEGER NOT NULL,
+        tax_year          INTEGER NOT NULL,
+        credit_type       TEXT NOT NULL,
+        amount_cents      INTEGER NOT NULL DEFAULT 0,
+        phase_out_cents   INTEGER NOT NULL DEFAULT 0,
+        qualifying_data   TEXT DEFAULT '{}',
+        form_ref          TEXT,
+        created_at        INTEGER NOT NULL,
+        UNIQUE(user_id, tax_year, credit_type)
+    );
+
+    -- Education expenses for AOTC / LLC
+    CREATE TABLE IF NOT EXISTS education_expenses (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id           INTEGER NOT NULL,
+        tax_year          INTEGER NOT NULL,
+        student_name      TEXT NOT NULL,
+        institution       TEXT NOT NULL,
+        tuition_cents     INTEGER NOT NULL DEFAULT 0,
+        fees_cents        INTEGER NOT NULL DEFAULT 0,
+        books_cents       INTEGER NOT NULL DEFAULT 0,
+        form_1098t_doc_id INTEGER,
+        created_at        INTEGER NOT NULL
+    );
+
+    -- Dependent care expenses for CDCC (Form 2441)
+    CREATE TABLE IF NOT EXISTS dependent_care_expenses (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id           INTEGER NOT NULL,
+        tax_year          INTEGER NOT NULL,
+        provider_name     TEXT NOT NULL,
+        provider_tin      TEXT,
+        amount_cents      INTEGER NOT NULL DEFAULT 0,
+        dependent_id      INTEGER,
+        created_at        INTEGER NOT NULL
+    );
+
+    -- Energy improvements for residential energy credit
+    CREATE TABLE IF NOT EXISTS energy_improvements (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id           INTEGER NOT NULL,
+        tax_year          INTEGER NOT NULL,
+        improvement_type  TEXT NOT NULL,
+        cost_cents        INTEGER NOT NULL DEFAULT 0,
+        qualifying_cents  INTEGER NOT NULL DEFAULT 0,
+        property_id       INTEGER,
+        vendor            TEXT,
+        created_at        INTEGER NOT NULL
+    );
+
+    -- Quarterly estimated tax payments
+    CREATE TABLE IF NOT EXISTS estimated_tax_payments (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id           INTEGER NOT NULL,
+        tax_year          INTEGER NOT NULL,
+        quarter           INTEGER NOT NULL,
+        amount_cents      INTEGER NOT NULL DEFAULT 0,
+        payment_date      TEXT,
+        payment_method    TEXT,
+        confirmation_id   TEXT,
+        status            TEXT NOT NULL DEFAULT 'pending',
+        created_at        INTEGER NOT NULL,
+        UNIQUE(user_id, tax_year, quarter)
+    );
+
+    -- Tax projections / what-if scenarios
+    CREATE TABLE IF NOT EXISTS tax_projections (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id           INTEGER NOT NULL,
+        tax_year          INTEGER NOT NULL,
+        scenario_name     TEXT NOT NULL DEFAULT 'baseline',
+        parameters_json   TEXT DEFAULT '{}',
+        result_json       TEXT DEFAULT '{}',
+        created_at        INTEGER NOT NULL
+    );
     "#,
 ];
 

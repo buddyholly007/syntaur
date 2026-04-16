@@ -1,6 +1,7 @@
 //! Tax module — receipt scanning, expense tracking, tax dashboard.
 //! Premium add-on module ($49).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -486,6 +487,14 @@ pub struct TaxEstimate {
     pub w2_withheld: i64,
     pub fed_paid: i64,
     pub child_credit: i64,
+    // Additional credits (Phase 1A)
+    pub eitc: i64,
+    pub cdcc: i64,
+    pub education_credits: i64,
+    pub savers_credit: i64,
+    pub energy_credits: i64,
+    pub total_credits: i64,
+    pub estimated_payments: i64,
     pub total_payments: i64,
     pub owed: i64,
     pub effective_rate: f64,
@@ -686,15 +695,114 @@ pub fn compute_tax_estimate(
         rusqlite::params![user_id, &start, &end], |r| r.get(0),
     ).unwrap_or(0);
 
-    // Child tax credit
-    let dependents: i64 = conn.query_row(
-        "SELECT answers_json FROM deduction_questionnaire WHERE user_id = ? AND tax_year = ?",
-        rusqlite::params![user_id, year], |r| r.get::<_, String>(0),
-    ).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-    .and_then(|v| v.get("dependents")?.as_i64()).unwrap_or(0);
-    let child_credit = dependents * 200_000; // $2,000 per child
+    // ── Credits ──
 
-    let total_payments = w2_withheld + fed_paid + child_credit;
+    // Child Tax Credit ($2,000 per qualifying child)
+    let num_dependents: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM dependents WHERE user_id = ? AND tax_year = ? AND qualifies_ctc = 1",
+        rusqlite::params![user_id, year], |r| r.get(0),
+    ).unwrap_or(0);
+    let child_credit = num_dependents * 200_000; // $2,000 per child
+
+    // EITC — Earned Income Tax Credit
+    let earned_income = w2_income + std::cmp::max(se_net, 0);
+    let eitc = compute_eitc(earned_income, agi, num_dependents, filing_status);
+
+    // CDCC — Child and Dependent Care Credit (Form 2441)
+    let cdcc = {
+        let care_expenses: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(amount_cents), 0) FROM dependent_care_expenses WHERE user_id = ? AND tax_year = ?",
+            rusqlite::params![user_id, year], |r| r.get(0),
+        ).unwrap_or(0);
+        if care_expenses > 0 && num_dependents > 0 {
+            let max_qualifying = if num_dependents >= 2 { 600_000 } else { 300_000 }; // $6K or $3K
+            let qualifying = std::cmp::min(care_expenses, max_qualifying);
+            // Percentage: 35% at AGI ≤ $15K, decreasing 1% per $2K, floor 20%
+            let pct = if agi <= 1_500_000 { 3500 }
+                else { std::cmp::max(3500 - ((agi - 1_500_000) / 200_000) * 100, 2000) };
+            qualifying * pct / 10000
+        } else { 0 }
+    };
+
+    // Education Credits — AOTC ($2,500/student, 40% refundable) + LLC ($2,000/return)
+    let education_credits = {
+        let edu_expenses: Vec<(String, i64)> = {
+            let mut stmt = conn.prepare(
+                "SELECT student_name, COALESCE(SUM(tuition_cents + fees_cents + books_cents), 0) \
+                 FROM education_expenses WHERE user_id = ? AND tax_year = ? GROUP BY student_name"
+            ).ok();
+            match stmt {
+                Some(ref mut s) => s.query_map(rusqlite::params![user_id, year], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                }).ok().map(|rows| rows.filter_map(|r| r.ok()).collect()).unwrap_or_default(),
+                None => Vec::new(),
+            }
+        };
+        let mut aotc_total = 0i64;
+        for (_student, expenses) in &edu_expenses {
+            // AOTC: 100% of first $2K + 25% of next $2K = max $2,500
+            let first = std::cmp::min(*expenses, 200_000);
+            let next = std::cmp::min(std::cmp::max(*expenses - 200_000, 0), 200_000);
+            aotc_total += first + next * 2500 / 10000;
+        }
+        // Phase-out: MFJ $160K-$180K, others $80K-$90K
+        let (aotc_start, aotc_range) = match filing_status {
+            "married_jointly" => (16_000_000i64, 2_000_000i64),
+            _ => (8_000_000i64, 1_000_000i64),
+        };
+        if agi > aotc_start + aotc_range { 0 }
+        else if agi > aotc_start {
+            let reduction = ((agi - aotc_start) as f64 / aotc_range as f64).min(1.0);
+            ((1.0 - reduction) * aotc_total as f64) as i64
+        } else { aotc_total }
+    };
+
+    // Saver's Credit — 50%/20%/10% of retirement contributions up to $2K ($4K MFJ)
+    let savers_credit = {
+        let retirement_contributions: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(e.amount_cents), 0) FROM expenses e \
+             JOIN expense_categories c ON e.category_id = c.id \
+             WHERE e.user_id = ? AND (c.name LIKE '%401k%' OR c.name LIKE '%IRA%' OR c.name LIKE '%Retirement%') \
+             AND e.expense_date >= ? AND e.expense_date <= ?",
+            rusqlite::params![user_id, &start, &end], |r| r.get(0),
+        ).unwrap_or(0);
+        if retirement_contributions > 0 {
+            let max_contribution = if filing_status == "married_jointly" { 400_000 } else { 200_000 };
+            let qualifying = std::cmp::min(retirement_contributions, max_contribution);
+            // Rate based on AGI (2025 thresholds)
+            let (t1, t2) = match filing_status {
+                "married_jointly" => (4_600_000i64, 5_000_000i64),
+                "head_of_household" => (3_450_000i64, 3_750_000i64),
+                _ => (2_300_000i64, 2_500_000i64),
+            };
+            let rate = if agi <= t1 { 5000 } // 50%
+                else if agi <= t2 { 2000 }   // 20%
+                else if agi <= t2 + 500_000 { 1000 } // 10%
+                else { 0 };
+            qualifying * rate / 10000
+        } else { 0 }
+    };
+
+    // Energy Credits — residential energy property (Form 5695)
+    let energy_credits = {
+        let improvements: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(qualifying_cents), 0) FROM energy_improvements WHERE user_id = ? AND tax_year = ?",
+            rusqlite::params![user_id, year], |r| r.get(0),
+        ).unwrap_or(0);
+        // 30% credit, max $3,200/year for energy property + $2,000 for heat pumps
+        std::cmp::min(improvements * 3000 / 10000, 520_000) // $5,200 combined cap
+    };
+
+    let total_credits = child_credit + eitc + cdcc + education_credits + savers_credit + energy_credits;
+
+    // ── Estimated tax payments ──
+    let estimated_payments: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(amount_cents), 0) FROM estimated_tax_payments \
+         WHERE user_id = ? AND tax_year = ? AND status != 'cancelled'",
+        rusqlite::params![user_id, year], |r| r.get(0),
+    ).unwrap_or(0);
+
+    let total_payments = w2_withheld + fed_paid + total_credits + estimated_payments;
     let owed = total_tax - total_payments;
 
     let effective_rate = if gross_income > 0 { (total_tax as f64 / gross_income as f64) * 100.0 } else { 0.0 };
@@ -702,11 +810,50 @@ pub fn compute_tax_estimate(
     Ok(TaxEstimate {
         gross_income, se_income, w2_income, biz_deductions: biz_deductions_adj,
         meals_total, meals_adjustment, se_tax, half_se_tax, se_health_deduction,
-        student_loan_deduction, agi, standard_deduction, itemized_deduction: itemized_deduction,
+        student_loan_deduction, agi, standard_deduction, itemized_deduction,
         salt_capped, medical_deductible, qbi_deduction, deduction_used, deduction_type: deduction_type.to_string(),
         taxable_income, ordinary_tax, ltcg_tax, total_tax, w2_withheld, fed_paid,
-        child_credit, total_payments, owed, effective_rate,
+        child_credit, eitc, cdcc, education_credits, savers_credit, energy_credits,
+        total_credits, estimated_payments, total_payments, owed, effective_rate,
     })
+}
+
+/// Compute EITC based on 2025 thresholds. Returns credit amount in cents.
+/// Uses simplified table: earned income, AGI, number of qualifying children, filing status.
+fn compute_eitc(earned_income: i64, agi: i64, children: i64, filing_status: &str) -> i64 {
+    let is_joint = filing_status == "married_jointly";
+    // 2025 EITC parameters: (max_credit, phase_in_end, phase_out_start, phase_out_end)
+    // All values in cents
+    let (max_credit, phase_in_end, phase_out_start_single, phase_out_end_single) = match children {
+        0 => (64_900, 830_000, 1_020_000, 1_910_000),         // $649 max
+        1 => (434_100, 1_230_000, 2_190_000, 5_281_000),      // $4,341 max
+        2 => (717_000, 1_730_000, 2_190_000, 5_998_000),      // $7,170 max
+        _ => (807_000, 1_730_000, 2_190_000, 6_412_000),      // $8,070 max (3+)
+    };
+    let joint_bump = if is_joint { 740_000 } else { 0 }; // $7,400 MFJ bump
+    let phase_out_start = phase_out_start_single + joint_bump;
+    let phase_out_end = phase_out_end_single + joint_bump;
+
+    // Use the lesser of earned income or AGI for phase-out
+    let income = std::cmp::max(earned_income, agi);
+    if income <= 0 || income > phase_out_end { return 0; }
+
+    // Phase-in: credit increases as earned income rises to phase_in_end
+    let credit_from_income = if earned_income < phase_in_end {
+        max_credit * earned_income / phase_in_end
+    } else {
+        max_credit
+    };
+
+    // Phase-out: credit decreases as income rises from phase_out_start to phase_out_end
+    let credit_after_phaseout = if income > phase_out_start {
+        let reduction = max_credit * (income - phase_out_start) / (phase_out_end - phase_out_start);
+        std::cmp::max(max_credit - reduction, 0)
+    } else {
+        max_credit
+    };
+
+    std::cmp::min(credit_from_income, credit_after_phaseout)
 }
 
 // ── Module Gate Helper ──────────────────────────────────────────────────────
@@ -5141,5 +5288,251 @@ pub async fn handle_deduction_summary(
     .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
+    Ok(Json(result))
+}
+
+// ── Tax Credits API ─────────────────────────────────────────────────────────
+
+pub async fn handle_credits_list(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await.map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    require_tax_module(&state, uid).await?;
+    let year: i64 = params.get("year").and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| chrono::Utc::now().format("%Y").to_string().parse().unwrap_or(2025));
+    let filing_status = params.get("filing_status").cloned().unwrap_or_else(|| "single".to_string());
+
+    let db = state.db_path.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let estimate = compute_tax_estimate(&conn, uid, year, &filing_status)?;
+        Ok(serde_json::json!({
+            "year": year,
+            "child_credit": cents_to_display(estimate.child_credit),
+            "eitc": cents_to_display(estimate.eitc),
+            "cdcc": cents_to_display(estimate.cdcc),
+            "education_credits": cents_to_display(estimate.education_credits),
+            "savers_credit": cents_to_display(estimate.savers_credit),
+            "energy_credits": cents_to_display(estimate.energy_credits),
+            "total_credits": cents_to_display(estimate.total_credits),
+            "total_credits_cents": estimate.total_credits,
+        }))
+    }).await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(result))
+}
+
+pub async fn handle_credits_eligibility(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await.map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    require_tax_module(&state, uid).await?;
+    let year: i64 = params.get("year").and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| chrono::Utc::now().format("%Y").to_string().parse().unwrap_or(2025));
+    let filing_status = params.get("filing_status").cloned().unwrap_or_else(|| "single".to_string());
+
+    let db = state.db_path.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let est = compute_tax_estimate(&conn, uid, year, &filing_status)?;
+        let credits = vec![
+            serde_json::json!({"name":"Child Tax Credit","amount":cents_to_display(est.child_credit),"eligible":est.child_credit>0,
+                "reason": if est.child_credit>0 {"Qualifying children found"} else {"No qualifying dependents"}}),
+            serde_json::json!({"name":"Earned Income Credit","amount":cents_to_display(est.eitc),"eligible":est.eitc>0,
+                "reason": if est.eitc>0 {"Income qualifies"} else {"Income above EITC threshold"}}),
+            serde_json::json!({"name":"Child/Dependent Care","amount":cents_to_display(est.cdcc),"eligible":est.cdcc>0,
+                "reason": if est.cdcc>0 {"Care expenses found"} else {"No care expenses entered"}}),
+            serde_json::json!({"name":"Education (AOTC/LLC)","amount":cents_to_display(est.education_credits),"eligible":est.education_credits>0,
+                "reason": if est.education_credits>0 {"Education expenses found"} else {"No education expenses"}}),
+            serde_json::json!({"name":"Saver's Credit","amount":cents_to_display(est.savers_credit),"eligible":est.savers_credit>0,
+                "reason": if est.savers_credit>0 {"Retirement contributions qualify"} else {"No qualifying contributions or income too high"}}),
+            serde_json::json!({"name":"Residential Energy","amount":cents_to_display(est.energy_credits),"eligible":est.energy_credits>0,
+                "reason": if est.energy_credits>0 {"Energy improvements found"} else {"No energy improvements"}}),
+        ];
+        Ok(serde_json::json!({"credits": credits, "total": cents_to_display(est.total_credits)}))
+    }).await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(result))
+}
+
+// ── Education / Childcare / Energy CRUD ─────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct EducationExpenseReq { token: String, tax_year: i64, student_name: String, institution: String, tuition_cents: i64, fees_cents: Option<i64>, books_cents: Option<i64> }
+
+pub async fn handle_education_expense_create(
+    State(state): State<Arc<AppState>>, Json(req): Json<EducationExpenseReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &req.token).await.map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    require_tax_module(&state, uid).await?;
+    let db = state.db_path.clone();
+    let now = chrono::Utc::now().timestamp();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        conn.execute("INSERT INTO education_expenses (user_id, tax_year, student_name, institution, tuition_cents, fees_cents, books_cents, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            rusqlite::params![uid, req.tax_year, req.student_name, req.institution, req.tuition_cents, req.fees_cents.unwrap_or(0), req.books_cents.unwrap_or(0), now]).map_err(|e| e.to_string())?;
+        Ok(())
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+#[derive(serde::Deserialize)]
+pub struct ChildcareExpenseReq { token: String, tax_year: i64, provider_name: String, amount_cents: i64, dependent_id: Option<i64> }
+
+pub async fn handle_childcare_expense_create(
+    State(state): State<Arc<AppState>>, Json(req): Json<ChildcareExpenseReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &req.token).await.map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    require_tax_module(&state, uid).await?;
+    let db = state.db_path.clone();
+    let now = chrono::Utc::now().timestamp();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        conn.execute("INSERT INTO dependent_care_expenses (user_id, tax_year, provider_name, amount_cents, dependent_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            rusqlite::params![uid, req.tax_year, req.provider_name, req.amount_cents, req.dependent_id, now]).map_err(|e| e.to_string())?;
+        Ok(())
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+#[derive(serde::Deserialize)]
+pub struct EnergyImprovementReq { token: String, tax_year: i64, improvement_type: String, cost_cents: i64, qualifying_cents: Option<i64>, vendor: Option<String> }
+
+pub async fn handle_energy_improvement_create(
+    State(state): State<Arc<AppState>>, Json(req): Json<EnergyImprovementReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &req.token).await.map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    require_tax_module(&state, uid).await?;
+    let db = state.db_path.clone();
+    let now = chrono::Utc::now().timestamp();
+    let qualifying = req.qualifying_cents.unwrap_or(req.cost_cents);
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        conn.execute("INSERT INTO energy_improvements (user_id, tax_year, improvement_type, cost_cents, qualifying_cents, vendor, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            rusqlite::params![uid, req.tax_year, req.improvement_type, req.cost_cents, qualifying, req.vendor, now]).map_err(|e| e.to_string())?;
+        Ok(())
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+// ── Estimated Tax Payments ──────────────────────────────────────────────────
+
+pub async fn handle_estimated_payments_list(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await.map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    require_tax_module(&state, uid).await?;
+    let year: i64 = params.get("year").and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| chrono::Utc::now().format("%Y").to_string().parse().unwrap_or(2025));
+    let db = state.db_path.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT id, quarter, amount_cents, payment_date, payment_method, confirmation_id, status \
+             FROM estimated_tax_payments WHERE user_id = ? AND tax_year = ? ORDER BY quarter"
+        ).map_err(|e| e.to_string())?;
+        let rows: Vec<serde_json::Value> = stmt.query_map(rusqlite::params![uid, year], |r| {
+            Ok(serde_json::json!({"id":r.get::<_,i64>(0)?,"quarter":r.get::<_,i64>(1)?,
+                "amount":cents_to_display(r.get::<_,i64>(2)?),"amount_cents":r.get::<_,i64>(2)?,
+                "payment_date":r.get::<_,Option<String>>(3)?,"method":r.get::<_,Option<String>>(4)?,
+                "confirmation":r.get::<_,Option<String>>(5)?,"status":r.get::<_,String>(6)?}))
+        }).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
+        let deadlines = [format!("{year}-04-15"),format!("{year}-06-15"),format!("{year}-09-15"),format!("{}-01-15",year+1)];
+        Ok(serde_json::json!({"payments": rows, "deadlines": deadlines, "year": year}))
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(result))
+}
+
+#[derive(serde::Deserialize)]
+pub struct EstimatedPaymentReq { token: String, tax_year: i64, quarter: i64, amount_cents: i64, payment_date: Option<String>, payment_method: Option<String>, confirmation_id: Option<String> }
+
+pub async fn handle_estimated_payment_create(
+    State(state): State<Arc<AppState>>, Json(req): Json<EstimatedPaymentReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let principal = crate::resolve_principal(&state, &req.token).await.map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    require_tax_module(&state, uid).await?;
+    if req.quarter < 1 || req.quarter > 4 { return Ok(Json(serde_json::json!({"ok":false,"error":"Quarter must be 1-4"}))); }
+    let db = state.db_path.clone();
+    let now = chrono::Utc::now().timestamp();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        conn.execute("INSERT OR REPLACE INTO estimated_tax_payments (user_id, tax_year, quarter, amount_cents, payment_date, payment_method, confirmation_id, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'paid', ?)",
+            rusqlite::params![uid, req.tax_year, req.quarter, req.amount_cents, req.payment_date, req.payment_method, req.confirmation_id, now]).map_err(|e| e.to_string())?;
+        Ok(())
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+pub async fn handle_estimated_recommended(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await.map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    require_tax_module(&state, uid).await?;
+    let year: i64 = params.get("year").and_then(|s| s.parse().ok()).unwrap_or(2025);
+    let fs = params.get("filing_status").cloned().unwrap_or_else(|| "single".to_string());
+    let db = state.db_path.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let est = compute_tax_estimate(&conn, uid, year, &fs)?;
+        let prior_tax = compute_tax_estimate(&conn, uid, year - 1, &fs).map(|e| e.total_tax).unwrap_or(0);
+        let safe_harbor_pct = if est.agi > 15_000_000 { 11000 } else { 10000 };
+        let safe_harbor = prior_tax * safe_harbor_pct / 10000;
+        let required = std::cmp::min(est.total_tax * 9000 / 10000, safe_harbor);
+        let paid = est.w2_withheld + est.estimated_payments;
+        let remaining = std::cmp::max(required - paid, 0);
+        Ok(serde_json::json!({"annual_required":cents_to_display(required),"already_paid":cents_to_display(paid),
+            "remaining":cents_to_display(remaining),"per_quarter":cents_to_display(remaining/4),
+            "safe_harbor":cents_to_display(safe_harbor),"projected_tax":cents_to_display(est.total_tax),
+            "projected_owed":cents_to_display(est.owed)}))
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(result))
+}
+
+pub async fn handle_tax_projection(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await.map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
+    let uid = principal.user_id();
+    require_tax_module(&state, uid).await?;
+    let year: i64 = params.get("year").and_then(|s| s.parse().ok()).unwrap_or(2025);
+    let fs = params.get("filing_status").cloned().unwrap_or_else(|| "single".to_string());
+    let db = state.db_path.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let cur = compute_tax_estimate(&conn, uid, year, &fs)?;
+        let month = chrono::Utc::now().format("%m").to_string().parse::<f64>().unwrap_or(6.0);
+        let factor = 12.0 / month;
+        let proj_income = (cur.gross_income as f64 * factor) as i64;
+        let proj_tax = (cur.total_tax as f64 * factor) as i64;
+        let mut cmp = serde_json::json!({});
+        if let Ok(p) = compute_tax_estimate(&conn, uid, year - 1, &fs) {
+            cmp = serde_json::json!({"prior_income":cents_to_display(p.gross_income),"prior_tax":cents_to_display(p.total_tax),
+                "prior_rate":format!("{:.1}%",p.effective_rate),"income_change":cents_to_display(proj_income-p.gross_income),
+                "tax_change":cents_to_display(proj_tax-p.total_tax)});
+        }
+        Ok(serde_json::json!({"year":year,"ytd_income":cents_to_display(cur.gross_income),"projected_income":cents_to_display(proj_income),
+            "ytd_tax":cents_to_display(cur.total_tax),"projected_tax":cents_to_display(proj_tax),
+            "effective_rate":format!("{:.1}%",cur.effective_rate),"owed":cents_to_display(cur.owed),"comparison":cmp}))
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Task error".to_string()))?.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(result))
 }
