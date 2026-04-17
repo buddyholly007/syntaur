@@ -549,25 +549,25 @@ pub async fn render() -> Html<String> {
                                         label class="text-xs text-gray-400" {
                                             "Estimated total tax"
                                         }
-                                        input style="background:#1a1a2e;color:#f0f0f0;border:1px solid #444;border-radius:8px;padding:6px 10px;width:100%;font-size:14px" id="ext-total-tax" value="$0.00";
+                                        input class="input" id="ext-total-tax" value="$0.00";
                                     }
                                     div {
                                         label class="text-xs text-gray-400" {
                                             "Payments made (withholding + estimated)"
                                         }
-                                        input style="background:#1a1a2e;color:#f0f0f0;border:1px solid #444;border-radius:8px;padding:6px 10px;width:100%;font-size:14px" id="ext-payments" value="$0.00";
+                                        input class="input" id="ext-payments" value="$0.00";
                                     }
                                     div {
                                         label class="text-xs text-gray-400" {
                                             "Balance due"
                                         }
-                                        input style="background:#1a1a2e;color:#4ade80;border:1px solid #444;border-radius:8px;padding:6px 10px;width:100%;font-size:14px;font-weight:600" id="ext-balance" value="$0.00" readonly;
+                                        input class="input font-semibold text-green-600" id="ext-balance" value="$0.00" readonly;
                                     }
                                     div {
                                         label class="text-xs text-gray-400" {
                                             "Paying with this extension"
                                         }
-                                        input style="background:#1a1a2e;color:#f0f0f0;border:1px solid #444;border-radius:8px;padding:6px 10px;width:100%;font-size:14px" id="ext-payment" value="0.00" oninput="updateExtBalance()";
+                                        input class="input" id="ext-payment" value="0.00" oninput="updateExtBalance()";
                                     }
                                 }
                             }
@@ -3349,19 +3349,68 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   }
   .btn-primary:hover { background: var(--lcars-peach) !important; box-shadow: 0 0 12px rgba(255,156,61,0.45); }
 
-  /* ─── Inputs on parchment cards ─── */
-  .card .input, .card input:not([type="checkbox"]):not([type="radio"]), .card select, .card textarea {
+  /* ─── Inputs on parchment cards — strong override (beats inline styles) ─── */
+  .card .input,
+  .card input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),
+  .card select,
+  .card textarea {
     background: rgba(252,245,226,0.7) !important;
     color: var(--ink-sepia) !important;
     border: 1px solid rgba(43,29,16,0.35) !important;
-    font-family: 'IBM Plex Mono', monospace;
+    border-radius: 0.3rem !important;
+    padding: 0.4rem 0.65rem !important;
+    font-family: 'IBM Plex Mono', monospace !important;
+    font-size: 0.85rem !important;
+    outline: none !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+    min-height: 2.15rem;
   }
   .card .input:focus, .card input:focus, .card select:focus, .card textarea:focus {
     border-color: var(--ink-navy) !important;
     box-shadow: 0 0 0 1px var(--ink-navy) !important;
     outline: none !important;
   }
-  .card .label { color: var(--ink-navy) !important; font-family: 'Antonio', sans-serif; text-transform: uppercase; letter-spacing: 0.1em; font-size: 0.7rem !important; }
+  .card .label {
+    color: var(--ink-navy) !important;
+    font-family: 'Antonio', sans-serif;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-size: 0.7rem !important;
+    margin-bottom: 0.2rem !important;
+    display: block;
+  }
+
+  /* Native <select> — custom LCARS-ish chevron on the parchment */
+  .card select {
+    appearance: none !important;
+    -webkit-appearance: none !important;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='%232b1d10'%3E%3Cpath d='M2 4h8L6 9z'/%3E%3C/svg%3E") !important;
+    background-repeat: no-repeat !important;
+    background-position: right 0.55rem center !important;
+    background-size: 10px 10px !important;
+    padding-right: 1.8rem !important;
+    cursor: pointer;
+  }
+  .card select option { background: #f0e7cc; color: var(--ink-sepia); }
+
+  /* Native date / datetime pickers — darker calendar indicator on cream */
+  .card input[type="date"]::-webkit-calendar-picker-indicator,
+  .card input[type="datetime-local"]::-webkit-calendar-picker-indicator,
+  .card input[type="time"]::-webkit-calendar-picker-indicator {
+    filter: saturate(0) brightness(0.4);
+    opacity: 0.75;
+    cursor: pointer;
+  }
+
+  /* Checkboxes / radios on parchment — dark accent */
+  .card input[type="checkbox"], .card input[type="radio"] {
+    accent-color: var(--ledger);
+    width: 1rem; height: 1rem;
+  }
+
+  /* Narrow helper inputs (small quarter/quantity fields) get compact size */
+  .card input[size], .card select[size] { width: auto !important; }
 
   /* Year-select in top bar keeps dark style */
   #year-select { background: var(--desk-mid); color: var(--lcars-peach); border-color: var(--desk-trim); font-family: 'IBM Plex Mono', monospace; }
@@ -3379,7 +3428,7 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   }
   #positron-brain {
     position: absolute; inset: 0; pointer-events: none; z-index: 0;
-    opacity: 0.55;
+    opacity: 0.8;
   }
   .positron-panel > * { position: relative; z-index: 1; }
 
@@ -3425,13 +3474,14 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   .positron-logbar .logbar-label { letter-spacing: 0.12em; text-transform: uppercase; opacity: 0.7; }
   .positron-logbar .logbar-value { letter-spacing: 0.05em; }
 
-  /* Chat messages */
+  /* Chat messages — transparent so the positronic-brain canvas shows through */
   #tax-chat-messages { padding: 0.75rem !important; gap: 0.75rem !important; }
   #tax-chat-messages > div {
-    background: rgba(255,156,61,0.05);
+    background: transparent;
     border-left: 2px solid var(--lcars-gold);
     padding: 0.6rem 0.75rem !important;
-    border-radius: 0 6px 6px 0;
+    border-radius: 0;
+    backdrop-filter: blur(1.5px);
   }
   #tax-chat-messages > div > div, #tax-chat-messages > div > p,
   #tax-chat-messages > div p, #tax-chat-messages .text-sm, #tax-chat-messages .text-gray-400 {
@@ -6498,7 +6548,7 @@ function initPositronicBrain() {
   if (!canvas) return;
   const ctx = canvas.getContext('2d', { alpha: true });
   let w = 0, h = 0;
-  const NODE_COUNT = 38;
+  const NODE_COUNT = 68;  // denser neural-net; canvas is the full chat panel background
   const nodes = [];   // {x,y,r,phase}
   const edges = [];   // {a,b,len}
   const pulses = [];  // {edge, t, dir}
@@ -6561,8 +6611,8 @@ function initPositronicBrain() {
       ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
     }
 
-    // Spawn new pulses occasionally
-    if (Math.random() < 0.04 && pulses.length < 8) {
+    // Spawn new pulses occasionally — scales with node density
+    if (Math.random() < 0.08 && pulses.length < 14) {
       const e = edges[Math.floor(Math.random() * edges.length)];
       pulses.push({ edge: e, t: 0, dir: Math.random() < 0.5 ? 1 : -1 });
     }
