@@ -1668,8 +1668,30 @@ async fn handle_message_start(
                 let prior = mgr.messages(cid, principal_scope.clone(), agent_scope_for_conv2).await;
                 for m in prior {
                     match m.role.as_str() {
-                        "user" => messages.push(llm::ChatMessage::user(&m.content)),
-                        "assistant" => messages.push(llm::ChatMessage::assistant(&m.content)),
+                        "user" => {
+                            // Check for image content in user messages
+                            let image_urls: Vec<String> = extract_image_urls(&m.content);
+                            if !image_urls.is_empty() {
+                                let text = strip_image_markdown(&m.content);
+                                messages.push(llm::ChatMessage::user_with_images(&text, &image_urls));
+                            } else {
+                                messages.push(llm::ChatMessage::user(&m.content));
+                            }
+                        }
+                        "assistant" => {
+                            // Check for generated images in assistant messages
+                            let image_urls: Vec<String> = extract_image_urls(&m.content);
+                            if !image_urls.is_empty() {
+                                // Include the image so the model can "see" what it generated
+                                let text = strip_image_markdown(&m.content);
+                                messages.push(llm::ChatMessage::user_with_images(
+                                    &format!("[Previous assistant response with image]: {}", text),
+                                    &image_urls
+                                ));
+                            } else {
+                                messages.push(llm::ChatMessage::assistant(&m.content));
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -6538,6 +6560,23 @@ async fn handle_api_agent_delete(
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(serde_json::json!({ "deleted": true, "agent_id": agent_id })))
 }
+
+
+/// Extract image URLs from markdown content (![alt](url) pattern).
+fn extract_image_urls(content: &str) -> Vec<String> {
+    let re = regex::Regex::new(r"!\[.*?\]\((https?://[^\)]+|data:image/[^\)]+)\)").unwrap();
+    re.captures_iter(content)
+        .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
+        .collect()
+}
+
+/// Strip markdown image syntax from content, leaving just the text.
+fn strip_image_markdown(content: &str) -> String {
+    let re = regex::Regex::new(r"!\[.*?\]\([^\)]+\)
+*").unwrap();
+    re.replace_all(content, "").trim().to_string()
+}
+
 
 /// When no custom_prompt or workspace files exist for an agent, try to resolve
 /// a system prompt from `module_agent_defaults`. Returns the substituted prompt

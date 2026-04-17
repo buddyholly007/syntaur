@@ -64,7 +64,7 @@ impl Tool for GenerateImageTool {
         if prompt.len() > 2000 { return Err("Prompt too long (max 2000 chars)".to_string()); }
 
         // Create background task
-        let conv_id = None::<String>; // Will be set by the handler if available
+        let conv_id = ctx.conversation_id.clone();
         let task_id = self.task_manager.create(
             ctx.user_id,
             conv_id.clone(),
@@ -87,6 +87,7 @@ impl Tool for GenerateImageTool {
         let size_owned = size.to_string();
         let tid = task_id.clone();
         let convs = self.conversations.clone();
+        let conv_id = conv_id;
 
         tokio::spawn(async move {
             let result = call_image_api(&http, &api_key, &prompt_owned, &size_owned).await;
@@ -99,6 +100,16 @@ impl Tool for GenerateImageTool {
                         "prompt": prompt_owned,
                         "size": size_owned,
                     })).await;
+                    // Append image to conversation so the agent can see it next turn
+                    if let (Some(ref cid), Some(ref cm)) = (&conv_id, &convs) {
+                        let img_msg = format!(
+                            "![Generated image]({})
+
+Generated image from prompt: {}",
+                            image_url, prompt_owned
+                        );
+                        let _ = cm.append(cid, "assistant", &img_msg).await;
+                    }
                 }
                 Err(e) => {
                     error!("[image] task {} failed: {}", tid, e);

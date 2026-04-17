@@ -670,6 +670,7 @@ impl ToolRegistry {
             allowed_scripts: &self.allowed_scripts,
             user_id: self.user_id,
             db_path: self.db_path.as_deref(),
+            conversation_id: None,
         };
         let started = Instant::now();
         let result = match adaptive_timeout {

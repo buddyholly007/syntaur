@@ -48,6 +48,8 @@ pub struct ToolContext<'a> {
     pub user_id: i64,
     /// Path to index.db for direct queries (todos, calendar, bug reports).
     pub db_path: Option<&'a Path>,
+    /// Current conversation ID (for background tasks that need to append results).
+    pub conversation_id: Option<String>,
 }
 
 // ── Gateway-internal Tool trait ─────────────────────────────────────────
