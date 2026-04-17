@@ -229,6 +229,91 @@ fn populate_coders(ctx: &mut HashMap<&'static str, String>, conn: &rusqlite::Con
     let _ = ctx;
 }
 
+
+/// Build a compact memory index for injection into the system prompt.
+/// Returns the top N most relevant memories as a formatted text block.
+///
+/// Relevance = importance * recency_weight. Stale memories (>90 days)
+/// are marked. The output is ~500 tokens max.
+pub fn build_memory_injection(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+    agent_id: &str,
+    max_memories: usize,
+) -> String {
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(user_id)];
+
+    let scope_clause = if agent_id == "main" {
+        "m.user_id = ? AND m.agent_id != 'journal'".to_string()
+    } else if agent_id == "journal" {
+        params.push(Box::new(agent_id.to_string()));
+        "m.user_id = ? AND m.agent_id = ?".to_string()
+    } else {
+        params.push(Box::new(agent_id.to_string()));
+        "(m.user_id = ? AND (m.agent_id = ? OR m.shared = 1 OR (m.agent_id = 'main' AND m.memory_type IN ('user','feedback'))))".to_string()
+    };
+
+    let sql = format!(
+        "SELECT m.memory_type, m.key, m.title, m.description, m.content, \
+                m.importance, m.updated_at, m.confidence, m.agent_id \
+         FROM agent_memories m \
+         WHERE {} \
+         ORDER BY m.importance DESC, m.updated_at DESC \
+         LIMIT {}",
+        scope_clause, max_memories
+    );
+
+    let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
+    let mut stmt = match conn.prepare(&sql) {
+        Ok(s) => s,
+        Err(_) => return String::new(),
+    };
+
+    let now = chrono::Utc::now().timestamp();
+    let lines: Vec<String> = stmt
+        .query_map(refs.as_slice(), |r| {
+            let mtype: String = r.get(0)?;
+            let key: String = r.get(1)?;
+            let _title: String = r.get(2)?;
+            let desc: Option<String> = r.get(3)?;
+            let content: String = r.get(4)?;
+            let _importance: i64 = r.get(5)?;
+            let updated: i64 = r.get(6)?;
+            let confidence: f64 = r.get(7)?;
+            let agent: String = r.get(8)?;
+
+            let age_days = (now - updated) / 86400;
+            let stale = if age_days > 90 { " [stale]" } else { "" };
+            let conf = if confidence < 0.8 { " [uncertain]" } else { "" };
+            let summary = desc.unwrap_or_else(|| {
+                if content.len() > 80 { format!("{}...", &content[..77]) } else { content }
+            });
+
+            Ok(format!("[{}] {}: {}{}{}", mtype, key, summary, stale, conf))
+        })
+        .ok()
+        .map(|iter| iter.filter_map(Result::ok).collect())
+        .unwrap_or_default();
+
+    if lines.is_empty() {
+        return String::new();
+    }
+
+    // Update access counts for injected memories
+    let _ = conn.execute_batch(&format!(
+        "UPDATE agent_memories SET access_count = access_count + 1, last_accessed_at = {} \
+         WHERE user_id = {} AND id IN (SELECT id FROM agent_memories WHERE {} ORDER BY importance DESC, updated_at DESC LIMIT {})",
+        now, user_id, scope_clause.replace("m.", ""), max_memories
+    ));
+
+    format!(
+        "[Your memories — {} loaded. Use memory_recall(query) for more, memory_save(...) to remember new things.]
+{}",
+        lines.len(),
+        lines.join("\n")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

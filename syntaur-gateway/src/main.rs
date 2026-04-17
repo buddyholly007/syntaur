@@ -1229,6 +1229,21 @@ async fn handle_api_message(
         }
     }
 
+    // Inject relevant agent memories into system prompt
+    {
+        let mem_db = state.db_path.clone();
+        let mem_uid = principal.user_id();
+        let mem_aid = agent_id.clone();
+        if let Ok(Some(mem_index)) = tokio::task::spawn_blocking(move || {
+            let conn = rusqlite::Connection::open(&mem_db).ok()?;
+            let idx = crate::agents::templates::build_memory_injection(&conn, mem_uid, &mem_aid, 10);
+            if idx.is_empty() { None } else { Some(idx) }
+        }).await {
+            system_prompt.push_str("\n\n---\n\n");
+            system_prompt.push_str(&mem_index);
+        }
+    }
+
     // Build LLM chain — use llm_agent_id (base agent for user agents)
     let llm_chain = std::sync::Arc::new(llm::LlmChain::from_config(&state.config, &resolved.llm_agent_id, state.client.clone()));
 
@@ -5363,7 +5378,7 @@ async fn main() {
             .filter_map(|s| s.parse().ok())
             .collect();
 
-        // Build LLM chain for this agent
+    // Build LLM chain for this agent
         let llm_chain = Arc::new(llm::LlmChain::from_config(&config, &agent_id, state.client.clone()));
 
         // Load agent workspace context for system prompt
