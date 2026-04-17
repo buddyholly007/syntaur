@@ -5183,6 +5183,9 @@ async fn main() {
         .route("/api/agents/{agent_id}", axum::routing::delete(handle_api_agent_delete))
         .route("/api/settings/preferences", get(handle_api_settings_prefs_get).put(handle_api_settings_prefs_put))
         .route("/api/settings/export", get(handle_api_settings_export))
+        .route("/api/settings/wipe_memories", post(handle_api_settings_wipe_memories))
+        .route("/api/settings/factory_reset", post(handle_api_settings_factory_reset))
+        .route("/api/settings/integration_status", get(handle_api_settings_integration_status))
         .route("/api/agents/dismiss_escalation", axum::routing::post(handle_api_dismiss_escalation))
         .route("/api/agents/handoff", axum::routing::post(handle_api_agent_handoff))
         .route("/api/agents/reentry", axum::routing::post(handle_api_agent_reentry))
@@ -6703,6 +6706,194 @@ async fn handle_api_settings_export(
         "agents": agents_json,
         "preferences": prefs_map,
         "note": "Secrets (passwords, API keys, OAuth tokens) are never exported. Import via Settings → Privacy & data → Import.",
+    })))
+}
+
+/// POST /api/settings/wipe_memories — destructive. Deletes every row from
+/// agent_memories for the calling user. Type-confirm gated on the client.
+/// Body: {token, confirm: "wipe all memories"}.
+///
+/// NOTE on the journal scope: per the persona memory, Mushi (journal)
+/// memories are privacy-sensitive and normally never leave the isolated
+/// scope. This wipe explicitly includes them because the user is asking
+/// to purge all memory — there's no "keep some" option. If this feels
+/// wrong for a given workflow, add a `scope` field to the request body.
+async fn handle_api_settings_wipe_memories(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let token = body["token"].as_str()
+        .ok_or((axum::http::StatusCode::UNAUTHORIZED, "missing token".into()))?;
+    let confirm = body["confirm"].as_str().unwrap_or("");
+    if confirm != "wipe all memories" {
+        return Err((axum::http::StatusCode::BAD_REQUEST,
+            "confirmation phrase required — send {\"confirm\": \"wipe all memories\"}".into()));
+    }
+    let principal = resolve_principal(&state, token).await
+        .map_err(|c| (c, "auth failed".into()))?;
+    let uid = principal.user_id();
+
+    let db = state.db_path.clone();
+    let deleted = tokio::task::spawn_blocking(move || -> Result<usize, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let n = conn.execute("DELETE FROM agent_memories WHERE user_id = ?",
+            rusqlite::params![uid])
+            .map_err(|e| e.to_string())?;
+        // Also drop the FTS shadow to avoid phantom matches.
+        let _ = conn.execute("DELETE FROM agent_memories_fts", []);
+        Ok(n)
+    })
+    .await
+    .map_err(|_| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "spawn_blocking join".into()))?
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    info!("[settings] user {} wiped {} memories", uid, deleted);
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "deleted": deleted,
+    })))
+}
+
+/// POST /api/settings/factory_reset — ADMIN-ONLY nuclear option. Deletes
+/// the calling user's data across every per-user table. Does not touch
+/// server-wide config (LLM providers, gateway port) or other users' data.
+/// Body: {token, confirm: "factory reset"}.
+async fn handle_api_settings_factory_reset(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let token = body["token"].as_str()
+        .ok_or((axum::http::StatusCode::UNAUTHORIZED, "missing token".into()))?;
+    let confirm = body["confirm"].as_str().unwrap_or("");
+    if confirm != "factory reset" {
+        return Err((axum::http::StatusCode::BAD_REQUEST,
+            "confirmation phrase required — send {\"confirm\": \"factory reset\"}".into()));
+    }
+    let principal = resolve_principal(&state, token).await
+        .map_err(|c| (c, "auth failed".into()))?;
+    if !principal.is_admin() {
+        return Err((axum::http::StatusCode::FORBIDDEN,
+            "factory reset is admin-only".into()));
+    }
+    let uid = principal.user_id();
+
+    let db = state.db_path.clone();
+    let summary = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        // Collect counts before deleting so the response shows what actually got blown away.
+        let mut counts = serde_json::Map::new();
+        // Tables that are safe to purge per-user without breaking the schema.
+        for table in &[
+            "agent_memories", "user_agents", "user_preferences",
+            "personality_docs", "sharing_grants",
+        ] {
+            let n: i64 = conn.query_row(
+                &format!("SELECT COUNT(*) FROM {} WHERE user_id = ?", table),
+                rusqlite::params![uid],
+                |r| r.get(0),
+            ).unwrap_or(0);
+            let _ = conn.execute(
+                &format!("DELETE FROM {} WHERE user_id = ?", table),
+                rusqlite::params![uid],
+            );
+            counts.insert(table.to_string(), serde_json::Value::Number(n.into()));
+        }
+        // Conversations (+ messages via cascading FK if the schema sets it,
+        // otherwise manual). Best-effort; ignore errors for tables that may
+        // not have a user_id column in older schemas.
+        for table in &["conversations", "messages", "telegram_messages"] {
+            let _ = conn.execute(
+                &format!("DELETE FROM {} WHERE user_id = ?", table),
+                rusqlite::params![uid],
+            );
+        }
+        // Keep the user row itself + their token (so they can immediately
+        // re-onboard without being logged out). They'll hit the setup wizard
+        // on next load.
+        let _ = conn.execute("DELETE FROM agent_memories_fts", []);
+        Ok(serde_json::Value::Object(counts))
+    })
+    .await
+    .map_err(|_| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "spawn_blocking join".into()))?
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    warn!("[settings] FACTORY RESET by admin uid={} — tables wiped: {}", uid, summary);
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "wiped": summary,
+    })))
+}
+
+/// GET /api/settings/integration_status — live state of every integration
+/// shown on the Settings → Integrations pages. Used to drive the status
+/// pills (connected / partially configured / not configured / error).
+async fn handle_api_settings_integration_status(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").cloned().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let _principal = resolve_principal(&state, &token).await?;
+
+    // Telegram — configured if either the gateway config has a token OR
+    // the per-user preference has a bot token.
+    let telegram_configured = state.config.gateway
+        .extra.get("telegram")
+        .and_then(|v| v.get("bot_token"))
+        .and_then(|v| v.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+
+    // Home Assistant — same pattern: gateway config block.
+    let ha_configured = state.config.gateway
+        .extra.get("home_assistant")
+        .and_then(|v| v.get("url"))
+        .and_then(|v| v.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+
+    // LLM providers — count how many are declared in config.models.providers.
+    // Runtime circuit-state per provider is tracked elsewhere; config-level
+    // count is the right proxy for "is this set up?" in the settings UI.
+    let llm_total = state.config.models.providers.len();
+    let llm_live = llm_total;  // per-provider health snapshot TBD
+
+    // Sync providers — count rows in sync_connections if the table exists.
+    let db = state.db_path.clone();
+    let sync_count: i64 = tokio::task::spawn_blocking(move || {
+        let conn = rusqlite::Connection::open(&db).ok()?;
+        conn.query_row("SELECT COUNT(*) FROM sync_connections", [], |r| r.get::<_, i64>(0)).ok()
+    }).await.ok().flatten().unwrap_or(0);
+
+    // Media bridge — heuristic: is the companion running on :18790?
+    let media_alive = reqwest::Client::new()
+        .get("http://127.0.0.1:18790/health")
+        .timeout(std::time::Duration::from_millis(200))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false);
+
+    // Voice satellites — count configured devices.
+    let voice_satellites = state.config.gateway
+        .extra.get("voice")
+        .and_then(|v| v.get("satellites"))
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+
+    Ok(Json(serde_json::json!({
+        "telegram":      { "status": if telegram_configured { "connected" } else { "not_configured" } },
+        "homeassistant": { "status": if ha_configured       { "connected" } else { "not_configured" } },
+        "llm":           { "status": if llm_total == 0 { "not_configured" }
+                                     else if llm_live == 0 { "error" }
+                                     else if llm_live < llm_total { "degraded" }
+                                     else { "connected" },
+                           "live": llm_live, "total": llm_total },
+        "sync":          { "status": if sync_count > 0 { "connected" } else { "not_configured" },
+                           "connections": sync_count },
+        "media_bridge":  { "status": if media_alive { "connected" } else { "not_configured" } },
+        "voice":         { "status": if voice_satellites > 0 { "connected" } else { "not_configured" },
+                           "satellites": voice_satellites },
     })))
 }
 

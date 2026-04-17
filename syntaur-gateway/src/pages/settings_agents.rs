@@ -36,7 +36,17 @@ fn page_body() -> Markup {
                     "agents stay in their lane."
                 }
             }
+            (inline_body())
+        }
+    }
+}
 
+/// Public helper — the three agent-management cards (list / create / import)
+/// without the page heading or outer padding. Used by pages::settings to
+/// embed the manager inline under Agents → All agents.
+pub fn inline_body() -> Markup {
+    html! {
+        div class="space-y-6" {
             // ── Existing agents ────────────────────────────────────────
             div class="card p-5" {
                 div class="flex items-center justify-between mb-3" {
@@ -116,6 +126,9 @@ fn page_body() -> Markup {
         }
     }
 }
+
+pub const AGENT_CSS: &str = EXTRA_STYLE;
+pub const AGENT_JS:  &str = PAGE_JS;
 
 const EXTRA_STYLE: &str = r#"
 .agent-row {

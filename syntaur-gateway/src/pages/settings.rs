@@ -16,15 +16,14 @@ use maud::{html, Markup, PreEscaped};
 
 use super::shared::{shell, Page};
 
-// ── Legacy HTML blobs (progressively replaced with maud in later phases) ──
-const LEGACY_GENERAL: &str = include_str!("settings_chunks/tab-general.html");
-const LEGACY_LLM:     &str = include_str!("settings_chunks/tab-llm.html");
-const LEGACY_SYNC:    &str = include_str!("settings_chunks/tab-sync.html");
-const LEGACY_MEDIA:   &str = include_str!("settings_chunks/tab-media.html");
-const LEGACY_SYSTEM:  &str = include_str!("settings_chunks/tab-system.html");
-const LEGACY_USERS:   &str = include_str!("settings_chunks/tab-users.html");
-const LEGACY_MODALS:  &str = include_str!("settings_chunks/modals.html");
-const LEGACY_JS:      &str = include_str!("settings_chunks/page.js");
+// Legacy JS + shared modals stay as raw strings (JS can't be maud; modals
+// are a dense tangle of dialogs the JS expects at specific IDs).
+const LEGACY_MODALS: &str = include_str!("settings_chunks/modals.html");
+const LEGACY_JS:     &str = include_str!("settings_chunks/page.js");
+// The six former HTML tab bodies are now real maud functions in
+// `settings_legacy::tab_*` — type-checked at compile time, with every
+// legacy ID / class / onclick preserved. See `pages/settings_legacy.rs`.
+use crate::pages::settings_legacy::{tab_general, tab_llm, tab_sync, tab_media, tab_system, tab_users};
 
 pub async fn render() -> Html<String> {
     let page = Page {
@@ -36,6 +35,10 @@ pub async fn render() -> Html<String> {
     let resolved_js = NEW_JS.replace("%%SS_INDEX%%", &palette_index_json());
     let body = html! {
         (top_bar())
+        // Agents page CSS — scoped via `.agent-*` class names so it's safe
+        // to load globally. Powers the inlined Agent manager on the Agents
+        // → All agents sub-page.
+        style { (PreEscaped(crate::pages::settings_agents::AGENT_CSS)) }
         div class="ss-shell" {
             (sidebar())
             main class="ss-main" id="ss-main" {
@@ -53,6 +56,9 @@ pub async fn render() -> Html<String> {
         (dirty_banner())
 
         script { (PreEscaped(LEGACY_JS)) }
+        // Agents JS powers the inlined agent manager (agentsLoad / create /
+        // delete / import). Runs against the same `/api/agents/*` endpoints.
+        script { (PreEscaped(crate::pages::settings_agents::AGENT_JS)) }
         script { (PreEscaped(resolved_js)) }
     };
     Html(shell(page, body).into_string())
@@ -139,7 +145,7 @@ fn content_area() -> Markup {
             account_security_body()))
         (page_wrap("account", "users", "Users (admin)",
             "Invite, promote, or remove users on this Syntaur instance.",
-            html! { (PreEscaped(LEGACY_USERS)) }))
+            tab_users()))
 
         // ── AGENTS ─────────────────────────────────────────
         (page_wrap("agents", "all", "All agents",
@@ -152,26 +158,47 @@ fn content_area() -> Markup {
         // ── INTEGRATIONS ───────────────────────────────────
         (page_wrap("integrations", "telegram", "Telegram",
             "Chat with your agents from your phone.",
-            html! { (PreEscaped(LEGACY_GENERAL)) }))
+            integration_telegram_body()))
         (page_wrap("integrations", "homeassistant", "Home Assistant",
             "Let your agents see + control your smart home.",
-            integrations_ha_body()))
+            integration_ha_body()))
         (page_wrap("integrations", "sync", "Sync",
             "Connect cloud services so agents can read your calendar, email, bank, and more.",
-            html! { (PreEscaped(LEGACY_SYNC)) }))
+            integration_sync_body()))
         (page_wrap("integrations", "media", "Media bridge",
             "Local companion app that lets agents play hidden audio/video from Apple Music, Spotify, Tidal, and YouTube.",
-            html! { (PreEscaped(LEGACY_MEDIA)) }))
+            integration_media_body()))
 
         // ── LLM ────────────────────────────────────────────
         (page_wrap("llm", "providers", "Providers",
             "Which model answers each agent. Order + fallback + per-provider API keys.",
-            html! { (PreEscaped(LEGACY_LLM)) }))
+            html! {
+                div class="ss-card" {
+                    div class="ss-card-head" {
+                        h3 class="ss-card-title" { "LLM providers" }
+                        (status_pill("ss-pill-llm"))
+                    }
+                    p class="ss-help" {
+                        "Providers are tried in fallback order. If the primary "
+                        "fails (rate limit, 5xx, timeout) the chain moves to the "
+                        "next automatically."
+                    }
+                    (tab_llm())
+                }
+            }))
 
         // ── VOICE ──────────────────────────────────────────
         (page_wrap("voice", "satellites", "Satellites",
             "Smart speakers running your wake word. Train voice prints, assign rooms.",
-            voice_satellites_body()))
+            html! {
+                div class="ss-card" {
+                    div class="ss-card-head" {
+                        h3 class="ss-card-title" { "Voice satellites" }
+                        (status_pill("ss-pill-voice"))
+                    }
+                    (voice_satellites_body())
+                }
+            }))
 
         // ── MODULES ────────────────────────────────────────
         (page_wrap("modules", "installed", "Installed modules",
@@ -191,7 +218,7 @@ fn content_area() -> Markup {
         // ── SYSTEM ─────────────────────────────────────────
         (page_wrap("system", "gateway", "Gateway & ports",
             "Network + runtime configuration. Some fields require a gateway restart.",
-            html! { (PreEscaped(LEGACY_SYSTEM)) }))
+            tab_system()))
         (page_wrap("system", "danger", "Danger zone",
             "Destructive actions. Typed confirmation required.",
             system_danger_body()))
@@ -359,20 +386,12 @@ fn account_security_body() -> Markup {
 // ── Agents ─────────────────────────────────────────────────
 fn agents_all_body() -> Markup {
     html! {
-        div class="ss-card" {
-            p class="ss-help" {
-                "You can run multiple main-thread agents (Peter / Kyron-tier privileges) "
-                "and import agents from other platforms via Markdown, plain text, or JSON."
-            }
-            div class="ss-actions" {
-                a href="/settings/agents" class="ss-btn-primary" { "Open agent manager →" }
-            }
-            p class="ss-help" style="margin-top:12px" {
-                "The agent manager currently lives at "
-                code { "/settings/agents" }
-                " — will be folded inline in the next iteration."
-            }
+        p class="ss-help" {
+            "You can run multiple main-thread agents (Peter / Kyron-tier privileges) "
+            "and import agents from other platforms via Markdown, plain text, or JSON."
         }
+        // Inlined — same component that powers the standalone /settings/agents page.
+        (crate::pages::settings_agents::inline_body())
     }
 }
 
@@ -412,24 +431,93 @@ fn persona_tile(ico: &str, name: &str, role: &str, inspiration: &str) -> Markup 
 }
 
 // ── Integrations ───────────────────────────────────────────
-fn integrations_ha_body() -> Markup {
+// Status pill — JS fills textContent + class based on /api/settings/
+// integration_status. Server renders the empty skeleton with a neutral class.
+fn status_pill(id: &str) -> Markup {
+    html! {
+        span id=(id) class="ss-pill ss-pill-unknown" { "checking…" }
+    }
+}
+
+fn integration_telegram_body() -> Markup {
     html! {
         div class="ss-card" {
+            div class="ss-card-head" {
+                h3 class="ss-card-title" { "Telegram bot" }
+                (status_pill("ss-pill-telegram"))
+            }
+            p class="ss-help" {
+                "Connecting a Telegram bot lets you chat with your agents from your phone. "
+                "Syntaur relays messages between Telegram and your local chat — "
+                "nothing of yours ever leaves your server except what the LLM needs."
+            }
+            // Fold in the legacy Telegram config block — the form fields are
+            // already wired to working JS in page.js.
+            (tab_general())
+        }
+    }
+}
+
+fn integration_ha_body() -> Markup {
+    html! {
+        div class="ss-card" {
+            div class="ss-card-head" {
+                h3 class="ss-card-title" { "Home Assistant" }
+                (status_pill("ss-pill-ha"))
+            }
+            p class="ss-help" {
+                "Connect a Home Assistant instance so your agents can read sensor "
+                "state (lights, locks, temperatures) and send commands back."
+            }
             div class="ss-field" {
                 label class="ss-label" for="ha-url" { "Home Assistant URL" }
                 input id="ha-url" class="ss-input" placeholder="http://homeassistant.local:8123" {}
-                p class="ss-help" { "The URL of your Home Assistant instance, reachable from this gateway." }
+                p class="ss-help" { "Reachable from this gateway — same LAN or via Tailscale." }
             }
             div class="ss-field" {
                 label class="ss-label" for="ha-token" { "Long-lived access token" }
                 input id="ha-token" class="ss-input" type="password" placeholder="eyJhbGc…" {}
-                p class="ss-help" { "Generate one in HA → Profile → Long-Lived Access Tokens." }
+                p class="ss-help" { "Generate in HA → Profile → Long-Lived Access Tokens." }
             }
             div class="ss-actions" {
                 button class="ss-btn-secondary" onclick="ssHaTest()" { "Test connection" }
-                button class="ss-btn-primary" onclick="ssHaSave()" { "Connect Home Assistant" }
+                button class="ss-btn-primary" onclick="ssHaSave()" { "Save" }
             }
             p id="ss-ha-result" class="ss-help" {}
+        }
+    }
+}
+
+fn integration_sync_body() -> Markup {
+    html! {
+        div class="ss-card" {
+            div class="ss-card-head" {
+                h3 class="ss-card-title" { "Sync providers" }
+                (status_pill("ss-pill-sync"))
+            }
+            p class="ss-help" {
+                "Cloud connectors — Google Workspace, Microsoft 365, Plaid banks, "
+                "Stripe, Coinbase, SimpleFIN, etc. Grants read-only access unless "
+                "a specific provider asks for more."
+            }
+            (tab_sync())
+        }
+    }
+}
+
+fn integration_media_body() -> Markup {
+    html! {
+        div class="ss-card" {
+            div class="ss-card-head" {
+                h3 class="ss-card-title" { "Media bridge" }
+                (status_pill("ss-pill-media"))
+            }
+            p class="ss-help" {
+                "Companion app that runs a headless Chromium on your local machine "
+                "so agents can play Apple Music / Spotify / Tidal / YouTube hidden "
+                "in the background — no popup tabs."
+            }
+            (tab_media())
         }
     }
 }
@@ -1060,6 +1148,31 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   .ss-restart button { background: var(--ss-warn); color: #0a0d12; border: none; padding: 4px 10px; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer; }
 
   .hidden { display: none !important; }
+
+  /* ── Integration status pill ──────────────────────────── */
+  .ss-pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 3px 10px;
+    font-size: 10.5px; font-weight: 500; letter-spacing: 0.03em;
+    text-transform: uppercase;
+    border-radius: 999px;
+  }
+  .ss-pill::before {
+    content: ''; width: 6px; height: 6px; border-radius: 50%;
+    display: inline-block; flex-shrink: 0;
+  }
+  .ss-pill-unknown    { background: var(--ss-panel-2); color: var(--ss-ink-mute); border: 1px solid var(--ss-line-2); }
+  .ss-pill-unknown::before    { background: var(--ss-ink-mute); }
+  .ss-pill-connected  { background: rgba(127,191,138,0.14); color: var(--ss-success); border: 1px solid rgba(127,191,138,0.35); }
+  .ss-pill-connected::before  { background: var(--ss-success); }
+  .ss-pill-degraded   { background: rgba(240,180,112,0.14); color: var(--ss-warn);  border: 1px solid rgba(240,180,112,0.35); }
+  .ss-pill-degraded::before   { background: var(--ss-warn); }
+  .ss-pill-error      { background: rgba(217,122,122,0.14); color: var(--ss-danger); border: 1px solid rgba(217,122,122,0.35); }
+  .ss-pill-error::before      { background: var(--ss-danger); }
+  .ss-pill-not_configured { background: var(--ss-panel-2); color: var(--ss-ink-mute); border: 1px solid var(--ss-line-2); }
+  .ss-pill-not_configured::before { background: var(--ss-ink-faint); }
+
+  .ss-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
 "##;
 
 // Fresh JS used by the new shell. Legacy JS from `page.js` handles all the
@@ -1460,8 +1573,59 @@ async function ssResetPreferences() {
   }
   alert('Preferences reset.');
 }
-function ssWipeMemories() { alert("Memory wipe endpoint pending — type-confirm UI is live. Backend DELETE across agent_memories is a follow-up."); }
-function ssFactoryReset()  { alert("Factory reset endpoint pending — type-confirm UI is live. Destructive admin RPC is a follow-up."); }
+async function ssWipeMemories() {
+  try {
+    const r = await fetch('/api/settings/wipe_memories', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: sessionStorage.getItem('syntaur_token'), confirm: 'wipe all memories' }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || data.message || 'wipe failed');
+    alert('Wiped ' + (data.deleted || 0) + ' memory rows. Agents will rebuild context from scratch.');
+  } catch(e) { alert('Error: ' + e.message); }
+}
+async function ssFactoryReset() {
+  try {
+    const r = await fetch('/api/settings/factory_reset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: sessionStorage.getItem('syntaur_token'), confirm: 'factory reset' }),
+    });
+    if (r.status === 403) { alert('Factory reset is admin-only. Ask the gateway admin to run it.'); return; }
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'reset failed');
+    const wiped = data.wiped || {};
+    const summary = Object.entries(wiped).map(([k, v]) => k + '=' + v).join(', ');
+    alert('Factory reset complete.\n\n' + summary + '\n\nYou will be returned to the dashboard.');
+    window.location.href = '/';
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+// Live integration status pills — updates every 30s.
+async function ssRefreshIntegrationStatus() {
+  try {
+    const r = await fetch('/api/settings/integration_status?token=' + encodeURIComponent(sessionStorage.getItem('syntaur_token') || ''));
+    if (!r.ok) return;
+    const data = await r.json();
+    const map = {
+      'ss-pill-telegram': { s: data.telegram, labels: { connected: 'connected', not_configured: 'not configured' } },
+      'ss-pill-ha':       { s: data.homeassistant, labels: { connected: 'connected', not_configured: 'not configured' } },
+      'ss-pill-sync':     { s: data.sync,  labels: { connected: (data.sync?.connections || 0) + ' connected', not_configured: 'no providers' } },
+      'ss-pill-media':    { s: data.media_bridge, labels: { connected: 'bridge running', not_configured: 'bridge offline' } },
+      'ss-pill-llm':      { s: data.llm,   labels: { connected: (data.llm?.live || 0) + '/' + (data.llm?.total || 0) + ' live', not_configured: 'no providers', degraded: 'partial', error: 'error' } },
+      'ss-pill-voice':    { s: data.voice, labels: { connected: (data.voice?.satellites || 0) + ' satellites', not_configured: 'none' } },
+    };
+    for (const [id, info] of Object.entries(map)) {
+      const el = document.getElementById(id);
+      if (!el || !info.s) continue;
+      const status = info.s.status || 'unknown';
+      el.className = 'ss-pill ss-pill-' + status;
+      el.textContent = info.labels[status] || status;
+    }
+  } catch(e) { /* keep pills in "checking…" state */ }
+}
+setInterval(ssRefreshIntegrationStatus, 30000);
 
 // About page — pull live stats.
 async function ssRefreshAbout() {
@@ -1487,9 +1651,10 @@ async function ssRefreshAbout() {
   ssRefreshAbout();
   ssLoadPreferences();
   ssRefreshGettingStarted();
+  ssRefreshIntegrationStatus();
   // Re-refresh the checklist every 60s + on return from other tabs so it
   // reflects what the user just did elsewhere.
   setInterval(ssRefreshGettingStarted, 60000);
-  window.addEventListener('focus', ssRefreshGettingStarted);
+  window.addEventListener('focus', () => { ssRefreshGettingStarted(); ssRefreshIntegrationStatus(); });
 })();
 "##;

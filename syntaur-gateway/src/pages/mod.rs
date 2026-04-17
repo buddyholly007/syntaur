@@ -37,6 +37,7 @@ pub mod music;
 pub mod research;
 pub mod settings;
 pub mod settings_agents;
+pub mod settings_legacy;
 pub mod setup;
 pub mod shared;
 pub mod onboarding;
