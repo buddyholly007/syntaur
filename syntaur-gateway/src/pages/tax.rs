@@ -3434,7 +3434,10 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   }
   .positron-panel > * { position: relative; z-index: 1; }
 
+  /* Header + logbar are absolutely positioned on top of the scroll area so
+     chat content scrolls BEHIND them (the blur masks the overlap). */
   .positron-header {
+    position: absolute; top: 0; left: 0; right: 0; z-index: 3;
     display: flex; align-items: center; gap: 0.6rem;
     padding: 0.55rem 0.85rem;
     background: linear-gradient(90deg, var(--lcars-orange) 0%, var(--lcars-orange) 60%, transparent 60.5%);
@@ -3466,12 +3469,13 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   @keyframes positron-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
 
   .positron-logbar {
+    position: absolute; top: 46px; left: 0; right: 0; z-index: 3;
     padding: 0.35rem 0.85rem;
     /* Semi-transparent + blur so the matrix stays visible but scrolled
-       chat content underneath is fully hidden when it passes under. */
-    background: rgba(14,10,5,0.55);
-    backdrop-filter: blur(6px);
-    -webkit-backdrop-filter: blur(6px);
+       chat content passing UNDER the bar gets frosted out. */
+    background: rgba(14,10,5,0.72);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
     border-bottom: 1px solid rgba(255,156,61,0.25);
     font-family: 'IBM Plex Mono', monospace; font-size: 0.62rem;
     color: var(--lcars-peach);
@@ -3480,23 +3484,17 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   .positron-logbar .logbar-label { letter-spacing: 0.12em; text-transform: uppercase; opacity: 0.7; }
   .positron-logbar .logbar-value { letter-spacing: 0.05em; }
 
-  /* Chat messages — transparent so the positronic-brain canvas shows through.
-     mask-image creates a soft fade at the top + bottom edges so scrolled
-     content visually disappears into the logbar / input row instead of
-     getting abruptly clipped against them. */
+  /* Chat messages — full-panel scroll region that sits BEHIND the bars.
+     Padding-top/bottom = height of overlapping bars, so first + last
+     messages don't get visually covered when scroll is at the extremes.
+     Header (46px) + logbar (27px) = 73px of top overlap.
+     Input row = 55px of bottom overlap. */
   #tax-chat-messages {
-    padding: 0.75rem !important;
-    gap: 0.75rem !important;
-    mask-image: linear-gradient(to bottom,
-      transparent 0,
-      #000 18px,
-      #000 calc(100% - 18px),
-      transparent 100%);
-    -webkit-mask-image: linear-gradient(to bottom,
-      transparent 0,
-      #000 18px,
-      #000 calc(100% - 18px),
-      transparent 100%);
+    padding: 82px 0.75rem 66px 0.75rem !important;
+    flex: 1 1 auto;
+    min-height: 0;
+    position: relative;
+    z-index: 2;
   }
   #tax-chat-messages > div {
     background: transparent;
@@ -3527,11 +3525,12 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
 
   /* Input row */
   .positron-input-row {
+    position: absolute; bottom: 0; left: 0; right: 0; z-index: 3;
     padding: 0.55rem 0.75rem;
     border-top: 1px solid rgba(255,156,61,0.25);
-    background: rgba(14,10,5,0.55);
-    backdrop-filter: blur(6px);
-    -webkit-backdrop-filter: blur(6px);
+    background: rgba(14,10,5,0.72);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
   }
   #tax-chat-input {
     background: rgba(255,184,137,0.05) !important;
