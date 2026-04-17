@@ -43,6 +43,7 @@ pub fn shell(page: Page, body_content: Markup) -> Markup {
             body class="bg-gray-950 text-gray-100 min-h-screen" {
                 (body_content)
                 @if page.authed {
+                    (PreEscaped(PERSONA_HEADER_SCRIPT))
                     (bug_report_overlay())
                 }
             }
@@ -53,6 +54,69 @@ pub fn shell(page: Page, body_content: Markup) -> Markup {
 /// Standard top bar with brand + breadcrumb + "← Dashboard" right link.
 /// Used by `/modules`, `/settings`, etc. Pages with non-standard right
 /// nav (e.g. `/history` which has two links) should inline their own.
+
+const PERSONA_HEADER_SCRIPT: &str = r##"
+<script>
+(function() {
+  const MODULE_MAP = {
+    '/tax': { key: 'tax', accent: '#3b82f6', bg: 'rgba(30,58,95,0.3)' },
+    '/knowledge': { key: 'research', accent: '#d4a574', bg: 'rgba(92,64,51,0.2)' },
+    '/research': { key: 'research', accent: '#d4a574', bg: 'rgba(92,64,51,0.2)' },
+    '/music': { key: 'music', accent: '#d946ef', bg: 'rgba(217,70,239,0.1)' },
+    '/settings': { key: 'scheduler', accent: '#b8860b', bg: 'rgba(45,74,62,0.2)' },
+    '/coders': { key: 'coders', accent: '#22c55e', bg: 'rgba(13,17,23,0.3)' },
+    '/journal': { key: 'journal', accent: '#8fbc8f', bg: 'rgba(61,79,62,0.2)' },
+    '/chat': { key: 'main', accent: '#0ea5e9', bg: 'rgba(14,165,233,0.08)' },
+  };
+  const ROLES = {
+    main: 'Your main assistant',
+    tax: 'Tax specialist',
+    research: 'Research analyst',
+    music: 'Music curator',
+    scheduler: 'Calendar & todos',
+    coders: 'Pair programmer',
+    journal: 'Journal companion',
+  };
+
+  const path = location.pathname;
+  const mod = Object.entries(MODULE_MAP).find(([p]) => path.startsWith(p));
+  if (!mod) return;
+  const [, { key, accent, bg }] = mod;
+
+  const token = localStorage.getItem('syntaur_token') || document.cookie.replace(/(?:(?:^|.*;\s*)syntaur_token\s*=\s*([^;]*).*$)|^.*$/, '$1') || '';
+  if (!token) return;
+
+  fetch('/api/agents/list?token=' + encodeURIComponent(token))
+    .then(r => r.json())
+    .then(data => {
+      const agents = data.agents || [];
+      const agent = agents.find(a => a.agent_id === key);
+      if (!agent) return;
+
+      const bar = document.createElement('div');
+      bar.id = 'persona-header';
+      bar.style.cssText = `
+        position:fixed; top:0; left:0; right:0; z-index:40;
+        display:flex; align-items:center; gap:8px;
+        padding:6px 16px; font-size:13px;
+        background:${bg}; backdrop-filter:blur(12px);
+        border-bottom:1px solid ${accent}33;
+        color:${accent}; font-family:Inter,sans-serif;
+        transition: opacity 0.3s;
+      `;
+      bar.innerHTML = `
+        <span style="font-weight:600">${agent.display_name}</span>
+        <span style="opacity:0.6;font-size:11px">${ROLES[key] || ''}</span>
+        <span style="margin-left:auto;opacity:0.4;font-size:10px">${key}</span>
+      `;
+      document.body.prepend(bar);
+      document.body.style.paddingTop = '33px';
+    })
+    .catch(() => {});
+})();
+</script>
+"##;
+
 pub fn top_bar_standard(crumb: &str) -> Markup {
     html! {
         div class="border-b border-gray-800 bg-gray-900/50 backdrop-blur sticky top-0 z-40" {

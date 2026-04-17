@@ -13,7 +13,10 @@ pub async fn render() -> Html<String> {
         authed: true,
         extra_style: Some(EXTRA_STYLE),
     };
-    let body = html! { (PreEscaped(BODY_HTML)) };
+    let body = html! {
+        (PreEscaped(BODY_HTML))
+        script { (PreEscaped(PAGE_JS)) }
+    };
     Html(shell(page, body).into_string())
 }
 
@@ -21,12 +24,12 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   @import url('https://fonts.googleapis.com/css2?family=Antonio:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:wght@400;600;700&display=swap');
 
   /* =========================================================================
-     Tax module — "Data's positronic ledger"
+     Tax module — ledger theme
      LCARS chrome (orange/gold/peach) + parchment accountant's desk main canvas
      + positronic-brain sidebar for Positron. Dark leather backing.
      ========================================================================= */
   :root {
-    /* LCARS palette (authentic TNG) */
+    /* Warm-amber block palette */
     --lcars-orange: #ff9c3d;
     --lcars-peach:  #ffb889;
     --lcars-salmon: #e88b7a;
@@ -247,7 +250,7 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   .card table tr:nth-child(even), .card .ledger-table tr:nth-child(even) { background: var(--ledger-pale); }
 
   /* ═════════════════════════════════════════════════════════════════════════
-     POSITRONIC MATRIX — the right-rail AI chat
+     POSITRON CHANNEL — the right-rail AI chat
      ═════════════════════════════════════════════════════════════════════════ */
   .positron-panel {
     position: relative;
@@ -1675,7 +1678,7 @@ const BODY_HTML: &str = r##"<!-- Module paywall overlay (hidden by default, show
     <!-- LCARS header -->
     <div class="positron-header">
       <div class="p-frame">P</div>
-      <div class="p-title">Positronic Matrix</div>
+      <div class="p-title">Positron Channel</div>
       <div class="p-status"><span class="p-led"></span><span>ONLINE</span></div>
     </div>
 
@@ -1712,8 +1715,9 @@ const BODY_HTML: &str = r##"<!-- Module paywall overlay (hidden by default, show
   </div>
 
 </div><!-- end split layout -->
+"##;
 
-<script>
+const PAGE_JS: &str = r##"
 const token = sessionStorage.getItem('syntaur_token') || '';
 if (!token) { window.location.href = '/'; }
 
@@ -4829,17 +4833,17 @@ function initPositronicBrain() {
   requestAnimationFrame(tick);
 }
 
-// Starship-style log counter: STARDATE-ish "XXXX.X" cycling slowly
+// Session log counter — aesthetic increment, resets daily
 let positronMsgCount = 0;
 function updatePositronLog() {
   const idx = document.getElementById('positron-log-index');
   if (!idx) return;
   const base = 48000;  // aesthetic starting offset
   const now = Date.now() / 1000;
-  const stardate = (base + (now % 100000) / 10).toFixed(1);
-  idx.textContent = stardate;
+  const sessionLog = (base + (now % 100000) / 10).toFixed(1);
+  idx.textContent = sessionLog;
   const cnt = document.getElementById('positron-msg-count');
   if (cnt) cnt.textContent = positronMsgCount.toString().padStart(3, '0');
 }
 setInterval(updatePositronLog, 3000);
-</script>"##;
+"##;

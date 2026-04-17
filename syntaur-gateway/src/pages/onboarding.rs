@@ -42,6 +42,24 @@ pub async fn render() -> Html<String> {
                 }
 
                 // Step 2: Personalize (shown after agent creation)
+                div id="step-team" class="hidden" {
+                    div class="text-center mb-6" {
+                        h1 class="text-2xl font-bold" { "Meet Your Team" }
+                        p class="text-gray-400 text-sm mt-2" {
+                            "These are your AI specialists. Each handles a different area. "
+                            "Rename any of them — or keep the defaults."
+                        }
+                    }
+                    div class="bg-gray-800 rounded-xl border border-gray-700 p-6 space-y-3" id="team-list" {
+                        p class="text-gray-500 text-sm animate-pulse" { "Loading your team..." }
+                    }
+                    div class="mt-4 flex gap-3 justify-end" {
+                        button onclick="saveTeamNames()"
+                            class="bg-oc-600 hover:bg-oc-700 text-white font-medium py-2.5 px-8 rounded-lg transition-colors"
+                        { "Continue" }
+                    }
+                }
+
                 div id="step-2" class="hidden" {
                     div class="text-center mb-6" {
                         h1 class="text-2xl font-bold" { "Personalize Your AI" }
@@ -137,7 +155,8 @@ async function createAgent() {
     if (data.ok) {
       createdAgentId = agentId;
       document.getElementById('step-1').classList.add('hidden');
-      document.getElementById('step-2').classList.remove('hidden');
+      document.getElementById('step-team').classList.remove('hidden');
+      showTeamStep();
     } else {
       errEl.textContent = data.error || 'Failed to create agent';
       errEl.classList.remove('hidden');
@@ -193,6 +212,61 @@ async function skipToFinal() {
   await fetch('/api/me/onboarding/complete?token=' + encodeURIComponent(token), { method: 'POST' });
   document.getElementById('step-3').classList.add('hidden');
   document.getElementById('step-4').classList.remove('hidden');
+}
+
+
+const AGENT_ROLES = {
+  main: { emoji: '🤖', role: 'Your main assistant', accent: '#0ea5e9' },
+  tax: { emoji: '📊', role: 'Tax specialist', accent: '#3b82f6' },
+  research: { emoji: '🔍', role: 'Research analyst', accent: '#d4a574' },
+  music: { emoji: '🎵', role: 'Music curator', accent: '#d946ef' },
+  scheduler: { emoji: '📅', role: 'Calendar & todos', accent: '#b8860b' },
+  coders: { emoji: '💻', role: 'Pair programmer', accent: '#22c55e' },
+  journal: { emoji: '📓', role: 'Journal companion', accent: '#8fbc8f' },
+};
+
+async function showTeamStep() {
+  // Seed defaults first
+  await fetch('/api/agents/seed_defaults?token=' + encodeURIComponent(token), { method: 'POST' });
+  const data = await (await fetch('/api/agents/list?token=' + encodeURIComponent(token))).json();
+  const agents = data.agents || [];
+  const listEl = document.getElementById('team-list');
+
+  if (agents.length === 0) {
+    listEl.innerHTML = '<p class="text-red-400">No agents found. Try refreshing.</p>';
+    return;
+  }
+
+  listEl.innerHTML = agents.map(a => {
+    const info = AGENT_ROLES[a.agent_id] || { emoji: '✨', role: 'Specialist', accent: '#6b7280' };
+    return `<div class="flex items-center gap-3 p-3 rounded-lg hover:bg-gray-700/50 transition-colors">
+      <span class="text-2xl">${info.emoji}</span>
+      <div class="flex-1">
+        <input type="text" value="${a.display_name}" data-agent="${a.agent_id}"
+          class="bg-transparent border-b border-gray-600 text-white font-medium text-sm px-1 py-0.5 w-full max-w-[200px]
+                 focus:border-sky-400 outline-none transition-colors" />
+        <p class="text-xs text-gray-500 mt-0.5">${info.role}</p>
+      </div>
+      <span class="text-xs px-2 py-0.5 rounded-full border" style="border-color:${info.accent}40;color:${info.accent}">${a.agent_id}</span>
+    </div>`;
+  }).join('');
+}
+
+async function saveTeamNames() {
+  const inputs = document.querySelectorAll('#team-list input[data-agent]');
+  for (const inp of inputs) {
+    const agentId = inp.dataset.agent;
+    const newName = inp.value.trim();
+    if (newName && newName.length <= 50) {
+      await fetch('/api/agents/rename', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, agent_id: agentId, name: newName })
+      });
+    }
+  }
+  document.getElementById('step-team').classList.add('hidden');
+  document.getElementById('step-2').classList.remove('hidden');
 }
 
 // Check if already onboarded

@@ -5612,6 +5612,7 @@ async fn main() {
                     gateway_url: "http://127.0.0.1:18789".to_string(),
                     gateway_secret: ha_cfg.voice_secret.clone().unwrap_or_default(),
                     tts_host: ha_cfg.tts_host.clone().unwrap_or_else(|| "192.168.1.69:10400".to_string()),
+                    db_path: crate::resolve_data_dir().to_string_lossy().to_string() + "/index.db",
                 };
                 info!(
                     "Satellite voice client: {} (STT: {}, TTS: {})",

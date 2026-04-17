@@ -104,6 +104,8 @@ pub struct SatelliteConfig {
     pub gateway_secret: String,
     /// TTS Wyoming server (e.g., "192.168.1.69:10400")
     pub tts_host: String,
+    /// Path to gateway index.db for wake-word → user_id lookup
+    pub db_path: String,
 }
 
 /// Run the satellite client loop. Connects, handles voice pipeline,
@@ -324,9 +326,10 @@ async fn connect_and_run(config: &SatelliteConfig) -> Result<(), String> {
                             }
                         }
                     }
+                    let voice_user_id = resolve_user_from_wake_word(&config.db_path, &req.wake_word_phrase);
                     info!(
-                        "[satellite] pipeline START (conv={}, wake={})",
-                        req.conversation_id, req.wake_word_phrase
+                        "[satellite] pipeline START (conv={}, wake={}, user={:?})",
+                        req.conversation_id, req.wake_word_phrase, voice_user_id
                     );
                     pipeline_active = true;
                     conversation_id = req.conversation_id;
@@ -604,6 +607,20 @@ struct PipelineResult {
     tts_sample_rate: u32,
     tts_channels: u16,
     tts_width: u16,
+}
+
+
+
+/// Look up a wake word phrase in user_voice_models to resolve user_id.
+/// Returns Some(user_id) if a matching enabled model exists, None otherwise.
+fn resolve_user_from_wake_word(db_path: &str, wake_phrase: &str) -> Option<i64> {
+    if wake_phrase.is_empty() { return None; }
+    let conn = rusqlite::Connection::open(db_path).ok()?;
+    conn.query_row(
+        "SELECT user_id FROM user_voice_models WHERE wake_word_name = ? AND enabled = 1",
+        rusqlite::params![wake_phrase],
+        |r| r.get::<_, i64>(0),
+    ).ok()
 }
 
 async fn run_voice_pipeline(
