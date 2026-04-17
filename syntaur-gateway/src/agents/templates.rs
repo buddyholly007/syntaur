@@ -235,6 +235,33 @@ fn populate_coders(ctx: &mut HashMap<&'static str, String>, conn: &rusqlite::Con
 ///
 /// Relevance = importance * recency_weight. Stale memories (>90 days)
 /// are marked. The output is ~500 tokens max.
+/// Calculate how many memories to inject based on the model's context window.
+/// Ensures the system prompt (persona + memories + personality + module context)
+/// doesn't crowd out conversation history.
+///
+/// Budget allocation:
+///   - Reserve 20% for response generation (max_tokens)
+///   - Persona template: fixed (what it is)
+///   - Memories: 5-15% of remaining, adaptive
+///   - Personality doc: fixed (what it is)
+///   - Conversation history: everything left
+pub fn context_budget_memories(context_window_tokens: u64) -> usize {
+    match context_window_tokens {
+        0..=4096 => 2,          // 4K: bare minimum — 2 most important memories
+        4097..=8192 => 4,       // 8K: light — 4 memories
+        8193..=16384 => 6,      // 16K: moderate
+        16385..=32768 => 8,     // 32K: comfortable
+        32769..=65536 => 10,    // 64K: standard (current default)
+        65537..=131072 => 15,   // 128K: generous
+        _ => 20,                // 256K+: load lots
+    }
+}
+
+/// Estimate token count for a string (rough: ~4 chars per token for English).
+pub fn estimate_tokens(text: &str) -> usize {
+    text.len() / 4
+}
+
 pub fn build_memory_injection(
     conn: &rusqlite::Connection,
     user_id: i64,

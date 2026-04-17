@@ -1234,9 +1234,11 @@ async fn handle_api_message(
         let mem_db = state.db_path.clone();
         let mem_uid = principal.user_id();
         let mem_aid = agent_id.clone();
+        let ctx_window = state.config.agents.defaults.context_tokens;
+        let mem_count = crate::agents::templates::context_budget_memories(ctx_window);
         if let Ok(Some(mem_index)) = tokio::task::spawn_blocking(move || {
             let conn = rusqlite::Connection::open(&mem_db).ok()?;
-            let idx = crate::agents::templates::build_memory_injection(&conn, mem_uid, &mem_aid, 10);
+            let idx = crate::agents::templates::build_memory_injection(&conn, mem_uid, &mem_aid, mem_count);
             if idx.is_empty() { None } else { Some(idx) }
         }).await {
             system_prompt.push_str("\n\n---\n\n");
