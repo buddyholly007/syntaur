@@ -5063,6 +5063,9 @@ async fn main() {
         .route("/api/voice/settings", axum::routing::put(handle_api_voice_settings_set))
         .route("/api/journal/extract_tasks", axum::routing::post(handle_api_journal_extract_tasks))
         .route("/api/journal/route_tasks", axum::routing::post(handle_api_journal_route_tasks))
+        .route("/api/memory/stats", get(handle_api_memory_stats))
+        .route("/api/memory/export", axum::routing::post(handle_api_memory_export))
+        .route("/api/memory/prune", axum::routing::post(handle_api_memory_prune))
         .route("/api/modules/toggle", post(setup::handle_module_toggle))
         .route("/api/license/status", get(setup::handle_license_status))
         .route("/api/license/activate", post(setup::handle_license_activate))
@@ -5741,7 +5744,20 @@ async fn handle_api_agent_handoff(
         .map(|ua| ua.display_name)
         .unwrap_or_else(|| crate::agents::handoff::agent_display_for_module(to_module).to_string());
 
-    let context = crate::agents::handoff::build_handoff_context(&recent, &from_name, &to_name);
+    // Include relevant memories in handoff context
+    let mem_context = {
+        let hdb = state.db_path.clone();
+        let hmod = to_module.to_string();
+        let huid = uid;
+        tokio::task::spawn_blocking(move || {
+            let conn = rusqlite::Connection::open(&hdb).ok()?;
+            Some(crate::agents::handoff::memory_context_for_handoff(&conn, huid, &hmod, 5))
+        }).await.ok().flatten().unwrap_or_default()
+    };
+    let mut context = crate::agents::handoff::build_handoff_context(&recent, &from_name, &to_name);
+    if !mem_context.is_empty() {
+        context.push_str(&mem_context);
+    }
 
     let topic = recent.iter().rev().find(|(r, _)| r == "user")
         .map(|(_, c)| if c.len() > 60 { format!("{}...", &c[..57]) } else { c.clone() })
@@ -6038,6 +6054,65 @@ async fn handle_api_journal_route_tasks(
         "routed": created.len(),
         "results": created,
     })))
+}
+
+
+// ── Memory analytics + management (Phase 8) ─────────────────────────────────
+
+/// GET /api/memory/stats — per-agent memory statistics
+async fn handle_api_memory_stats(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").cloned().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let principal = resolve_principal(&state, &token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let stats = tokio::task::spawn_blocking(move || {
+        let conn = rusqlite::Connection::open(&db).ok()?;
+        Some(crate::agents::defaults::memory_stats(&conn, uid))
+    }).await.ok().flatten().unwrap_or_default();
+
+    let list: Vec<serde_json::Value> = stats.iter().map(|(agent, total, stale, accesses)| {
+        serde_json::json!({"agent": agent, "total": total, "stale_90d": stale, "total_accesses": accesses})
+    }).collect();
+    Ok(Json(serde_json::json!({"stats": list})))
+}
+
+/// POST /api/memory/export — export all memories to vault markdown files
+async fn handle_api_memory_export(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").cloned().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let principal = resolve_principal(&state, &token).await?;
+    if principal.role() != "admin" { return Err(axum::http::StatusCode::FORBIDDEN); }
+    let db = state.db_path.clone();
+    let vault = std::env::var("HOME").unwrap_or_else(|_| "/home/sean".to_string()) + "/vault";
+    let vault_clone = vault.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let conn = rusqlite::Connection::open(&db).ok()?;
+        crate::agents::defaults::export_to_vault(&conn, &vault_clone).ok()
+    }).await.ok().flatten();
+    match result {
+        Some(n) => Ok(Json(serde_json::json!({"exported": n, "path": vault + "/agent-memories/"}))),
+        None => Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+/// POST /api/memory/prune — delete expired memories
+async fn handle_api_memory_prune(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").cloned().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let _principal = resolve_principal(&state, &token).await?;
+    let db = state.db_path.clone();
+    let pruned = tokio::task::spawn_blocking(move || {
+        let conn = rusqlite::Connection::open(&db).ok()?;
+        Some(crate::agents::defaults::prune_expired(&conn))
+    }).await.ok().flatten().unwrap_or(0);
+    Ok(Json(serde_json::json!({"pruned": pruned})))
 }
 
 /// POST /api/agents/seed_defaults — clone all product-default personas into

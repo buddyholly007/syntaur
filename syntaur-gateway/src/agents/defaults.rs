@@ -757,3 +757,77 @@ pub fn rename_agent(
         rusqlite::params![new_name, now, user_id, agent_id],
     )
 }
+
+
+/// Export agent memories to vault-compatible markdown files.
+/// Creates vault/agent-memories/{agent_id}/{key}.md with Obsidian frontmatter.
+/// Mushi (journal) memories are NEVER exported.
+pub fn export_to_vault(conn: &rusqlite::Connection, vault_path: &str) -> Result<usize, String> {
+    let mut stmt = conn.prepare(
+        "SELECT agent_id, memory_type, key, title, description, tags, content, \
+                confidence, importance, access_count, created_at, updated_at \
+         FROM agent_memories WHERE agent_id != 'journal' ORDER BY agent_id, key"
+    ).map_err(|e| e.to_string())?;
+
+    let memories: Vec<(String, String, String, String, String, Option<String>, String, f64, i64, i64, i64, i64)> =
+        stmt.query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?,
+                r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?,
+                r.get(9)?, r.get(10)?, r.get(11)?))
+        }).map_err(|e| e.to_string())?
+        .filter_map(Result::ok).collect();
+
+    let mut count = 0;
+    for (agent, mtype, key, title, desc, tags, content, conf, imp, access, created, updated) in &memories {
+        let dir = format!("{}/agent-memories/{}", vault_path, agent);
+        std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {}", dir, e))?;
+
+        let safe_key = key.chars().map(|c| if c == '/' || c == '\\' { '_' } else { c }).collect::<String>();
+        let path = format!("{}/{}.md", dir, safe_key);
+
+        let created_date = chrono::DateTime::from_timestamp(*created, 0)
+            .map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default();
+        let updated_date = chrono::DateTime::from_timestamp(*updated, 0)
+            .map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default();
+
+        let file_content = format!(
+            "---\nname: {}\ndescription: {}\ntype: {}\nagent: {}\ntags: [{}]\n\
+confidence: {}\nimportance: {}\naccess_count: {}\ncreated: {}\nupdated: {}\n---\n\n{}",
+            title, desc, mtype, agent,
+            tags.as_deref().unwrap_or(""),
+            conf, imp, access, created_date, updated_date, content
+        );
+
+        std::fs::write(&path, &file_content).map_err(|e| format!("write {}: {}", path, e))?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+pub fn prune_expired(conn: &rusqlite::Connection) -> usize {
+    let now = chrono::Utc::now().timestamp();
+    conn.execute(
+        "DELETE FROM agent_memories WHERE expires_at IS NOT NULL AND expires_at < ?",
+        rusqlite::params![now],
+    ).unwrap_or(0)
+}
+
+/// Get memory statistics per agent.
+pub fn memory_stats(conn: &rusqlite::Connection, user_id: i64) -> Vec<(String, i64, i64, i64)> {
+    let now = chrono::Utc::now().timestamp();
+    let mut stmt = match conn.prepare(
+        "SELECT agent_id, COUNT(*), \
+                SUM(CASE WHEN (? - updated_at) > 7776000 THEN 1 ELSE 0 END), \
+                SUM(access_count) \
+         FROM agent_memories WHERE user_id = ? GROUP BY agent_id ORDER BY agent_id"
+    ) {
+        Ok(s) => s,
+        Err(_) => return vec![],
+    };
+    stmt.query_map(rusqlite::params![now, user_id], |r| {
+        Ok((r.get::<_,String>(0)?, r.get::<_,i64>(1)?, r.get::<_,i64>(2)?, r.get::<_,i64>(3)?))
+    }).ok()
+    .map(|iter| iter.filter_map(Result::ok).collect())
+    .unwrap_or_default()
+}

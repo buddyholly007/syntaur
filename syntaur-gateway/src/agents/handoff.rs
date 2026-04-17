@@ -106,6 +106,38 @@ pub fn build_reentry_summary(
     }
 }
 
+/// Build a compact memory summary to include in handoff context.
+/// Pulls the specialist's most important memories so they have context
+/// from prior sessions, not just the current conversation.
+pub fn memory_context_for_handoff(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+    to_agent_id: &str,
+    max: usize,
+) -> String {
+    let mut stmt = match conn.prepare(
+        "SELECT memory_type, key, title, content FROM agent_memories \
+         WHERE user_id = ? AND (agent_id = ? OR shared = 1 OR \
+               (agent_id = 'main' AND memory_type IN ('user','feedback'))) \
+         ORDER BY importance DESC LIMIT ?"
+    ) { Ok(s) => s, Err(_) => return String::new() };
+
+    let lines: Vec<String> = stmt.query_map(
+        rusqlite::params![user_id, to_agent_id, max as i64],
+        |r| {
+            let mtype: String = r.get(0)?;
+            let key: String = r.get(1)?;
+            let title: String = r.get(2)?;
+            Ok(format!("[{}] {}: {}", mtype, key, title))
+        }
+    ).ok()
+    .map(|iter| iter.filter_map(Result::ok).collect())
+    .unwrap_or_default();
+
+    if lines.is_empty() { return String::new(); }
+    format!("\nRelevant memories from prior sessions:\n{}", lines.join("\n"))
+}
+
 /// Map an agent_id to its display name from user_agents or defaults.
 pub fn agent_display_for_module(module: &str) -> &'static str {
     match module {
