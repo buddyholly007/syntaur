@@ -3480,8 +3480,24 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   .positron-logbar .logbar-label { letter-spacing: 0.12em; text-transform: uppercase; opacity: 0.7; }
   .positron-logbar .logbar-value { letter-spacing: 0.05em; }
 
-  /* Chat messages — transparent so the positronic-brain canvas shows through */
-  #tax-chat-messages { padding: 0.75rem !important; gap: 0.75rem !important; }
+  /* Chat messages — transparent so the positronic-brain canvas shows through.
+     mask-image creates a soft fade at the top + bottom edges so scrolled
+     content visually disappears into the logbar / input row instead of
+     getting abruptly clipped against them. */
+  #tax-chat-messages {
+    padding: 0.75rem !important;
+    gap: 0.75rem !important;
+    mask-image: linear-gradient(to bottom,
+      transparent 0,
+      #000 18px,
+      #000 calc(100% - 18px),
+      transparent 100%);
+    -webkit-mask-image: linear-gradient(to bottom,
+      transparent 0,
+      #000 18px,
+      #000 calc(100% - 18px),
+      transparent 100%);
+  }
   #tax-chat-messages > div {
     background: transparent;
     border-left: 2px solid var(--lcars-gold);
