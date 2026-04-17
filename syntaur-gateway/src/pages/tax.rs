@@ -14,7 +14,3127 @@ pub async fn render() -> Html<String> {
         extra_style: Some(EXTRA_STYLE),
     };
     let body = html! {
-        (PreEscaped(BODY_HTML))
+        // Module paywall overlay (hidden by default, shown if module is locked)
+        div id="module-paywall" class="hidden fixed inset-0 z-50 bg-gray-950/95 backdrop-blur-sm flex items-center justify-center" {
+            div class="max-w-md w-full mx-4" {
+                div class="card text-center" {
+                    div class="text-4xl mb-4" {
+                        "💰"
+                    }
+                    h2 class="text-xl font-semibold text-white mb-2" {
+                        "Tax & Expenses Module"
+                    }
+                    p class="text-sm text-gray-400 mb-6" {
+                        "Receipt scanning, expense tracking, tax document management, deduction calculator, and year-end tax prep wizard."
+                    }
+                    div id="paywall-trial-available" {
+                        button onclick="startFreeTrial()" class="w-full bg-oc-600 hover:bg-oc-700 text-white font-medium py-3 px-6 rounded-xl transition-colors text-base mb-3" {
+                            " Start Free 3-Day Trial "
+                        }
+                        p class="text-xs text-gray-500 mb-4" {
+                            "No credit card required. Full access for 3 days."
+                        }
+                    }
+                    div id="paywall-trial-expired" class="hidden" {
+                        p class="text-sm text-yellow-400 mb-4" {
+                            "Your free trial has ended."
+                        }
+                    }
+                    div class="border-t border-gray-700 pt-4" {
+                        button onclick="upgradePro()" class="w-full bg-gradient-to-r from-purple-600 to-oc-600 hover:from-purple-700 hover:to-oc-700 text-white font-medium py-3 px-6 rounded-xl transition-all text-base" {
+                            " Upgrade to Syntaur Pro — $49 "
+                        }
+                        p class="text-xs text-gray-500 mt-2" {
+                            "One-time payment. Unlocks all modules forever."
+                        }
+                    }
+                    a href="/" class="text-xs text-gray-500 hover:text-gray-300 mt-4 inline-block" {
+                        "Back to Dashboard"
+                    }
+                }
+            }
+        }
+        // Trial banner (shown when trial is active)
+        div id="trial-banner" class="hidden bg-gradient-to-r from-oc-700/30 to-purple-700/30 border-b border-oc-800/30 text-center py-1.5 text-xs text-gray-300" {
+            span id="trial-banner-text" {
+                "Free trial — "
+                strong id="trial-days-left" {
+                    "3"
+                }
+                " days remaining"
+            }
+            button onclick="upgradePro()" class="ml-3 bg-oc-600 hover:bg-oc-700 text-white px-3 py-0.5 rounded-full text-xs transition-colors" {
+                "Upgrade to Pro"
+            }
+        }
+        // Top bar
+        div class="border-b border-gray-800 bg-gray-900/50 backdrop-blur sticky top-0 z-40" {
+            div class="max-w-6xl mx-auto px-4 py-2.5 flex items-center justify-between gap-3" {
+                div class="flex items-center gap-3 min-w-0" {
+                    a href="/" class="flex items-center gap-2 hover:opacity-80 flex-shrink-0" {
+                        img src="/app-icon.jpg" class="h-8 w-8 rounded-lg" alt="";
+                        span class="font-semibold" {
+                            "Syntaur"
+                        }
+                    }
+                    span class="text-gray-500" {
+                        "/"
+                    }
+                    span class="text-gray-300 font-medium truncate" {
+                        "Tax & Expenses"
+                    }
+                }
+                div class="flex items-center gap-3 text-sm flex-shrink-0" {
+                    // Deadline pill — visible when any deadline is within 60 days
+                    span id="deadline-pill" class="deadline-pill hidden" {
+                        span class="deadline-dot" {
+                        }
+                        span id="deadline-pill-text" {
+                            "—"
+                        }
+                    }
+                    select id="year-select" class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-sm text-gray-300 outline-none" onchange="changeYear()" {
+                    }
+                    a href="/" class="text-gray-500 hover:text-gray-300" {
+                        "Home"
+                    }
+                }
+            }
+            // Section nav (top-level)
+            div class="border-t border-gray-800/50" {
+                div class="max-w-6xl mx-auto px-4 flex items-center gap-1 overflow-x-auto whitespace-nowrap" {
+                    button onclick="showSection('investments')" id="sec-btn-investments" class="sec-tab active" {
+                        "Investments"
+                    }
+                    button onclick="showSection('documents')" id="sec-btn-documents" class="sec-tab" {
+                        "Documents"
+                    }
+                    button onclick="showSection('deductions')" id="sec-btn-deductions" class="sec-tab" {
+                        "Deductions"
+                    }
+                    button onclick="showSection('dashboard')" id="sec-btn-dashboard" class="sec-tab" {
+                        "Dashboard"
+                    }
+                    button onclick="showSection('filing')" id="sec-btn-filing" class="sec-tab" {
+                        "Filing"
+                    }
+                }
+            }
+            // Sub-tab chip row (context-sensitive — populated by showSection())
+            div class="border-t border-gray-800/50 bg-gray-900/30" {
+                div class="max-w-6xl mx-auto px-4 py-2 flex items-center gap-2 overflow-x-auto whitespace-nowrap" id="sub-tab-bar" {
+                    // filled in by JS
+                }
+            }
+        }
+        div class="flex h-[calc(100vh-126px)]" {
+            // LEFT: Tax content
+            div class="flex-1 overflow-y-auto px-4 py-4" {
+                // KPI strip — always visible at top of main canvas
+                div class="kpi-strip" id="kpi-strip" {
+                    div class="kpi-tile" id="kpi-tile-portfolio" {
+                        div class="kpi-label" {
+                            "Portfolio value"
+                        }
+                        div class="kpi-value" id="kpi-portfolio-value" {
+                            "—"
+                        }
+                        div class="kpi-sub" id="kpi-portfolio-sub" {
+                        }
+                    }
+                    div class="kpi-tile" id="kpi-tile-income" {
+                        div class="kpi-label" {
+                            "Income YTD"
+                        }
+                        div class="kpi-value" id="kpi-income-value" {
+                            "—"
+                        }
+                        div class="kpi-sub" id="kpi-income-sub" {
+                        }
+                    }
+                    div class="kpi-tile" id="kpi-tile-deductions" {
+                        div class="kpi-label" {
+                            "Deductions YTD"
+                        }
+                        div class="kpi-value" id="kpi-deductions-value" {
+                            "—"
+                        }
+                        div class="kpi-sub" id="kpi-deductions-sub" {
+                        }
+                    }
+                    div class="kpi-tile" id="kpi-tile-tax" {
+                        div class="kpi-label" {
+                            "Est. refund / owe"
+                        }
+                        div class="kpi-value" id="kpi-tax-value" {
+                            "—"
+                        }
+                        div class="kpi-sub" id="kpi-tax-sub" {
+                        }
+                    }
+                }
+                // Dashboard tab (the old "Overview") — hidden by default; Investments is the landing
+                div id="tab-overview" class="hidden" {
+                    // Taxpayer Profile
+                    div class="card mb-4" id="profile-card" {
+                        div class="flex items-center justify-between mb-3" {
+                            h3 class="font-medium text-sm" {
+                                "Tax Filing Profile"
+                            }
+                            div class="flex items-center gap-2" {
+                                span id="profile-year-label" class="text-xs text-gray-500" {
+                                }
+                                button onclick="toggleProfileEdit()" class="text-xs text-oc-500 hover:text-oc-400" id="profile-edit-btn" {
+                                    "Edit"
+                                }
+                            }
+                        }
+                        // Masked SSN banner — shown when stored SSN starts with X (i.e. user
+                        // saved a redacted W-2 last-4 instead of their real digits).
+                        div id="ssn-banner" class="hidden mb-3 p-3 rounded-lg border border-yellow-600/40 bg-yellow-500/10" {
+                            div class="flex items-start gap-3" {
+                                div class="text-yellow-300 text-lg leading-none mt-0.5" {
+                                    "!"
+                                }
+                                div class="flex-1" {
+                                    p class="text-xs font-medium text-yellow-200" id="ssn-banner-title" {
+                                        "Your SSN is masked"
+                                    }
+                                    p class="text-xs text-gray-300 mt-1" id="ssn-banner-detail" {
+                                        "The IRS needs your full 9-digit SSN to file Form 4868."
+                                    }
+                                    div class="mt-2 grid grid-cols-1 md:grid-cols-2 gap-2" {
+                                        div id="ssn-banner-self-row" class="hidden" {
+                                            label class="text-xs text-gray-400" {
+                                                "Your SSN"
+                                            }
+                                            input id="ssn-banner-self" class="input text-sm" placeholder="###-##-####" autocomplete="off";
+                                        }
+                                        div id="ssn-banner-spouse-row" class="hidden" {
+                                            label class="text-xs text-gray-400" {
+                                                "Spouse SSN"
+                                            }
+                                            input id="ssn-banner-spouse" class="input text-sm" placeholder="###-##-####" autocomplete="off";
+                                        }
+                                    }
+                                    div class="mt-2 flex items-center gap-2" {
+                                        button onclick="saveSsnBanner()" class="btn-primary text-xs" {
+                                            "Save SSN"
+                                        }
+                                        span id="ssn-banner-result" class="text-xs" {
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // View mode
+                        div id="profile-view" {
+                            div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm" id="profile-summary" {
+                                p class="text-xs text-gray-600 col-span-4" {
+                                    "Loading profile..."
+                                }
+                            }
+                            // Dependents
+                            div id="dependents-section" class="hidden mt-3 pt-3 border-t border-gray-800" {
+                                div class="flex items-center justify-between mb-2" {
+                                    p class="text-xs text-gray-500 font-medium" {
+                                        "Dependents"
+                                    }
+                                    button onclick="showAddDependent()" class="text-[10px] text-oc-500 hover:text-oc-400" {
+                                        "+ Add"
+                                    }
+                                }
+                                div id="dependents-list" class="space-y-1" {
+                                }
+                            }
+                        }
+                        // Edit mode
+                        div id="profile-edit" class="hidden" {
+                            div class="grid grid-cols-2 gap-3 text-sm" {
+                                div {
+                                    label class="text-xs text-gray-500" {
+                                        "First Name"
+                                    }
+                                    input class="input text-sm" id="pf-first";
+                                }
+                                div {
+                                    label class="text-xs text-gray-500" {
+                                        "Last Name"
+                                    }
+                                    input class="input text-sm" id="pf-last";
+                                }
+                                div {
+                                    label class="text-xs text-gray-500" {
+                                        "SSN"
+                                    }
+                                    input class="input text-sm" id="pf-ssn" type="password" placeholder="XXX-XX-XXXX";
+                                }
+                                div {
+                                    label class="text-xs text-gray-500" {
+                                        "Date of Birth"
+                                    }
+                                    input class="input text-sm" id="pf-dob" type="date";
+                                }
+                                div class="col-span-2" {
+                                    label class="text-xs text-gray-500" {
+                                        "Address"
+                                    }
+                                    input class="input text-sm" id="pf-addr" placeholder="123 Main St";
+                                }
+                                div {
+                                    label class="text-xs text-gray-500" {
+                                        "City"
+                                    }
+                                    input class="input text-sm" id="pf-city";
+                                }
+                                div class="grid grid-cols-2 gap-2" {
+                                    div {
+                                        label class="text-xs text-gray-500" {
+                                            "State"
+                                        }
+                                        input class="input text-sm" id="pf-state" maxlength="2" placeholder="WA";
+                                    }
+                                    div {
+                                        label class="text-xs text-gray-500" {
+                                            "ZIP"
+                                        }
+                                        input class="input text-sm" id="pf-zip" maxlength="10";
+                                    }
+                                }
+                                div {
+                                    label class="text-xs text-gray-500" {
+                                        "Filing Status"
+                                    }
+                                    select class="input text-sm" id="pf-filing" {
+                                        option value="single" {
+                                            "Single"
+                                        }
+                                        option value="married_jointly" {
+                                            "Married Filing Jointly"
+                                        }
+                                        option value="married_separately" {
+                                            "Married Filing Separately"
+                                        }
+                                        option value="head_of_household" {
+                                            "Head of Household"
+                                        }
+                                    }
+                                }
+                                div {
+                                    label class="text-xs text-gray-500" {
+                                        "Occupation"
+                                    }
+                                    input class="input text-sm" id="pf-occupation";
+                                }
+                            }
+                            details class="mt-3" id="spouse-section" {
+                                summary class="text-xs text-gray-400 cursor-pointer hover:text-gray-300" {
+                                    "Spouse Information"
+                                }
+                                div class="grid grid-cols-2 gap-3 text-sm mt-2" {
+                                    div {
+                                        label class="text-xs text-gray-500" {
+                                            "Spouse First Name"
+                                        }
+                                        input class="input text-sm" id="pf-sp-first";
+                                    }
+                                    div {
+                                        label class="text-xs text-gray-500" {
+                                            "Spouse Last Name"
+                                        }
+                                        input class="input text-sm" id="pf-sp-last";
+                                    }
+                                    div {
+                                        label class="text-xs text-gray-500" {
+                                            "Spouse SSN"
+                                        }
+                                        input class="input text-sm" id="pf-sp-ssn" type="password";
+                                    }
+                                    div {
+                                        label class="text-xs text-gray-500" {
+                                            "Spouse DOB"
+                                        }
+                                        input class="input text-sm" id="pf-sp-dob" type="date";
+                                    }
+                                }
+                            }
+                            div class="flex gap-2 mt-3 items-center" {
+                                button onclick="saveProfile()" class="btn-primary text-xs" {
+                                    "Save Profile"
+                                }
+                                button onclick="autoFillProfileFromScans()" class="text-xs bg-gray-700 hover:bg-gray-600 text-gray-100 px-3 py-1.5 rounded-lg" title="Pull values from scanned W-2, 1095-C, mortgage statement" {
+                                    "Auto-fill from scans"
+                                }
+                                button onclick="toggleProfileEdit()" class="text-xs text-gray-500 hover:text-gray-300" {
+                                    "Cancel"
+                                }
+                                span id="profile-save-result" class="text-xs self-center" {
+                                }
+                            }
+                            p id="profile-suggest-sources" class="text-xs text-gray-500 mt-2" {
+                            }
+                        }
+                    }
+                    // Summary cards
+                    div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6" {
+                        div class="card" {
+                            p class="text-xs text-gray-500 uppercase" {
+                                "Total Expenses"
+                            }
+                            p class="text-2xl font-semibold mt-1" id="sum-total" {
+                                "--"
+                            }
+                        }
+                        div class="card" {
+                            p class="text-xs text-gray-500 uppercase" {
+                                "Business"
+                            }
+                            p class="text-2xl font-semibold mt-1 text-oc-500" id="sum-business" {
+                                "--"
+                            }
+                        }
+                        div class="card" {
+                            p class="text-xs text-gray-500 uppercase" {
+                                "Tax Deductible"
+                            }
+                            p class="text-2xl font-semibold mt-1 text-green-400" id="sum-deductible" {
+                                "--"
+                            }
+                        }
+                        div class="card" {
+                            p class="text-xs text-gray-500 uppercase" {
+                                "Receipts"
+                            }
+                            p class="text-2xl font-semibold mt-1" id="sum-receipts" {
+                                "--"
+                            }
+                        }
+                    }
+                    // Potential Deductions
+                    details class="card mb-6 cursor-pointer group" id="deductions-section" {
+                        summary class="flex items-center justify-between" {
+                            div class="flex items-center gap-2" {
+                                span class="text-green-400" {
+                                    "💡"
+                                }
+                                h3 class="font-medium" {
+                                    "Potential Deductions You Might Be Missing"
+                                }
+                            }
+                            span class="text-xs text-gray-500 group-open:hidden" {
+                                "Click to expand"
+                            }
+                        }
+                        div class="mt-4 space-y-3" id="deductions-list" {
+                            p class="text-xs text-gray-500" {
+                                "Analyzing your expenses..."
+                            }
+                        }
+                    }
+                    // Export to Tax Software
+                    div class="card mb-4" {
+                        div class="flex items-center justify-between mb-3" {
+                            h3 class="font-medium text-sm" {
+                                "Export to Tax Software"
+                            }
+                            span id="export-year-label" class="text-xs text-gray-500" {
+                            }
+                        }
+                        div class="grid grid-cols-3 gap-3 mb-3" {
+                            a href="#" id="export-txf" class="flex flex-col items-center gap-1.5 p-3 bg-gray-900 rounded-lg hover:bg-gray-800 border border-gray-700 transition-colors text-center" {
+                                span class="text-lg" {
+                                    "💾"
+                                }
+                                span class="text-xs text-white font-medium" {
+                                    "TXF File"
+                                }
+                                span class="text-[10px] text-gray-500" {
+                                    "TurboTax / H&R Block Desktop"
+                                }
+                            }
+                            a href="#" id="export-csv-irs" class="flex flex-col items-center gap-1.5 p-3 bg-gray-900 rounded-lg hover:bg-gray-800 border border-gray-700 transition-colors text-center" {
+                                span class="text-lg" {
+                                    "📈"
+                                }
+                                span class="text-xs text-white font-medium" {
+                                    "IRS Summary CSV"
+                                }
+                                span class="text-[10px] text-gray-500" {
+                                    "CPA / Any software"
+                                }
+                            }
+                            a href="#" id="export-csv-raw" class="flex flex-col items-center gap-1.5 p-3 bg-gray-900 rounded-lg hover:bg-gray-800 border border-gray-700 transition-colors text-center" {
+                                span class="text-lg" {
+                                    "📄"
+                                }
+                                span class="text-xs text-white font-medium" {
+                                    "Expense CSV"
+                                }
+                                span class="text-[10px] text-gray-500" {
+                                    "All transactions"
+                                }
+                            }
+                        }
+                        details class="text-xs text-gray-500" {
+                            summary class="cursor-pointer hover:text-gray-300" {
+                                "Import instructions"
+                            }
+                            div class="mt-2 space-y-1.5 pl-2 border-l border-gray-700" {
+                                p {
+                                    strong class="text-gray-300" {
+                                        "TurboTax Desktop:"
+                                    }
+                                    " File → Import → From Accounting Software → select the .txf file"
+                                }
+                                p {
+                                    strong class="text-gray-300" {
+                                        "H&R Block Desktop:"
+                                    }
+                                    " File → Import Financial Information → browse for .txf file"
+                                }
+                                p {
+                                    strong class="text-gray-300" {
+                                        "TaxAct:"
+                                    }
+                                    " Use the IRS Summary CSV as reference for manual entry"
+                                }
+                                p {
+                                    strong class="text-gray-300" {
+                                        "CPA / Tax preparer:"
+                                    }
+                                    " Send the IRS Summary CSV — it maps every line to the correct IRS form"
+                                }
+                                p class="text-gray-600 mt-1" {
+                                    "Note: TurboTax Online and H&R Block Online do not accept file imports. Desktop versions are required for TXF import."
+                                }
+                            }
+                        }
+                    }
+                    // File Extension (Form 4868) — Multi-step workflow
+                    div class="card mb-4" id="extension-card" {
+                        div class="flex items-center justify-between mb-3" {
+                            div class="flex items-center gap-2" {
+                                span class="text-yellow-400" {
+                                    "⏰"
+                                }
+                                h3 class="font-medium text-sm" {
+                                    "File an Extension (Form 4868)"
+                                }
+                            }
+                            div class="flex items-center gap-2" {
+                                span id="ext-status-badge" class="badge badge-yellow text-[10px]" {
+                                    "Not filed"
+                                }
+                                span class="badge badge-green text-[10px]" {
+                                    "Free"
+                                }
+                            }
+                        }
+                        // Step 1: Review + Choose Method
+                        div id="ext-step-review" {
+                            p class="text-xs text-gray-400 mb-3" {
+                                "Review your estimated tax data, adjust if needed, then choose how to file. Extends filing deadline to "
+                                strong class="text-gray-300" {
+                                    "October 15"
+                                }
+                                ". Payment is still due "
+                                strong class="text-red-400" {
+                                    "April 15"
+                                }
+                                "."
+                            }
+                            div class="bg-gray-800 rounded-lg p-3 mb-3 border border-gray-700" {
+                                div class="grid grid-cols-2 gap-3 text-sm" {
+                                    div {
+                                        label class="text-xs text-gray-400" {
+                                            "Estimated total tax"
+                                        }
+                                        input style="background:#1a1a2e;color:#f0f0f0;border:1px solid #444;border-radius:8px;padding:6px 10px;width:100%;font-size:14px" id="ext-total-tax" value="$0.00";
+                                    }
+                                    div {
+                                        label class="text-xs text-gray-400" {
+                                            "Payments made (withholding + estimated)"
+                                        }
+                                        input style="background:#1a1a2e;color:#f0f0f0;border:1px solid #444;border-radius:8px;padding:6px 10px;width:100%;font-size:14px" id="ext-payments" value="$0.00";
+                                    }
+                                    div {
+                                        label class="text-xs text-gray-400" {
+                                            "Balance due"
+                                        }
+                                        input style="background:#1a1a2e;color:#4ade80;border:1px solid #444;border-radius:8px;padding:6px 10px;width:100%;font-size:14px;font-weight:600" id="ext-balance" value="$0.00" readonly;
+                                    }
+                                    div {
+                                        label class="text-xs text-gray-400" {
+                                            "Paying with this extension"
+                                        }
+                                        input style="background:#1a1a2e;color:#f0f0f0;border:1px solid #444;border-radius:8px;padding:6px 10px;width:100%;font-size:14px" id="ext-payment" value="0.00" oninput="updateExtBalance()";
+                                    }
+                                }
+                            }
+                            p class="text-xs text-gray-400 mb-2" {
+                                "Choose how to file:"
+                            }
+                            div class="space-y-2" {
+                                a href="javascript:void(0)" onclick="startExtFiling('direct_pay')" class="block p-3 rounded-lg bg-gray-900 border border-gray-700 hover:border-oc-600 cursor-pointer transition-colors no-underline" {
+                                    div class="flex items-center justify-between" {
+                                        div {
+                                            p class="text-sm text-white font-medium" {
+                                                "IRS Direct Pay"
+                                            }
+                                            p class="text-[11px] text-gray-500" {
+                                                "Payment auto-files your extension. Instant confirmation number."
+                                            }
+                                        }
+                                        span class="text-oc-500 text-xs font-medium" {
+                                            "Recommended →"
+                                        }
+                                    }
+                                }
+                                a href="javascript:void(0)" onclick="startExtFiling('free_file')" class="block p-3 rounded-lg bg-gray-900 border border-gray-700 hover:border-gray-600 cursor-pointer transition-colors no-underline" {
+                                    div class="flex items-center justify-between" {
+                                        div {
+                                            p class="text-sm text-white font-medium" {
+                                                "IRS Free File"
+                                            }
+                                            p class="text-[11px] text-gray-500" {
+                                                "E-file Form 4868 free. Confirmation via email within 24-48h."
+                                            }
+                                        }
+                                        span class="text-gray-500 text-xs" {
+                                            "Free →"
+                                        }
+                                    }
+                                }
+                                a href="javascript:void(0)" onclick="startExtFiling('mail')" class="block p-3 rounded-lg bg-gray-900 border border-gray-700 hover:border-gray-600 cursor-pointer transition-colors no-underline" {
+                                    div class="flex items-center justify-between" {
+                                        div {
+                                            p class="text-sm text-white font-medium" {
+                                                "Print & Mail"
+                                            }
+                                            p class="text-[11px] text-gray-500" {
+                                                "Download form, print, mail by April 15. Use certified mail for proof."
+                                            }
+                                        }
+                                        span class="text-gray-500 text-xs" {
+                                            "Download →"
+                                        }
+                                    }
+                                }
+                            }
+                            details class="mt-3 text-xs text-gray-400" {
+                                summary class="cursor-pointer hover:text-gray-200" {
+                                    "Form 4868 options & missing fields →"
+                                }
+                                div class="mt-3 p-3 bg-gray-900/40 rounded-lg space-y-3" {
+                                    p class="text-xs text-gray-500" {
+                                        "Override anything missing from your tax profile, or check the boxes for less-common situations. These apply when you generate the PDF."
+                                    }
+                                    div class="grid grid-cols-2 gap-2" {
+                                        div {
+                                            label class="label" {
+                                                "Name(s) on return"
+                                            }
+                                            input id="ext-opt-name" class="input" placeholder="leave blank = use profile";
+                                        }
+                                        div {
+                                            label class="label" {
+                                                "SSN"
+                                            }
+                                            input id="ext-opt-ssn" class="input" placeholder="###-##-####";
+                                        }
+                                        div {
+                                            label class="label" {
+                                                "Spouse SSN (joint only)"
+                                            }
+                                            input id="ext-opt-spouse-ssn" class="input" placeholder="###-##-####";
+                                        }
+                                        div {
+                                            label class="label" {
+                                                "Street address"
+                                            }
+                                            input id="ext-opt-address" class="input" placeholder="leave blank = use profile";
+                                        }
+                                        div {
+                                            label class="label" {
+                                                "City"
+                                            }
+                                            input id="ext-opt-city" class="input";
+                                        }
+                                        div class="grid grid-cols-2 gap-2" {
+                                            div {
+                                                label class="label" {
+                                                    "State"
+                                                }
+                                                input id="ext-opt-state" class="input" maxlength="2" placeholder="WA";
+                                            }
+                                            div {
+                                                label class="label" {
+                                                    "ZIP"
+                                                }
+                                                input id="ext-opt-zip" class="input" placeholder="98502";
+                                            }
+                                        }
+                                    }
+                                    div class="grid grid-cols-2 gap-2" {
+                                        label class="flex items-center gap-2 text-gray-300" {
+                                            input type="checkbox" id="ext-opt-ooc";
+                                            " Line 8: I'm \"out of the country\" (US citizen/resident abroad)"
+                                        }
+                                        label class="flex items-center gap-2 text-gray-300" {
+                                            input type="checkbox" id="ext-opt-1040nr";
+                                            " Line 9: I file Form 1040-NR with no withheld wages"
+                                        }
+                                    }
+                                    details class="text-xs text-gray-500" {
+                                        summary class="cursor-pointer hover:text-gray-300" {
+                                            "Fiscal-year filer (rare) →"
+                                        }
+                                        div class="mt-2 grid grid-cols-3 gap-2" {
+                                            div {
+                                                label class="label" {
+                                                    "FY beginning (MM/DD)"
+                                                }
+                                                input id="ext-opt-fy-begin" class="input" placeholder="07/01";
+                                            }
+                                            div {
+                                                label class="label" {
+                                                    "FY ending (MM/DD)"
+                                                }
+                                                input id="ext-opt-fy-end" class="input" placeholder="06/30";
+                                            }
+                                            div {
+                                                label class="label" {
+                                                    "FY ending year (YY)"
+                                                }
+                                                input id="ext-opt-fy-end-year" class="input" placeholder="26";
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            span id="ext-result" class="text-xs mt-2 block" {
+                            }
+                        }
+                        // Step 2: Copy-Assist + File
+                        div id="ext-step-file" class="hidden" {
+                            div class="flex items-center gap-2 mb-3" {
+                                button onclick="showExtStep('review')" class="text-xs text-gray-500 hover:text-gray-300" {
+                                    "← Back"
+                                }
+                                span class="text-xs text-gray-400" id="ext-method-label" {
+                                    "Filing via IRS Direct Pay"
+                                }
+                            }
+                            div class="bg-gray-900 rounded-lg p-3 mb-3 space-y-2" id="ext-copy-fields" {
+                                // Populated by JS: steps + identity + spouse + payment
+                            }
+                            div id="ext-form-link" class="mb-3 flex items-center gap-3 flex-wrap" {
+                                a id="ext-form-anchor" href="#" onclick="openForm4868(); return false;" class="bg-oc-600 hover:bg-oc-700 text-white font-medium py-2 px-4 rounded-lg transition-colors text-sm inline-block no-underline cursor-pointer" {
+                                    "Generate Form 4868 →"
+                                }
+                                a href="#" onclick="openEnvelope(); return false;" class="bg-gray-700 hover:bg-gray-600 text-white font-medium py-2 px-4 rounded-lg transition-colors text-sm inline-block no-underline cursor-pointer" title="9.5 x 4.125 inch PDF positioned for direct envelope printing" {
+                                    "Print #10 envelope"
+                                }
+                                span class="text-xs text-gray-500" {
+                                    "Pre-filled from your documents. Print or save as PDF."
+                                }
+                            }
+                            div class="bg-gray-800 rounded-lg p-3 border border-gray-700" {
+                                p class="text-xs text-gray-300 mb-2" {
+                                    "After you submit on the IRS website, enter your confirmation below:"
+                                }
+                                div class="flex gap-2" {
+                                    input class="input text-sm flex-1" id="ext-confirm-input" placeholder="Confirmation number or submission ID";
+                                    button onclick="confirmExtension()" class="btn-primary text-xs" {
+                                        "Save & Confirm"
+                                    }
+                                }
+                                span id="ext-confirm-result" class="text-xs mt-1 block" {
+                                }
+                            }
+                        }
+                        // Step 3: Confirmed / Tracking
+                        div id="ext-step-confirmed" class="hidden" {
+                            div class="bg-green-900/20 border border-green-800/30 rounded-lg p-4 mb-3" {
+                                div class="flex items-center gap-2 mb-1" {
+                                    span class="text-green-400" {
+                                        "✓"
+                                    }
+                                    p class="text-sm text-green-400 font-medium" {
+                                        "Extension Confirmed"
+                                    }
+                                }
+                                p class="text-xs text-gray-400" id="ext-confirmed-detail" {
+                                    "Filed via IRS Direct Pay"
+                                }
+                            }
+                            div class="grid grid-cols-2 gap-3 text-sm mb-3" {
+                                div {
+                                    label class="text-xs text-gray-500" {
+                                        "Confirmation ID"
+                                    }
+                                    p class="text-sm text-white font-mono" id="ext-confirmed-id" {
+                                        "—"
+                                    }
+                                }
+                                div {
+                                    label class="text-xs text-gray-500" {
+                                        "Filed on"
+                                    }
+                                    p class="text-sm text-white" id="ext-confirmed-date" {
+                                        "—"
+                                    }
+                                }
+                                div {
+                                    label class="text-xs text-gray-500" {
+                                        "New filing deadline"
+                                    }
+                                    p class="text-sm text-yellow-400 font-medium" id="ext-deadline" {
+                                        "October 15"
+                                    }
+                                }
+                                div {
+                                    label class="text-xs text-gray-500" {
+                                        "Balance due"
+                                    }
+                                    p class="text-sm text-white" id="ext-confirmed-balance" {
+                                        "—"
+                                    }
+                                }
+                            }
+                            div class="text-xs text-gray-500 space-y-1" {
+                                p {
+                                    a href="https://www.irs.gov/refunds" target="_blank" class="text-oc-500 hover:text-oc-400" {
+                                        "Check status at irs.gov/refunds"
+                                    }
+                                    " or use the "
+                                    a href="https://www.irs.gov/newsroom/irs2goapp" target="_blank" class="text-oc-500 hover:text-oc-400" {
+                                        "IRS2Go app"
+                                    }
+                                }
+                                p {
+                                    "This confirmation is saved with your tax documents."
+                                }
+                            }
+                        }
+                    }
+                    // Category breakdown
+                    div class="card" {
+                        div class="flex items-center justify-between mb-4" {
+                            h3 class="font-medium" {
+                                "By Category"
+                            }
+                        }
+                        div id="category-list" class="space-y-2" {
+                            p class="text-xs text-gray-600" {
+                                "Loading..."
+                            }
+                        }
+                    }
+                }
+                // Expenses tab
+                div id="tab-expenses" class="hidden" {
+                    // Add expense form
+                    div class="card mb-6" {
+                        h3 class="font-medium mb-4" {
+                            "Log Expense"
+                        }
+                        div class="grid grid-cols-2 md:grid-cols-4 gap-3" {
+                            div {
+                                label class="label" {
+                                    "Vendor"
+                                }
+                                input type="text" id="exp-vendor" class="input" placeholder="Home Depot";
+                            }
+                            div {
+                                label class="label" {
+                                    "Amount"
+                                }
+                                input type="text" id="exp-amount" class="input" placeholder="45.99";
+                            }
+                            div {
+                                label class="label" {
+                                    "Category"
+                                }
+                                select id="exp-category" class="input" {
+                                }
+                            }
+                            div {
+                                label class="label" {
+                                    "Date"
+                                }
+                                input type="date" id="exp-date" class="input";
+                            }
+                        }
+                        div class="grid grid-cols-2 gap-3 mt-3" {
+                            div {
+                                label class="label" {
+                                    "Description (optional)"
+                                }
+                                input type="text" id="exp-desc" class="input" placeholder="2x4 lumber for shelving project";
+                            }
+                            div {
+                                label class="label" {
+                                    "Entity"
+                                }
+                                select id="exp-entity" class="input" {
+                                    option value="business" {
+                                        "Business"
+                                    }
+                                    option value="personal" {
+                                        "Personal"
+                                    }
+                                }
+                            }
+                        }
+                        div class="mt-3 flex items-center gap-3" {
+                            button onclick="addExpense()" class="btn-primary" {
+                                "Add Expense"
+                            }
+                            span id="exp-status" class="text-xs text-gray-500" {
+                            }
+                        }
+                    }
+                    // Expense list
+                    div class="card" {
+                        div class="flex items-center justify-between mb-4" {
+                            h3 class="font-medium" {
+                                "Recent Expenses"
+                            }
+                            div class="flex gap-2" {
+                                select id="exp-filter-entity" class="input w-auto" onchange="loadExpenses()" {
+                                    option value="" {
+                                        "All"
+                                    }
+                                    option value="business" {
+                                        "Business"
+                                    }
+                                    option value="personal" {
+                                        "Personal"
+                                    }
+                                }
+                            }
+                        }
+                        div id="expense-list" class="space-y-2" {
+                            p class="text-xs text-gray-600" {
+                                "Loading..."
+                            }
+                        }
+                    }
+                }
+                // Receipts tab
+                div id="tab-receipts" class="hidden" {
+                    div class="p-3 rounded-lg bg-yellow-900/20 border border-yellow-800/50 mb-4" {
+                        div class="flex items-start gap-2" {
+                            span class="text-yellow-400 mt-0.5" {
+                                "⚠"
+                            }
+                            p class="text-xs text-yellow-300/80" {
+                                strong {
+                                    "Always verify"
+                                }
+                                " AI-extracted amounts against your original receipts before using for tax filing."
+                            }
+                        }
+                    }
+                    // Upload
+                    div class="card mb-6" {
+                        h3 class="font-medium mb-3" {
+                            "Upload Receipt"
+                        }
+                        p class="text-xs text-gray-500 mb-3" {
+                            "Upload a photo or PDF of a receipt. AI will automatically extract the vendor, amount, date, and category."
+                        }
+                        div class="flex items-center gap-3" {
+                            label class="btn-primary cursor-pointer" {
+                                " Choose File "
+                                input type="file" class="hidden" accept="image/*,.pdf" onchange="uploadReceipt(this)" id="receipt-input";
+                            }
+                            span id="receipt-status" class="text-xs text-gray-500" {
+                            }
+                        }
+                    }
+                    // Receipt gallery
+                    div class="card" {
+                        h3 class="font-medium mb-4" {
+                            "Receipts"
+                        }
+                        div id="receipt-list" class="grid grid-cols-2 md:grid-cols-3 gap-3" {
+                            p class="text-xs text-gray-600 col-span-full" {
+                                "Loading..."
+                            }
+                        }
+                    }
+                }
+                // Documents tab
+                div id="tab-documents" class="hidden" {
+                    div class="card mb-6" {
+                        h3 class="font-medium mb-3" {
+                            "Smart Upload"
+                        }
+                        p class="text-xs text-gray-500 mb-3" {
+                            "Upload any tax document — receipts, W-2s, 1099s, bank statements, credit card statements, mortgage statements, or any other document. AI will automatically identify the type and route it to the correct handler."
+                        }
+                        details class="mb-3" {
+                            summary class="text-xs text-gray-600 cursor-pointer hover:text-gray-400" {
+                                "Accuracy tips"
+                            }
+                            div class="mt-2 p-2 rounded bg-gray-900 text-xs text-gray-500 space-y-1" {
+                                p {
+                                    "The scanner uses AI vision to read your documents. For best results:"
+                                }
+                                p {
+                                    "• Upload clear, high-resolution scans (photos of paper documents work too)"
+                                }
+                                p {
+                                    "• PDFs are automatically converted to high-res images for better reading"
+                                }
+                                p {
+                                    "• "
+                                    strong class="text-gray-400" {
+                                        "If you see frequent errors"
+                                    }
+                                    ", switching to a more capable model in Settings can significantly improve accuracy."
+                                }
+                                p class="mt-1" {
+                                    strong class="text-gray-400" {
+                                        "Free models (OpenRouter):"
+                                    }
+                                }
+                                p class="pl-3" {
+                                    "• "
+                                    strong class="text-green-400" {
+                                        "NVIDIA Nemotron Nano VL"
+                                    }
+                                    " — #1 on OCR benchmarks, purpose-built for documents (current default)"
+                                }
+                                p class="pl-3" {
+                                    "• "
+                                    strong class="text-gray-300" {
+                                        "Google Gemma 4 31B"
+                                    }
+                                    " — strong vision with 262K context for large documents"
+                                }
+                                p class="pl-3" {
+                                    "• "
+                                    strong class="text-gray-300" {
+                                        "Google Gemma 4 26B"
+                                    }
+                                    " — lighter alternative, nearly as accurate"
+                                }
+                                p class="mt-1" {
+                                    strong class="text-gray-400" {
+                                        "Self-hosted (free, private, offline):"
+                                    }
+                                }
+                                p class="pl-3" {
+                                    "• "
+                                    strong class="text-green-400" {
+                                        "NVIDIA Nemotron Nano 12B VL"
+                                    }
+                                    " — same model as cloud default, runs locally on any GPU with 10+ GB VRAM. Q4_K_M quantization needs ~9 GB. Download GGUF from HuggingFace, run via llama.cpp. Cannot run alongside a large chat model — swap models when scanning."
+                                }
+                                p class="pl-3 text-gray-600" {
+                                    "Setup: "
+                                    code class="text-xs bg-gray-800 px-1 rounded" {
+                                        "llama-server -m Nemotron-Nano-12B-v2-VL-Q4_K_M.gguf --mmproj mmproj-BF16.gguf --port 1237 -ngl 99"
+                                    }
+                                }
+                                p class="mt-1" {
+                                    strong class="text-gray-400" {
+                                        "Paid cloud (highest accuracy):"
+                                    }
+                                }
+                                p class="pl-3" {
+                                    "• "
+                                    strong class="text-gray-300" {
+                                        "Anthropic Claude Sonnet"
+                                    }
+                                    " — best overall accuracy for complex tax documents"
+                                }
+                                p class="pl-3" {
+                                    "• "
+                                    strong class="text-gray-300" {
+                                        "OpenAI GPT-4o"
+                                    }
+                                    " — excellent OCR, especially for handwritten notes"
+                                }
+                                p class="pl-3" {
+                                    "• "
+                                    strong class="text-gray-300" {
+                                        "Qwen3 VL 235B"
+                                    }
+                                    " — top-tier vision, best value at scale"
+                                }
+                                p {
+                                    "• Always verify extracted values against your original documents"
+                                }
+                            }
+                        }
+                        div class="flex items-center gap-3" {
+                            label class="btn-primary cursor-pointer" {
+                                " Upload Document "
+                                input type="file" class="hidden" accept="image/*,.pdf" onchange="uploadTaxDoc(this)" id="doc-input";
+                            }
+                            span id="doc-upload-status" class="text-xs text-gray-500" {
+                            }
+                        }
+                    }
+                    div class="p-3 rounded-lg bg-yellow-900/20 border border-yellow-800/50 mb-4" {
+                        div class="flex items-start gap-2" {
+                            span class="text-yellow-400 mt-0.5" {
+                                "⚠"
+                            }
+                            p class="text-xs text-yellow-300/80" {
+                                "AI-extracted values may contain errors. "
+                                strong {
+                                    "Always verify amounts against your original documents"
+                                }
+                                " before filing. Click any value to correct it."
+                            }
+                        }
+                    }
+                    div class="card" {
+                        h3 class="font-medium mb-4" {
+                            "Tax Documents"
+                        }
+                        div id="doc-list" class="space-y-3" {
+                            p class="text-xs text-gray-600" {
+                                "Loading..."
+                            }
+                        }
+                    }
+                }
+                // Property tab
+                div id="tab-property" class="hidden" {
+                    div class="card mb-6" {
+                        h3 class="font-medium mb-4" {
+                            "Property Profile"
+                        }
+                        p class="text-xs text-gray-500 mb-4" {
+                            "Your property details for home office / workshop deduction calculations. Values auto-populate from scanned 1098s, settlement statements, and tax documents."
+                        }
+                        div class="grid grid-cols-2 gap-4" {
+                            div {
+                                label class="label" {
+                                    "Address"
+                                }
+                                input type="text" id="prop-address" class="input" placeholder="1406 Summit Lake Shore";
+                            }
+                            div {
+                                label class="label" {
+                                    "Purchase Date"
+                                }
+                                input type="date" id="prop-purchase-date" class="input";
+                            }
+                            div {
+                                label class="label" {
+                                    "Total Sqft"
+                                }
+                                input type="number" id="prop-total-sqft" class="input" placeholder="5206";
+                            }
+                            div {
+                                label class="label" {
+                                    "Workshop Sqft"
+                                }
+                                input type="number" id="prop-workshop-sqft" class="input" placeholder="488";
+                            }
+                            div {
+                                label class="label" {
+                                    "Purchase Price"
+                                }
+                                input type="text" id="prop-purchase-price" class="input" placeholder="1060000";
+                            }
+                            div {
+                                label class="label" {
+                                    "Building Value (from assessor)"
+                                }
+                                input type="text" id="prop-building-value" class="input" placeholder="831762";
+                            }
+                            div {
+                                label class="label" {
+                                    "Land Value (from assessor)"
+                                }
+                                input type="text" id="prop-land-value" class="input" placeholder="228238";
+                            }
+                            div {
+                                label class="label" {
+                                    "Land Ratio"
+                                }
+                                input type="text" id="prop-land-ratio" class="input" placeholder="0.2153" readonly;
+                            }
+                        }
+                        div class="grid grid-cols-2 gap-4 mt-4" {
+                            div {
+                                label class="label" {
+                                    "Annual Property Tax"
+                                }
+                                input type="text" id="prop-property-tax" class="input" placeholder="571.60";
+                            }
+                            div {
+                                label class="label" {
+                                    "Annual Insurance (Homeowner's)"
+                                }
+                                input type="text" id="prop-insurance" class="input" placeholder="1680";
+                            }
+                            div {
+                                label class="label" {
+                                    "Mortgage Lender"
+                                }
+                                input type="text" id="prop-mortgage-lender" class="input" placeholder="Chase";
+                            }
+                            div {
+                                label class="label" {
+                                    "Annual Mortgage Interest (from 1098)"
+                                }
+                                input type="text" id="prop-mortgage-interest" class="input" placeholder="Will auto-fill from 1098";
+                            }
+                        }
+                        div class="mt-4" {
+                            label class="label" {
+                                "Notes"
+                            }
+                            textarea id="prop-notes" class="input" rows="2" placeholder="e.g., Workshop used exclusively for woodworking business" {
+                            }
+                        }
+                        div class="flex items-center gap-3 mt-4" {
+                            button onclick="saveProperty()" class="btn-primary" {
+                                "Save Property"
+                            }
+                            button onclick="autofillProperty()" class="text-xs text-oc-500 hover:text-oc-400" {
+                                "Auto-fill from documents"
+                            }
+                            span id="prop-status" class="text-xs text-gray-500" {
+                            }
+                        }
+                    }
+                    // Depreciation Calculator
+                    div class="card mb-6" id="depreciation-section" {
+                        h3 class="font-medium mb-3" {
+                            "Depreciation Calculator"
+                        }
+                        div id="depreciation-result" class="text-sm text-gray-400" {
+                            p class="text-xs text-gray-600" {
+                                "Save a property profile above to calculate depreciation."
+                            }
+                        }
+                    }
+                    // Statement Transactions
+                    div class="card" {
+                        div class="flex items-center justify-between mb-4" {
+                            h3 class="font-medium" {
+                                "Statement Transactions"
+                            }
+                            span class="text-xs text-gray-500" id="stmt-txn-count" {
+                                "—"
+                            }
+                        }
+                        p class="text-xs text-gray-500 mb-3" {
+                            "Individual transactions extracted from uploaded bank/credit card statements."
+                        }
+                        div id="stmt-txn-list" class="space-y-1 max-h-96 overflow-y-auto" {
+                            p class="text-xs text-gray-600" {
+                                "No statement transactions yet. Upload a bank or credit card statement in the Documents tab."
+                            }
+                        }
+                    }
+                }
+                // Deductions tab
+                div id="tab-deductions" class="hidden" {
+                    // Questionnaire section
+                    div id="ded-questionnaire" class="card mb-4" {
+                        div class="flex items-center justify-between mb-4" {
+                            h3 class="font-medium text-sm" {
+                                "Deduction Qualification"
+                            }
+                            span id="ded-quest-status" class="text-xs text-gray-500" {
+                            }
+                        }
+                        div id="ded-quest-wizard" {
+                            // Step 1
+                            div class="ded-step" id="ded-step-1" {
+                                p class="text-xs text-gray-500 mb-3" {
+                                    "Step 1 of 3 — Filing & Employment"
+                                }
+                                div class="space-y-3" {
+                                    div class="flex items-center justify-between py-2" {
+                                        div {
+                                            p class="text-sm text-gray-300" {
+                                                "Filing status"
+                                            }
+                                        }
+                                        select id="q-filing-status" onchange="saveQAnswer('filing_status', this.value)" class="bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-white outline-none" {
+                                            option value="single" {
+                                                "Single"
+                                            }
+                                            option value="married_jointly" {
+                                                "Married Filing Jointly"
+                                            }
+                                            option value="married_separately" {
+                                                "Married Filing Separately"
+                                            }
+                                            option value="head_of_household" {
+                                                "Head of Household"
+                                            }
+                                        }
+                                    }
+                                    div class="flex items-center justify-between py-2" {
+                                        div {
+                                            p class="text-sm text-gray-300" {
+                                                "Self-employed / 1099 income?"
+                                            }
+                                            p class="text-xs text-gray-500" {
+                                                "Enables SE tax, QBI deduction, business scanning"
+                                            }
+                                        }
+                                        button onclick="toggleQAnswer('self_employed')" id="qtog-self_employed" class="w-10 h-5 rounded-full bg-gray-700 relative transition-colors flex-shrink-0" {
+                                            span class="absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-gray-400 transition-transform" {
+                                            }
+                                        }
+                                    }
+                                    div class="flex items-center justify-between py-2" {
+                                        div {
+                                            p class="text-sm text-gray-300" {
+                                                "Work from home?"
+                                            }
+                                            p class="text-xs text-gray-500" {
+                                                "Enables home office utility scanning"
+                                            }
+                                        }
+                                        button onclick="toggleQAnswer('home_office')" id="qtog-home_office" class="w-10 h-5 rounded-full bg-gray-700 relative transition-colors flex-shrink-0" {
+                                            span class="absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-gray-400 transition-transform" {
+                                            }
+                                        }
+                                    }
+                                }
+                                div class="flex justify-end mt-4" {
+                                    button onclick="dedStep(2)" class="text-sm bg-oc-600 hover:bg-oc-700 text-white px-4 py-1.5 rounded-lg" {
+                                        "Next"
+                                    }
+                                }
+                            }
+                            // Step 2
+                            div class="ded-step hidden" id="ded-step-2" {
+                                p class="text-xs text-gray-500 mb-3" {
+                                    "Step 2 of 3 — Insurance & Health"
+                                }
+                                div class="space-y-3" {
+                                    div class="flex items-center justify-between py-2" {
+                                        div {
+                                            p class="text-sm text-gray-300" {
+                                                "Pay own health insurance?"
+                                            }
+                                            p class="text-xs text-gray-500" {
+                                                "Not through an employer plan"
+                                            }
+                                        }
+                                        button onclick="toggleQAnswer('health_insurance_self')" id="qtog-health_insurance_self" class="w-10 h-5 rounded-full bg-gray-700 relative transition-colors flex-shrink-0" {
+                                            span class="absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-gray-400 transition-transform" {
+                                            }
+                                        }
+                                    }
+                                    div class="flex items-center justify-between py-2" {
+                                        div {
+                                            p class="text-sm text-gray-300" {
+                                                "High-deductible health plan (HDHP)?"
+                                            }
+                                            p class="text-xs text-gray-500" {
+                                                "Enables HSA contribution tracking"
+                                            }
+                                        }
+                                        button onclick="toggleQAnswer('hdhp')" id="qtog-hdhp" class="w-10 h-5 rounded-full bg-gray-700 relative transition-colors flex-shrink-0" {
+                                            span class="absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-gray-400 transition-transform" {
+                                            }
+                                        }
+                                    }
+                                }
+                                div class="flex justify-between mt-4" {
+                                    button onclick="dedStep(1)" class="text-sm text-gray-400 hover:text-white px-4 py-1.5 rounded-lg" {
+                                        "Back"
+                                    }
+                                    button onclick="dedStep(3)" class="text-sm bg-oc-600 hover:bg-oc-700 text-white px-4 py-1.5 rounded-lg" {
+                                        "Next"
+                                    }
+                                }
+                            }
+                            // Step 3
+                            div class="ded-step hidden" id="ded-step-3" {
+                                p class="text-xs text-gray-500 mb-3" {
+                                    "Step 3 of 3 — Deductions"
+                                }
+                                div class="space-y-3" {
+                                    div class="flex items-center justify-between py-2" {
+                                        div {
+                                            p class="text-sm text-gray-300" {
+                                                "Use a vehicle for business?"
+                                            }
+                                        }
+                                        button onclick="toggleQAnswer('vehicle_business')" id="qtog-vehicle_business" class="w-10 h-5 rounded-full bg-gray-700 relative transition-colors flex-shrink-0" {
+                                            span class="absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-gray-400 transition-transform" {
+                                            }
+                                        }
+                                    }
+                                    div class="flex items-center justify-between py-2" {
+                                        div {
+                                            p class="text-sm text-gray-300" {
+                                                "Contribute to retirement accounts?"
+                                            }
+                                            p class="text-xs text-gray-500" {
+                                                "SEP-IRA, Solo 401(k), Traditional IRA"
+                                            }
+                                        }
+                                        button onclick="toggleQAnswer('retirement_contributions')" id="qtog-retirement_contributions" class="w-10 h-5 rounded-full bg-gray-700 relative transition-colors flex-shrink-0" {
+                                            span class="absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-gray-400 transition-transform" {
+                                            }
+                                        }
+                                    }
+                                    div class="flex items-center justify-between py-2" {
+                                        div {
+                                            p class="text-sm text-gray-300" {
+                                                "Number of dependents"
+                                            }
+                                        }
+                                        input type="number" min="0" max="10" value="0" id="q-dependents" onchange="saveQAnswer('dependents', parseInt(this.value)||0)" class="w-16 bg-gray-900 border border-gray-700 rounded-lg px-2 py-1 text-sm text-white text-center outline-none";
+                                    }
+                                    div class="flex items-center justify-between py-2" {
+                                        div {
+                                            p class="text-sm text-gray-300" {
+                                                "Paid student loan interest?"
+                                            }
+                                        }
+                                        button onclick="toggleQAnswer('student_loan_interest')" id="qtog-student_loan_interest" class="w-10 h-5 rounded-full bg-gray-700 relative transition-colors flex-shrink-0" {
+                                            span class="absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-gray-400 transition-transform" {
+                                            }
+                                        }
+                                    }
+                                    div class="flex items-center justify-between py-2" {
+                                        div {
+                                            p class="text-sm text-gray-300" {
+                                                "Made charitable donations?"
+                                            }
+                                        }
+                                        button onclick="toggleQAnswer('charitable_donations')" id="qtog-charitable_donations" class="w-10 h-5 rounded-full bg-gray-700 relative transition-colors flex-shrink-0" {
+                                            span class="absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-gray-400 transition-transform" {
+                                            }
+                                        }
+                                    }
+                                }
+                                div class="flex justify-between mt-4" {
+                                    button onclick="dedStep(2)" class="text-sm text-gray-400 hover:text-white px-4 py-1.5 rounded-lg" {
+                                        "Back"
+                                    }
+                                    button onclick="completeQuestionnaire()" class="text-sm bg-green-600 hover:bg-green-700 text-white px-4 py-1.5 rounded-lg font-medium" {
+                                        "Complete & Scan"
+                                    }
+                                }
+                            }
+                        }
+                        // Collapsed summary (shown when complete)
+                        div id="ded-quest-summary" class="hidden" {
+                            div id="ded-quest-tags" class="flex flex-wrap gap-2" {
+                            }
+                            button onclick="editQuestionnaire()" class="text-xs text-oc-500 hover:text-oc-400 mt-2" {
+                                "Edit answers"
+                            }
+                        }
+                    }
+                    // Scan status
+                    div class="card mb-4" {
+                        div class="flex items-center justify-between mb-3" {
+                            h3 class="font-medium text-sm" {
+                                "Deduction Scanner"
+                            }
+                            div class="flex gap-2" {
+                                button onclick="triggerScan()" class="text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 px-3 py-1 rounded-lg" id="scan-btn" {
+                                    "Quick Scan"
+                                }
+                                button onclick="triggerDeepScan()" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-3 py-1 rounded-lg" id="deep-scan-btn" {
+                                    "AI Deep Scan"
+                                }
+                            }
+                        }
+                        p id="scan-status-msg" class="text-xs text-gray-500 mb-2 hidden" {
+                        }
+                        div class="flex gap-4 text-sm" {
+                            div {
+                                span id="ded-pending" class="text-yellow-400 font-medium" {
+                                    "0"
+                                }
+                                span class="text-gray-500" {
+                                    "pending"
+                                }
+                            }
+                            div {
+                                span id="ded-approved" class="text-green-400 font-medium" {
+                                    "0"
+                                }
+                                span class="text-gray-500" {
+                                    "approved"
+                                }
+                            }
+                            div {
+                                span id="ded-denied" class="text-gray-500 font-medium" {
+                                    "0"
+                                }
+                                span class="text-gray-500" {
+                                    "denied"
+                                }
+                            }
+                            div class="ml-auto" {
+                                span id="ded-saved" class="text-green-400 font-medium" {
+                                    "$0.00"
+                                }
+                                span class="text-gray-500" {
+                                    "in deductions found"
+                                }
+                            }
+                        }
+                    }
+                    // Review queue
+                    div id="ded-review-wrapper" {
+                        // Normal: full list. Review mode: split panel
+                        div id="ded-list-mode" {
+                            div class="flex items-center justify-between mb-3" {
+                                div class="flex gap-2" {
+                                    button onclick="filterDedStatus('pending')" class="text-xs px-2 py-1 rounded-lg bg-gray-700 text-yellow-400" id="ded-filter-pending" {
+                                        "Pending"
+                                    }
+                                    button onclick="filterDedStatus('approved')" class="text-xs px-2 py-1 rounded-lg text-gray-500 hover:text-gray-300" id="ded-filter-approved" {
+                                        "Approved"
+                                    }
+                                    button onclick="filterDedStatus('denied')" class="text-xs px-2 py-1 rounded-lg text-gray-500 hover:text-gray-300" id="ded-filter-denied" {
+                                        "Denied"
+                                    }
+                                }
+                                select onchange="filterDedType(this.value)" class="bg-gray-900 border border-gray-700 rounded-lg px-2 py-1 text-xs text-gray-400 outline-none" id="ded-type-filter" {
+                                    option value="" {
+                                        "All types"
+                                    }
+                                    option value="medical" {
+                                        "Medical"
+                                    }
+                                    option value="health_insurance" {
+                                        "Health Insurance"
+                                    }
+                                    option value="vehicle" {
+                                        "Vehicle"
+                                    }
+                                    option value="home_office" {
+                                        "Home Office"
+                                    }
+                                    option value="software" {
+                                        "Software"
+                                    }
+                                    option value="education" {
+                                        "Education"
+                                    }
+                                    option value="charitable" {
+                                        "Charitable"
+                                    }
+                                    option value="professional" {
+                                        "Professional"
+                                    }
+                                    option value="retirement" {
+                                        "Retirement"
+                                    }
+                                    option value="student_loan" {
+                                        "Student Loan"
+                                    }
+                                    option value="hsa" {
+                                        "HSA"
+                                    }
+                                }
+                            }
+                            div id="ded-candidates-list" class="space-y-1.5" {
+                                p class="text-xs text-gray-600 text-center py-8" {
+                                    "Complete the questionnaire above to scan for deductions."
+                                }
+                            }
+                        }
+                        // Review split panel
+                        div id="ded-review-mode" class="hidden flex gap-3" style="height:calc(100vh - 340px)" {
+                            div class="w-[35%] overflow-y-auto border-r border-gray-800 pr-3 space-y-1" id="ded-review-list" {
+                            }
+                            div class="flex-1 flex flex-col" {
+                                div class="flex-1 overflow-y-auto bg-gray-900 rounded-lg border border-gray-700 p-3 mb-3" id="ded-viewer" {
+                                    p class="text-xs text-gray-500 text-center py-8" {
+                                        "Select a candidate to review"
+                                    }
+                                }
+                                div class="flex items-center gap-3 p-3 bg-gray-800 rounded-lg border border-gray-700" {
+                                    select id="review-category" class="bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-white outline-none" {
+                                    }
+                                    select id="review-entity" class="bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-white outline-none" {
+                                        option value="business" {
+                                            "Business"
+                                        }
+                                        option value="personal" {
+                                            "Personal"
+                                        }
+                                    }
+                                    div class="flex-1" {
+                                    }
+                                    span class="text-xs text-gray-600" id="review-keys" {
+                                        "j/k navigate · a approve · d deny"
+                                    }
+                                    button onclick="reviewAction('deny')" class="px-4 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg text-sm" {
+                                        "Deny"
+                                    }
+                                    button onclick="reviewAction('approve')" class="px-4 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium" {
+                                        "Approve"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Wizard tab
+                div id="tab-wizard" class="hidden" {
+                    div class="card mb-6" {
+                        div class="flex items-center justify-between mb-4" {
+                            h3 class="font-medium" {
+                                "Tax Prep Wizard — "
+                                span id="wizard-year" {
+                                    "2025"
+                                }
+                            }
+                            div class="flex items-center gap-2" {
+                                span class="text-xs text-gray-500" {
+                                    "Completeness:"
+                                }
+                                div class="w-32 h-2 rounded-full bg-gray-700 overflow-hidden" {
+                                    div id="wizard-progress-bar" class="h-full rounded-full bg-green-500 transition-all" style="width:0%" {
+                                    }
+                                }
+                                span id="wizard-pct" class="text-xs font-medium text-green-400" {
+                                    "0%"
+                                }
+                            }
+                        }
+                        div id="wizard-steps" class="space-y-3" {
+                            p class="text-xs text-gray-600" {
+                                "Loading wizard..."
+                            }
+                        }
+                    }
+                    // Missing Items
+                    div class="card mb-6" id="wizard-missing-section" style="display:none" {
+                        h3 class="font-medium mb-3 text-yellow-400" {
+                            "Missing Items"
+                        }
+                        div id="wizard-missing" class="space-y-2" {
+                        }
+                    }
+                    // Tax Summary
+                    div class="card" {
+                        h3 class="font-medium mb-4" {
+                            "Estimated Tax Summary"
+                        }
+                        div id="wizard-summary" class="space-y-2 text-sm" {
+                            p class="text-xs text-gray-600" {
+                                "Loading..."
+                            }
+                        }
+                    }
+                }
+                // Connections tab
+                div id="tab-connections" class="hidden" {
+                    div class="card mb-6" {
+                        h3 class="font-medium mb-3" {
+                            "Connect Bank Account"
+                        }
+                        p class="text-xs text-gray-500 mb-4" {
+                            "Link your bank or credit card via Plaid for automatic transaction imports. Your credentials are never stored — Plaid handles authentication directly with your bank."
+                        }
+                        div class="flex items-center gap-3" {
+                            button onclick="launchPlaidLink()" class="btn-primary" id="plaid-link-btn" {
+                                "Link Bank Account"
+                            }
+                            span id="plaid-status" class="text-xs text-gray-500" {
+                            }
+                        }
+                    }
+                    div class="card mb-6" {
+                        h3 class="font-medium mb-3" {
+                            "Connect via SimpleFIN"
+                        }
+                        p class="text-xs text-gray-500 mb-4" {
+                            "Alternative to Plaid ($15/yr). Get a setup token from "
+                            a href="https://beta-bridge.simplefin.org" target="_blank" class="text-oc-500 hover:text-oc-400" {
+                                "SimpleFIN Bridge"
+                            }
+                            ", then paste it here."
+                        }
+                        div class="flex items-center gap-3" {
+                            input type="text" id="simplefin-token" class="input flex-1" placeholder="Paste SimpleFIN setup token...";
+                            button onclick="connectSimpleFIN()" class="btn-primary" {
+                                "Connect"
+                            }
+                        }
+                        span id="simplefin-status" class="text-xs text-gray-500 mt-2 block" {
+                        }
+                    }
+                    div class="card mb-6" {
+                        div class="flex items-center justify-between mb-4" {
+                            h3 class="font-medium" {
+                                "Connected Accounts"
+                            }
+                            button onclick="loadConnections()" class="text-xs text-oc-500 hover:text-oc-400" {
+                                "Refresh"
+                            }
+                        }
+                        div id="connections-list" class="space-y-3" {
+                            p class="text-xs text-gray-600" {
+                                "No accounts connected yet."
+                            }
+                        }
+                    }
+                    div class="card" {
+                        h3 class="font-medium mb-3" {
+                            "Email Receipt Scanning"
+                        }
+                        p class="text-xs text-gray-500 mb-4" {
+                            "Connect Gmail to automatically find and import receipts from purchase confirmation emails."
+                        }
+                        div class="flex items-center gap-3" {
+                            button onclick="connectGmail()" class="btn-primary" {
+                                "Connect Gmail"
+                            }
+                            span id="gmail-status" class="text-xs text-gray-500" {
+                            }
+                        }
+                        div id="email-connections-list" class="mt-4 space-y-2" {
+                        }
+                    }
+                }
+                // Investments tab — default landing (most-viewed section)
+                div id="tab-investments" {
+                    div class="card mb-6" {
+                        h3 class="font-medium mb-3" {
+                            "Connect Brokerage"
+                        }
+                        p class="text-xs text-gray-500 mb-4" {
+                            "Connect your Alpaca account to import trades, dividends, and portfolio data."
+                        }
+                        div class="grid grid-cols-2 gap-3" {
+                            div {
+                                label class="label" {
+                                    "API Key"
+                                }
+                                input type="text" id="alpaca-key" class="input" placeholder="PK...";
+                            }
+                            div {
+                                label class="label" {
+                                    "API Secret"
+                                }
+                                input type="password" id="alpaca-secret" class="input" placeholder="Secret key";
+                            }
+                            div {
+                                label class="label" {
+                                    "Nickname"
+                                }
+                                input type="text" id="alpaca-nickname" class="input" placeholder="e.g. Main Trading";
+                            }
+                            div {
+                                label class="label" {
+                                    "Environment"
+                                }
+                                select id="alpaca-env" class="input" {
+                                    option value="https://api.alpaca.markets" {
+                                        "Live"
+                                    }
+                                    option value="https://paper-api.alpaca.markets" {
+                                        "Paper"
+                                    }
+                                }
+                            }
+                        }
+                        div class="mt-3 flex items-center gap-3" {
+                            button onclick="connectAlpaca()" class="btn-primary" {
+                                "Connect Alpaca"
+                            }
+                            span id="alpaca-status" class="text-xs text-gray-500" {
+                            }
+                        }
+                    }
+                    div class="card mb-6" {
+                        h3 class="font-medium mb-3" {
+                            "Connect Crypto Exchange"
+                        }
+                        p class="text-xs text-gray-500 mb-4" {
+                            "Import crypto trades from Coinbase for capital gains tracking."
+                        }
+                        div class="grid grid-cols-2 gap-3" {
+                            div {
+                                label class="label" {
+                                    "API Key"
+                                }
+                                input type="text" id="coinbase-key" class="input" placeholder="API key";
+                            }
+                            div {
+                                label class="label" {
+                                    "API Secret"
+                                }
+                                input type="password" id="coinbase-secret" class="input" placeholder="API secret";
+                            }
+                        }
+                        div class="mt-3 flex items-center gap-3" {
+                            button onclick="connectCoinbase()" class="btn-primary" {
+                                "Connect Coinbase"
+                            }
+                            span id="coinbase-status" class="text-xs text-gray-500" {
+                            }
+                        }
+                    }
+                    div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6" {
+                        div class="card" {
+                            p class="text-xs text-gray-500 uppercase" {
+                                "Short-Term Gains"
+                            }
+                            p class="text-2xl font-semibold mt-1" id="inv-short-term" {
+                                "--"
+                            }
+                        }
+                        div class="card" {
+                            p class="text-xs text-gray-500 uppercase" {
+                                "Long-Term Gains"
+                            }
+                            p class="text-2xl font-semibold mt-1 text-oc-500" id="inv-long-term" {
+                                "--"
+                            }
+                        }
+                        div class="card" {
+                            p class="text-xs text-gray-500 uppercase" {
+                                "Dividends"
+                            }
+                            p class="text-2xl font-semibold mt-1 text-green-400" id="inv-dividends" {
+                                "--"
+                            }
+                        }
+                        div class="card" {
+                            p class="text-xs text-gray-500 uppercase" {
+                                "Net P/L"
+                            }
+                            p class="text-2xl font-semibold mt-1" id="inv-net-pl" {
+                                "--"
+                            }
+                        }
+                    }
+                    div class="card mb-6" {
+                        div class="flex items-center justify-between mb-4" {
+                            h3 class="font-medium" {
+                                "Connected Accounts"
+                            }
+                            button onclick="loadInvestmentAccounts()" class="text-xs text-oc-500 hover:text-oc-400" {
+                                "Refresh"
+                            }
+                        }
+                        div id="inv-accounts-list" class="space-y-2" {
+                            p class="text-xs text-gray-600" {
+                                "No brokerage accounts connected yet."
+                            }
+                        }
+                    }
+                    div class="card mb-6" {
+                        div class="flex items-center justify-between mb-4" {
+                            h3 class="font-medium" {
+                                "Holdings"
+                            }
+                            span class="text-xs text-gray-500" id="holdings-as-of" {
+                                "--"
+                            }
+                        }
+                        div id="holdings-list" class="space-y-1" {
+                            p class="text-xs text-gray-600" {
+                                "Connect a brokerage to see holdings."
+                            }
+                        }
+                    }
+                    div class="card mb-6" {
+                        div class="flex items-center justify-between mb-4" {
+                            h3 class="font-medium" {
+                                "Investment Transactions"
+                            }
+                            div class="flex items-center gap-2" {
+                                select id="inv-filter-type" class="input w-auto" onchange="loadInvestmentTransactions()" {
+                                    option value="" {
+                                        "All"
+                                    }
+                                    option value="fill" {
+                                        "Trades"
+                                    }
+                                    option value="dividend" {
+                                        "Dividends"
+                                    }
+                                }
+                                select id="inv-filter-broker" class="input w-auto" onchange="loadInvestmentTransactions()" {
+                                    option value="" {
+                                        "All"
+                                    }
+                                    option value="alpaca" {
+                                        "Alpaca"
+                                    }
+                                    option value="coinbase" {
+                                        "Coinbase"
+                                    }
+                                }
+                                span class="text-xs text-gray-500" id="inv-txn-count" {
+                                    "--"
+                                }
+                            }
+                        }
+                        div id="inv-txn-list" class="space-y-1 max-h-[500px] overflow-y-auto" {
+                            p class="text-xs text-gray-600" {
+                                "No transactions yet."
+                            }
+                        }
+                    }
+                    div class="card mb-6" {
+                        h3 class="font-medium mb-3" {
+                            "Capital Gains Summary"
+                        }
+                        div class="grid grid-cols-2 md:grid-cols-4 gap-3" id="cap-gains-grid" {
+                            p class="text-xs text-gray-600 col-span-full" {
+                                "Loading..."
+                            }
+                        }
+                        p class="text-xs text-gray-500 mt-3" id="cap-gains-note" {
+                        }
+                    }
+                    div class="card mb-6" {
+                        div class="flex items-center justify-between mb-3" {
+                            h3 class="font-medium" {
+                                "Tax Lots (Open Positions)"
+                            }
+                            div class="flex items-center gap-2" {
+                                select id="lots-status" class="input w-auto" onchange="loadLots()" {
+                                    option value="open" {
+                                        "Open"
+                                    }
+                                    option value="closed" {
+                                        "Closed"
+                                    }
+                                }
+                                button onclick="showAddLotForm()" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-2.5 py-1 rounded-lg" {
+                                    "+ Add Lot"
+                                }
+                            }
+                        }
+                        div id="add-lot-form" class="hidden mb-4 p-3 bg-gray-900/40 rounded-lg" {
+                            div class="grid grid-cols-2 md:grid-cols-4 gap-2" {
+                                div {
+                                    label class="label" {
+                                        "Symbol"
+                                    }
+                                    input id="lot-symbol" class="input" placeholder="AAPL";
+                                }
+                                div {
+                                    label class="label" {
+                                        "Type"
+                                    }
+                                    select id="lot-asset-type" class="input" {
+                                        option value="stock" {
+                                            "Stock"
+                                        }
+                                        option value="etf" {
+                                            "ETF"
+                                        }
+                                        option value="crypto" {
+                                            "Crypto"
+                                        }
+                                        option value="option" {
+                                            "Option"
+                                        }
+                                    }
+                                }
+                                div {
+                                    label class="label" {
+                                        "Quantity"
+                                    }
+                                    input id="lot-qty" type="number" step="any" class="input" placeholder="100";
+                                }
+                                div {
+                                    label class="label" {
+                                        "Cost per Unit ($)"
+                                    }
+                                    input id="lot-cpu" type="number" step="0.01" class="input" placeholder="150.25";
+                                }
+                                div {
+                                    label class="label" {
+                                        "Acquisition Date"
+                                    }
+                                    input id="lot-date" type="date" class="input";
+                                }
+                                div {
+                                    label class="label" {
+                                        "Broker"
+                                    }
+                                    input id="lot-broker" class="input" placeholder="Alpaca";
+                                }
+                                div class="col-span-2 flex items-end gap-2" {
+                                    button onclick="saveLot()" class="btn-primary" {
+                                        "Save Lot"
+                                    }
+                                    button onclick="document.getElementById('add-lot-form').classList.add('hidden')" class="text-xs text-gray-400 hover:text-gray-200" {
+                                        "Cancel"
+                                    }
+                                }
+                            }
+                        }
+                        div id="lots-list" class="space-y-1 max-h-[400px] overflow-y-auto" {
+                            p class="text-xs text-gray-600" {
+                                "Loading lots..."
+                            }
+                        }
+                    }
+                    div class="card mb-6" {
+                        div class="flex items-center justify-between mb-3" {
+                            h3 class="font-medium" {
+                                "Wash Sales"
+                            }
+                            span class="text-xs text-gray-500" id="wash-count" {
+                                "--"
+                            }
+                        }
+                        div id="wash-list" class="space-y-1" {
+                            p class="text-xs text-gray-600" {
+                                "Loading..."
+                            }
+                        }
+                    }
+                    div class="card mb-6" {
+                        div class="flex items-center justify-between mb-3" {
+                            h3 class="font-medium" {
+                                "Form 8949 (Capital Gains Detail)"
+                            }
+                            span class="text-xs text-gray-500" id="form8949-count" {
+                                "--"
+                            }
+                        }
+                        div id="form8949-list" class="space-y-1 max-h-[300px] overflow-y-auto" {
+                            p class="text-xs text-gray-600" {
+                                "Loading dispositions..."
+                            }
+                        }
+                    }
+                    div class="card" {
+                        div class="flex items-center justify-between mb-3" {
+                            h3 class="font-medium" {
+                                "K-1 Income (Partnerships, S-Corps)"
+                            }
+                            button onclick="showAddK1Form()" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-2.5 py-1 rounded-lg" {
+                                "+ Add K-1"
+                            }
+                        }
+                        div id="add-k1-form" class="hidden mb-4 p-3 bg-gray-900/40 rounded-lg" {
+                            div class="grid grid-cols-2 md:grid-cols-3 gap-2" {
+                                div class="col-span-2" {
+                                    label class="label" {
+                                        "Entity Name"
+                                    }
+                                    input id="k1-name" class="input" placeholder="Acme Partners LLC";
+                                }
+                                div {
+                                    label class="label" {
+                                        "Type"
+                                    }
+                                    select id="k1-type" class="input" {
+                                        option value="partnership" {
+                                            "Partnership"
+                                        }
+                                        option value="s_corp" {
+                                            "S-Corp"
+                                        }
+                                    }
+                                }
+                                div {
+                                    label class="label" {
+                                        "Ordinary Income ($)"
+                                    }
+                                    input id="k1-ordinary" type="number" step="0.01" class="input" placeholder="0";
+                                }
+                                div {
+                                    label class="label" {
+                                        "Rental Income ($)"
+                                    }
+                                    input id="k1-rental" type="number" step="0.01" class="input" placeholder="0";
+                                }
+                                div {
+                                    label class="label" {
+                                        "Interest ($)"
+                                    }
+                                    input id="k1-interest" type="number" step="0.01" class="input" placeholder="0";
+                                }
+                                div {
+                                    label class="label" {
+                                        "Dividends ($)"
+                                    }
+                                    input id="k1-dividend" type="number" step="0.01" class="input" placeholder="0";
+                                }
+                                div {
+                                    label class="label" {
+                                        "Capital Gain ($)"
+                                    }
+                                    input id="k1-capgain" type="number" step="0.01" class="input" placeholder="0";
+                                }
+                                div {
+                                    label class="label" {
+                                        "SE Income ($)"
+                                    }
+                                    input id="k1-se" type="number" step="0.01" class="input" placeholder="0";
+                                }
+                                div class="col-span-full flex gap-2" {
+                                    button onclick="saveK1()" class="btn-primary" {
+                                        "Save K-1"
+                                    }
+                                    button onclick="document.getElementById('add-k1-form').classList.add('hidden')" class="text-xs text-gray-400 hover:text-gray-200" {
+                                        "Cancel"
+                                    }
+                                }
+                            }
+                        }
+                        div id="k1-list" class="space-y-1" {
+                            p class="text-xs text-gray-600" {
+                                "Loading K-1s..."
+                            }
+                        }
+                    }
+                }
+                // Credits tab
+                div id="tab-credits" class="hidden" {
+                    div class="card mb-6" {
+                        h3 class="font-medium mb-2" {
+                            "Tax Credit Eligibility"
+                        }
+                        p class="text-xs text-gray-500 mb-4" {
+                            "Credits directly reduce your tax owed, dollar for dollar. Based on your dependents, income, and expenses entered so far."
+                        }
+                        div class="grid grid-cols-1 md:grid-cols-2 gap-3" id="credits-eligibility-grid" {
+                            p class="text-xs text-gray-600 col-span-full" {
+                                "Loading credit eligibility..."
+                            }
+                        }
+                        div class="mt-4 pt-4 border-t border-gray-700 flex items-center justify-between" {
+                            span class="text-sm text-gray-400" {
+                                "Estimated total credits:"
+                            }
+                            span class="text-xl font-semibold text-green-400" id="credits-total" {
+                                "$0.00"
+                            }
+                        }
+                    }
+                    div class="card mb-6" {
+                        div class="flex items-center justify-between mb-3" {
+                            h3 class="font-medium" {
+                                "Education Expenses "
+                                span class="text-xs text-gray-500 font-normal" {
+                                    "— AOTC / Lifetime Learning"
+                                }
+                            }
+                            button onclick="toggleForm('edu-form')" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-2.5 py-1 rounded-lg" {
+                                "+ Add"
+                            }
+                        }
+                        div id="edu-form" class="hidden mb-3 p-3 bg-gray-900/40 rounded-lg" {
+                            div class="grid grid-cols-2 gap-2" {
+                                div {
+                                    label class="label" {
+                                        "Student Name"
+                                    }
+                                    input id="edu-student" class="input" placeholder="Jane Doe";
+                                }
+                                div {
+                                    label class="label" {
+                                        "Institution"
+                                    }
+                                    input id="edu-school" class="input" placeholder="Acme University";
+                                }
+                                div {
+                                    label class="label" {
+                                        "Tuition ($)"
+                                    }
+                                    input id="edu-tuition" type="number" step="0.01" class="input" placeholder="12000";
+                                }
+                                div {
+                                    label class="label" {
+                                        "Required Fees ($)"
+                                    }
+                                    input id="edu-fees" type="number" step="0.01" class="input" placeholder="0";
+                                }
+                                div {
+                                    label class="label" {
+                                        "Books & Supplies ($)"
+                                    }
+                                    input id="edu-books" type="number" step="0.01" class="input" placeholder="0";
+                                }
+                                div class="flex items-end gap-2" {
+                                    button onclick="saveEducation()" class="btn-primary" {
+                                        "Save"
+                                    }
+                                }
+                            }
+                        }
+                        p class="text-xs text-gray-500" {
+                            "Up to $2,500 credit per student for first 4 years of college (AOTC), or 20% of first $10,000 for graduate/continuing (LLC)."
+                        }
+                    }
+                    div class="card mb-6" {
+                        div class="flex items-center justify-between mb-3" {
+                            h3 class="font-medium" {
+                                "Dependent Care "
+                                span class="text-xs text-gray-500 font-normal" {
+                                    "— Child & Dependent Care Credit"
+                                }
+                            }
+                            button onclick="toggleForm('care-form')" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-2.5 py-1 rounded-lg" {
+                                "+ Add"
+                            }
+                        }
+                        div id="care-form" class="hidden mb-3 p-3 bg-gray-900/40 rounded-lg" {
+                            div class="grid grid-cols-2 gap-2" {
+                                div {
+                                    label class="label" {
+                                        "Provider Name"
+                                    }
+                                    input id="care-provider" class="input" placeholder="Sunshine Daycare";
+                                }
+                                div {
+                                    label class="label" {
+                                        "Amount Paid ($)"
+                                    }
+                                    input id="care-amount" type="number" step="0.01" class="input" placeholder="5000";
+                                }
+                                div {
+                                    label class="label" {
+                                        "For Dependent (optional id)"
+                                    }
+                                    input id="care-dep" type="number" class="input" placeholder="";
+                                }
+                                div class="flex items-end gap-2" {
+                                    button onclick="saveChildcare()" class="btn-primary" {
+                                        "Save"
+                                    }
+                                }
+                            }
+                        }
+                        p class="text-xs text-gray-500" {
+                            "20-35% credit on up to $3,000 (one child) or $6,000 (two+) of care expenses for children under 13 or disabled dependents."
+                        }
+                    }
+                    div class="card" {
+                        div class="flex items-center justify-between mb-3" {
+                            h3 class="font-medium" {
+                                "Energy Improvements "
+                                span class="text-xs text-gray-500 font-normal" {
+                                    "— Residential Clean Energy / Efficient Home"
+                                }
+                            }
+                            button onclick="toggleForm('energy-form')" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-2.5 py-1 rounded-lg" {
+                                "+ Add"
+                            }
+                        }
+                        div id="energy-form" class="hidden mb-3 p-3 bg-gray-900/40 rounded-lg" {
+                            div class="grid grid-cols-2 gap-2" {
+                                div {
+                                    label class="label" {
+                                        "Type"
+                                    }
+                                    select id="energy-type" class="input" {
+                                        option value="solar" {
+                                            "Solar panels / solar water heater"
+                                        }
+                                        option value="wind" {
+                                            "Small wind"
+                                        }
+                                        option value="geothermal" {
+                                            "Geothermal heat pump"
+                                        }
+                                        option value="battery" {
+                                            "Battery storage"
+                                        }
+                                        option value="heat_pump" {
+                                            "Heat pump"
+                                        }
+                                        option value="windows" {
+                                            "Windows/doors/insulation"
+                                        }
+                                        option value="ev_charger" {
+                                            "EV charger"
+                                        }
+                                    }
+                                }
+                                div {
+                                    label class="label" {
+                                        "Vendor"
+                                    }
+                                    input id="energy-vendor" class="input" placeholder="Installer name";
+                                }
+                                div {
+                                    label class="label" {
+                                        "Total Cost ($)"
+                                    }
+                                    input id="energy-cost" type="number" step="0.01" class="input" placeholder="15000";
+                                }
+                                div {
+                                    label class="label" {
+                                        "Qualifying Portion ($)"
+                                    }
+                                    input id="energy-qual" type="number" step="0.01" class="input" placeholder="leave blank = full";
+                                }
+                                div class="flex items-end gap-2" {
+                                    button onclick="saveEnergy()" class="btn-primary" {
+                                        "Save"
+                                    }
+                                }
+                            }
+                        }
+                        p class="text-xs text-gray-500" {
+                            "30% residential clean energy credit (solar, wind, geothermal). Energy efficient home improvement credit up to $1,200-$3,200/year depending on type."
+                        }
+                    }
+                }
+                // Quarterly tab
+                div id="tab-quarterly" class="hidden" {
+                    div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6" {
+                        div class="card" {
+                            p class="text-xs text-gray-500 uppercase" {
+                                "Projected Full-Year Tax"
+                            }
+                            p class="text-2xl font-semibold mt-1" id="qtr-projected-tax" {
+                                "--"
+                            }
+                            p class="text-xs text-gray-500 mt-1" id="qtr-effective-rate" {
+                            }
+                        }
+                        div class="card" {
+                            p class="text-xs text-gray-500 uppercase" {
+                                "Projected Owed at Year End"
+                            }
+                            p class="text-2xl font-semibold mt-1" id="qtr-owed" {
+                                "--"
+                            }
+                            p class="text-xs text-gray-500 mt-1" {
+                                "Before estimated payments"
+                            }
+                        }
+                        div class="card" {
+                            p class="text-xs text-gray-500 uppercase" {
+                                "Per-Quarter Recommended"
+                            }
+                            p class="text-2xl font-semibold mt-1 text-oc-400" id="qtr-per-quarter" {
+                                "--"
+                            }
+                            p class="text-xs text-gray-500 mt-1" id="qtr-safe-harbor" {
+                            }
+                        }
+                    }
+                    div class="card mb-6" {
+                        h3 class="font-medium mb-3" {
+                            "Quarterly Estimated Payments (Form 1040-ES)"
+                        }
+                        div id="qtr-list" class="space-y-2" {
+                            p class="text-xs text-gray-600" {
+                                "Loading..."
+                            }
+                        }
+                        p class="text-xs text-gray-500 mt-3" {
+                            "Deadlines: Q1 Apr 15, Q2 Jun 15, Q3 Sep 15, Q4 Jan 15. Safe harbor: pay 100% of prior year's tax (110% if AGI > $150K) OR 90% of current year."
+                        }
+                    }
+                    div class="card" {
+                        h3 class="font-medium mb-3" {
+                            "Record a Payment"
+                        }
+                        div class="grid grid-cols-2 md:grid-cols-5 gap-2" {
+                            div {
+                                label class="label" {
+                                    "Quarter"
+                                }
+                                select id="qtr-q" class="input" {
+                                    option value="1" {
+                                        "Q1"
+                                    }
+                                    option value="2" {
+                                        "Q2"
+                                    }
+                                    option value="3" {
+                                        "Q3"
+                                    }
+                                    option value="4" {
+                                        "Q4"
+                                    }
+                                }
+                            }
+                            div {
+                                label class="label" {
+                                    "Amount ($)"
+                                }
+                                input id="qtr-amt" type="number" step="0.01" class="input";
+                            }
+                            div {
+                                label class="label" {
+                                    "Payment Date"
+                                }
+                                input id="qtr-date" type="date" class="input";
+                            }
+                            div {
+                                label class="label" {
+                                    "Method"
+                                }
+                                select id="qtr-method" class="input" {
+                                    option value="IRS Direct Pay" {
+                                        "IRS Direct Pay"
+                                    }
+                                    option value="EFTPS" {
+                                        "EFTPS"
+                                    }
+                                    option value="Check" {
+                                        "Check"
+                                    }
+                                    option value="Credit Card" {
+                                        "Credit Card"
+                                    }
+                                }
+                            }
+                            div {
+                                label class="label" {
+                                    "Confirmation #"
+                                }
+                                input id="qtr-conf" class="input" placeholder="EFTPS#";
+                            }
+                            div class="col-span-full" {
+                                button onclick="saveEstimatedPayment()" class="btn-primary" {
+                                    "Record Payment"
+                                }
+                            }
+                        }
+                    }
+                }
+                // Depreciation tab
+                div id="tab-depreciation" class="hidden" {
+                    div class="card mb-6" {
+                        div class="flex items-center justify-between mb-3" {
+                            h3 class="font-medium" {
+                                "Depreciable Assets"
+                            }
+                            button onclick="toggleForm('asset-form')" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-2.5 py-1 rounded-lg" {
+                                "+ Add Asset"
+                            }
+                        }
+                        div id="asset-form" class="hidden mb-4 p-3 bg-gray-900/40 rounded-lg" {
+                            div class="grid grid-cols-2 md:grid-cols-3 gap-2" {
+                                div class="col-span-2" {
+                                    label class="label" {
+                                        "Description"
+                                    }
+                                    input id="asset-desc" class="input" placeholder="Dell XPS laptop";
+                                }
+                                div {
+                                    label class="label" {
+                                        "Asset Class"
+                                    }
+                                    select id="asset-class" class="input" onchange="updateAssetLife()" {
+                                        option value="computer" data-life="5" {
+                                            "Computer / Software (5yr)"
+                                        }
+                                        option value="office_equipment" data-life="7" {
+                                            "Office Equipment (7yr)"
+                                        }
+                                        option value="vehicle" data-life="5" {
+                                            "Vehicle (5yr)"
+                                        }
+                                        option value="machinery" data-life="7" {
+                                            "Machinery (7yr)"
+                                        }
+                                        option value="furniture" data-life="7" {
+                                            "Furniture (7yr)"
+                                        }
+                                        option value="improvement" data-life="15" {
+                                            "Leasehold Improvement (15yr)"
+                                        }
+                                        option value="building_residential" data-life="27" {
+                                            "Residential Rental Bldg (27.5yr)"
+                                        }
+                                        option value="building_commercial" data-life="39" {
+                                            "Commercial Building (39yr)"
+                                        }
+                                    }
+                                }
+                                div {
+                                    label class="label" {
+                                        "MACRS Life (yrs)"
+                                    }
+                                    input id="asset-life" type="number" class="input" value="5";
+                                }
+                                div {
+                                    label class="label" {
+                                        "Cost Basis ($)"
+                                    }
+                                    input id="asset-cost" type="number" step="0.01" class="input" placeholder="2500";
+                                }
+                                div {
+                                    label class="label" {
+                                        "Placed in Service"
+                                    }
+                                    input id="asset-date" type="date" class="input";
+                                }
+                                div {
+                                    label class="label" {
+                                        "Business Use %"
+                                    }
+                                    input id="asset-biz-pct" type="number" min="0" max="100" class="input" value="100";
+                                }
+                                div {
+                                    label class="label" {
+                                        "Section 179 ($)"
+                                    }
+                                    input id="asset-179" type="number" step="0.01" class="input" placeholder="0";
+                                }
+                                div class="flex items-end gap-2" {
+                                    label class="flex items-center gap-2 text-xs text-gray-300" {
+                                        input id="asset-bonus" type="checkbox";
+                                        " Bonus Depreciation"
+                                    }
+                                    label class="flex items-center gap-2 text-xs text-gray-300" {
+                                        input id="asset-is-vehicle" type="checkbox";
+                                        " Vehicle"
+                                    }
+                                }
+                                div class="col-span-full flex gap-2" {
+                                    button onclick="saveAsset()" class="btn-primary" {
+                                        "Save Asset"
+                                    }
+                                    button onclick="document.getElementById('asset-form').classList.add('hidden')" class="text-xs text-gray-400 hover:text-gray-200" {
+                                        "Cancel"
+                                    }
+                                }
+                            }
+                        }
+                        div id="assets-list" class="space-y-1" {
+                            p class="text-xs text-gray-600" {
+                                "Loading assets..."
+                            }
+                        }
+                    }
+                    div class="card mb-6" {
+                        h3 class="font-medium mb-2" {
+                            "This Year's Depreciation"
+                        }
+                        div class="grid grid-cols-2 md:grid-cols-4 gap-3" {
+                            div {
+                                p class="text-xs text-gray-500 uppercase" {
+                                    "Section 179"
+                                }
+                                p class="text-xl font-semibold mt-1" id="depr-179" {
+                                    "--"
+                                }
+                            }
+                            div {
+                                p class="text-xs text-gray-500 uppercase" {
+                                    "Bonus Depreciation"
+                                }
+                                p class="text-xl font-semibold mt-1" id="depr-bonus" {
+                                    "--"
+                                }
+                            }
+                            div {
+                                p class="text-xs text-gray-500 uppercase" {
+                                    "MACRS Yr 1"
+                                }
+                                p class="text-xl font-semibold mt-1" id="depr-macrs" {
+                                    "--"
+                                }
+                            }
+                            div {
+                                p class="text-xs text-gray-500 uppercase" {
+                                    "Total Year 1"
+                                }
+                                p class="text-xl font-semibold mt-1 text-oc-400" id="depr-total" {
+                                    "--"
+                                }
+                            }
+                        }
+                    }
+                    div class="card" {
+                        h3 class="font-medium mb-3" {
+                            "Vehicle Mileage Log"
+                        }
+                        div class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3" {
+                            div {
+                                label class="label" {
+                                    "Asset"
+                                }
+                                select id="veh-asset" class="input" {
+                                    option value="" {
+                                        "-- pick vehicle --"
+                                    }
+                                }
+                            }
+                            div {
+                                label class="label" {
+                                    "Tax Year"
+                                }
+                                input id="veh-year" type="number" class="input" value="2025";
+                            }
+                            div {
+                                label class="label" {
+                                    "Business Miles"
+                                }
+                                input id="veh-biz-miles" type="number" class="input";
+                            }
+                            div {
+                                label class="label" {
+                                    "Total Miles"
+                                }
+                                input id="veh-total-miles" type="number" class="input";
+                            }
+                            div class="col-span-full" {
+                                button onclick="saveVehicleUsage()" class="btn-primary" {
+                                    "Save Usage"
+                                }
+                            }
+                        }
+                        p class="text-xs text-gray-500" {
+                            "IRS standard mileage rate 2025: $0.70/business mile. Use actual expense method if higher (gas, maintenance, depreciation, insurance)."
+                        }
+                    }
+                }
+                // State tab
+                div id="tab-state" class="hidden" {
+                    div class="card mb-6" {
+                        h3 class="font-medium mb-3" {
+                            "State Tax Estimates"
+                        }
+                        div class="grid grid-cols-1 md:grid-cols-3 gap-3" {
+                            div class="p-3 bg-gray-900/40 rounded-lg" {
+                                p class="text-xs text-gray-500 uppercase" {
+                                    "Federal AGI"
+                                }
+                                p class="text-xl font-semibold mt-1" id="st-federal-agi" {
+                                    "--"
+                                }
+                            }
+                            div class="p-3 bg-gray-900/40 rounded-lg" {
+                                p class="text-xs text-gray-500 uppercase" {
+                                    "Total State Tax"
+                                }
+                                p class="text-xl font-semibold mt-1" id="st-total-state-tax" {
+                                    "--"
+                                }
+                            }
+                            div class="p-3 bg-gray-900/40 rounded-lg" {
+                                p class="text-xs text-gray-500 uppercase" {
+                                    "Combined Effective Rate"
+                                }
+                                p class="text-xl font-semibold mt-1" id="st-combined-rate" {
+                                    "--"
+                                }
+                            }
+                        }
+                        div id="state-breakdown" class="mt-4 space-y-2" {
+                            p class="text-xs text-gray-600" {
+                                "Add a state residency below to estimate state taxes."
+                            }
+                        }
+                    }
+                    div class="card" {
+                        h3 class="font-medium mb-3" {
+                            "Add State Residency"
+                        }
+                        p class="text-xs text-gray-500 mb-3" {
+                            "Full-year resident, part-year (moved), or non-resident (worked in another state). Multi-state supported."
+                        }
+                        div class="grid grid-cols-2 md:grid-cols-3 gap-2" {
+                            div {
+                                label class="label" {
+                                    "State"
+                                }
+                                select id="st-state" class="input" {
+                                }
+                            }
+                            div {
+                                label class="label" {
+                                    "Residency"
+                                }
+                                select id="st-residency" class="input" {
+                                    option value="full_year" {
+                                        "Full Year"
+                                    }
+                                    option value="part_year" {
+                                        "Part Year"
+                                    }
+                                    option value="nonresident" {
+                                        "Non-Resident"
+                                    }
+                                }
+                            }
+                            div {
+                                label class="label" {
+                                    "Months in State"
+                                }
+                                input id="st-months" type="number" min="0" max="12" class="input" value="12";
+                            }
+                            div {
+                                label class="label" {
+                                    "State Wages ($)"
+                                }
+                                input id="st-wages" type="number" step="0.01" class="input" placeholder="0";
+                            }
+                            div {
+                                label class="label" {
+                                    "State Tax Withheld ($)"
+                                }
+                                input id="st-withheld" type="number" step="0.01" class="input" placeholder="0";
+                            }
+                            div class="flex items-end gap-2" {
+                                button onclick="saveStateProfile()" class="btn-primary" {
+                                    "Save"
+                                }
+                            }
+                        }
+                    }
+                }
+                // Entities tab
+                div id="tab-entities" class="hidden" {
+                    div class="card mb-6" {
+                        div class="flex items-center justify-between mb-3" {
+                            h3 class="font-medium" {
+                                "Business Entities"
+                            }
+                            button onclick="toggleForm('ent-form')" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-2.5 py-1 rounded-lg" {
+                                "+ Add Entity"
+                            }
+                        }
+                        div id="ent-form" class="hidden mb-4 p-3 bg-gray-900/40 rounded-lg" {
+                            div class="grid grid-cols-2 md:grid-cols-3 gap-2" {
+                                div class="col-span-2" {
+                                    label class="label" {
+                                        "Entity Name"
+                                    }
+                                    input id="ent-name" class="input" placeholder="Acme Woodworks LLC";
+                                }
+                                div {
+                                    label class="label" {
+                                        "Type"
+                                    }
+                                    select id="ent-type" class="input" {
+                                        option value="sole_prop" {
+                                            "Sole Proprietorship"
+                                        }
+                                        option value="s_corp" {
+                                            "S-Corp"
+                                        }
+                                        option value="c_corp" {
+                                            "C-Corp"
+                                        }
+                                        option value="partnership" {
+                                            "Partnership"
+                                        }
+                                        option value="llc_single" {
+                                            "Single-Member LLC"
+                                        }
+                                        option value="llc_multi" {
+                                            "Multi-Member LLC"
+                                        }
+                                    }
+                                }
+                                div {
+                                    label class="label" {
+                                        "EIN (optional)"
+                                    }
+                                    input id="ent-ein" class="input" placeholder="XX-XXXXXXX";
+                                }
+                                div {
+                                    label class="label" {
+                                        "State of Formation"
+                                    }
+                                    input id="ent-state" class="input" placeholder="NC";
+                                }
+                                div {
+                                    label class="label" {
+                                        "Formation Date"
+                                    }
+                                    input id="ent-formed" type="date" class="input";
+                                }
+                                div {
+                                    label class="label" {
+                                        "Your Ownership %"
+                                    }
+                                    input id="ent-own" type="number" class="input" value="100";
+                                }
+                                div class="col-span-full flex gap-2" {
+                                    button onclick="saveEntity()" class="btn-primary" {
+                                        "Save Entity"
+                                    }
+                                    button onclick="document.getElementById('ent-form').classList.add('hidden')" class="text-xs text-gray-400 hover:text-gray-200" {
+                                        "Cancel"
+                                    }
+                                }
+                            }
+                        }
+                        div id="entities-list" class="space-y-1" {
+                            p class="text-xs text-gray-600" {
+                                "Loading entities..."
+                            }
+                        }
+                    }
+                    div id="entity-detail" class="hidden card mb-6" {
+                        div class="flex items-center justify-between mb-3" {
+                            h3 class="font-medium" id="ent-detail-name" {
+                                "--"
+                            }
+                            button onclick="hideEntityDetail()" class="text-xs text-gray-400 hover:text-gray-200" {
+                                "Close"
+                            }
+                        }
+                        div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4" {
+                            div {
+                                p class="text-xs text-gray-500 uppercase" {
+                                    "Income"
+                                }
+                                p class="text-xl font-semibold mt-1 text-green-400" id="ent-d-income" {
+                                    "--"
+                                }
+                            }
+                            div {
+                                p class="text-xs text-gray-500 uppercase" {
+                                    "Expenses"
+                                }
+                                p class="text-xl font-semibold mt-1 text-red-400" id="ent-d-expenses" {
+                                    "--"
+                                }
+                            }
+                            div {
+                                p class="text-xs text-gray-500 uppercase" {
+                                    "Net Income"
+                                }
+                                p class="text-xl font-semibold mt-1" id="ent-d-net" {
+                                    "--"
+                                }
+                            }
+                            div {
+                                p class="text-xs text-gray-500 uppercase" {
+                                    "Entity Tax"
+                                }
+                                p class="text-xl font-semibold mt-1" id="ent-d-tax" {
+                                    "--"
+                                }
+                                p class="text-xs text-gray-500" id="ent-d-passthrough" {
+                                }
+                            }
+                        }
+                        div class="grid grid-cols-1 md:grid-cols-2 gap-4" {
+                            div {
+                                h4 class="text-xs uppercase text-gray-500 mb-2" {
+                                    "Shareholders / Partners"
+                                }
+                                div id="ent-d-shareholders" class="space-y-1" {
+                                }
+                                button onclick="showAddShareholder()" class="text-xs text-oc-400 hover:text-oc-300 mt-2" {
+                                    "+ Add Shareholder"
+                                }
+                                div id="ent-sh-form" class="hidden mt-2 p-2 bg-gray-900/40 rounded-lg grid grid-cols-2 gap-2" {
+                                    div {
+                                        label class="label" {
+                                            "Name"
+                                        }
+                                        input id="ent-sh-name" class="input";
+                                    }
+                                    div {
+                                        label class="label" {
+                                            "Ownership %"
+                                        }
+                                        input id="ent-sh-pct" type="number" class="input";
+                                    }
+                                    div {
+                                        label class="label" {
+                                            "Salary ($)"
+                                        }
+                                        input id="ent-sh-salary" type="number" step="0.01" class="input";
+                                    }
+                                    div {
+                                        label class="label" {
+                                            "Distributions ($)"
+                                        }
+                                        input id="ent-sh-dist" type="number" step="0.01" class="input";
+                                    }
+                                    div class="col-span-full" {
+                                        button onclick="saveShareholder()" class="btn-primary" {
+                                            "Save"
+                                        }
+                                    }
+                                }
+                            }
+                            div {
+                                h4 class="text-xs uppercase text-gray-500 mb-2" {
+                                    "Expense Breakdown"
+                                }
+                                div id="ent-d-categories" class="space-y-1" {
+                                    p class="text-xs text-gray-600" {
+                                        "No expenses yet"
+                                    }
+                                }
+                            }
+                        }
+                        div class="mt-4 pt-4 border-t border-gray-700 flex items-center gap-3" {
+                            button onclick="generateK1s()" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-3 py-1.5 rounded-lg" {
+                                "Generate K-1s"
+                            }
+                            button onclick="toggleForm('ent-1099-form')" class="text-xs bg-gray-700 hover:bg-gray-600 text-white px-3 py-1.5 rounded-lg" {
+                                "Issue 1099-NEC"
+                            }
+                            button onclick="loadEntity1099List()" class="text-xs text-gray-400 hover:text-gray-200" {
+                                "View issued 1099s"
+                            }
+                        }
+                        div id="ent-1099-form" class="hidden mt-3 p-3 bg-gray-900/40 rounded-lg grid grid-cols-2 gap-2" {
+                            div class="col-span-2" {
+                                label class="label" {
+                                    "Recipient Name"
+                                }
+                                input id="ent-1099-name" class="input";
+                            }
+                            div class="col-span-2" {
+                                label class="label" {
+                                    "Recipient Address"
+                                }
+                                input id="ent-1099-addr" class="input" placeholder="Street, City, ST ZIP";
+                            }
+                            div {
+                                label class="label" {
+                                    "Amount Paid ($)"
+                                }
+                                input id="ent-1099-amt" type="number" step="0.01" class="input" placeholder="min $600";
+                            }
+                            div class="flex items-end" {
+                                button onclick="issue1099()" class="btn-primary" {
+                                    "Issue"
+                                }
+                            }
+                        }
+                        div id="ent-k1-results" class="mt-3" {
+                        }
+                        div id="ent-1099-results" class="mt-3" {
+                        }
+                    }
+                    div class="card" {
+                        h3 class="font-medium mb-3" {
+                            "Entity Structure Comparison"
+                        }
+                        p class="text-xs text-gray-500 mb-3" {
+                            "Compare Sole Proprietorship vs S-Corp vs LLC based on projected SE income. Shows SE tax savings opportunities."
+                        }
+                        div class="flex items-end gap-2 mb-3" {
+                            div class="flex-1" {
+                                label class="label" {
+                                    "SE Income ($, optional override)"
+                                }
+                                input id="ent-cmp-income" type="number" step="0.01" class="input" placeholder="Leave blank to use actual";
+                            }
+                            button onclick="loadEntityComparison()" class="btn-primary" {
+                                "Compare"
+                            }
+                        }
+                        div id="ent-comparison" class="space-y-2" {
+                            p class="text-xs text-gray-600" {
+                                "Click Compare to see structure analysis."
+                            }
+                        }
+                    }
+                }
+                // Insights tab
+                div id="tab-insights" class="hidden" {
+                    div class="card mb-6" {
+                        div class="flex items-center justify-between mb-3" {
+                            h3 class="font-medium" {
+                                "Audit Risk Score"
+                            }
+                            button onclick="loadAuditRisk()" class="text-xs text-oc-400 hover:text-oc-300" {
+                                "Refresh"
+                            }
+                        }
+                        div class="flex items-center gap-4 mb-3" {
+                            div id="audit-score-ring" class="w-20 h-20 rounded-full border-4 border-gray-700 flex items-center justify-center text-2xl font-semibold" {
+                                "--"
+                            }
+                            div {
+                                p class="text-sm text-gray-300" id="audit-score-label" {
+                                    "Loading..."
+                                }
+                                p class="text-xs text-gray-500 mt-1" id="audit-score-summary" {
+                                }
+                            }
+                        }
+                        div id="audit-factors" class="space-y-1 mt-3" {
+                        }
+                    }
+                    div class="card mb-6" {
+                        div class="flex items-center justify-between mb-3" {
+                            h3 class="font-medium" {
+                                "AI Tax Insights"
+                            }
+                            button onclick="loadInsightsList()" class="text-xs text-oc-400 hover:text-oc-300" {
+                                "Refresh"
+                            }
+                        }
+                        div id="insights-list" class="space-y-2" {
+                            p class="text-xs text-gray-600" {
+                                "Loading insights..."
+                            }
+                        }
+                    }
+                    div class="card mb-6" {
+                        h3 class="font-medium mb-3" {
+                            "What-If Scenario"
+                        }
+                        p class="text-xs text-gray-500 mb-3" {
+                            "Model a tax change: raise, bonus, marriage, new dependent, IRA contribution."
+                        }
+                        div class="grid grid-cols-2 md:grid-cols-3 gap-2 mb-3" {
+                            div class="col-span-2" {
+                                label class="label" {
+                                    "Scenario Name"
+                                }
+                                input id="wi-name" class="input" placeholder="10k raise + max IRA";
+                            }
+                            div {
+                                label class="label" {
+                                    "Additional Income ($)"
+                                }
+                                input id="wi-income" type="number" step="0.01" class="input" placeholder="0";
+                            }
+                            div {
+                                label class="label" {
+                                    "Additional Deductions ($)"
+                                }
+                                input id="wi-ded" type="number" step="0.01" class="input" placeholder="0";
+                            }
+                            div {
+                                label class="label" {
+                                    "Retirement Contribution ($)"
+                                }
+                                input id="wi-ret" type="number" step="0.01" class="input" placeholder="0";
+                            }
+                            div {
+                                label class="label" {
+                                    "Filing Status Override"
+                                }
+                                select id="wi-fs" class="input" {
+                                    option value="" {
+                                        "-- keep current --"
+                                    }
+                                    option value="single" {
+                                        "Single"
+                                    }
+                                    option value="married_jointly" {
+                                        "Married Jointly"
+                                    }
+                                    option value="married_separately" {
+                                        "Married Separately"
+                                    }
+                                    option value="head_of_household" {
+                                        "Head of Household"
+                                    }
+                                }
+                            }
+                            div class="col-span-full" {
+                                button onclick="runWhatIf()" class="btn-primary" {
+                                    "Run Scenario"
+                                }
+                            }
+                        }
+                        div id="wi-result" {
+                        }
+                    }
+                    div class="card" {
+                        div class="flex items-center justify-between mb-2" {
+                            h3 class="font-medium" {
+                                "Injected Tax Context (what the AI sees)"
+                            }
+                            button onclick="loadTaxContext()" class="text-xs text-oc-400 hover:text-oc-300" {
+                                "Refresh"
+                            }
+                        }
+                        pre id="tax-context-text" class="text-xs text-gray-400 whitespace-pre-wrap max-h-[300px] overflow-y-auto bg-gray-900/40 rounded p-3" {
+                            "Loading..."
+                        }
+                    }
+                }
+            }
+            // end left panel
+            // RIGHT: Positronic Matrix (AI chat, Positron persona)
+            div class="w-[380px] positron-panel flex flex-col flex-shrink-0" {
+                // Animated positronic brain canvas behind messages
+                canvas id="positron-brain" {
+                }
+                // LCARS header
+                div class="positron-header" {
+                    div class="p-frame" {
+                        "P"
+                    }
+                    div class="p-title" {
+                        "Positron Channel"
+                    }
+                    div class="p-status" {
+                        span class="p-led" {
+                        }
+                        span {
+                            "ONLINE"
+                        }
+                    }
+                }
+                // Log counter / action strip
+                div class="positron-logbar" {
+                    span class="logbar-label" {
+                        "LOG"
+                    }
+                    span class="logbar-value" id="positron-log-index" {
+                        "0000.0"
+                    }
+                    span class="logbar-label" style="margin-left:auto" {
+                        "CYCLES"
+                    }
+                    span class="logbar-value" id="positron-msg-count" {
+                        "0"
+                    }
+                    button onclick="clearTaxChat()" class="logbar-label" style="background:none;border:none;color:inherit;cursor:pointer;margin-left:0.5rem;opacity:0.7" title="Clear conversation" {
+                        "CLR"
+                    }
+                }
+                div class="flex-1 overflow-y-auto space-y-3" id="tax-chat-messages" {
+                    div class="flex gap-2" {
+                        img src="/agent-avatar/main" class="w-6 h-6 rounded-lg flex-shrink-0 mt-0.5" alt="";
+                        div class="text-sm text-gray-400" {
+                            p {
+                                "Positron here. I have access to your receipts, expenses, investments, and taxpayer profile. I can compute deductions, flag inconsistencies, and cite IRC when appropriate. Queries:"
+                            }
+                            div class="flex flex-wrap gap-1 mt-2" {
+                                button onclick="taxChat('Show my expense summary for 2025')" {
+                                    "2025 Summary"
+                                }
+                                button onclick="taxChat('What are my deductible expenses?')" {
+                                    "Deductibility"
+                                }
+                                button onclick="taxChat('Log a $50 lunch at Chipotle today as business meal')" {
+                                    "Log Expense"
+                                }
+                            }
+                        }
+                    }
+                }
+                // Input
+                div class="positron-input-row" {
+                    div class="flex gap-2 items-end" {
+                        textarea id="tax-chat-input" rows="1" class="flex-1 px-3 py-2 outline-none resize-none" placeholder="Query Positron..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendTaxChat()}" oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,100)+'px'" style="max-height:100px" {
+                        }
+                        button onclick="sendTaxChat()" class="transmit-btn flex-shrink-0" id="tax-send-btn" {
+                            "TRANSMIT"
+                        }
+                    }
+                }
+            }
+        }
+        // end split layout
         script { (PreEscaped(PAGE_JS)) }
     };
     Html(shell(page, body).into_string())
@@ -363,1359 +3483,6 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
     transition: all 0.12s;
   }
   .transmit-btn:hover { background: var(--lcars-peach); box-shadow: 0 0 10px rgba(255,156,61,0.45); }"##;
-
-const BODY_HTML: &str = r##"<!-- Module paywall overlay (hidden by default, shown if module is locked) -->
-<div id="module-paywall" class="hidden fixed inset-0 z-50 bg-gray-950/95 backdrop-blur-sm flex items-center justify-center">
-  <div class="max-w-md w-full mx-4">
-    <div class="card text-center">
-      <div class="text-4xl mb-4">&#128176;</div>
-      <h2 class="text-xl font-semibold text-white mb-2">Tax & Expenses Module</h2>
-      <p class="text-sm text-gray-400 mb-6">Receipt scanning, expense tracking, tax document management, deduction calculator, and year-end tax prep wizard.</p>
-
-      <div id="paywall-trial-available">
-        <button onclick="startFreeTrial()" class="w-full bg-oc-600 hover:bg-oc-700 text-white font-medium py-3 px-6 rounded-xl transition-colors text-base mb-3">
-          Start Free 3-Day Trial
-        </button>
-        <p class="text-xs text-gray-500 mb-4">No credit card required. Full access for 3 days.</p>
-      </div>
-
-      <div id="paywall-trial-expired" class="hidden">
-        <p class="text-sm text-yellow-400 mb-4">Your free trial has ended.</p>
-      </div>
-
-      <div class="border-t border-gray-700 pt-4">
-        <button onclick="upgradePro()" class="w-full bg-gradient-to-r from-purple-600 to-oc-600 hover:from-purple-700 hover:to-oc-700 text-white font-medium py-3 px-6 rounded-xl transition-all text-base">
-          Upgrade to Syntaur Pro — $49
-        </button>
-        <p class="text-xs text-gray-500 mt-2">One-time payment. Unlocks all modules forever.</p>
-      </div>
-
-      <a href="/" class="text-xs text-gray-500 hover:text-gray-300 mt-4 inline-block">Back to Dashboard</a>
-    </div>
-  </div>
-</div>
-
-<!-- Trial banner (shown when trial is active) -->
-<div id="trial-banner" class="hidden bg-gradient-to-r from-oc-700/30 to-purple-700/30 border-b border-oc-800/30 text-center py-1.5 text-xs text-gray-300">
-  <span id="trial-banner-text">Free trial — <strong id="trial-days-left">3</strong> days remaining</span>
-  <button onclick="upgradePro()" class="ml-3 bg-oc-600 hover:bg-oc-700 text-white px-3 py-0.5 rounded-full text-xs transition-colors">Upgrade to Pro</button>
-</div>
-
-<!-- Top bar -->
-<div class="border-b border-gray-800 bg-gray-900/50 backdrop-blur sticky top-0 z-40">
-  <div class="max-w-6xl mx-auto px-4 py-2.5 flex items-center justify-between gap-3">
-    <div class="flex items-center gap-3 min-w-0">
-      <a href="/" class="flex items-center gap-2 hover:opacity-80 flex-shrink-0">
-        <img src="/app-icon.jpg" class="h-8 w-8 rounded-lg" alt="">
-        <span class="font-semibold">Syntaur</span>
-      </a>
-      <span class="text-gray-500">/</span>
-      <span class="text-gray-300 font-medium truncate">Tax &amp; Expenses</span>
-    </div>
-    <div class="flex items-center gap-3 text-sm flex-shrink-0">
-      <!-- Deadline pill — visible when any deadline is within 60 days -->
-      <span id="deadline-pill" class="deadline-pill hidden"><span class="deadline-dot"></span><span id="deadline-pill-text">—</span></span>
-      <select id="year-select" class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-sm text-gray-300 outline-none" onchange="changeYear()"></select>
-      <a href="/" class="text-gray-500 hover:text-gray-300">Home</a>
-    </div>
-  </div>
-  <!-- Section nav (top-level) -->
-  <div class="border-t border-gray-800/50">
-    <div class="max-w-6xl mx-auto px-4 flex items-center gap-1 overflow-x-auto whitespace-nowrap">
-      <button onclick="showSection('investments')" id="sec-btn-investments" class="sec-tab active">Investments</button>
-      <button onclick="showSection('documents')"   id="sec-btn-documents"   class="sec-tab">Documents</button>
-      <button onclick="showSection('deductions')"  id="sec-btn-deductions"  class="sec-tab">Deductions</button>
-      <button onclick="showSection('dashboard')"   id="sec-btn-dashboard"   class="sec-tab">Dashboard</button>
-      <button onclick="showSection('filing')"      id="sec-btn-filing"      class="sec-tab">Filing</button>
-    </div>
-  </div>
-  <!-- Sub-tab chip row (context-sensitive — populated by showSection()) -->
-  <div class="border-t border-gray-800/50 bg-gray-900/30">
-    <div class="max-w-6xl mx-auto px-4 py-2 flex items-center gap-2 overflow-x-auto whitespace-nowrap" id="sub-tab-bar">
-      <!-- filled in by JS -->
-    </div>
-  </div>
-</div>
-
-<div class="flex h-[calc(100vh-126px)]">
-
-  <!-- LEFT: Tax content -->
-  <div class="flex-1 overflow-y-auto px-4 py-4">
-
-  <!-- KPI strip — always visible at top of main canvas -->
-  <div class="kpi-strip" id="kpi-strip">
-    <div class="kpi-tile" id="kpi-tile-portfolio">
-      <div class="kpi-label">Portfolio value</div>
-      <div class="kpi-value" id="kpi-portfolio-value">—</div>
-      <div class="kpi-sub" id="kpi-portfolio-sub"></div>
-    </div>
-    <div class="kpi-tile" id="kpi-tile-income">
-      <div class="kpi-label">Income YTD</div>
-      <div class="kpi-value" id="kpi-income-value">—</div>
-      <div class="kpi-sub" id="kpi-income-sub"></div>
-    </div>
-    <div class="kpi-tile" id="kpi-tile-deductions">
-      <div class="kpi-label">Deductions YTD</div>
-      <div class="kpi-value" id="kpi-deductions-value">—</div>
-      <div class="kpi-sub" id="kpi-deductions-sub"></div>
-    </div>
-    <div class="kpi-tile" id="kpi-tile-tax">
-      <div class="kpi-label">Est. refund / owe</div>
-      <div class="kpi-value" id="kpi-tax-value">—</div>
-      <div class="kpi-sub" id="kpi-tax-sub"></div>
-    </div>
-  </div>
-
-  <!-- Dashboard tab (the old "Overview") — hidden by default; Investments is the landing -->
-  <div id="tab-overview" class="hidden">
-    <!-- Taxpayer Profile -->
-    <div class="card mb-4" id="profile-card">
-      <div class="flex items-center justify-between mb-3">
-        <h3 class="font-medium text-sm">Tax Filing Profile</h3>
-        <div class="flex items-center gap-2">
-          <span id="profile-year-label" class="text-xs text-gray-500"></span>
-          <button onclick="toggleProfileEdit()" class="text-xs text-oc-500 hover:text-oc-400" id="profile-edit-btn">Edit</button>
-        </div>
-      </div>
-      <!-- Masked SSN banner — shown when stored SSN starts with X (i.e. user
-           saved a redacted W-2 last-4 instead of their real digits). -->
-      <div id="ssn-banner" class="hidden mb-3 p-3 rounded-lg border border-yellow-600/40 bg-yellow-500/10">
-        <div class="flex items-start gap-3">
-          <div class="text-yellow-300 text-lg leading-none mt-0.5">!</div>
-          <div class="flex-1">
-            <p class="text-xs font-medium text-yellow-200" id="ssn-banner-title">Your SSN is masked</p>
-            <p class="text-xs text-gray-300 mt-1" id="ssn-banner-detail">The IRS needs your full 9-digit SSN to file Form 4868.</p>
-            <div class="mt-2 grid grid-cols-1 md:grid-cols-2 gap-2">
-              <div id="ssn-banner-self-row" class="hidden">
-                <label class="text-xs text-gray-400">Your SSN</label>
-                <input id="ssn-banner-self" class="input text-sm" placeholder='###-##-####' autocomplete="off">
-              </div>
-              <div id="ssn-banner-spouse-row" class="hidden">
-                <label class="text-xs text-gray-400">Spouse SSN</label>
-                <input id="ssn-banner-spouse" class="input text-sm" placeholder='###-##-####' autocomplete="off">
-              </div>
-            </div>
-            <div class="mt-2 flex items-center gap-2">
-              <button onclick="saveSsnBanner()" class="btn-primary text-xs">Save SSN</button>
-              <span id="ssn-banner-result" class="text-xs"></span>
-            </div>
-          </div>
-        </div>
-      </div>
-      <!-- View mode -->
-      <div id="profile-view">
-        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm" id="profile-summary">
-          <p class="text-xs text-gray-600 col-span-4">Loading profile...</p>
-        </div>
-        <!-- Dependents -->
-        <div id="dependents-section" class="hidden mt-3 pt-3 border-t border-gray-800">
-          <div class="flex items-center justify-between mb-2">
-            <p class="text-xs text-gray-500 font-medium">Dependents</p>
-            <button onclick="showAddDependent()" class="text-[10px] text-oc-500 hover:text-oc-400">+ Add</button>
-          </div>
-          <div id="dependents-list" class="space-y-1"></div>
-        </div>
-      </div>
-      <!-- Edit mode -->
-      <div id="profile-edit" class="hidden">
-        <div class="grid grid-cols-2 gap-3 text-sm">
-          <div><label class="text-xs text-gray-500">First Name</label><input class="input text-sm" id="pf-first"></div>
-          <div><label class="text-xs text-gray-500">Last Name</label><input class="input text-sm" id="pf-last"></div>
-          <div><label class="text-xs text-gray-500">SSN</label><input class="input text-sm" id="pf-ssn" type="password" placeholder="XXX-XX-XXXX"></div>
-          <div><label class="text-xs text-gray-500">Date of Birth</label><input class="input text-sm" id="pf-dob" type="date"></div>
-          <div class="col-span-2"><label class="text-xs text-gray-500">Address</label><input class="input text-sm" id="pf-addr" placeholder="123 Main St"></div>
-          <div><label class="text-xs text-gray-500">City</label><input class="input text-sm" id="pf-city"></div>
-          <div class="grid grid-cols-2 gap-2">
-            <div><label class="text-xs text-gray-500">State</label><input class="input text-sm" id="pf-state" maxlength="2" placeholder="WA"></div>
-            <div><label class="text-xs text-gray-500">ZIP</label><input class="input text-sm" id="pf-zip" maxlength="10"></div>
-          </div>
-          <div><label class="text-xs text-gray-500">Filing Status</label>
-            <select class="input text-sm" id="pf-filing">
-              <option value="single">Single</option><option value="married_jointly">Married Filing Jointly</option>
-              <option value="married_separately">Married Filing Separately</option><option value="head_of_household">Head of Household</option>
-            </select>
-          </div>
-          <div><label class="text-xs text-gray-500">Occupation</label><input class="input text-sm" id="pf-occupation"></div>
-        </div>
-        <details class="mt-3" id="spouse-section">
-          <summary class="text-xs text-gray-400 cursor-pointer hover:text-gray-300">Spouse Information</summary>
-          <div class="grid grid-cols-2 gap-3 text-sm mt-2">
-            <div><label class="text-xs text-gray-500">Spouse First Name</label><input class="input text-sm" id="pf-sp-first"></div>
-            <div><label class="text-xs text-gray-500">Spouse Last Name</label><input class="input text-sm" id="pf-sp-last"></div>
-            <div><label class="text-xs text-gray-500">Spouse SSN</label><input class="input text-sm" id="pf-sp-ssn" type="password"></div>
-            <div><label class="text-xs text-gray-500">Spouse DOB</label><input class="input text-sm" id="pf-sp-dob" type="date"></div>
-          </div>
-        </details>
-        <div class="flex gap-2 mt-3 items-center">
-          <button onclick="saveProfile()" class="btn-primary text-xs">Save Profile</button>
-          <button onclick="autoFillProfileFromScans()" class="text-xs bg-gray-700 hover:bg-gray-600 text-gray-100 px-3 py-1.5 rounded-lg" title="Pull values from scanned W-2, 1095-C, mortgage statement">Auto-fill from scans</button>
-          <button onclick="toggleProfileEdit()" class="text-xs text-gray-500 hover:text-gray-300">Cancel</button>
-          <span id="profile-save-result" class="text-xs self-center"></span>
-        </div>
-        <p id="profile-suggest-sources" class="text-xs text-gray-500 mt-2"></p>
-      </div>
-    </div>
-
-    <!-- Summary cards -->
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
-      <div class="card">
-        <p class="text-xs text-gray-500 uppercase">Total Expenses</p>
-        <p class="text-2xl font-semibold mt-1" id="sum-total">--</p>
-      </div>
-      <div class="card">
-        <p class="text-xs text-gray-500 uppercase">Business</p>
-        <p class="text-2xl font-semibold mt-1 text-oc-500" id="sum-business">--</p>
-      </div>
-      <div class="card">
-        <p class="text-xs text-gray-500 uppercase">Tax Deductible</p>
-        <p class="text-2xl font-semibold mt-1 text-green-400" id="sum-deductible">--</p>
-      </div>
-      <div class="card">
-        <p class="text-xs text-gray-500 uppercase">Receipts</p>
-        <p class="text-2xl font-semibold mt-1" id="sum-receipts">--</p>
-      </div>
-    </div>
-
-    <!-- Potential Deductions -->
-    <details class="card mb-6 cursor-pointer group" id="deductions-section">
-      <summary class="flex items-center justify-between">
-        <div class="flex items-center gap-2">
-          <span class="text-green-400">&#128161;</span>
-          <h3 class="font-medium">Potential Deductions You Might Be Missing</h3>
-        </div>
-        <span class="text-xs text-gray-500 group-open:hidden">Click to expand</span>
-      </summary>
-      <div class="mt-4 space-y-3" id="deductions-list">
-        <p class="text-xs text-gray-500">Analyzing your expenses...</p>
-      </div>
-    </details>
-
-    <!-- Export to Tax Software -->
-    <div class="card mb-4">
-      <div class="flex items-center justify-between mb-3">
-        <h3 class="font-medium text-sm">Export to Tax Software</h3>
-        <span id="export-year-label" class="text-xs text-gray-500"></span>
-      </div>
-      <div class="grid grid-cols-3 gap-3 mb-3">
-        <a href="#" id="export-txf" class="flex flex-col items-center gap-1.5 p-3 bg-gray-900 rounded-lg hover:bg-gray-800 border border-gray-700 transition-colors text-center">
-          <span class="text-lg">&#128190;</span>
-          <span class="text-xs text-white font-medium">TXF File</span>
-          <span class="text-[10px] text-gray-500">TurboTax / H&amp;R Block Desktop</span>
-        </a>
-        <a href="#" id="export-csv-irs" class="flex flex-col items-center gap-1.5 p-3 bg-gray-900 rounded-lg hover:bg-gray-800 border border-gray-700 transition-colors text-center">
-          <span class="text-lg">&#128200;</span>
-          <span class="text-xs text-white font-medium">IRS Summary CSV</span>
-          <span class="text-[10px] text-gray-500">CPA / Any software</span>
-        </a>
-        <a href="#" id="export-csv-raw" class="flex flex-col items-center gap-1.5 p-3 bg-gray-900 rounded-lg hover:bg-gray-800 border border-gray-700 transition-colors text-center">
-          <span class="text-lg">&#128196;</span>
-          <span class="text-xs text-white font-medium">Expense CSV</span>
-          <span class="text-[10px] text-gray-500">All transactions</span>
-        </a>
-      </div>
-      <details class="text-xs text-gray-500">
-        <summary class="cursor-pointer hover:text-gray-300">Import instructions</summary>
-        <div class="mt-2 space-y-1.5 pl-2 border-l border-gray-700">
-          <p><strong class="text-gray-300">TurboTax Desktop:</strong> File &rarr; Import &rarr; From Accounting Software &rarr; select the .txf file</p>
-          <p><strong class="text-gray-300">H&amp;R Block Desktop:</strong> File &rarr; Import Financial Information &rarr; browse for .txf file</p>
-          <p><strong class="text-gray-300">TaxAct:</strong> Use the IRS Summary CSV as reference for manual entry</p>
-          <p><strong class="text-gray-300">CPA / Tax preparer:</strong> Send the IRS Summary CSV — it maps every line to the correct IRS form</p>
-          <p class="text-gray-600 mt-1">Note: TurboTax Online and H&amp;R Block Online do not accept file imports. Desktop versions are required for TXF import.</p>
-        </div>
-      </details>
-    </div>
-
-    <!-- File Extension (Form 4868) — Multi-step workflow -->
-    <div class="card mb-4" id="extension-card">
-      <div class="flex items-center justify-between mb-3">
-        <div class="flex items-center gap-2">
-          <span class="text-yellow-400">&#9200;</span>
-          <h3 class="font-medium text-sm">File an Extension (Form 4868)</h3>
-        </div>
-        <div class="flex items-center gap-2">
-          <span id="ext-status-badge" class="badge badge-yellow text-[10px]">Not filed</span>
-          <span class="badge badge-green text-[10px]">Free</span>
-        </div>
-      </div>
-
-      <!-- Step 1: Review + Choose Method -->
-      <div id="ext-step-review">
-        <p class="text-xs text-gray-400 mb-3">Review your estimated tax data, adjust if needed, then choose how to file. Extends filing deadline to <strong class="text-gray-300">October 15</strong>. Payment is still due <strong class="text-red-400">April 15</strong>.</p>
-        <div class="bg-gray-800 rounded-lg p-3 mb-3 border border-gray-700">
-          <div class="grid grid-cols-2 gap-3 text-sm">
-            <div><label class="text-xs text-gray-400">Estimated total tax</label><input style="background:#1a1a2e;color:#f0f0f0;border:1px solid #444;border-radius:8px;padding:6px 10px;width:100%;font-size:14px" id="ext-total-tax" value="$0.00"></div>
-            <div><label class="text-xs text-gray-400">Payments made (withholding + estimated)</label><input style="background:#1a1a2e;color:#f0f0f0;border:1px solid #444;border-radius:8px;padding:6px 10px;width:100%;font-size:14px" id="ext-payments" value="$0.00"></div>
-            <div><label class="text-xs text-gray-400">Balance due</label><input style="background:#1a1a2e;color:#4ade80;border:1px solid #444;border-radius:8px;padding:6px 10px;width:100%;font-size:14px;font-weight:600" id="ext-balance" value="$0.00" readonly></div>
-            <div><label class="text-xs text-gray-400">Paying with this extension</label><input style="background:#1a1a2e;color:#f0f0f0;border:1px solid #444;border-radius:8px;padding:6px 10px;width:100%;font-size:14px" id="ext-payment" value="0.00" oninput="updateExtBalance()"></div>
-          </div>
-        </div>
-        <p class="text-xs text-gray-400 mb-2">Choose how to file:</p>
-        <div class="space-y-2">
-          <a href="javascript:void(0)" onclick="startExtFiling('direct_pay')" class="block p-3 rounded-lg bg-gray-900 border border-gray-700 hover:border-oc-600 cursor-pointer transition-colors no-underline">
-            <div class="flex items-center justify-between">
-              <div><p class="text-sm text-white font-medium">IRS Direct Pay</p><p class="text-[11px] text-gray-500">Payment auto-files your extension. Instant confirmation number.</p></div>
-              <span class="text-oc-500 text-xs font-medium">Recommended &rarr;</span>
-            </div>
-          </a>
-          <a href="javascript:void(0)" onclick="startExtFiling('free_file')" class="block p-3 rounded-lg bg-gray-900 border border-gray-700 hover:border-gray-600 cursor-pointer transition-colors no-underline">
-            <div class="flex items-center justify-between">
-              <div><p class="text-sm text-white font-medium">IRS Free File</p><p class="text-[11px] text-gray-500">E-file Form 4868 free. Confirmation via email within 24-48h.</p></div>
-              <span class="text-gray-500 text-xs">Free &rarr;</span>
-            </div>
-          </a>
-          <a href="javascript:void(0)" onclick="startExtFiling('mail')" class="block p-3 rounded-lg bg-gray-900 border border-gray-700 hover:border-gray-600 cursor-pointer transition-colors no-underline">
-            <div class="flex items-center justify-between">
-              <div><p class="text-sm text-white font-medium">Print &amp; Mail</p><p class="text-[11px] text-gray-500">Download form, print, mail by April 15. Use certified mail for proof.</p></div>
-              <span class="text-gray-500 text-xs">Download &rarr;</span>
-            </div>
-          </a>
-        </div>
-        <details class="mt-3 text-xs text-gray-400">
-          <summary class="cursor-pointer hover:text-gray-200">Form 4868 options &amp; missing fields &rarr;</summary>
-          <div class="mt-3 p-3 bg-gray-900/40 rounded-lg space-y-3">
-            <p class="text-xs text-gray-500">Override anything missing from your tax profile, or check the boxes for less-common situations. These apply when you generate the PDF.</p>
-            <div class="grid grid-cols-2 gap-2">
-              <div><label class="label">Name(s) on return</label><input id="ext-opt-name" class="input" placeholder="leave blank = use profile"></div>
-              <div><label class="label">SSN</label><input id="ext-opt-ssn" class="input" placeholder='###-##-####'></div>
-              <div><label class="label">Spouse SSN (joint only)</label><input id="ext-opt-spouse-ssn" class="input" placeholder='###-##-####'></div>
-              <div><label class="label">Street address</label><input id="ext-opt-address" class="input" placeholder="leave blank = use profile"></div>
-              <div><label class="label">City</label><input id="ext-opt-city" class="input"></div>
-              <div class="grid grid-cols-2 gap-2">
-                <div><label class="label">State</label><input id="ext-opt-state" class="input" maxlength="2" placeholder="WA"></div>
-                <div><label class="label">ZIP</label><input id="ext-opt-zip" class="input" placeholder="98502"></div>
-              </div>
-            </div>
-            <div class="grid grid-cols-2 gap-2">
-              <label class="flex items-center gap-2 text-gray-300"><input type="checkbox" id="ext-opt-ooc"> Line 8: I'm "out of the country" (US citizen/resident abroad)</label>
-              <label class="flex items-center gap-2 text-gray-300"><input type="checkbox" id="ext-opt-1040nr"> Line 9: I file Form 1040-NR with no withheld wages</label>
-            </div>
-            <details class="text-xs text-gray-500">
-              <summary class="cursor-pointer hover:text-gray-300">Fiscal-year filer (rare) &rarr;</summary>
-              <div class="mt-2 grid grid-cols-3 gap-2">
-                <div><label class="label">FY beginning (MM/DD)</label><input id="ext-opt-fy-begin" class="input" placeholder="07/01"></div>
-                <div><label class="label">FY ending (MM/DD)</label><input id="ext-opt-fy-end" class="input" placeholder="06/30"></div>
-                <div><label class="label">FY ending year (YY)</label><input id="ext-opt-fy-end-year" class="input" placeholder="26"></div>
-              </div>
-            </details>
-          </div>
-        </details>
-        <span id="ext-result" class="text-xs mt-2 block"></span>
-      </div>
-
-      <!-- Step 2: Copy-Assist + File -->
-      <div id="ext-step-file" class="hidden">
-        <div class="flex items-center gap-2 mb-3">
-          <button onclick="showExtStep('review')" class="text-xs text-gray-500 hover:text-gray-300">&larr; Back</button>
-          <span class="text-xs text-gray-400" id="ext-method-label">Filing via IRS Direct Pay</span>
-        </div>
-        <div class="bg-gray-900 rounded-lg p-3 mb-3 space-y-2" id="ext-copy-fields">
-          <!-- Populated by JS: steps + identity + spouse + payment -->
-        </div>
-        <div id="ext-form-link" class="mb-3 flex items-center gap-3 flex-wrap">
-          <a id="ext-form-anchor" href="#" onclick="openForm4868(); return false;" class="bg-oc-600 hover:bg-oc-700 text-white font-medium py-2 px-4 rounded-lg transition-colors text-sm inline-block no-underline cursor-pointer">Generate Form 4868 &rarr;</a>
-          <a href="#" onclick="openEnvelope(); return false;" class="bg-gray-700 hover:bg-gray-600 text-white font-medium py-2 px-4 rounded-lg transition-colors text-sm inline-block no-underline cursor-pointer" title="9.5 x 4.125 inch PDF positioned for direct envelope printing">Print #10 envelope</a>
-          <span class="text-xs text-gray-500">Pre-filled from your documents. Print or save as PDF.</span>
-        </div>
-        <div class="bg-gray-800 rounded-lg p-3 border border-gray-700">
-          <p class="text-xs text-gray-300 mb-2">After you submit on the IRS website, enter your confirmation below:</p>
-          <div class="flex gap-2">
-            <input class="input text-sm flex-1" id="ext-confirm-input" placeholder="Confirmation number or submission ID">
-            <button onclick="confirmExtension()" class="btn-primary text-xs">Save &amp; Confirm</button>
-          </div>
-          <span id="ext-confirm-result" class="text-xs mt-1 block"></span>
-        </div>
-      </div>
-
-      <!-- Step 3: Confirmed / Tracking -->
-      <div id="ext-step-confirmed" class="hidden">
-        <div class="bg-green-900/20 border border-green-800/30 rounded-lg p-4 mb-3">
-          <div class="flex items-center gap-2 mb-1">
-            <span class="text-green-400">&#10003;</span>
-            <p class="text-sm text-green-400 font-medium">Extension Confirmed</p>
-          </div>
-          <p class="text-xs text-gray-400" id="ext-confirmed-detail">Filed via IRS Direct Pay</p>
-        </div>
-        <div class="grid grid-cols-2 gap-3 text-sm mb-3">
-          <div><label class="text-xs text-gray-500">Confirmation ID</label><p class="text-sm text-white font-mono" id="ext-confirmed-id">—</p></div>
-          <div><label class="text-xs text-gray-500">Filed on</label><p class="text-sm text-white" id="ext-confirmed-date">—</p></div>
-          <div><label class="text-xs text-gray-500">New filing deadline</label><p class="text-sm text-yellow-400 font-medium" id="ext-deadline">October 15</p></div>
-          <div><label class="text-xs text-gray-500">Balance due</label><p class="text-sm text-white" id="ext-confirmed-balance">—</p></div>
-        </div>
-        <div class="text-xs text-gray-500 space-y-1">
-          <p><a href="https://www.irs.gov/refunds" target="_blank" class="text-oc-500 hover:text-oc-400">Check status at irs.gov/refunds</a> or use the <a href="https://www.irs.gov/newsroom/irs2goapp" target="_blank" class="text-oc-500 hover:text-oc-400">IRS2Go app</a></p>
-          <p>This confirmation is saved with your tax documents.</p>
-        </div>
-      </div>
-    </div>
-
-    <!-- Category breakdown -->
-    <div class="card">
-      <div class="flex items-center justify-between mb-4">
-        <h3 class="font-medium">By Category</h3>
-      </div>
-      <div id="category-list" class="space-y-2">
-        <p class="text-xs text-gray-600">Loading...</p>
-      </div>
-    </div>
-  </div>
-
-  <!-- Expenses tab -->
-  <div id="tab-expenses" class="hidden">
-    <!-- Add expense form -->
-    <div class="card mb-6">
-      <h3 class="font-medium mb-4">Log Expense</h3>
-      <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <div>
-          <label class="label">Vendor</label>
-          <input type="text" id="exp-vendor" class="input" placeholder="Home Depot">
-        </div>
-        <div>
-          <label class="label">Amount</label>
-          <input type="text" id="exp-amount" class="input" placeholder="45.99">
-        </div>
-        <div>
-          <label class="label">Category</label>
-          <select id="exp-category" class="input"></select>
-        </div>
-        <div>
-          <label class="label">Date</label>
-          <input type="date" id="exp-date" class="input">
-        </div>
-      </div>
-      <div class="grid grid-cols-2 gap-3 mt-3">
-        <div>
-          <label class="label">Description (optional)</label>
-          <input type="text" id="exp-desc" class="input" placeholder="2x4 lumber for shelving project">
-        </div>
-        <div>
-          <label class="label">Entity</label>
-          <select id="exp-entity" class="input">
-            <option value="business">Business</option>
-            <option value="personal">Personal</option>
-          </select>
-        </div>
-      </div>
-      <div class="mt-3 flex items-center gap-3">
-        <button onclick="addExpense()" class="btn-primary">Add Expense</button>
-        <span id="exp-status" class="text-xs text-gray-500"></span>
-      </div>
-    </div>
-
-    <!-- Expense list -->
-    <div class="card">
-      <div class="flex items-center justify-between mb-4">
-        <h3 class="font-medium">Recent Expenses</h3>
-        <div class="flex gap-2">
-          <select id="exp-filter-entity" class="input w-auto" onchange="loadExpenses()">
-            <option value="">All</option>
-            <option value="business">Business</option>
-            <option value="personal">Personal</option>
-          </select>
-        </div>
-      </div>
-      <div id="expense-list" class="space-y-2">
-        <p class="text-xs text-gray-600">Loading...</p>
-      </div>
-    </div>
-  </div>
-
-  <!-- Receipts tab -->
-  <div id="tab-receipts" class="hidden">
-    <div class="p-3 rounded-lg bg-yellow-900/20 border border-yellow-800/50 mb-4">
-      <div class="flex items-start gap-2">
-        <span class="text-yellow-400 mt-0.5">&#9888;</span>
-        <p class="text-xs text-yellow-300/80"><strong>Always verify</strong> AI-extracted amounts against your original receipts before using for tax filing.</p>
-      </div>
-    </div>
-    <!-- Upload -->
-    <div class="card mb-6">
-      <h3 class="font-medium mb-3">Upload Receipt</h3>
-      <p class="text-xs text-gray-500 mb-3">Upload a photo or PDF of a receipt. AI will automatically extract the vendor, amount, date, and category.</p>
-      <div class="flex items-center gap-3">
-        <label class="btn-primary cursor-pointer">
-          Choose File
-          <input type="file" class="hidden" accept="image/*,.pdf" onchange="uploadReceipt(this)" id="receipt-input">
-        </label>
-        <span id="receipt-status" class="text-xs text-gray-500"></span>
-      </div>
-    </div>
-
-    <!-- Receipt gallery -->
-    <div class="card">
-      <h3 class="font-medium mb-4">Receipts</h3>
-      <div id="receipt-list" class="grid grid-cols-2 md:grid-cols-3 gap-3">
-        <p class="text-xs text-gray-600 col-span-full">Loading...</p>
-      </div>
-    </div>
-  </div>
-
-  <!-- Documents tab -->
-  <div id="tab-documents" class="hidden">
-    <div class="card mb-6">
-      <h3 class="font-medium mb-3">Smart Upload</h3>
-      <p class="text-xs text-gray-500 mb-3">Upload any tax document — receipts, W-2s, 1099s, bank statements, credit card statements, mortgage statements, or any other document. AI will automatically identify the type and route it to the correct handler.</p>
-      <details class="mb-3">
-        <summary class="text-xs text-gray-600 cursor-pointer hover:text-gray-400">Accuracy tips</summary>
-        <div class="mt-2 p-2 rounded bg-gray-900 text-xs text-gray-500 space-y-1">
-          <p>The scanner uses AI vision to read your documents. For best results:</p>
-          <p>&bull; Upload clear, high-resolution scans (photos of paper documents work too)</p>
-          <p>&bull; PDFs are automatically converted to high-res images for better reading</p>
-          <p>&bull; <strong class="text-gray-400">If you see frequent errors</strong>, switching to a more capable model in Settings can significantly improve accuracy.</p>
-          <p class="mt-1"><strong class="text-gray-400">Free models (OpenRouter):</strong></p>
-          <p class="pl-3">&bull; <strong class="text-green-400">NVIDIA Nemotron Nano VL</strong> — #1 on OCR benchmarks, purpose-built for documents (current default)</p>
-          <p class="pl-3">&bull; <strong class="text-gray-300">Google Gemma 4 31B</strong> — strong vision with 262K context for large documents</p>
-          <p class="pl-3">&bull; <strong class="text-gray-300">Google Gemma 4 26B</strong> — lighter alternative, nearly as accurate</p>
-          <p class="mt-1"><strong class="text-gray-400">Self-hosted (free, private, offline):</strong></p>
-          <p class="pl-3">&bull; <strong class="text-green-400">NVIDIA Nemotron Nano 12B VL</strong> — same model as cloud default, runs locally on any GPU with 10+ GB VRAM. Q4_K_M quantization needs ~9 GB. Download GGUF from HuggingFace, run via llama.cpp. Cannot run alongside a large chat model — swap models when scanning.</p>
-          <p class="pl-3 text-gray-600">Setup: <code class="text-xs bg-gray-800 px-1 rounded">llama-server -m Nemotron-Nano-12B-v2-VL-Q4_K_M.gguf --mmproj mmproj-BF16.gguf --port 1237 -ngl 99</code></p>
-          <p class="mt-1"><strong class="text-gray-400">Paid cloud (highest accuracy):</strong></p>
-          <p class="pl-3">&bull; <strong class="text-gray-300">Anthropic Claude Sonnet</strong> — best overall accuracy for complex tax documents</p>
-          <p class="pl-3">&bull; <strong class="text-gray-300">OpenAI GPT-4o</strong> — excellent OCR, especially for handwritten notes</p>
-          <p class="pl-3">&bull; <strong class="text-gray-300">Qwen3 VL 235B</strong> — top-tier vision, best value at scale</p>
-          <p>&bull; Always verify extracted values against your original documents</p>
-        </div>
-      </details>
-      <div class="flex items-center gap-3">
-        <label class="btn-primary cursor-pointer">
-          Upload Document
-          <input type="file" class="hidden" accept="image/*,.pdf" onchange="uploadTaxDoc(this)" id="doc-input">
-        </label>
-        <span id="doc-upload-status" class="text-xs text-gray-500"></span>
-      </div>
-    </div>
-
-    <div class="p-3 rounded-lg bg-yellow-900/20 border border-yellow-800/50 mb-4">
-      <div class="flex items-start gap-2">
-        <span class="text-yellow-400 mt-0.5">&#9888;</span>
-        <p class="text-xs text-yellow-300/80">AI-extracted values may contain errors. <strong>Always verify amounts against your original documents</strong> before filing. Click any value to correct it.</p>
-      </div>
-    </div>
-
-    <div class="card">
-      <h3 class="font-medium mb-4">Tax Documents</h3>
-      <div id="doc-list" class="space-y-3">
-        <p class="text-xs text-gray-600">Loading...</p>
-      </div>
-    </div>
-  </div>
-
-  <!-- Property tab -->
-  <div id="tab-property" class="hidden">
-    <div class="card mb-6">
-      <h3 class="font-medium mb-4">Property Profile</h3>
-      <p class="text-xs text-gray-500 mb-4">Your property details for home office / workshop deduction calculations. Values auto-populate from scanned 1098s, settlement statements, and tax documents.</p>
-      <div class="grid grid-cols-2 gap-4">
-        <div>
-          <label class="label">Address</label>
-          <input type="text" id="prop-address" class="input" placeholder="1406 Summit Lake Shore">
-        </div>
-        <div>
-          <label class="label">Purchase Date</label>
-          <input type="date" id="prop-purchase-date" class="input">
-        </div>
-        <div>
-          <label class="label">Total Sqft</label>
-          <input type="number" id="prop-total-sqft" class="input" placeholder="5206">
-        </div>
-        <div>
-          <label class="label">Workshop Sqft</label>
-          <input type="number" id="prop-workshop-sqft" class="input" placeholder="488">
-        </div>
-        <div>
-          <label class="label">Purchase Price</label>
-          <input type="text" id="prop-purchase-price" class="input" placeholder="1060000">
-        </div>
-        <div>
-          <label class="label">Building Value (from assessor)</label>
-          <input type="text" id="prop-building-value" class="input" placeholder="831762">
-        </div>
-        <div>
-          <label class="label">Land Value (from assessor)</label>
-          <input type="text" id="prop-land-value" class="input" placeholder="228238">
-        </div>
-        <div>
-          <label class="label">Land Ratio</label>
-          <input type="text" id="prop-land-ratio" class="input" placeholder="0.2153" readonly>
-        </div>
-      </div>
-      <div class="grid grid-cols-2 gap-4 mt-4">
-        <div>
-          <label class="label">Annual Property Tax</label>
-          <input type="text" id="prop-property-tax" class="input" placeholder="571.60">
-        </div>
-        <div>
-          <label class="label">Annual Insurance (Homeowner's)</label>
-          <input type="text" id="prop-insurance" class="input" placeholder="1680">
-        </div>
-        <div>
-          <label class="label">Mortgage Lender</label>
-          <input type="text" id="prop-mortgage-lender" class="input" placeholder="Chase">
-        </div>
-        <div>
-          <label class="label">Annual Mortgage Interest (from 1098)</label>
-          <input type="text" id="prop-mortgage-interest" class="input" placeholder="Will auto-fill from 1098">
-        </div>
-      </div>
-      <div class="mt-4">
-        <label class="label">Notes</label>
-        <textarea id="prop-notes" class="input" rows="2" placeholder="e.g., Workshop used exclusively for woodworking business"></textarea>
-      </div>
-      <div class="flex items-center gap-3 mt-4">
-        <button onclick="saveProperty()" class="btn-primary">Save Property</button>
-        <button onclick="autofillProperty()" class="text-xs text-oc-500 hover:text-oc-400">Auto-fill from documents</button>
-        <span id="prop-status" class="text-xs text-gray-500"></span>
-      </div>
-    </div>
-
-    <!-- Depreciation Calculator -->
-    <div class="card mb-6" id="depreciation-section">
-      <h3 class="font-medium mb-3">Depreciation Calculator</h3>
-      <div id="depreciation-result" class="text-sm text-gray-400">
-        <p class="text-xs text-gray-600">Save a property profile above to calculate depreciation.</p>
-      </div>
-    </div>
-
-    <!-- Statement Transactions -->
-    <div class="card">
-      <div class="flex items-center justify-between mb-4">
-        <h3 class="font-medium">Statement Transactions</h3>
-        <span class="text-xs text-gray-500" id="stmt-txn-count">—</span>
-      </div>
-      <p class="text-xs text-gray-500 mb-3">Individual transactions extracted from uploaded bank/credit card statements.</p>
-      <div id="stmt-txn-list" class="space-y-1 max-h-96 overflow-y-auto">
-        <p class="text-xs text-gray-600">No statement transactions yet. Upload a bank or credit card statement in the Documents tab.</p>
-      </div>
-    </div>
-  </div>
-
-  <!-- Deductions tab -->
-  <div id="tab-deductions" class="hidden">
-    <!-- Questionnaire section -->
-    <div id="ded-questionnaire" class="card mb-4">
-      <div class="flex items-center justify-between mb-4">
-        <h3 class="font-medium text-sm">Deduction Qualification</h3>
-        <span id="ded-quest-status" class="text-xs text-gray-500"></span>
-      </div>
-      <div id="ded-quest-wizard">
-        <!-- Step 1 -->
-        <div class="ded-step" id="ded-step-1">
-          <p class="text-xs text-gray-500 mb-3">Step 1 of 3 — Filing &amp; Employment</p>
-          <div class="space-y-3">
-            <div class="flex items-center justify-between py-2">
-              <div><p class="text-sm text-gray-300">Filing status</p></div>
-              <select id="q-filing-status" onchange="saveQAnswer('filing_status', this.value)" class="bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-white outline-none">
-                <option value="single">Single</option>
-                <option value="married_jointly">Married Filing Jointly</option>
-                <option value="married_separately">Married Filing Separately</option>
-                <option value="head_of_household">Head of Household</option>
-              </select>
-            </div>
-            <div class="flex items-center justify-between py-2">
-              <div><p class="text-sm text-gray-300">Self-employed / 1099 income?</p><p class="text-xs text-gray-500">Enables SE tax, QBI deduction, business scanning</p></div>
-              <button onclick="toggleQAnswer('self_employed')" id="qtog-self_employed" class="w-10 h-5 rounded-full bg-gray-700 relative transition-colors flex-shrink-0"><span class="absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-gray-400 transition-transform"></span></button>
-            </div>
-            <div class="flex items-center justify-between py-2">
-              <div><p class="text-sm text-gray-300">Work from home?</p><p class="text-xs text-gray-500">Enables home office utility scanning</p></div>
-              <button onclick="toggleQAnswer('home_office')" id="qtog-home_office" class="w-10 h-5 rounded-full bg-gray-700 relative transition-colors flex-shrink-0"><span class="absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-gray-400 transition-transform"></span></button>
-            </div>
-          </div>
-          <div class="flex justify-end mt-4"><button onclick="dedStep(2)" class="text-sm bg-oc-600 hover:bg-oc-700 text-white px-4 py-1.5 rounded-lg">Next</button></div>
-        </div>
-        <!-- Step 2 -->
-        <div class="ded-step hidden" id="ded-step-2">
-          <p class="text-xs text-gray-500 mb-3">Step 2 of 3 — Insurance &amp; Health</p>
-          <div class="space-y-3">
-            <div class="flex items-center justify-between py-2">
-              <div><p class="text-sm text-gray-300">Pay own health insurance?</p><p class="text-xs text-gray-500">Not through an employer plan</p></div>
-              <button onclick="toggleQAnswer('health_insurance_self')" id="qtog-health_insurance_self" class="w-10 h-5 rounded-full bg-gray-700 relative transition-colors flex-shrink-0"><span class="absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-gray-400 transition-transform"></span></button>
-            </div>
-            <div class="flex items-center justify-between py-2">
-              <div><p class="text-sm text-gray-300">High-deductible health plan (HDHP)?</p><p class="text-xs text-gray-500">Enables HSA contribution tracking</p></div>
-              <button onclick="toggleQAnswer('hdhp')" id="qtog-hdhp" class="w-10 h-5 rounded-full bg-gray-700 relative transition-colors flex-shrink-0"><span class="absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-gray-400 transition-transform"></span></button>
-            </div>
-          </div>
-          <div class="flex justify-between mt-4">
-            <button onclick="dedStep(1)" class="text-sm text-gray-400 hover:text-white px-4 py-1.5 rounded-lg">Back</button>
-            <button onclick="dedStep(3)" class="text-sm bg-oc-600 hover:bg-oc-700 text-white px-4 py-1.5 rounded-lg">Next</button>
-          </div>
-        </div>
-        <!-- Step 3 -->
-        <div class="ded-step hidden" id="ded-step-3">
-          <p class="text-xs text-gray-500 mb-3">Step 3 of 3 — Deductions</p>
-          <div class="space-y-3">
-            <div class="flex items-center justify-between py-2">
-              <div><p class="text-sm text-gray-300">Use a vehicle for business?</p></div>
-              <button onclick="toggleQAnswer('vehicle_business')" id="qtog-vehicle_business" class="w-10 h-5 rounded-full bg-gray-700 relative transition-colors flex-shrink-0"><span class="absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-gray-400 transition-transform"></span></button>
-            </div>
-            <div class="flex items-center justify-between py-2">
-              <div><p class="text-sm text-gray-300">Contribute to retirement accounts?</p><p class="text-xs text-gray-500">SEP-IRA, Solo 401(k), Traditional IRA</p></div>
-              <button onclick="toggleQAnswer('retirement_contributions')" id="qtog-retirement_contributions" class="w-10 h-5 rounded-full bg-gray-700 relative transition-colors flex-shrink-0"><span class="absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-gray-400 transition-transform"></span></button>
-            </div>
-            <div class="flex items-center justify-between py-2">
-              <div><p class="text-sm text-gray-300">Number of dependents</p></div>
-              <input type="number" min="0" max="10" value="0" id="q-dependents" onchange="saveQAnswer('dependents', parseInt(this.value)||0)" class="w-16 bg-gray-900 border border-gray-700 rounded-lg px-2 py-1 text-sm text-white text-center outline-none">
-            </div>
-            <div class="flex items-center justify-between py-2">
-              <div><p class="text-sm text-gray-300">Paid student loan interest?</p></div>
-              <button onclick="toggleQAnswer('student_loan_interest')" id="qtog-student_loan_interest" class="w-10 h-5 rounded-full bg-gray-700 relative transition-colors flex-shrink-0"><span class="absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-gray-400 transition-transform"></span></button>
-            </div>
-            <div class="flex items-center justify-between py-2">
-              <div><p class="text-sm text-gray-300">Made charitable donations?</p></div>
-              <button onclick="toggleQAnswer('charitable_donations')" id="qtog-charitable_donations" class="w-10 h-5 rounded-full bg-gray-700 relative transition-colors flex-shrink-0"><span class="absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-gray-400 transition-transform"></span></button>
-            </div>
-          </div>
-          <div class="flex justify-between mt-4">
-            <button onclick="dedStep(2)" class="text-sm text-gray-400 hover:text-white px-4 py-1.5 rounded-lg">Back</button>
-            <button onclick="completeQuestionnaire()" class="text-sm bg-green-600 hover:bg-green-700 text-white px-4 py-1.5 rounded-lg font-medium">Complete &amp; Scan</button>
-          </div>
-        </div>
-      </div>
-      <!-- Collapsed summary (shown when complete) -->
-      <div id="ded-quest-summary" class="hidden">
-        <div id="ded-quest-tags" class="flex flex-wrap gap-2"></div>
-        <button onclick="editQuestionnaire()" class="text-xs text-oc-500 hover:text-oc-400 mt-2">Edit answers</button>
-      </div>
-    </div>
-
-    <!-- Scan status -->
-    <div class="card mb-4">
-      <div class="flex items-center justify-between mb-3">
-        <h3 class="font-medium text-sm">Deduction Scanner</h3>
-        <div class="flex gap-2">
-          <button onclick="triggerScan()" class="text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 px-3 py-1 rounded-lg" id="scan-btn">Quick Scan</button>
-          <button onclick="triggerDeepScan()" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-3 py-1 rounded-lg" id="deep-scan-btn">AI Deep Scan</button>
-        </div>
-      </div>
-      <p id="scan-status-msg" class="text-xs text-gray-500 mb-2 hidden"></p>
-      <div class="flex gap-4 text-sm">
-        <div><span id="ded-pending" class="text-yellow-400 font-medium">0</span> <span class="text-gray-500">pending</span></div>
-        <div><span id="ded-approved" class="text-green-400 font-medium">0</span> <span class="text-gray-500">approved</span></div>
-        <div><span id="ded-denied" class="text-gray-500 font-medium">0</span> <span class="text-gray-500">denied</span></div>
-        <div class="ml-auto"><span id="ded-saved" class="text-green-400 font-medium">$0.00</span> <span class="text-gray-500">in deductions found</span></div>
-      </div>
-    </div>
-
-    <!-- Review queue -->
-    <div id="ded-review-wrapper">
-      <!-- Normal: full list. Review mode: split panel -->
-      <div id="ded-list-mode">
-        <div class="flex items-center justify-between mb-3">
-          <div class="flex gap-2">
-            <button onclick="filterDedStatus('pending')" class="text-xs px-2 py-1 rounded-lg bg-gray-700 text-yellow-400" id="ded-filter-pending">Pending</button>
-            <button onclick="filterDedStatus('approved')" class="text-xs px-2 py-1 rounded-lg text-gray-500 hover:text-gray-300" id="ded-filter-approved">Approved</button>
-            <button onclick="filterDedStatus('denied')" class="text-xs px-2 py-1 rounded-lg text-gray-500 hover:text-gray-300" id="ded-filter-denied">Denied</button>
-          </div>
-          <select onchange="filterDedType(this.value)" class="bg-gray-900 border border-gray-700 rounded-lg px-2 py-1 text-xs text-gray-400 outline-none" id="ded-type-filter">
-            <option value="">All types</option>
-            <option value="medical">Medical</option>
-            <option value="health_insurance">Health Insurance</option>
-            <option value="vehicle">Vehicle</option>
-            <option value="home_office">Home Office</option>
-            <option value="software">Software</option>
-            <option value="education">Education</option>
-            <option value="charitable">Charitable</option>
-            <option value="professional">Professional</option>
-            <option value="retirement">Retirement</option>
-            <option value="student_loan">Student Loan</option>
-            <option value="hsa">HSA</option>
-          </select>
-        </div>
-        <div id="ded-candidates-list" class="space-y-1.5">
-          <p class="text-xs text-gray-600 text-center py-8">Complete the questionnaire above to scan for deductions.</p>
-        </div>
-      </div>
-
-      <!-- Review split panel -->
-      <div id="ded-review-mode" class="hidden flex gap-3" style="height:calc(100vh - 340px)">
-        <div class="w-[35%] overflow-y-auto border-r border-gray-800 pr-3 space-y-1" id="ded-review-list"></div>
-        <div class="flex-1 flex flex-col">
-          <div class="flex-1 overflow-y-auto bg-gray-900 rounded-lg border border-gray-700 p-3 mb-3" id="ded-viewer">
-            <p class="text-xs text-gray-500 text-center py-8">Select a candidate to review</p>
-          </div>
-          <div class="flex items-center gap-3 p-3 bg-gray-800 rounded-lg border border-gray-700">
-            <select id="review-category" class="bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-white outline-none"></select>
-            <select id="review-entity" class="bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-white outline-none">
-              <option value="business">Business</option>
-              <option value="personal">Personal</option>
-            </select>
-            <div class="flex-1"></div>
-            <span class="text-xs text-gray-600" id="review-keys">j/k navigate &middot; a approve &middot; d deny</span>
-            <button onclick="reviewAction('deny')" class="px-4 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg text-sm">Deny</button>
-            <button onclick="reviewAction('approve')" class="px-4 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium">Approve</button>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Wizard tab -->
-  <div id="tab-wizard" class="hidden">
-    <div class="card mb-6">
-      <div class="flex items-center justify-between mb-4">
-        <h3 class="font-medium">Tax Prep Wizard — <span id="wizard-year">2025</span></h3>
-        <div class="flex items-center gap-2">
-          <span class="text-xs text-gray-500">Completeness:</span>
-          <div class="w-32 h-2 rounded-full bg-gray-700 overflow-hidden">
-            <div id="wizard-progress-bar" class="h-full rounded-full bg-green-500 transition-all" style="width:0%"></div>
-          </div>
-          <span id="wizard-pct" class="text-xs font-medium text-green-400">0%</span>
-        </div>
-      </div>
-      <div id="wizard-steps" class="space-y-3">
-        <p class="text-xs text-gray-600">Loading wizard...</p>
-      </div>
-    </div>
-
-    <!-- Missing Items -->
-    <div class="card mb-6" id="wizard-missing-section" style="display:none">
-      <h3 class="font-medium mb-3 text-yellow-400">Missing Items</h3>
-      <div id="wizard-missing" class="space-y-2"></div>
-    </div>
-
-    <!-- Tax Summary -->
-    <div class="card">
-      <h3 class="font-medium mb-4">Estimated Tax Summary</h3>
-      <div id="wizard-summary" class="space-y-2 text-sm">
-        <p class="text-xs text-gray-600">Loading...</p>
-      </div>
-    </div>
-  </div>
-
-  <!-- Connections tab -->
-  <div id="tab-connections" class="hidden">
-    <div class="card mb-6">
-      <h3 class="font-medium mb-3">Connect Bank Account</h3>
-      <p class="text-xs text-gray-500 mb-4">Link your bank or credit card via Plaid for automatic transaction imports. Your credentials are never stored — Plaid handles authentication directly with your bank.</p>
-      <div class="flex items-center gap-3">
-        <button onclick="launchPlaidLink()" class="btn-primary" id="plaid-link-btn">Link Bank Account</button>
-        <span id="plaid-status" class="text-xs text-gray-500"></span>
-      </div>
-    </div>
-    <div class="card mb-6">
-      <h3 class="font-medium mb-3">Connect via SimpleFIN</h3>
-      <p class="text-xs text-gray-500 mb-4">Alternative to Plaid ($15/yr). Get a setup token from <a href="https://beta-bridge.simplefin.org" target="_blank" class="text-oc-500 hover:text-oc-400">SimpleFIN Bridge</a>, then paste it here.</p>
-      <div class="flex items-center gap-3">
-        <input type="text" id="simplefin-token" class="input flex-1" placeholder="Paste SimpleFIN setup token...">
-        <button onclick="connectSimpleFIN()" class="btn-primary">Connect</button>
-      </div>
-      <span id="simplefin-status" class="text-xs text-gray-500 mt-2 block"></span>
-    </div>
-    <div class="card mb-6">
-      <div class="flex items-center justify-between mb-4">
-        <h3 class="font-medium">Connected Accounts</h3>
-        <button onclick="loadConnections()" class="text-xs text-oc-500 hover:text-oc-400">Refresh</button>
-      </div>
-      <div id="connections-list" class="space-y-3">
-        <p class="text-xs text-gray-600">No accounts connected yet.</p>
-      </div>
-    </div>
-    <div class="card">
-      <h3 class="font-medium mb-3">Email Receipt Scanning</h3>
-      <p class="text-xs text-gray-500 mb-4">Connect Gmail to automatically find and import receipts from purchase confirmation emails.</p>
-      <div class="flex items-center gap-3">
-        <button onclick="connectGmail()" class="btn-primary">Connect Gmail</button>
-        <span id="gmail-status" class="text-xs text-gray-500"></span>
-      </div>
-      <div id="email-connections-list" class="mt-4 space-y-2"></div>
-    </div>
-  </div>
-
-  <!-- Investments tab — default landing (most-viewed section) -->
-  <div id="tab-investments">
-    <div class="card mb-6">
-      <h3 class="font-medium mb-3">Connect Brokerage</h3>
-      <p class="text-xs text-gray-500 mb-4">Connect your Alpaca account to import trades, dividends, and portfolio data.</p>
-      <div class="grid grid-cols-2 gap-3">
-        <div><label class="label">API Key</label><input type="text" id="alpaca-key" class="input" placeholder="PK..."></div>
-        <div><label class="label">API Secret</label><input type="password" id="alpaca-secret" class="input" placeholder="Secret key"></div>
-        <div><label class="label">Nickname</label><input type="text" id="alpaca-nickname" class="input" placeholder="e.g. Main Trading"></div>
-        <div><label class="label">Environment</label><select id="alpaca-env" class="input"><option value="https://api.alpaca.markets">Live</option><option value="https://paper-api.alpaca.markets">Paper</option></select></div>
-      </div>
-      <div class="mt-3 flex items-center gap-3">
-        <button onclick="connectAlpaca()" class="btn-primary">Connect Alpaca</button>
-        <span id="alpaca-status" class="text-xs text-gray-500"></span>
-      </div>
-    </div>
-    <div class="card mb-6">
-      <h3 class="font-medium mb-3">Connect Crypto Exchange</h3>
-      <p class="text-xs text-gray-500 mb-4">Import crypto trades from Coinbase for capital gains tracking.</p>
-      <div class="grid grid-cols-2 gap-3">
-        <div><label class="label">API Key</label><input type="text" id="coinbase-key" class="input" placeholder="API key"></div>
-        <div><label class="label">API Secret</label><input type="password" id="coinbase-secret" class="input" placeholder="API secret"></div>
-      </div>
-      <div class="mt-3 flex items-center gap-3">
-        <button onclick="connectCoinbase()" class="btn-primary">Connect Coinbase</button>
-        <span id="coinbase-status" class="text-xs text-gray-500"></span>
-      </div>
-    </div>
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
-      <div class="card"><p class="text-xs text-gray-500 uppercase">Short-Term Gains</p><p class="text-2xl font-semibold mt-1" id="inv-short-term">--</p></div>
-      <div class="card"><p class="text-xs text-gray-500 uppercase">Long-Term Gains</p><p class="text-2xl font-semibold mt-1 text-oc-500" id="inv-long-term">--</p></div>
-      <div class="card"><p class="text-xs text-gray-500 uppercase">Dividends</p><p class="text-2xl font-semibold mt-1 text-green-400" id="inv-dividends">--</p></div>
-      <div class="card"><p class="text-xs text-gray-500 uppercase">Net P/L</p><p class="text-2xl font-semibold mt-1" id="inv-net-pl">--</p></div>
-    </div>
-    <div class="card mb-6">
-      <div class="flex items-center justify-between mb-4">
-        <h3 class="font-medium">Connected Accounts</h3>
-        <button onclick="loadInvestmentAccounts()" class="text-xs text-oc-500 hover:text-oc-400">Refresh</button>
-      </div>
-      <div id="inv-accounts-list" class="space-y-2"><p class="text-xs text-gray-600">No brokerage accounts connected yet.</p></div>
-    </div>
-    <div class="card mb-6">
-      <div class="flex items-center justify-between mb-4"><h3 class="font-medium">Holdings</h3><span class="text-xs text-gray-500" id="holdings-as-of">--</span></div>
-      <div id="holdings-list" class="space-y-1"><p class="text-xs text-gray-600">Connect a brokerage to see holdings.</p></div>
-    </div>
-    <div class="card mb-6">
-      <div class="flex items-center justify-between mb-4">
-        <h3 class="font-medium">Investment Transactions</h3>
-        <div class="flex items-center gap-2">
-          <select id="inv-filter-type" class="input w-auto" onchange="loadInvestmentTransactions()"><option value="">All</option><option value="fill">Trades</option><option value="dividend">Dividends</option></select>
-          <select id="inv-filter-broker" class="input w-auto" onchange="loadInvestmentTransactions()"><option value="">All</option><option value="alpaca">Alpaca</option><option value="coinbase">Coinbase</option></select>
-          <span class="text-xs text-gray-500" id="inv-txn-count">--</span>
-        </div>
-      </div>
-      <div id="inv-txn-list" class="space-y-1 max-h-[500px] overflow-y-auto"><p class="text-xs text-gray-600">No transactions yet.</p></div>
-    </div>
-    <div class="card mb-6">
-      <h3 class="font-medium mb-3">Capital Gains Summary</h3>
-      <div class="grid grid-cols-2 md:grid-cols-4 gap-3" id="cap-gains-grid">
-        <p class="text-xs text-gray-600 col-span-full">Loading...</p>
-      </div>
-      <p class="text-xs text-gray-500 mt-3" id="cap-gains-note"></p>
-    </div>
-    <div class="card mb-6">
-      <div class="flex items-center justify-between mb-3">
-        <h3 class="font-medium">Tax Lots (Open Positions)</h3>
-        <div class="flex items-center gap-2">
-          <select id="lots-status" class="input w-auto" onchange="loadLots()"><option value="open">Open</option><option value="closed">Closed</option></select>
-          <button onclick="showAddLotForm()" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-2.5 py-1 rounded-lg">+ Add Lot</button>
-        </div>
-      </div>
-      <div id="add-lot-form" class="hidden mb-4 p-3 bg-gray-900/40 rounded-lg">
-        <div class="grid grid-cols-2 md:grid-cols-4 gap-2">
-          <div><label class="label">Symbol</label><input id="lot-symbol" class="input" placeholder="AAPL"></div>
-          <div><label class="label">Type</label><select id="lot-asset-type" class="input"><option value="stock">Stock</option><option value="etf">ETF</option><option value="crypto">Crypto</option><option value="option">Option</option></select></div>
-          <div><label class="label">Quantity</label><input id="lot-qty" type="number" step="any" class="input" placeholder="100"></div>
-          <div><label class="label">Cost per Unit ($)</label><input id="lot-cpu" type="number" step="0.01" class="input" placeholder="150.25"></div>
-          <div><label class="label">Acquisition Date</label><input id="lot-date" type="date" class="input"></div>
-          <div><label class="label">Broker</label><input id="lot-broker" class="input" placeholder="Alpaca"></div>
-          <div class="col-span-2 flex items-end gap-2"><button onclick="saveLot()" class="btn-primary">Save Lot</button><button onclick="document.getElementById('add-lot-form').classList.add('hidden')" class="text-xs text-gray-400 hover:text-gray-200">Cancel</button></div>
-        </div>
-      </div>
-      <div id="lots-list" class="space-y-1 max-h-[400px] overflow-y-auto"><p class="text-xs text-gray-600">Loading lots...</p></div>
-    </div>
-    <div class="card mb-6">
-      <div class="flex items-center justify-between mb-3">
-        <h3 class="font-medium">Wash Sales</h3>
-        <span class="text-xs text-gray-500" id="wash-count">--</span>
-      </div>
-      <div id="wash-list" class="space-y-1"><p class="text-xs text-gray-600">Loading...</p></div>
-    </div>
-    <div class="card mb-6">
-      <div class="flex items-center justify-between mb-3">
-        <h3 class="font-medium">Form 8949 (Capital Gains Detail)</h3>
-        <span class="text-xs text-gray-500" id="form8949-count">--</span>
-      </div>
-      <div id="form8949-list" class="space-y-1 max-h-[300px] overflow-y-auto"><p class="text-xs text-gray-600">Loading dispositions...</p></div>
-    </div>
-    <div class="card">
-      <div class="flex items-center justify-between mb-3">
-        <h3 class="font-medium">K-1 Income (Partnerships, S-Corps)</h3>
-        <button onclick="showAddK1Form()" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-2.5 py-1 rounded-lg">+ Add K-1</button>
-      </div>
-      <div id="add-k1-form" class="hidden mb-4 p-3 bg-gray-900/40 rounded-lg">
-        <div class="grid grid-cols-2 md:grid-cols-3 gap-2">
-          <div class="col-span-2"><label class="label">Entity Name</label><input id="k1-name" class="input" placeholder="Acme Partners LLC"></div>
-          <div><label class="label">Type</label><select id="k1-type" class="input"><option value="partnership">Partnership</option><option value="s_corp">S-Corp</option></select></div>
-          <div><label class="label">Ordinary Income ($)</label><input id="k1-ordinary" type="number" step="0.01" class="input" placeholder="0"></div>
-          <div><label class="label">Rental Income ($)</label><input id="k1-rental" type="number" step="0.01" class="input" placeholder="0"></div>
-          <div><label class="label">Interest ($)</label><input id="k1-interest" type="number" step="0.01" class="input" placeholder="0"></div>
-          <div><label class="label">Dividends ($)</label><input id="k1-dividend" type="number" step="0.01" class="input" placeholder="0"></div>
-          <div><label class="label">Capital Gain ($)</label><input id="k1-capgain" type="number" step="0.01" class="input" placeholder="0"></div>
-          <div><label class="label">SE Income ($)</label><input id="k1-se" type="number" step="0.01" class="input" placeholder="0"></div>
-          <div class="col-span-full flex gap-2"><button onclick="saveK1()" class="btn-primary">Save K-1</button><button onclick="document.getElementById('add-k1-form').classList.add('hidden')" class="text-xs text-gray-400 hover:text-gray-200">Cancel</button></div>
-        </div>
-      </div>
-      <div id="k1-list" class="space-y-1"><p class="text-xs text-gray-600">Loading K-1s...</p></div>
-    </div>
-  </div>
-
-  <!-- Credits tab -->
-  <div id="tab-credits" class="hidden">
-    <div class="card mb-6">
-      <h3 class="font-medium mb-2">Tax Credit Eligibility</h3>
-      <p class="text-xs text-gray-500 mb-4">Credits directly reduce your tax owed, dollar for dollar. Based on your dependents, income, and expenses entered so far.</p>
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-3" id="credits-eligibility-grid">
-        <p class="text-xs text-gray-600 col-span-full">Loading credit eligibility...</p>
-      </div>
-      <div class="mt-4 pt-4 border-t border-gray-700 flex items-center justify-between">
-        <span class="text-sm text-gray-400">Estimated total credits:</span>
-        <span class="text-xl font-semibold text-green-400" id="credits-total">$0.00</span>
-      </div>
-    </div>
-
-    <div class="card mb-6">
-      <div class="flex items-center justify-between mb-3">
-        <h3 class="font-medium">Education Expenses <span class="text-xs text-gray-500 font-normal">— AOTC / Lifetime Learning</span></h3>
-        <button onclick="toggleForm('edu-form')" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-2.5 py-1 rounded-lg">+ Add</button>
-      </div>
-      <div id="edu-form" class="hidden mb-3 p-3 bg-gray-900/40 rounded-lg">
-        <div class="grid grid-cols-2 gap-2">
-          <div><label class="label">Student Name</label><input id="edu-student" class="input" placeholder="Jane Doe"></div>
-          <div><label class="label">Institution</label><input id="edu-school" class="input" placeholder="Acme University"></div>
-          <div><label class="label">Tuition ($)</label><input id="edu-tuition" type="number" step="0.01" class="input" placeholder="12000"></div>
-          <div><label class="label">Required Fees ($)</label><input id="edu-fees" type="number" step="0.01" class="input" placeholder="0"></div>
-          <div><label class="label">Books &amp; Supplies ($)</label><input id="edu-books" type="number" step="0.01" class="input" placeholder="0"></div>
-          <div class="flex items-end gap-2"><button onclick="saveEducation()" class="btn-primary">Save</button></div>
-        </div>
-      </div>
-      <p class="text-xs text-gray-500">Up to $2,500 credit per student for first 4 years of college (AOTC), or 20% of first $10,000 for graduate/continuing (LLC).</p>
-    </div>
-
-    <div class="card mb-6">
-      <div class="flex items-center justify-between mb-3">
-        <h3 class="font-medium">Dependent Care <span class="text-xs text-gray-500 font-normal">— Child &amp; Dependent Care Credit</span></h3>
-        <button onclick="toggleForm('care-form')" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-2.5 py-1 rounded-lg">+ Add</button>
-      </div>
-      <div id="care-form" class="hidden mb-3 p-3 bg-gray-900/40 rounded-lg">
-        <div class="grid grid-cols-2 gap-2">
-          <div><label class="label">Provider Name</label><input id="care-provider" class="input" placeholder="Sunshine Daycare"></div>
-          <div><label class="label">Amount Paid ($)</label><input id="care-amount" type="number" step="0.01" class="input" placeholder="5000"></div>
-          <div><label class="label">For Dependent (optional id)</label><input id="care-dep" type="number" class="input" placeholder=""></div>
-          <div class="flex items-end gap-2"><button onclick="saveChildcare()" class="btn-primary">Save</button></div>
-        </div>
-      </div>
-      <p class="text-xs text-gray-500">20-35% credit on up to $3,000 (one child) or $6,000 (two+) of care expenses for children under 13 or disabled dependents.</p>
-    </div>
-
-    <div class="card">
-      <div class="flex items-center justify-between mb-3">
-        <h3 class="font-medium">Energy Improvements <span class="text-xs text-gray-500 font-normal">— Residential Clean Energy / Efficient Home</span></h3>
-        <button onclick="toggleForm('energy-form')" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-2.5 py-1 rounded-lg">+ Add</button>
-      </div>
-      <div id="energy-form" class="hidden mb-3 p-3 bg-gray-900/40 rounded-lg">
-        <div class="grid grid-cols-2 gap-2">
-          <div><label class="label">Type</label><select id="energy-type" class="input">
-            <option value="solar">Solar panels / solar water heater</option>
-            <option value="wind">Small wind</option>
-            <option value="geothermal">Geothermal heat pump</option>
-            <option value="battery">Battery storage</option>
-            <option value="heat_pump">Heat pump</option>
-            <option value="windows">Windows/doors/insulation</option>
-            <option value="ev_charger">EV charger</option>
-          </select></div>
-          <div><label class="label">Vendor</label><input id="energy-vendor" class="input" placeholder="Installer name"></div>
-          <div><label class="label">Total Cost ($)</label><input id="energy-cost" type="number" step="0.01" class="input" placeholder="15000"></div>
-          <div><label class="label">Qualifying Portion ($)</label><input id="energy-qual" type="number" step="0.01" class="input" placeholder="leave blank = full"></div>
-          <div class="flex items-end gap-2"><button onclick="saveEnergy()" class="btn-primary">Save</button></div>
-        </div>
-      </div>
-      <p class="text-xs text-gray-500">30% residential clean energy credit (solar, wind, geothermal). Energy efficient home improvement credit up to $1,200-$3,200/year depending on type.</p>
-    </div>
-  </div>
-
-  <!-- Quarterly tab -->
-  <div id="tab-quarterly" class="hidden">
-    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-      <div class="card">
-        <p class="text-xs text-gray-500 uppercase">Projected Full-Year Tax</p>
-        <p class="text-2xl font-semibold mt-1" id="qtr-projected-tax">--</p>
-        <p class="text-xs text-gray-500 mt-1" id="qtr-effective-rate"></p>
-      </div>
-      <div class="card">
-        <p class="text-xs text-gray-500 uppercase">Projected Owed at Year End</p>
-        <p class="text-2xl font-semibold mt-1" id="qtr-owed">--</p>
-        <p class="text-xs text-gray-500 mt-1">Before estimated payments</p>
-      </div>
-      <div class="card">
-        <p class="text-xs text-gray-500 uppercase">Per-Quarter Recommended</p>
-        <p class="text-2xl font-semibold mt-1 text-oc-400" id="qtr-per-quarter">--</p>
-        <p class="text-xs text-gray-500 mt-1" id="qtr-safe-harbor"></p>
-      </div>
-    </div>
-
-    <div class="card mb-6">
-      <h3 class="font-medium mb-3">Quarterly Estimated Payments (Form 1040-ES)</h3>
-      <div id="qtr-list" class="space-y-2"><p class="text-xs text-gray-600">Loading...</p></div>
-      <p class="text-xs text-gray-500 mt-3">Deadlines: Q1 Apr 15, Q2 Jun 15, Q3 Sep 15, Q4 Jan 15. Safe harbor: pay 100% of prior year's tax (110% if AGI &gt; $150K) OR 90% of current year.</p>
-    </div>
-
-    <div class="card">
-      <h3 class="font-medium mb-3">Record a Payment</h3>
-      <div class="grid grid-cols-2 md:grid-cols-5 gap-2">
-        <div><label class="label">Quarter</label><select id="qtr-q" class="input"><option value="1">Q1</option><option value="2">Q2</option><option value="3">Q3</option><option value="4">Q4</option></select></div>
-        <div><label class="label">Amount ($)</label><input id="qtr-amt" type="number" step="0.01" class="input"></div>
-        <div><label class="label">Payment Date</label><input id="qtr-date" type="date" class="input"></div>
-        <div><label class="label">Method</label><select id="qtr-method" class="input"><option value="IRS Direct Pay">IRS Direct Pay</option><option value="EFTPS">EFTPS</option><option value="Check">Check</option><option value="Credit Card">Credit Card</option></select></div>
-        <div><label class="label">Confirmation #</label><input id="qtr-conf" class="input" placeholder="EFTPS#"></div>
-        <div class="col-span-full"><button onclick="saveEstimatedPayment()" class="btn-primary">Record Payment</button></div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Depreciation tab -->
-  <div id="tab-depreciation" class="hidden">
-    <div class="card mb-6">
-      <div class="flex items-center justify-between mb-3">
-        <h3 class="font-medium">Depreciable Assets</h3>
-        <button onclick="toggleForm('asset-form')" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-2.5 py-1 rounded-lg">+ Add Asset</button>
-      </div>
-      <div id="asset-form" class="hidden mb-4 p-3 bg-gray-900/40 rounded-lg">
-        <div class="grid grid-cols-2 md:grid-cols-3 gap-2">
-          <div class="col-span-2"><label class="label">Description</label><input id="asset-desc" class="input" placeholder="Dell XPS laptop"></div>
-          <div><label class="label">Asset Class</label><select id="asset-class" class="input" onchange="updateAssetLife()">
-            <option value="computer" data-life="5">Computer / Software (5yr)</option>
-            <option value="office_equipment" data-life="7">Office Equipment (7yr)</option>
-            <option value="vehicle" data-life="5">Vehicle (5yr)</option>
-            <option value="machinery" data-life="7">Machinery (7yr)</option>
-            <option value="furniture" data-life="7">Furniture (7yr)</option>
-            <option value="improvement" data-life="15">Leasehold Improvement (15yr)</option>
-            <option value="building_residential" data-life="27">Residential Rental Bldg (27.5yr)</option>
-            <option value="building_commercial" data-life="39">Commercial Building (39yr)</option>
-          </select></div>
-          <div><label class="label">MACRS Life (yrs)</label><input id="asset-life" type="number" class="input" value="5"></div>
-          <div><label class="label">Cost Basis ($)</label><input id="asset-cost" type="number" step="0.01" class="input" placeholder="2500"></div>
-          <div><label class="label">Placed in Service</label><input id="asset-date" type="date" class="input"></div>
-          <div><label class="label">Business Use %</label><input id="asset-biz-pct" type="number" min="0" max="100" class="input" value="100"></div>
-          <div><label class="label">Section 179 ($)</label><input id="asset-179" type="number" step="0.01" class="input" placeholder="0"></div>
-          <div class="flex items-end gap-2">
-            <label class="flex items-center gap-2 text-xs text-gray-300"><input id="asset-bonus" type="checkbox"> Bonus Depreciation</label>
-            <label class="flex items-center gap-2 text-xs text-gray-300"><input id="asset-is-vehicle" type="checkbox"> Vehicle</label>
-          </div>
-          <div class="col-span-full flex gap-2"><button onclick="saveAsset()" class="btn-primary">Save Asset</button><button onclick="document.getElementById('asset-form').classList.add('hidden')" class="text-xs text-gray-400 hover:text-gray-200">Cancel</button></div>
-        </div>
-      </div>
-      <div id="assets-list" class="space-y-1"><p class="text-xs text-gray-600">Loading assets...</p></div>
-    </div>
-
-    <div class="card mb-6">
-      <h3 class="font-medium mb-2">This Year's Depreciation</h3>
-      <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <div><p class="text-xs text-gray-500 uppercase">Section 179</p><p class="text-xl font-semibold mt-1" id="depr-179">--</p></div>
-        <div><p class="text-xs text-gray-500 uppercase">Bonus Depreciation</p><p class="text-xl font-semibold mt-1" id="depr-bonus">--</p></div>
-        <div><p class="text-xs text-gray-500 uppercase">MACRS Yr 1</p><p class="text-xl font-semibold mt-1" id="depr-macrs">--</p></div>
-        <div><p class="text-xs text-gray-500 uppercase">Total Year 1</p><p class="text-xl font-semibold mt-1 text-oc-400" id="depr-total">--</p></div>
-      </div>
-    </div>
-
-    <div class="card">
-      <h3 class="font-medium mb-3">Vehicle Mileage Log</h3>
-      <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
-        <div><label class="label">Asset</label><select id="veh-asset" class="input"><option value="">-- pick vehicle --</option></select></div>
-        <div><label class="label">Tax Year</label><input id="veh-year" type="number" class="input" value="2025"></div>
-        <div><label class="label">Business Miles</label><input id="veh-biz-miles" type="number" class="input"></div>
-        <div><label class="label">Total Miles</label><input id="veh-total-miles" type="number" class="input"></div>
-        <div class="col-span-full"><button onclick="saveVehicleUsage()" class="btn-primary">Save Usage</button></div>
-      </div>
-      <p class="text-xs text-gray-500">IRS standard mileage rate 2025: $0.70/business mile. Use actual expense method if higher (gas, maintenance, depreciation, insurance).</p>
-    </div>
-  </div>
-
-  <!-- State tab -->
-  <div id="tab-state" class="hidden">
-    <div class="card mb-6">
-      <h3 class="font-medium mb-3">State Tax Estimates</h3>
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
-        <div class="p-3 bg-gray-900/40 rounded-lg"><p class="text-xs text-gray-500 uppercase">Federal AGI</p><p class="text-xl font-semibold mt-1" id="st-federal-agi">--</p></div>
-        <div class="p-3 bg-gray-900/40 rounded-lg"><p class="text-xs text-gray-500 uppercase">Total State Tax</p><p class="text-xl font-semibold mt-1" id="st-total-state-tax">--</p></div>
-        <div class="p-3 bg-gray-900/40 rounded-lg"><p class="text-xs text-gray-500 uppercase">Combined Effective Rate</p><p class="text-xl font-semibold mt-1" id="st-combined-rate">--</p></div>
-      </div>
-      <div id="state-breakdown" class="mt-4 space-y-2"><p class="text-xs text-gray-600">Add a state residency below to estimate state taxes.</p></div>
-    </div>
-
-    <div class="card">
-      <h3 class="font-medium mb-3">Add State Residency</h3>
-      <p class="text-xs text-gray-500 mb-3">Full-year resident, part-year (moved), or non-resident (worked in another state). Multi-state supported.</p>
-      <div class="grid grid-cols-2 md:grid-cols-3 gap-2">
-        <div><label class="label">State</label><select id="st-state" class="input"></select></div>
-        <div><label class="label">Residency</label><select id="st-residency" class="input"><option value="full_year">Full Year</option><option value="part_year">Part Year</option><option value="nonresident">Non-Resident</option></select></div>
-        <div><label class="label">Months in State</label><input id="st-months" type="number" min="0" max="12" class="input" value="12"></div>
-        <div><label class="label">State Wages ($)</label><input id="st-wages" type="number" step="0.01" class="input" placeholder="0"></div>
-        <div><label class="label">State Tax Withheld ($)</label><input id="st-withheld" type="number" step="0.01" class="input" placeholder="0"></div>
-        <div class="flex items-end gap-2"><button onclick="saveStateProfile()" class="btn-primary">Save</button></div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Entities tab -->
-  <div id="tab-entities" class="hidden">
-    <div class="card mb-6">
-      <div class="flex items-center justify-between mb-3">
-        <h3 class="font-medium">Business Entities</h3>
-        <button onclick="toggleForm('ent-form')" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-2.5 py-1 rounded-lg">+ Add Entity</button>
-      </div>
-      <div id="ent-form" class="hidden mb-4 p-3 bg-gray-900/40 rounded-lg">
-        <div class="grid grid-cols-2 md:grid-cols-3 gap-2">
-          <div class="col-span-2"><label class="label">Entity Name</label><input id="ent-name" class="input" placeholder="Acme Woodworks LLC"></div>
-          <div><label class="label">Type</label><select id="ent-type" class="input">
-            <option value="sole_prop">Sole Proprietorship</option>
-            <option value="s_corp">S-Corp</option>
-            <option value="c_corp">C-Corp</option>
-            <option value="partnership">Partnership</option>
-            <option value="llc_single">Single-Member LLC</option>
-            <option value="llc_multi">Multi-Member LLC</option>
-          </select></div>
-          <div><label class="label">EIN (optional)</label><input id="ent-ein" class="input" placeholder="XX-XXXXXXX"></div>
-          <div><label class="label">State of Formation</label><input id="ent-state" class="input" placeholder="NC"></div>
-          <div><label class="label">Formation Date</label><input id="ent-formed" type="date" class="input"></div>
-          <div><label class="label">Your Ownership %</label><input id="ent-own" type="number" class="input" value="100"></div>
-          <div class="col-span-full flex gap-2"><button onclick="saveEntity()" class="btn-primary">Save Entity</button><button onclick="document.getElementById('ent-form').classList.add('hidden')" class="text-xs text-gray-400 hover:text-gray-200">Cancel</button></div>
-        </div>
-      </div>
-      <div id="entities-list" class="space-y-1"><p class="text-xs text-gray-600">Loading entities...</p></div>
-    </div>
-
-    <div id="entity-detail" class="hidden card mb-6">
-      <div class="flex items-center justify-between mb-3">
-        <h3 class="font-medium" id="ent-detail-name">--</h3>
-        <button onclick="hideEntityDetail()" class="text-xs text-gray-400 hover:text-gray-200">Close</button>
-      </div>
-      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-        <div><p class="text-xs text-gray-500 uppercase">Income</p><p class="text-xl font-semibold mt-1 text-green-400" id="ent-d-income">--</p></div>
-        <div><p class="text-xs text-gray-500 uppercase">Expenses</p><p class="text-xl font-semibold mt-1 text-red-400" id="ent-d-expenses">--</p></div>
-        <div><p class="text-xs text-gray-500 uppercase">Net Income</p><p class="text-xl font-semibold mt-1" id="ent-d-net">--</p></div>
-        <div><p class="text-xs text-gray-500 uppercase">Entity Tax</p><p class="text-xl font-semibold mt-1" id="ent-d-tax">--</p><p class="text-xs text-gray-500" id="ent-d-passthrough"></p></div>
-      </div>
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div>
-          <h4 class="text-xs uppercase text-gray-500 mb-2">Shareholders / Partners</h4>
-          <div id="ent-d-shareholders" class="space-y-1"></div>
-          <button onclick="showAddShareholder()" class="text-xs text-oc-400 hover:text-oc-300 mt-2">+ Add Shareholder</button>
-          <div id="ent-sh-form" class="hidden mt-2 p-2 bg-gray-900/40 rounded-lg grid grid-cols-2 gap-2">
-            <div><label class="label">Name</label><input id="ent-sh-name" class="input"></div>
-            <div><label class="label">Ownership %</label><input id="ent-sh-pct" type="number" class="input"></div>
-            <div><label class="label">Salary ($)</label><input id="ent-sh-salary" type="number" step="0.01" class="input"></div>
-            <div><label class="label">Distributions ($)</label><input id="ent-sh-dist" type="number" step="0.01" class="input"></div>
-            <div class="col-span-full"><button onclick="saveShareholder()" class="btn-primary">Save</button></div>
-          </div>
-        </div>
-        <div>
-          <h4 class="text-xs uppercase text-gray-500 mb-2">Expense Breakdown</h4>
-          <div id="ent-d-categories" class="space-y-1"><p class="text-xs text-gray-600">No expenses yet</p></div>
-        </div>
-      </div>
-      <div class="mt-4 pt-4 border-t border-gray-700 flex items-center gap-3">
-        <button onclick="generateK1s()" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-3 py-1.5 rounded-lg">Generate K-1s</button>
-        <button onclick="toggleForm('ent-1099-form')" class="text-xs bg-gray-700 hover:bg-gray-600 text-white px-3 py-1.5 rounded-lg">Issue 1099-NEC</button>
-        <button onclick="loadEntity1099List()" class="text-xs text-gray-400 hover:text-gray-200">View issued 1099s</button>
-      </div>
-      <div id="ent-1099-form" class="hidden mt-3 p-3 bg-gray-900/40 rounded-lg grid grid-cols-2 gap-2">
-        <div class="col-span-2"><label class="label">Recipient Name</label><input id="ent-1099-name" class="input"></div>
-        <div class="col-span-2"><label class="label">Recipient Address</label><input id="ent-1099-addr" class="input" placeholder="Street, City, ST ZIP"></div>
-        <div><label class="label">Amount Paid ($)</label><input id="ent-1099-amt" type="number" step="0.01" class="input" placeholder="min $600"></div>
-        <div class="flex items-end"><button onclick="issue1099()" class="btn-primary">Issue</button></div>
-      </div>
-      <div id="ent-k1-results" class="mt-3"></div>
-      <div id="ent-1099-results" class="mt-3"></div>
-    </div>
-
-    <div class="card">
-      <h3 class="font-medium mb-3">Entity Structure Comparison</h3>
-      <p class="text-xs text-gray-500 mb-3">Compare Sole Proprietorship vs S-Corp vs LLC based on projected SE income. Shows SE tax savings opportunities.</p>
-      <div class="flex items-end gap-2 mb-3">
-        <div class="flex-1"><label class="label">SE Income ($, optional override)</label><input id="ent-cmp-income" type="number" step="0.01" class="input" placeholder="Leave blank to use actual"></div>
-        <button onclick="loadEntityComparison()" class="btn-primary">Compare</button>
-      </div>
-      <div id="ent-comparison" class="space-y-2"><p class="text-xs text-gray-600">Click Compare to see structure analysis.</p></div>
-    </div>
-  </div>
-
-  <!-- Insights tab -->
-  <div id="tab-insights" class="hidden">
-    <div class="card mb-6">
-      <div class="flex items-center justify-between mb-3">
-        <h3 class="font-medium">Audit Risk Score</h3>
-        <button onclick="loadAuditRisk()" class="text-xs text-oc-400 hover:text-oc-300">Refresh</button>
-      </div>
-      <div class="flex items-center gap-4 mb-3">
-        <div id="audit-score-ring" class="w-20 h-20 rounded-full border-4 border-gray-700 flex items-center justify-center text-2xl font-semibold">--</div>
-        <div>
-          <p class="text-sm text-gray-300" id="audit-score-label">Loading...</p>
-          <p class="text-xs text-gray-500 mt-1" id="audit-score-summary"></p>
-        </div>
-      </div>
-      <div id="audit-factors" class="space-y-1 mt-3"></div>
-    </div>
-
-    <div class="card mb-6">
-      <div class="flex items-center justify-between mb-3">
-        <h3 class="font-medium">AI Tax Insights</h3>
-        <button onclick="loadInsightsList()" class="text-xs text-oc-400 hover:text-oc-300">Refresh</button>
-      </div>
-      <div id="insights-list" class="space-y-2"><p class="text-xs text-gray-600">Loading insights...</p></div>
-    </div>
-
-    <div class="card mb-6">
-      <h3 class="font-medium mb-3">What-If Scenario</h3>
-      <p class="text-xs text-gray-500 mb-3">Model a tax change: raise, bonus, marriage, new dependent, IRA contribution.</p>
-      <div class="grid grid-cols-2 md:grid-cols-3 gap-2 mb-3">
-        <div class="col-span-2"><label class="label">Scenario Name</label><input id="wi-name" class="input" placeholder="10k raise + max IRA"></div>
-        <div><label class="label">Additional Income ($)</label><input id="wi-income" type="number" step="0.01" class="input" placeholder="0"></div>
-        <div><label class="label">Additional Deductions ($)</label><input id="wi-ded" type="number" step="0.01" class="input" placeholder="0"></div>
-        <div><label class="label">Retirement Contribution ($)</label><input id="wi-ret" type="number" step="0.01" class="input" placeholder="0"></div>
-        <div><label class="label">Filing Status Override</label><select id="wi-fs" class="input"><option value="">-- keep current --</option><option value="single">Single</option><option value="married_jointly">Married Jointly</option><option value="married_separately">Married Separately</option><option value="head_of_household">Head of Household</option></select></div>
-        <div class="col-span-full"><button onclick="runWhatIf()" class="btn-primary">Run Scenario</button></div>
-      </div>
-      <div id="wi-result"></div>
-    </div>
-
-    <div class="card">
-      <div class="flex items-center justify-between mb-2">
-        <h3 class="font-medium">Injected Tax Context (what the AI sees)</h3>
-        <button onclick="loadTaxContext()" class="text-xs text-oc-400 hover:text-oc-300">Refresh</button>
-      </div>
-      <pre id="tax-context-text" class="text-xs text-gray-400 whitespace-pre-wrap max-h-[300px] overflow-y-auto bg-gray-900/40 rounded p-3">Loading...</pre>
-    </div>
-  </div>
-
-  </div><!-- end left panel -->
-
-  <!-- RIGHT: Positronic Matrix (AI chat, Positron persona) -->
-  <div class="w-[380px] positron-panel flex flex-col flex-shrink-0">
-    <!-- Animated positronic brain canvas behind messages -->
-    <canvas id="positron-brain"></canvas>
-
-    <!-- LCARS header -->
-    <div class="positron-header">
-      <div class="p-frame">P</div>
-      <div class="p-title">Positron Channel</div>
-      <div class="p-status"><span class="p-led"></span><span>ONLINE</span></div>
-    </div>
-
-    <!-- Log counter / action strip -->
-    <div class="positron-logbar">
-      <span class="logbar-label">LOG</span>
-      <span class="logbar-value" id="positron-log-index">0000.0</span>
-      <span class="logbar-label" style="margin-left:auto">CYCLES</span>
-      <span class="logbar-value" id="positron-msg-count">0</span>
-      <button onclick="clearTaxChat()" class="logbar-label" style="background:none;border:none;color:inherit;cursor:pointer;margin-left:0.5rem;opacity:0.7" title="Clear conversation">CLR</button>
-    </div>
-
-    <div class="flex-1 overflow-y-auto space-y-3" id="tax-chat-messages">
-      <div class="flex gap-2">
-        <img src="/agent-avatar/main" class="w-6 h-6 rounded-lg flex-shrink-0 mt-0.5" alt="">
-        <div class="text-sm text-gray-400">
-          <p>Positron here. I have access to your receipts, expenses, investments, and taxpayer profile. I can compute deductions, flag inconsistencies, and cite IRC when appropriate. Queries:</p>
-          <div class="flex flex-wrap gap-1 mt-2">
-            <button onclick="taxChat('Show my expense summary for 2025')">2025 Summary</button>
-            <button onclick="taxChat('What are my deductible expenses?')">Deductibility</button>
-            <button onclick="taxChat('Log a $50 lunch at Chipotle today as business meal')">Log Expense</button>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Input -->
-    <div class="positron-input-row">
-      <div class="flex gap-2 items-end">
-        <textarea id="tax-chat-input" rows="1" class="flex-1 px-3 py-2 outline-none resize-none" placeholder="Query Positron..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendTaxChat()}" oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,100)+'px'" style="max-height:100px"></textarea>
-        <button onclick="sendTaxChat()" class="transmit-btn flex-shrink-0" id="tax-send-btn">TRANSMIT</button>
-      </div>
-    </div>
-  </div>
-
-</div><!-- end split layout -->
-"##;
 
 const PAGE_JS: &str = r##"
 const token = sessionStorage.getItem('syntaur_token') || '';
