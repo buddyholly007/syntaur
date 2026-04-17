@@ -1556,6 +1556,20 @@ const MIGRATIONS: &[&str] = &[
     UPDATE user_agents SET is_main_thread = 1
      WHERE base_agent = 'main' OR agent_id = 'main';
     "#,
+    // ── v41 ──────────────────────────────────────────────────────────────
+    // Per-user preferences key/value store. Powers the Privacy toggles
+    // (telemetry, LLM logging, memory retention, etc.) and any other
+    // per-user UI flags. Small + simple: one row per (user, key).
+    r#"
+    CREATE TABLE IF NOT EXISTS user_preferences (
+        user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        key        TEXT NOT NULL,
+        value      TEXT,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (user_id, key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_prefs_user ON user_preferences(user_id);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

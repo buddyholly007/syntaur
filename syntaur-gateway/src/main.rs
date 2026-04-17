@@ -5181,6 +5181,8 @@ async fn main() {
         .route("/api/agents/create", post(handle_api_agent_create))
         .route("/api/agents/import", post(handle_api_agent_import))
         .route("/api/agents/{agent_id}", axum::routing::delete(handle_api_agent_delete))
+        .route("/api/settings/preferences", get(handle_api_settings_prefs_get).put(handle_api_settings_prefs_put))
+        .route("/api/settings/export", get(handle_api_settings_export))
         .route("/api/agents/dismiss_escalation", axum::routing::post(handle_api_dismiss_escalation))
         .route("/api/agents/handoff", axum::routing::post(handle_api_agent_handoff))
         .route("/api/agents/reentry", axum::routing::post(handle_api_agent_reentry))
@@ -6604,6 +6606,104 @@ async fn handle_api_agent_delete(
     state.users.delete_user_agent(uid, &agent_id).await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(serde_json::json!({ "deleted": true, "agent_id": agent_id })))
+}
+
+/// GET /api/settings/preferences — return all per-user prefs as a {key: value} map.
+async fn handle_api_settings_prefs_get(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").cloned().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let principal = resolve_principal(&state, &token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let prefs: serde_json::Map<String, serde_json::Value> = tokio::task::spawn_blocking(move || {
+        let conn = rusqlite::Connection::open(&db).ok()?;
+        let mut stmt = conn.prepare("SELECT key, value FROM user_preferences WHERE user_id = ?").ok()?;
+        let rows = stmt.query_map([uid], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        }).ok()?;
+        let mut out = serde_json::Map::new();
+        for row in rows.flatten() {
+            out.insert(row.0, row.1.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null));
+        }
+        Some(out)
+    }).await.ok().flatten().unwrap_or_default();
+    Ok(Json(serde_json::Value::Object(prefs)))
+}
+
+/// PUT /api/settings/preferences — body: {token, key, value}. Upserts one pref.
+async fn handle_api_settings_prefs_put(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let key = body["key"].as_str().ok_or(axum::http::StatusCode::BAD_REQUEST)?.to_string();
+    if key.is_empty() || key.len() > 100 { return Err(axum::http::StatusCode::BAD_REQUEST); }
+    let value = body["value"].as_str().map(|s| s.to_string());
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO user_preferences (user_id, key, value, updated_at) VALUES (?, ?, ?, ?) \
+             ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            rusqlite::params![uid, key, value, chrono::Utc::now().timestamp()],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// GET /api/settings/export — aggregate the caller's non-secret config into
+/// a portable JSON blob for backup / migration / sharing.
+async fn handle_api_settings_export(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").cloned().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let principal = resolve_principal(&state, &token).await?;
+    let uid = principal.user_id();
+
+    // User-owned agents (name, description, prompt, flags — secrets excluded).
+    let agents = state.users.list_user_agents(uid).await.unwrap_or_default();
+    let agents_json: Vec<serde_json::Value> = agents.iter().map(|a| serde_json::json!({
+        "agent_id": a.agent_id,
+        "display_name": a.display_name,
+        "base_agent": a.base_agent,
+        "description": a.description,
+        "avatar_color": a.avatar_color,
+        "is_main_thread": a.is_main_thread,
+        "system_prompt": a.system_prompt,
+        "imported_from": a.imported_from,
+    })).collect();
+
+    // User preferences.
+    let db = state.db_path.clone();
+    let prefs_map = tokio::task::spawn_blocking(move || -> serde_json::Map<String, serde_json::Value> {
+        let conn = match rusqlite::Connection::open(&db) { Ok(c) => c, Err(_) => return Default::default() };
+        let mut stmt = match conn.prepare("SELECT key, value FROM user_preferences WHERE user_id = ?") {
+            Ok(s) => s, Err(_) => return Default::default(),
+        };
+        let mut out = serde_json::Map::new();
+        if let Ok(rows) = stmt.query_map([uid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))) {
+            for row in rows.flatten() {
+                out.insert(row.0, row.1.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null));
+            }
+        }
+        out
+    }).await.unwrap_or_default();
+
+    Ok(Json(serde_json::json!({
+        "syntaur_export_version": 1,
+        "exported_at": chrono::Utc::now().timestamp(),
+        "user_id": uid,
+        "agents": agents_json,
+        "preferences": prefs_map,
+        "note": "Secrets (passwords, API keys, OAuth tokens) are never exported. Import via Settings → Privacy & data → Import.",
+    })))
 }
 
 

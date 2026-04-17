@@ -204,10 +204,16 @@ fn content_area() -> Markup {
 }
 
 fn page_wrap(section: &str, page: &str, title: &str, subtitle: &str, body: Markup) -> Markup {
+    let scope = lookup_scope(section, page);
     html! {
         section class="ss-page" data-section=(section) data-page=(page) id={ "ss-page-" (section) "-" (page) } {
             header class="ss-page-header" {
-                h1 class="ss-page-title" { (title) }
+                div class="ss-page-title-row" {
+                    h1 class="ss-page-title" { (title) }
+                    @if !scope.is_empty() {
+                        span class={ "ss-scope ss-scope-" (scope) } title="Who this setting applies to" { (scope) }
+                    }
+                }
                 p class="ss-page-subtitle" { (subtitle) }
             }
             div class="ss-page-body" { (body) }
@@ -215,9 +221,46 @@ fn page_wrap(section: &str, page: &str, title: &str, subtitle: &str, body: Marku
     }
 }
 
+fn lookup_scope(section: &str, page: &str) -> &'static str {
+    for s in SECTIONS {
+        if s.slug == section {
+            for p in s.pages {
+                if p.slug == page { return p.scope; }
+            }
+        }
+    }
+    ""
+}
+
 // ── Home welcome ───────────────────────────────────────────
 fn home_body() -> Markup {
     html! {
+        // Getting-started checklist — tasks light up as actual state
+        // is satisfied. Hides itself once every task is done.
+        div class="ss-gs-card" id="ss-gs-card" {
+            div class="ss-gs-head" {
+                div {
+                    div class="ss-gs-eyebrow" { "Getting started" }
+                    h3 class="ss-gs-title" { "Finish setting up Syntaur" }
+                }
+                div class="ss-gs-progress" {
+                    svg class="ss-gs-ring" width="44" height="44" viewBox="0 0 44 44" {
+                        circle class="ss-gs-ring-bg" cx="22" cy="22" r="18" stroke-width="4" fill="none" {}
+                        circle id="ss-gs-ring-fill" class="ss-gs-ring-fill" cx="22" cy="22" r="18" stroke-width="4" fill="none"
+                            stroke-dasharray="113.1" stroke-dashoffset="113.1" transform="rotate(-90 22 22)" {}
+                    }
+                    span class="ss-gs-progress-text" id="ss-gs-progress-text" { "0 / 5" }
+                }
+            }
+            ul class="ss-gs-list" id="ss-gs-list" {
+                li data-task="llm"      { span class="ss-gs-check" {} "Add an LLM provider" a class="ss-gs-go" href="#llm/providers" onclick="ssNavigate('llm','providers');return false;" { "Set up →" } }
+                li data-task="agent"    { span class="ss-gs-check" {} "Pick a main agent" a class="ss-gs-go" href="#agents/all" onclick="ssNavigate('agents','all');return false;" { "Choose →" } }
+                li data-task="telegram" { span class="ss-gs-check" {} "Connect Telegram for phone chat" a class="ss-gs-go" href="#integrations/telegram" onclick="ssNavigate('integrations','telegram');return false;" { "Connect →" } }
+                li data-task="voice"    { span class="ss-gs-check" {} "Set up a voice satellite" a class="ss-gs-go" href="#voice/satellites" onclick="ssNavigate('voice','satellites');return false;" { "Set up →" } }
+                li data-task="privacy"  { span class="ss-gs-check" {} "Review what Syntaur stores" a class="ss-gs-go" href="#privacy/data" onclick="ssNavigate('privacy','data');return false;" { "Review →" } }
+            }
+        }
+
         div class="ss-welcome-grid" {
             a class="ss-welcome-tile" href="#agents/all" onclick="ssNavigate('agents','all');return false;" {
                 div class="ss-welcome-ico" { "🧑‍🚀" }
@@ -497,18 +540,37 @@ fn privacy_data_body() -> Markup {
         }
         div class="ss-card" {
             h3 class="ss-card-title" { "Controls" }
-            p class="ss-help" { "(Functional toggles land in Phase G — structure shown now so you can see where they'll live.)" }
-            div class="ss-toggle-row" { span { "LLM prompt logging" } input type="checkbox" disabled; }
-            div class="ss-toggle-row" { span { "Voice-transcript auto-save" } input type="checkbox" disabled; }
-            div class="ss-toggle-row" { span { "Anonymous telemetry" } input type="checkbox" disabled; }
+            p class="ss-help" { "Toggles persist server-side as user preferences. Changes take effect immediately." }
+            div class="ss-toggle-row" {
+                div { div { "LLM prompt logging" } div class="ss-help" { "Store the full prompt + response of every LLM call in ~/.syntaur/lcm.db. Useful for debugging, burns storage fast." } }
+                label class="ss-switch" { input type="checkbox" id="pref-llm-logging" data-pref="llm_logging" onchange="ssSavePref(this)"; span class="ss-switch-slider" {} }
+            }
+            div class="ss-toggle-row" {
+                div { div { "Voice-transcript auto-save" } div class="ss-help" { "Automatically save every voice interaction to the journal. Off = session-only transcripts." } }
+                label class="ss-switch" { input type="checkbox" id="pref-voice-autosave" data-pref="voice_autosave" onchange="ssSavePref(this)"; span class="ss-switch-slider" {} }
+            }
+            div class="ss-toggle-row" {
+                div { div { "Anonymous telemetry" } div class="ss-help" { "Currently off by default. Syntaur does not call home unless you explicitly enable it." } }
+                label class="ss-switch" { input type="checkbox" id="pref-telemetry" data-pref="telemetry" onchange="ssSavePref(this)"; span class="ss-switch-slider" {} }
+            }
+            div class="ss-toggle-row" {
+                div { div { "Retain chat history" } div class="ss-help" { "Off = conversations wiped on close. On = persist forever until you delete." } }
+                label class="ss-switch" { input type="checkbox" id="pref-chat-retention" data-pref="chat_retention" onchange="ssSavePref(this)" checked; span class="ss-switch-slider" {} }
+            }
         }
         div class="ss-card" {
             h3 class="ss-card-title" { "Export / import" }
-            p class="ss-help" { "Download a portable copy of your config or import from a previous install." }
-            div class="ss-actions" {
-                button class="ss-btn-secondary" onclick="alert('Settings-as-code export — Phase H.')" { "Export config (JSON)" }
-                button class="ss-btn-secondary" onclick="alert('Settings-as-code import — Phase H.')" { "Import config…" }
+            p class="ss-help" {
+                "Download a portable copy of your config (agents, preferences, non-secret settings) "
+                "as " code { "syntaur.json" } ". Secrets — API keys, passwords, OAuth tokens — are "
+                "never included. Version-control it, share across installs, restore after a reinstall."
             }
+            div class="ss-actions" {
+                button class="ss-btn-secondary" onclick="ssExportConfig()" { "Export config (JSON)" }
+                button class="ss-btn-secondary" onclick="ssImportConfig()" { "Import config…" }
+                input type="file" id="ss-import-file" accept=".json,application/json" class="hidden" onchange="ssHandleImport(this.files[0])";
+            }
+            p id="ss-export-status" class="ss-help" {}
         }
     }
 }
@@ -521,24 +583,41 @@ fn system_danger_body() -> Markup {
             p class="ss-help" { "These actions cannot be undone. Typed confirmation required." }
             div class="ss-danger-row" {
                 div {
-                    div class="ss-danger-name" { "Reset all settings to defaults" }
-                    div class="ss-help" { "Keeps your data (chats, memories, agents) — only config is reset." }
+                    div class="ss-danger-name" { "Reset all preferences" }
+                    div class="ss-help" { "Clears every row in user_preferences. Keeps your agents, chats, and memories intact." }
                 }
-                button class="ss-btn-danger" onclick="alert('Phase H.')" { "Reset…" }
+                button class="ss-btn-danger" onclick="ssDangerConfirm('reset preferences','ssResetPreferences')" { "Reset…" }
             }
             div class="ss-danger-row" {
                 div {
                     div class="ss-danger-name" { "Wipe all agent memories" }
-                    div class="ss-help" { "Removes every saved memory across every agent (journal included only if opted in)." }
+                    div class="ss-help" { "Removes every saved memory across every agent (journal is isolated and never auto-exported, but this wipes it too)." }
                 }
-                button class="ss-btn-danger" onclick="alert('Phase G.')" { "Wipe memories…" }
+                button class="ss-btn-danger" onclick="ssDangerConfirm('wipe all memories','ssWipeMemories')" { "Wipe memories…" }
             }
             div class="ss-danger-row" {
                 div {
                     div class="ss-danger-name" { "Factory reset" }
-                    div class="ss-help" { "Erase all data and configuration. Same as a fresh install." }
+                    div class="ss-help" { "Erase this user's data and configuration. Same as re-running onboarding. Admin-only and irreversible." }
                 }
-                button class="ss-btn-danger" onclick="alert('Phase G.')" { "Factory reset…" }
+                button class="ss-btn-danger" onclick="ssDangerConfirm('factory reset','ssFactoryReset')" { "Factory reset…" }
+            }
+
+            // Hidden type-confirm dialog, reused across all danger actions.
+            div id="ss-danger-modal" class="ss-modal hidden" {
+                div class="ss-modal-scrim" onclick="ssDangerClose()" {}
+                div class="ss-modal-inner" {
+                    h3 class="ss-modal-title" { "Confirm destructive action" }
+                    p class="ss-modal-body" id="ss-danger-prompt" {}
+                    div class="ss-field" {
+                        label class="ss-label" for="ss-danger-input" { "Type the phrase to continue" }
+                        input id="ss-danger-input" class="ss-input" autocomplete="off" spellcheck="false" {}
+                    }
+                    div class="ss-actions" {
+                        button class="ss-btn-secondary" onclick="ssDangerClose()" { "Cancel" }
+                        button id="ss-danger-go" class="ss-btn-danger" disabled onclick="ssDangerExecute()" { "Proceed" }
+                    }
+                }
             }
         }
     }
@@ -624,45 +703,47 @@ struct PageDef {
     /// Keywords for the ⌘K palette — space-separated, lowercase.
     keywords: &'static str,
     description: &'static str,
+    /// Scope badge shown on the page header + nav — per-user, server, admin.
+    scope: &'static str,
 }
 
 const SECTIONS: &[SectionDef] = &[
     SectionDef { slug: "account", title: "Account", pages: &[
-        PageDef { slug: "profile", title: "Profile", badge: None, keywords: "name email username display", description: "Your identity and personal info" },
-        PageDef { slug: "security", title: "Password & security", badge: None, keywords: "password login sessions signout logout 2fa", description: "Change password, active sessions" },
-        PageDef { slug: "users", title: "Users", badge: Some("admin"), keywords: "invite team members users roles admin", description: "Invite and manage users (admin only)" },
+        PageDef { slug: "profile", title: "Profile", badge: None, scope: "per-user", keywords: "name email username display", description: "Your identity and personal info" },
+        PageDef { slug: "security", title: "Password & security", badge: None, scope: "per-user", keywords: "password login sessions signout logout 2fa", description: "Change password, active sessions" },
+        PageDef { slug: "users", title: "Users", badge: Some("admin"), scope: "admin", keywords: "invite team members users roles admin", description: "Invite and manage users (admin only)" },
     ]},
     SectionDef { slug: "agents", title: "Agents", pages: &[
-        PageDef { slug: "all", title: "All agents", badge: None, keywords: "create import main thread agents peter felix kyron", description: "Create, import, and manage agents" },
-        PageDef { slug: "personas", title: "Personas & tone", badge: None, keywords: "personas peter kyron positron cortex silvr thaddeus maurice mushi humor dial", description: "Built-in personas and tone dials" },
+        PageDef { slug: "all", title: "All agents", badge: None, scope: "per-user", keywords: "create import main thread agents peter felix kyron", description: "Create, import, and manage agents" },
+        PageDef { slug: "personas", title: "Personas & tone", badge: None, scope: "per-user", keywords: "personas peter kyron positron cortex silvr thaddeus maurice mushi humor dial", description: "Built-in personas and tone dials" },
     ]},
     SectionDef { slug: "integrations", title: "Integrations", pages: &[
-        PageDef { slug: "telegram", title: "Telegram", badge: None, keywords: "telegram bot phone chat messaging", description: "Chat from your phone via a Telegram bot" },
-        PageDef { slug: "homeassistant", title: "Home Assistant", badge: None, keywords: "home assistant smart home ha homeassistant", description: "Connect to a Home Assistant instance" },
-        PageDef { slug: "sync", title: "Sync", badge: None, keywords: "google microsoft gmail calendar drive sync oauth plaid stripe coinbase simplefin", description: "Cloud connectors (Google, Microsoft, bank, etc.)" },
-        PageDef { slug: "media", title: "Media bridge", badge: None, keywords: "media apple music spotify tidal youtube bridge playback", description: "Local companion for hidden playback" },
+        PageDef { slug: "telegram", title: "Telegram", badge: None, scope: "per-user", keywords: "telegram bot phone chat messaging", description: "Chat from your phone via a Telegram bot" },
+        PageDef { slug: "homeassistant", title: "Home Assistant", badge: None, scope: "server-wide", keywords: "home assistant smart home ha homeassistant", description: "Connect to a Home Assistant instance" },
+        PageDef { slug: "sync", title: "Sync", badge: None, scope: "per-user", keywords: "google microsoft gmail calendar drive sync oauth plaid stripe coinbase simplefin", description: "Cloud connectors (Google, Microsoft, bank, etc.)" },
+        PageDef { slug: "media", title: "Media bridge", badge: None, scope: "per-user", keywords: "media apple music spotify tidal youtube bridge playback", description: "Local companion for hidden playback" },
     ]},
     SectionDef { slug: "llm", title: "LLM", pages: &[
-        PageDef { slug: "providers", title: "Providers", badge: None, keywords: "openrouter lm studio turboquant fallback api key model provider openai anthropic claude", description: "Model providers, API keys, fallback chain" },
+        PageDef { slug: "providers", title: "Providers", badge: None, scope: "server-wide", keywords: "openrouter lm studio turboquant fallback api key model provider openai anthropic claude", description: "Model providers, API keys, fallback chain" },
     ]},
     SectionDef { slug: "voice", title: "Voice", pages: &[
-        PageDef { slug: "satellites", title: "Satellites", badge: None, keywords: "voice wake word satellite esphome speaker", description: "Voice satellites and wake word" },
+        PageDef { slug: "satellites", title: "Satellites", badge: None, scope: "server-wide", keywords: "voice wake word satellite esphome speaker", description: "Voice satellites and wake word" },
     ]},
     SectionDef { slug: "modules", title: "Modules", pages: &[
-        PageDef { slug: "installed", title: "Installed", badge: None, keywords: "modules extensions enable disable tax music knowledge coders journal", description: "Enable and disable modules" },
+        PageDef { slug: "installed", title: "Installed", badge: None, scope: "server-wide", keywords: "modules extensions enable disable tax music knowledge coders journal", description: "Enable and disable modules" },
     ]},
     SectionDef { slug: "appearance", title: "Appearance", pages: &[
-        PageDef { slug: "theme", title: "Theme", badge: None, keywords: "theme dark mode density accent color appearance", description: "Dashboard palette and density" },
+        PageDef { slug: "theme", title: "Theme", badge: None, scope: "per-user", keywords: "theme dark mode density accent color appearance", description: "Dashboard palette and density" },
     ]},
     SectionDef { slug: "privacy", title: "Privacy & data", pages: &[
-        PageDef { slug: "data", title: "What Syntaur stores", badge: None, keywords: "privacy data retention telemetry logging export import", description: "What's stored, where, for how long" },
+        PageDef { slug: "data", title: "What Syntaur stores", badge: None, scope: "per-user", keywords: "privacy data retention telemetry logging export import", description: "What's stored, where, for how long" },
     ]},
     SectionDef { slug: "system", title: "System", pages: &[
-        PageDef { slug: "gateway", title: "Gateway & ports", badge: None, keywords: "gateway port bind network restart system config", description: "Gateway network + runtime settings" },
-        PageDef { slug: "danger", title: "Danger zone", badge: None, keywords: "reset wipe factory delete danger", description: "Destructive actions" },
+        PageDef { slug: "gateway", title: "Gateway & ports", badge: None, scope: "admin", keywords: "gateway port bind network restart system config", description: "Gateway network + runtime settings" },
+        PageDef { slug: "danger", title: "Danger zone", badge: None, scope: "admin", keywords: "reset wipe factory delete danger", description: "Destructive actions" },
     ]},
     SectionDef { slug: "about", title: "About", pages: &[
-        PageDef { slug: "info", title: "About this Syntaur", badge: None, keywords: "about version uptime tools licenses", description: "Version, uptime, tool count" },
+        PageDef { slug: "info", title: "About this Syntaur", badge: None, scope: "server-wide", keywords: "about version uptime tools licenses", description: "Version, uptime, tool count" },
     ]},
 ];
 
@@ -908,6 +989,77 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
     15% { box-shadow: 0 0 0 4px rgba(122,162,255,0.35); }
     100% { box-shadow: 0 0 0 0 rgba(122,162,255,0); }
   }
+
+  /* ── Scope chip ────────────────────────────────────────── */
+  .ss-page-title-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .ss-scope {
+    font-size: 10px; font-weight: 500; letter-spacing: 0.05em;
+    padding: 2px 8px; border-radius: 999px;
+    background: var(--ss-panel-2); color: var(--ss-ink-mute);
+    border: 1px solid var(--ss-line-2);
+    text-transform: lowercase;
+  }
+  .ss-scope-per-user { background: rgba(122,162,255,0.1); color: var(--ss-accent); border-color: rgba(122,162,255,0.25); }
+  .ss-scope-server-wide { background: rgba(127,191,138,0.1); color: var(--ss-success); border-color: rgba(127,191,138,0.25); }
+  .ss-scope-admin { background: rgba(217,122,122,0.1); color: var(--ss-danger); border-color: rgba(217,122,122,0.25); }
+
+  /* ── Getting-started checklist ─────────────────────────── */
+  .ss-gs-card { background: linear-gradient(135deg, rgba(122,162,255,0.06), var(--ss-panel)); border: 1px solid var(--ss-line-2); border-radius: 12px; padding: 18px 20px; margin-bottom: 16px; }
+  .ss-gs-card.ss-gs-done { display: none; }
+  .ss-gs-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 12px; }
+  .ss-gs-eyebrow { font-size: 10.5px; font-weight: 600; letter-spacing: 0.09em; text-transform: uppercase; color: var(--ss-accent); }
+  .ss-gs-title { font-size: 15px; font-weight: 600; color: var(--ss-ink); margin-top: 2px; }
+  .ss-gs-progress { position: relative; display: flex; align-items: center; justify-content: center; }
+  .ss-gs-ring-bg { stroke: var(--ss-line-2); }
+  .ss-gs-ring-fill { stroke: var(--ss-accent); transition: stroke-dashoffset 0.4s ease-out; }
+  .ss-gs-progress-text { position: absolute; font-size: 10.5px; font-weight: 600; color: var(--ss-ink); font-family: ui-monospace, monospace; }
+  .ss-gs-list { list-style: none; padding: 0; margin: 0; }
+  .ss-gs-list li { display: flex; align-items: center; gap: 10px; padding: 7px 0; font-size: 13px; border-top: 1px dashed var(--ss-line); }
+  .ss-gs-list li:first-child { border-top: none; }
+  .ss-gs-list li.done { color: var(--ss-ink-mute); text-decoration: line-through; }
+  .ss-gs-check {
+    width: 16px; height: 16px; border-radius: 50%;
+    border: 1.5px solid var(--ss-line-2); flex-shrink: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 9px; color: transparent;
+  }
+  .ss-gs-list li.done .ss-gs-check { border-color: var(--ss-success); background: var(--ss-success); color: #0a0d12; }
+  .ss-gs-list li.done .ss-gs-check::after { content: '✓'; font-size: 10px; }
+  .ss-gs-list li > span:first-child + * { flex: 1; }
+  .ss-gs-go { color: var(--ss-accent); font-size: 11.5px; text-decoration: none; margin-left: auto; flex-shrink: 0; }
+  .ss-gs-list li.done .ss-gs-go { display: none; }
+
+  /* ── Toggle switch ─────────────────────────────────────── */
+  .ss-switch { display: inline-block; position: relative; width: 36px; height: 20px; flex-shrink: 0; cursor: pointer; }
+  .ss-switch input { opacity: 0; width: 0; height: 0; }
+  .ss-switch-slider { position: absolute; inset: 0; background: var(--ss-line-2); border-radius: 999px; transition: background 0.12s; }
+  .ss-switch-slider::before { content: ''; position: absolute; width: 14px; height: 14px; left: 3px; top: 3px; background: var(--ss-ink-dim); border-radius: 50%; transition: transform 0.18s, background 0.12s; }
+  .ss-switch input:checked + .ss-switch-slider { background: var(--ss-accent); }
+  .ss-switch input:checked + .ss-switch-slider::before { transform: translateX(16px); background: #0a0d12; }
+  .ss-toggle-row { align-items: flex-start; }
+  .ss-toggle-row > div { flex: 1; min-width: 0; }
+
+  /* ── Modal (type-confirm) ──────────────────────────────── */
+  .ss-modal { position: fixed; inset: 0; z-index: 90; display: flex; align-items: center; justify-content: center; padding: 24px; }
+  .ss-modal.hidden { display: none; }
+  .ss-modal-scrim { position: absolute; inset: 0; background: rgba(0,0,0,0.55); backdrop-filter: blur(4px); }
+  .ss-modal-inner { position: relative; background: var(--ss-panel); border: 1px solid var(--ss-line-2); border-radius: 12px; padding: 22px 24px; width: 100%; max-width: 440px; box-shadow: 0 24px 48px rgba(0,0,0,0.6); }
+  .ss-modal-title { font-size: 16px; font-weight: 600; color: var(--ss-ink); margin-bottom: 6px; }
+  .ss-modal-body { font-size: 13.5px; color: var(--ss-ink-dim); margin-bottom: 14px; line-height: 1.5; }
+
+  /* ── Restart banner ────────────────────────────────────── */
+  .ss-restart {
+    position: fixed; left: 50%; transform: translateX(-50%);
+    top: 60px; z-index: 70;
+    background: rgba(240,180,112,0.12); color: var(--ss-warn);
+    border: 1px solid rgba(240,180,112,0.35); border-radius: 10px;
+    padding: 8px 14px; display: flex; align-items: center; gap: 10px;
+    font-size: 12.5px;
+  }
+  .ss-restart.hidden { display: none; }
+  .ss-restart button { background: var(--ss-warn); color: #0a0d12; border: none; padding: 4px 10px; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer; }
+
+  .hidden { display: none !important; }
 "##;
 
 // Fresh JS used by the new shell. Legacy JS from `page.js` handles all the
@@ -1128,6 +1280,189 @@ function ssSignOutOthers()  { alert('Sign-out-other-sessions flow — Phase E.')
 function ssHaTest() { const r = document.getElementById('ss-ha-result'); if (r) r.textContent = 'Testing… (endpoint wiring coming)'; }
 function ssHaSave() { const r = document.getElementById('ss-ha-result'); if (r) r.textContent = 'Save — wiring coming.'; }
 
+// ── Getting-started checklist ──────────────────────────────
+// Drives off /health + /api/agents/list + user_preferences. Each task lights
+// up when its real condition is met; checklist hides when all 5 are done.
+async function ssRefreshGettingStarted() {
+  const list = document.getElementById('ss-gs-list');
+  if (!list) return;
+  const status = { llm: false, agent: false, telegram: false, voice: false, privacy: false };
+  // Read /health for providers + agents
+  try {
+    const hr = await fetch('/health');
+    if (hr.ok) {
+      const h = await hr.json();
+      status.llm = (h.providers || []).length > 0;
+      status.agent = (h.agents || []).length > 0;
+      status.telegram = !!(h.telegram_configured || h.telegram || (h.features || []).includes('telegram'));
+      status.voice = !!(h.voice_configured || (h.features || []).includes('voice'));
+    }
+  } catch(e) {}
+  // Privacy: if user has set at least one preference, count them as having reviewed.
+  try {
+    const pr = await fetch('/api/settings/preferences?token=' + encodeURIComponent(sessionStorage.getItem('syntaur_token') || ''));
+    if (pr.ok) {
+      const prefs = await pr.json();
+      status.privacy = Object.keys(prefs).length > 0 || !!localStorage.getItem('ss_privacy_reviewed');
+    }
+  } catch(e) {}
+  let done = 0;
+  list.querySelectorAll('li').forEach(li => {
+    const key = li.dataset.task;
+    if (status[key]) { li.classList.add('done'); done++; }
+    else li.classList.remove('done');
+  });
+  const total = 5;
+  const txt = document.getElementById('ss-gs-progress-text');
+  if (txt) txt.textContent = done + ' / ' + total;
+  const ring = document.getElementById('ss-gs-ring-fill');
+  if (ring) ring.setAttribute('stroke-dashoffset', String(113.1 * (1 - done / total)));
+  const card = document.getElementById('ss-gs-card');
+  if (card) card.classList.toggle('ss-gs-done', done === total);
+}
+
+// ── Privacy preferences (persist via /api/settings/preferences) ──────
+async function ssLoadPreferences() {
+  try {
+    const r = await fetch('/api/settings/preferences?token=' + encodeURIComponent(sessionStorage.getItem('syntaur_token') || ''));
+    if (!r.ok) return;
+    const prefs = await r.json();
+    document.querySelectorAll('input[data-pref]').forEach(inp => {
+      const key = inp.dataset.pref;
+      const v = prefs[key];
+      if (inp.type === 'checkbox') inp.checked = (v === '1' || v === 'true' || v === true);
+      else inp.value = v || '';
+    });
+  } catch(e) { console.error('load prefs:', e); }
+}
+async function ssSavePref(inp) {
+  const key = inp.dataset.pref;
+  const value = inp.type === 'checkbox' ? (inp.checked ? '1' : '0') : inp.value;
+  try {
+    const r = await fetch('/api/settings/preferences', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: sessionStorage.getItem('syntaur_token'), key, value }),
+    });
+    if (!r.ok) throw new Error('save failed');
+    localStorage.setItem('ss_privacy_reviewed', '1');
+  } catch(e) { console.error('save pref:', e); }
+}
+
+// ── Export / import config ──────────────────────────────────
+async function ssExportConfig() {
+  const status = document.getElementById('ss-export-status');
+  if (status) { status.textContent = 'Preparing…'; status.style.color = 'var(--ss-ink-mute)'; }
+  try {
+    const r = await fetch('/api/settings/export?token=' + encodeURIComponent(sessionStorage.getItem('syntaur_token') || ''));
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'syntaur-export-' + new Date().toISOString().slice(0,10) + '.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    if (status) { status.textContent = '✓ Exported ' + Object.keys(data.preferences || {}).length + ' prefs, ' + (data.agents || []).length + ' agents'; status.style.color = 'var(--ss-success)'; }
+  } catch(e) {
+    if (status) { status.textContent = 'Error: ' + e.message; status.style.color = 'var(--ss-danger)'; }
+  }
+}
+function ssImportConfig() { document.getElementById('ss-import-file').click(); }
+async function ssHandleImport(file) {
+  if (!file) return;
+  const status = document.getElementById('ss-export-status');
+  if (status) { status.textContent = 'Reading ' + file.name + '…'; status.style.color = 'var(--ss-ink-mute)'; }
+  try {
+    const text = await file.text();
+    const data = JSON.parse(text);
+    if (!data.syntaur_export_version) throw new Error('Not a Syntaur export file');
+    const preview = [
+      (data.agents || []).length + ' agents',
+      Object.keys(data.preferences || {}).length + ' preferences',
+    ].join(', ');
+    if (!confirm('Import ' + preview + ' from this file?\n\nNote: this adds agents (with name collisions getting numeric suffixes) and overwrites any matching preferences. Secrets are never imported.')) {
+      if (status) status.textContent = '';
+      return;
+    }
+    // Import preferences — one PUT per key (small number of keys so OK).
+    for (const [key, val] of Object.entries(data.preferences || {})) {
+      await fetch('/api/settings/preferences', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: sessionStorage.getItem('syntaur_token'), key, value: String(val) }),
+      });
+    }
+    // Agents: use the existing /api/agents/create endpoint — secrets are never in the export.
+    for (const a of data.agents || []) {
+      if (!a.display_name || !a.system_prompt) continue;
+      try {
+        await fetch('/api/agents/create', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            token: sessionStorage.getItem('syntaur_token'),
+            display_name: a.display_name,
+            description: a.description || null,
+            system_prompt: a.system_prompt,
+            is_main_thread: !!a.is_main_thread,
+            avatar_color: a.avatar_color || null,
+          }),
+        });
+      } catch(e) {}
+    }
+    ssLoadPreferences();
+    if (status) { status.textContent = '✓ Imported ' + preview; status.style.color = 'var(--ss-success)'; }
+  } catch(e) {
+    if (status) { status.textContent = 'Error: ' + e.message; status.style.color = 'var(--ss-danger)'; }
+  }
+  document.getElementById('ss-import-file').value = '';
+}
+
+// ── Danger zone ────────────────────────────────────────────
+let ssDangerAction = null;
+let ssDangerPhrase = null;
+function ssDangerConfirm(phrase, action) {
+  ssDangerAction = action;
+  ssDangerPhrase = phrase;
+  const modal = document.getElementById('ss-danger-modal');
+  const prompt = document.getElementById('ss-danger-prompt');
+  const input = document.getElementById('ss-danger-input');
+  const go = document.getElementById('ss-danger-go');
+  if (prompt) prompt.innerHTML = 'Type <strong>' + phrase + '</strong> to confirm. This cannot be undone.';
+  if (input) { input.value = ''; input.oninput = () => { go.disabled = (input.value.trim() !== phrase); }; }
+  if (go) go.disabled = true;
+  if (modal) modal.classList.remove('hidden');
+  setTimeout(() => input && input.focus(), 30);
+}
+function ssDangerClose() {
+  const modal = document.getElementById('ss-danger-modal');
+  if (modal) modal.classList.add('hidden');
+  ssDangerAction = null; ssDangerPhrase = null;
+}
+function ssDangerExecute() {
+  if (!ssDangerAction || typeof window[ssDangerAction] !== 'function') { ssDangerClose(); return; }
+  window[ssDangerAction]();
+  ssDangerClose();
+}
+async function ssResetPreferences() {
+  const prefs = document.querySelectorAll('input[data-pref]');
+  for (const inp of prefs) {
+    if (inp.type === 'checkbox') inp.checked = false;
+    const key = inp.dataset.pref;
+    try {
+      await fetch('/api/settings/preferences', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: sessionStorage.getItem('syntaur_token'), key, value: null }),
+      });
+    } catch(e) {}
+  }
+  alert('Preferences reset.');
+}
+function ssWipeMemories() { alert("Memory wipe endpoint pending — type-confirm UI is live. Backend DELETE across agent_memories is a follow-up."); }
+function ssFactoryReset()  { alert("Factory reset endpoint pending — type-confirm UI is live. Destructive admin RPC is a follow-up."); }
+
 // About page — pull live stats.
 async function ssRefreshAbout() {
   try {
@@ -1150,5 +1485,11 @@ async function ssRefreshAbout() {
   window.addEventListener('hashchange', ssApplyRoute);
   setTimeout(() => { ssSnapshotForms(); }, 400);
   ssRefreshAbout();
+  ssLoadPreferences();
+  ssRefreshGettingStarted();
+  // Re-refresh the checklist every 60s + on return from other tabs so it
+  // reflects what the user just did elsewhere.
+  setInterval(ssRefreshGettingStarted, 60000);
+  window.addEventListener('focus', ssRefreshGettingStarted);
 })();
 "##;
