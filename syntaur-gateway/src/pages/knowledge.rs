@@ -164,7 +164,7 @@ fn page_body() -> Markup {
         }
 
         // ── Research tab — investigation workflow ──────────────────────
-        div class="lib-body lib-body-research hidden" id="tab-research" {
+        div class="lib-research-body hidden" id="tab-research" {
             div class="lib-research-col" {
                 // Investigation prompt card
                 section class="lib-card" id="research-query-card" {
@@ -398,18 +398,24 @@ const EXTRA_STYLE: &str = r##"
     font-size: 14px;
   }
 
-  /* ── Body shell + 60/40 split ─────────────────────────────────── */
+  /* ── Body shell + 60/40 split (Library tab) ───────────────────── */
   .lib-body {
     display: flex;
     height: calc(100vh - 53px - 44px);
     max-width: 1280px;
     margin: 0 auto;
   }
-  .lib-body.lib-body-research {
+  /* Research tab uses block flow — a single centered column. Uses its
+     own base class so .hidden (display:none) still wins over flex. */
+  .lib-research-body {
     display: block;
-    padding: 24px;
+    height: calc(100vh - 53px - 44px);
     overflow-y: auto;
+    padding: 28px 24px 40px;
+    max-width: 1280px;
+    margin: 0 auto;
   }
+  .lib-research-body.hidden, .lib-body.hidden { display: none !important; }
   .lib-left  { width: 60%; overflow-y: auto; padding: 24px 18px 24px 24px; }
   .lib-right { width: 40%; overflow-y: auto; padding: 24px 24px 24px 18px; display: flex; flex-direction: column; gap: 16px; }
   .lib-left  > section { margin-bottom: 16px; }
@@ -670,7 +676,7 @@ const EXTRA_STYLE: &str = r##"
 
   /* All real content sits above the photographic background image
      (see body::before / body::after rules) and its darkening overlays. */
-  .lib-topbar, .lib-tab-bar, .lib-body { position: relative; z-index: 1; }
+  .lib-topbar, .lib-tab-bar, .lib-body, .lib-research-body { position: relative; z-index: 1; }
 
   /* ── Research sub-tab — investigation ledger on parchment ──────── */
   .lib-research-col { max-width: 900px; margin: 0 auto; }
