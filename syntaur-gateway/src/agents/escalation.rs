@@ -56,6 +56,49 @@ pub fn classify(message: &str) -> &'static str {
     "other"
 }
 
+/// LLM-powered classifier for messages the keyword classifier tags as "other".
+/// Uses a fast single-turn LLM call with a constrained prompt. Falls back to
+/// "other" on error or timeout.
+pub async fn classify_with_llm(
+    config: &crate::config::Config,
+    client: &reqwest::Client,
+    message: &str,
+) -> &'static str {
+    use tokio::time::{timeout, Duration};
+
+    let chain = crate::llm::LlmChain::from_config_fast(config, "main", client.clone());
+    let messages = vec![
+        crate::llm::ChatMessage::system(
+            "Classify this user message into exactly one category. Reply with ONLY the category name, nothing else.
+             Categories: tax, music, research, scheduler, coders, journal, other
+             Rules:
+             - tax: money, expenses, receipts, deductions, IRS, filing, income
+             - music: songs, playlists, listening, artists, playing audio
+             - research: documents, searching knowledge, citations, analysis
+             - scheduler: calendar, meetings, appointments, deadlines, reminders, todos
+             - coders: code, programming, bugs, deployment, servers, git
+             - journal: feelings, reflection, personal thoughts, venting, gratitude
+             - other: anything that doesn't clearly fit the above"
+        ),
+        crate::llm::ChatMessage::user(message),
+    ];
+
+    let result = match timeout(Duration::from_secs(3), chain.call(&messages)).await {
+        Ok(Ok(text)) => text.trim().to_lowercase(),
+        _ => return "other",
+    };
+
+    match result.as_str() {
+        "tax" => "tax",
+        "music" => "music",
+        "research" => "research",
+        "scheduler" => "scheduler",
+        "coders" => "coders",
+        "journal" => "journal",
+        _ => "other",
+    }
+}
+
 /// Display name for a module's specialist agent.
 fn agent_display_name(module: &str) -> &'static str {
     match module {

@@ -1305,7 +1305,15 @@ async fn handle_api_message(
                 // Escalation check: classify user message + track + offer if threshold met
                 let escalation_offer = if agent_id == "main" {
                     let conv_key = req.conversation_id.as_deref().unwrap_or("ephemeral");
-                    let module_tag = crate::agents::escalation::classify(&req.message);
+                    // Hybrid classifier: keyword first, LLM fallback for ambiguous
+                    let keyword_tag = crate::agents::escalation::classify(&req.message);
+                    let module_tag = if keyword_tag == "other" {
+                        crate::agents::escalation::classify_with_llm(
+                            &state.config, &state.client, &req.message
+                        ).await
+                    } else {
+                        keyword_tag
+                    };
                     state.escalation.record(conv_key, module_tag);
                     state.escalation.should_offer(conv_key).map(|m| {
                         crate::agents::escalation::EscalationTracker::build_offer(&m)
@@ -5964,7 +5972,10 @@ async fn handle_api_journal_extract_tasks(
         .join("
 ");
 
-    let tasks = crate::agents::tasks::extract_tasks(&text);
+    // LLM-powered extraction with regex fallback
+    let tasks = crate::agents::tasks::extract_tasks_with_llm(
+        &state.config, &state.client, &text
+    ).await;
 
     Ok(Json(serde_json::json!({
         "conversation_id": conv_id,

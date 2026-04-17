@@ -72,6 +72,62 @@ pub fn create_todo(
     Ok(conn.last_insert_rowid())
 }
 
+/// LLM-powered task extraction — more accurate than regex, catches natural
+/// language tasks like "I should really get the car serviced" while avoiding
+/// false positives on emotional statements.
+///
+/// Falls back to regex extraction on error or timeout.
+pub async fn extract_tasks_with_llm(
+    config: &crate::config::Config,
+    client: &reqwest::Client,
+    text: &str,
+) -> Vec<String> {
+    use tokio::time::{timeout, Duration};
+
+    if text.len() < 10 { return vec![]; }
+
+    // Truncate very long text to avoid burning tokens
+    let input = if text.len() > 3000 { &text[..3000] } else { text };
+
+    let chain = crate::llm::LlmChain::from_config_fast(config, "main", client.clone());
+    let messages = vec![
+        crate::llm::ChatMessage::system(
+            "Extract actionable tasks from this journal entry. Return ONLY a JSON array of short task strings.
+             Rules:
+             - Include: things to do, buy, call, fix, schedule, remember, send, finish
+             - Exclude: feelings, reflections, observations, wishes without action
+             - Keep each task under 100 characters
+             - If no tasks found, return []
+             Example: [\"call the dentist\", \"buy groceries\", \"fix kitchen faucet\"]"
+        ),
+        crate::llm::ChatMessage::user(input),
+    ];
+
+    let result = match timeout(Duration::from_secs(8), chain.call(&messages)).await {
+        Ok(Ok(text)) => text,
+        _ => return extract_tasks(text), // fall back to regex
+    };
+
+    // Parse JSON array from response (handle markdown code blocks)
+    let cleaned = result
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+
+    match serde_json::from_str::<Vec<String>>(cleaned) {
+        Ok(tasks) => {
+            // Filter and deduplicate
+            let mut seen = std::collections::HashSet::new();
+            tasks.into_iter()
+                .filter(|t| t.len() >= 5 && t.len() <= 200 && seen.insert(t.clone()))
+                .collect()
+        }
+        Err(_) => extract_tasks(text), // fall back to regex
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
