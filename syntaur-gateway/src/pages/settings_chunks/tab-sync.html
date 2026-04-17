@@ -1,0 +1,70 @@
+<div class="tab-content hidden" id="tab-sync">
+    <div class="space-y-4">
+
+      <!-- Get Started — primary CTA, simplest path first -->
+      <div id="sync-getstarted-card" class="card border-2 border-oc-700 bg-gradient-to-br from-oc-900/30 to-gray-800">
+        <div class="flex items-start gap-4">
+          <div class="text-4xl flex-shrink-0">📱</div>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center justify-between mb-1">
+              <h3 class="font-semibold text-base">Start here: pair your phone</h3>
+              <span class="badge badge-blue">Recommended first</span>
+            </div>
+            <p class="text-sm text-gray-300 mb-3">Install the Syntaur Voice PWA on your phone. <strong class="text-white">That's all most people need.</strong> Once paired, Syntaur can listen to you, send notifications, capture your voice journal, and play music through your phone.</p>
+            <ul class="text-xs text-gray-400 space-y-1 mb-3">
+              <li>✓ Voice in / voice out (Syntaur listens and replies on your phone)</li>
+              <li>✓ Music playback through phone speakers, AirPods, or AirPlay</li>
+              <li>✓ Real-time notifications and reminders</li>
+              <li>✓ Voice journal capture from anywhere</li>
+            </ul>
+            <div class="bg-gray-900/60 border border-gray-700 rounded-lg p-3 mb-4">
+              <p class="text-xs text-gray-300"><strong class="text-oc-400">✨ Pair once, works anywhere.</strong> Also install <a href="https://tailscale.com/download" target="_blank" class="text-oc-500 hover:text-oc-400 underline">Tailscale</a> on your phone (one-time, free) — the same QR below then works at the coffee shop, on cellular, anywhere you have internet. No extra setup.</p>
+            </div>
+            <button onclick="openSyncModal('telegram')" class="hidden text-xs bg-oc-600 hover:bg-oc-700 text-white px-4 py-2 rounded-lg font-medium" id="sync-cta-telegram-btn">Connect Telegram</button>
+            <button onclick="window.open('http://' + location.hostname + ':18803', '_blank')" class="bg-oc-600 hover:bg-oc-700 text-white px-4 py-2 rounded-lg text-sm font-medium">Pair my phone</button>
+            <button onclick="openSyncModal('phone_music_pwa')" class="ml-2 text-xs text-gray-400 hover:text-gray-200">Already paired? Connect it →</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="sync-getstarted-done" class="hidden card border-green-700/50">
+        <div class="flex items-center gap-3">
+          <span class="text-2xl">✓</span>
+          <div class="flex-1">
+            <p class="text-sm font-medium text-green-400">Phone paired</p>
+            <p class="text-xs text-gray-500">You're set. Add more below to expand what Syntaur can do.</p>
+          </div>
+          <button onclick="document.getElementById('sync-getstarted-card').classList.remove('hidden'); this.parentElement.parentElement.classList.add('hidden');" class="text-xs text-gray-500 hover:text-gray-300">Show again</button>
+        </div>
+      </div>
+
+      <!-- Want Syntaur to... progressive disclosure -->
+      <div class="card">
+        <div class="flex items-center justify-between mb-1">
+          <h3 class="font-medium">Want Syntaur to do more?</h3>
+          <button onclick="loadSyncProviders()" class="text-xs text-gray-400 hover:text-gray-200">&#8634; Refresh</button>
+        </div>
+        <p class="text-xs text-gray-500 mb-4">Each row shows the simplest path first. Add more for extra capability.</p>
+        <div id="sync-usecases" class="space-y-3">
+          <p class="text-xs text-gray-500 italic">Loading…</p>
+        </div>
+      </div>
+
+      <!-- All services — power-user view, collapsed by default -->
+      <div class="card">
+        <button onclick="toggleAllServices()" class="w-full flex items-center justify-between text-left" id="sync-all-toggle">
+          <div>
+            <h3 class="font-medium text-sm">All services</h3>
+            <p class="text-[11px] text-gray-500 mt-0.5">Browse the full catalog (29 providers) or jump to a specific service.</p>
+          </div>
+          <span class="text-gray-500 text-xs" id="sync-all-arrow">▸ Show all</span>
+        </button>
+        <div id="sync-all-services" class="hidden mt-4">
+          <input type="text" id="sync-filter" placeholder="Filter…" oninput="filterProviders(this.value)" class="w-full mb-4 bg-gray-900 border border-gray-700 rounded-lg text-xs text-gray-300 px-3 py-2 outline-none focus:border-oc-500">
+          <div id="sync-categories" class="space-y-5">
+            <p class="text-xs text-gray-500 italic">Loading providers…</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>

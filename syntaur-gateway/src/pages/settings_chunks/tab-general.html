@@ -1,0 +1,59 @@
+<div class="tab-content" id="tab-general">
+    <div class="space-y-4">
+
+      <div class="card">
+        <h3 class="font-medium mb-4">Assistant</h3>
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label class="label">Agent name</label>
+            <p class="text-gray-300" id="set-agent-name">--</p>
+          </div>
+          <div>
+            <label class="label">Version</label>
+            <p class="text-gray-300" id="set-version">--</p>
+          </div>
+        </div>
+
+        <h3 class="font-medium mb-3 mt-6">Agent Avatars</h3>
+        <p class="text-xs text-gray-500 mb-3">Upload a custom image for each agent. It will appear in chat and on the dashboard.</p>
+        <div class="space-y-3" id="avatar-list">
+          <!-- Populated by JS -->
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 class="font-medium mb-4">Connections</h3>
+        <div class="space-y-3">
+          <div class="flex items-center justify-between p-3 rounded-lg bg-gray-900">
+            <div>
+              <p class="text-sm font-medium">Telegram</p>
+              <p class="text-xs text-gray-500" id="set-telegram-status">Not configured</p>
+            </div>
+            <span class="badge" id="set-telegram-badge"></span>
+          </div>
+          <div class="flex items-center justify-between p-3 rounded-lg bg-gray-900">
+            <div>
+              <p class="text-sm font-medium">Home Assistant</p>
+              <p class="text-xs text-gray-500" id="set-ha-status">Not configured</p>
+            </div>
+            <span class="badge" id="set-ha-badge"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 class="font-medium mb-4">Data</h3>
+        <div class="grid grid-cols-2 gap-4 text-sm">
+          <div>
+            <label class="label">Config directory</label>
+            <p class="text-gray-400 font-mono text-xs" id="set-config-dir">~/.syntaur/</p>
+          </div>
+          <div>
+            <label class="label">Gateway port</label>
+            <p class="text-gray-400" id="set-port">18789</p>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>

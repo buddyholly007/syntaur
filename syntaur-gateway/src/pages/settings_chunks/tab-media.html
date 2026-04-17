@@ -1,0 +1,53 @@
+<div class="tab-content hidden" id="tab-media">
+    <div class="space-y-4">
+
+      <div class="card">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="font-medium">Syntaur Media Bridge</h3>
+          <span id="mb-status-badge" class="badge badge-red">checking…</span>
+        </div>
+        <p class="text-sm text-gray-400 mb-3">
+          A small companion that runs on your desktop and plays Apple Music, Spotify, Tidal
+          and YouTube Music through your speakers — no popup window, no app switching.
+          It hosts a hidden Chromium that decrypts FairPlay/Widevine exactly as a normal
+          tab would.
+        </p>
+        <div id="mb-details" class="text-sm text-gray-300 space-y-1 mb-3 hidden">
+          <div>Version: <code id="mb-version" class="text-oc-500">—</code></div>
+          <div>Audio backend: <code id="mb-backend" class="text-oc-500">—</code></div>
+          <div>Authenticated services: <span id="mb-authed" class="text-gray-400">none yet</span></div>
+        </div>
+        <div id="mb-install" class="hidden text-sm text-gray-300 space-y-2">
+          <p class="text-amber-400">No bridge process detected on <code>127.0.0.1:18790</code>.</p>
+          <p class="font-medium">Install on this machine (Linux / macOS):</p>
+          <pre class="text-xs bg-gray-900 p-3 rounded overflow-x-auto"><code>scp user@server:/path/syntaur-media-bridge ~/.local/bin/
+chmod +x ~/.local/bin/syntaur-media-bridge
+bash install.sh   # systemd-user service / launchd agent</code></pre>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 class="font-medium mb-3">Authenticate a service</h3>
+        <p class="text-sm text-gray-400 mb-3">
+          One-time login per service. The bridge opens a visible Chromium, you sign in
+          normally, cookies persist so future playback is headless.
+        </p>
+        <div class="flex flex-wrap gap-2">
+          <button class="btn-secondary" onclick="copyAuthCmd('apple_music')">Apple Music — copy command</button>
+          <button class="btn-secondary" onclick="copyAuthCmd('spotify')">Spotify — copy command</button>
+          <button class="btn-secondary" onclick="copyAuthCmd('tidal')">Tidal — copy command</button>
+          <button class="btn-secondary" onclick="copyAuthCmd('youtube_music')">YT Music — copy command</button>
+        </div>
+        <p class="text-xs text-gray-500 mt-3" id="mb-copy-hint"></p>
+      </div>
+
+      <div class="card">
+        <h3 class="font-medium mb-3">Quick test</h3>
+        <p class="text-sm text-gray-400 mb-3">
+          Open the music page to verify end-to-end playback.
+        </p>
+        <a href="/music" class="btn-primary inline-block">Open /music</a>
+      </div>
+
+    </div>
+  </div>

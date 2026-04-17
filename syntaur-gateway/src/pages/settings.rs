@@ -1,11 +1,30 @@
-//! /settings — migrated from static/settings.html. Structural markup and
-//! embedded scripts live as raw-string consts below so their bytes
-//! count as Rust and the file compiles type-checked through maud.
+//! /settings — command-center style settings page.
+//!
+//! Two-pane sidebar layout (10 sections) replacing the old 6-tab strip.
+//! Deep-linkable via URL hash: `#account/profile`, `#integrations/telegram`,
+//! etc. Includes a ⌘K command palette that indexes every setting leaf.
+//!
+//! Legacy tab HTML chunks are extracted from the former raw `BODY_HTML`
+//! string and kept as `include_str!` blobs in `settings_chunks/` so the
+//! existing JS (form wiring, LLM provider CRUD, sync connect flow, admin
+//! invites, etc.) keeps working unchanged while we progressively rewrite
+//! each tab into proper maud. PAGE_JS is likewise held as `page.js` and
+//! included verbatim.
 
 use axum::response::Html;
-use maud::{html, PreEscaped};
+use maud::{html, Markup, PreEscaped};
 
 use super::shared::{shell, Page};
+
+// ── Legacy HTML blobs (progressively replaced with maud in later phases) ──
+const LEGACY_GENERAL: &str = include_str!("settings_chunks/tab-general.html");
+const LEGACY_LLM:     &str = include_str!("settings_chunks/tab-llm.html");
+const LEGACY_SYNC:    &str = include_str!("settings_chunks/tab-sync.html");
+const LEGACY_MEDIA:   &str = include_str!("settings_chunks/tab-media.html");
+const LEGACY_SYSTEM:  &str = include_str!("settings_chunks/tab-system.html");
+const LEGACY_USERS:   &str = include_str!("settings_chunks/tab-users.html");
+const LEGACY_MODALS:  &str = include_str!("settings_chunks/modals.html");
+const LEGACY_JS:      &str = include_str!("settings_chunks/page.js");
 
 pub async fn render() -> Html<String> {
     let page = Page {
@@ -13,2529 +32,1123 @@ pub async fn render() -> Html<String> {
         authed: true,
         extra_style: Some(EXTRA_STYLE),
     };
-    let body = html! { (PreEscaped(BODY_HTML)) };
+    // Substitute the server-rendered palette index into the JS template.
+    let resolved_js = NEW_JS.replace("%%SS_INDEX%%", &palette_index_json());
+    let body = html! {
+        (top_bar())
+        div class="ss-shell" {
+            (sidebar())
+            main class="ss-main" id="ss-main" {
+                (content_area())
+            }
+        }
+        // Legacy modals, dialogs, and any DOM nodes the JS expects to find
+        // at load. Preserved verbatim until we migrate each to maud.
+        (PreEscaped(LEGACY_MODALS))
+
+        // Command palette overlay (⌘K)
+        (cmdk_palette())
+
+        // Dirty-state banner (hidden by default; shown by JS on change)
+        (dirty_banner())
+
+        script { (PreEscaped(LEGACY_JS)) }
+        script { (PreEscaped(resolved_js)) }
+    };
     Html(shell(page, body).into_string())
 }
 
-const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
-  body { font-family: 'Inter', sans-serif; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; }
-  .card { @apply bg-gray-800 rounded-xl border border-gray-700 p-5; }
-  .input { @apply w-full bg-gray-900 border border-gray-600 rounded-lg px-4 py-2.5 text-white placeholder-gray-400 focus:border-oc-500 focus:ring-1 focus:ring-oc-500 outline-none text-sm; }
-  select, select.input { color-scheme: dark; }
-  select option { background-color: #111827; color: #e5e7eb; }
-  .label { @apply block text-sm font-medium text-gray-300 mb-1.5; }
-  .btn-primary { @apply bg-oc-600 hover:bg-oc-700 text-white font-medium py-2 px-5 rounded-lg transition-colors text-sm; }
-  .btn-secondary { @apply bg-gray-700 hover:bg-gray-600 text-gray-200 font-medium py-2 px-5 rounded-lg transition-colors text-sm; }
-  .badge { @apply inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium; }
-  .badge-green { @apply bg-green-900/50 text-green-400; }
-  .badge-red { @apply bg-red-900/50 text-red-400; }
-  .tab { @apply px-4 py-2 text-sm font-medium rounded-lg cursor-pointer transition-colors; }
-  .tab.active { @apply bg-gray-800 text-white; }
-  .tab:not(.active) { @apply text-gray-400 hover:text-gray-300; }"##;
+// ══════════════════════════════════════════════════════════════════════
+// Top bar + sidebar
+// ══════════════════════════════════════════════════════════════════════
 
-const BODY_HTML: &str = r##"<!-- Top bar -->
-<div class="border-b border-gray-800 bg-gray-900/50 backdrop-blur sticky top-0 z-40">
-  <div class="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
-    <div class="flex items-center gap-3">
-      <a href="/" class="flex items-center gap-2 hover:opacity-80">
-        <img src="/app-icon.jpg" class="h-8 w-8 rounded-lg" alt="">
-        <span class="font-semibold text-lg">Syntaur</span>
-      </a>
-      <span class="text-gray-600">/</span>
-      <span class="text-gray-400">Settings</span>
-    </div>
-    <a href="/" class="text-sm text-gray-400 hover:text-gray-300">&#8592; Dashboard</a>
-  </div>
-</div>
-
-<div class="max-w-4xl mx-auto px-4 py-6">
-
-  <!-- Tabs -->
-  <div class="flex gap-1 mb-6 bg-gray-900 rounded-xl p-1 w-fit">
-    <button class="tab active" onclick="showTab('general')">General</button>
-    <button class="tab" onclick="showTab('sync')">Sync</button>
-    <button class="tab" onclick="showTab('llm')">LLM Backends</button>
-    <button class="tab" onclick="showTab('media')">Media Bridge</button>
-    <button class="tab" onclick="showTab('system')">System</button>
-    <button class="tab" onclick="showTab('users')" id="users-tab-btn">Users</button>
-  </div>
-
-  <!-- General tab -->
-  <div class="tab-content" id="tab-general">
-    <div class="space-y-4">
-
-      <div class="card">
-        <h3 class="font-medium mb-4">Assistant</h3>
-        <div class="grid grid-cols-2 gap-4">
-          <div>
-            <label class="label">Agent name</label>
-            <p class="text-gray-300" id="set-agent-name">--</p>
-          </div>
-          <div>
-            <label class="label">Version</label>
-            <p class="text-gray-300" id="set-version">--</p>
-          </div>
-        </div>
-
-        <h3 class="font-medium mb-3 mt-6">Agent Avatars</h3>
-        <p class="text-xs text-gray-500 mb-3">Upload a custom image for each agent. It will appear in chat and on the dashboard.</p>
-        <div class="space-y-3" id="avatar-list">
-          <!-- Populated by JS -->
-        </div>
-      </div>
-
-      <div class="card">
-        <h3 class="font-medium mb-4">Connections</h3>
-        <div class="space-y-3">
-          <div class="flex items-center justify-between p-3 rounded-lg bg-gray-900">
-            <div>
-              <p class="text-sm font-medium">Telegram</p>
-              <p class="text-xs text-gray-500" id="set-telegram-status">Not configured</p>
-            </div>
-            <span class="badge" id="set-telegram-badge"></span>
-          </div>
-          <div class="flex items-center justify-between p-3 rounded-lg bg-gray-900">
-            <div>
-              <p class="text-sm font-medium">Home Assistant</p>
-              <p class="text-xs text-gray-500" id="set-ha-status">Not configured</p>
-            </div>
-            <span class="badge" id="set-ha-badge"></span>
-          </div>
-        </div>
-      </div>
-
-      <div class="card">
-        <h3 class="font-medium mb-4">Data</h3>
-        <div class="grid grid-cols-2 gap-4 text-sm">
-          <div>
-            <label class="label">Config directory</label>
-            <p class="text-gray-400 font-mono text-xs" id="set-config-dir">~/.syntaur/</p>
-          </div>
-          <div>
-            <label class="label">Gateway port</label>
-            <p class="text-gray-400" id="set-port">18789</p>
-          </div>
-        </div>
-      </div>
-
-    </div>
-  </div>
-
-  <!-- LLM tab -->
-  <div class="tab-content hidden" id="tab-llm">
-    <div class="space-y-4">
-
-      <div class="card">
-        <h3 class="font-medium mb-2">Active LLM Backends</h3>
-        <p class="text-sm text-gray-400 mb-4">These are the AI models Syntaur uses to process your requests. The primary is tried first; fallbacks activate automatically if the primary fails.</p>
-        <div class="space-y-3" id="llm-providers-list">
-          <p class="text-gray-500">Loading...</p>
-        </div>
-      </div>
-
-      <div class="card">
-        <h3 class="font-medium mb-2">Quick Setup</h3>
-        <p class="text-sm text-gray-400 mb-4">Choose the option that fits your setup. You can always change this later.</p>
-        <div class="space-y-3">
-          <details class="group">
-            <summary class="flex items-center gap-3 p-3 rounded-lg bg-gray-900 hover:bg-gray-800 cursor-pointer transition-colors">
-              <span class="text-lg">&#9729;</span>
-              <div class="flex-1">
-                <p class="text-sm font-medium text-white">Cloud API (Recommended)</p>
-                <p class="text-xs text-gray-500">OpenRouter, Anthropic, or OpenAI — best quality, no hardware needed</p>
-              </div>
-              <span class="text-xs text-gray-600 group-open:rotate-90 transition-transform">&#9654;</span>
-            </summary>
-            <div class="mt-2 ml-9 space-y-3 text-sm">
-              <div class="p-3 bg-gray-900/50 rounded-lg border border-gray-800">
-                <p class="text-gray-300 font-medium mb-2">OpenRouter (easiest, free tier available)</p>
-                <ol class="text-xs text-gray-400 space-y-1 list-decimal ml-4">
-                  <li>Sign up at <a href="https://openrouter.ai" target="_blank" class="text-oc-500 hover:text-oc-400">openrouter.ai</a></li>
-                  <li>Go to Keys &rarr; Create Key</li>
-                  <li>Paste below and click Save</li>
-                </ol>
-                <div class="flex gap-2 mt-2">
-                  <input class="input flex-1 text-xs" id="setup-or-key" placeholder="sk-or-v1-...">
-                  <button onclick="saveProvider('openrouter','https://openrouter.ai/api/v1',document.getElementById('setup-or-key').value,'openai-completions','nvidia/nemotron-3-super-120b-a12b:free')" class="btn-primary text-xs">Save</button>
-                </div>
-                <div class="mt-2 p-2 bg-gray-800/50 rounded-lg text-[11px] space-y-1">
-                  <p class="text-gray-400">Free model: <span class="text-gray-300">nvidia/nemotron-3-super-120b-a12b:free</span> (262K context)</p>
-                  <div class="flex gap-4 text-gray-500">
-                    <div>
-                      <p class="text-gray-500 font-medium">Without credits</p>
-                      <p>50 requests/day</p>
-                      <p>20 requests/min</p>
-                    </div>
-                    <div>
-                      <p class="text-green-500 font-medium">With $10+ credits</p>
-                      <p>1,000 requests/day</p>
-                      <p>Dynamic rate limit</p>
-                    </div>
-                  </div>
-                  <p class="text-gray-600">Adding just $10 in credits unlocks 20x more daily requests &mdash; free models still cost $0, the balance just proves you're a real user. <a href="https://openrouter.ai/credits" target="_blank" class="text-oc-500 hover:text-oc-400">Add credits &rarr;</a></p>
-                </div>
-              </div>
-              <div class="p-3 bg-gray-900/50 rounded-lg border border-gray-800">
-                <p class="text-gray-300 font-medium mb-2">Anthropic (Claude)</p>
-                <ol class="text-xs text-gray-400 space-y-1 list-decimal ml-4">
-                  <li>Get an API key at <a href="https://console.anthropic.com/settings/keys" target="_blank" class="text-oc-500 hover:text-oc-400">console.anthropic.com</a></li>
-                  <li>Paste below and click Save</li>
-                </ol>
-                <div class="flex gap-2 mt-2">
-                  <input class="input flex-1 text-xs" id="setup-anthropic-key" placeholder="sk-ant-...">
-                  <button onclick="saveProvider('anthropic','https://api.anthropic.com',document.getElementById('setup-anthropic-key').value,'anthropic','claude-sonnet-4-6')" class="btn-primary text-xs">Save</button>
-                </div>
-              </div>
-              <div class="p-3 bg-gray-900/50 rounded-lg border border-gray-800">
-                <p class="text-gray-300 font-medium mb-2">OpenAI</p>
-                <ol class="text-xs text-gray-400 space-y-1 list-decimal ml-4">
-                  <li>Get an API key at <a href="https://platform.openai.com/api-keys" target="_blank" class="text-oc-500 hover:text-oc-400">platform.openai.com</a></li>
-                  <li>Paste below and click Save</li>
-                </ol>
-                <div class="flex gap-2 mt-2">
-                  <input class="input flex-1 text-xs" id="setup-openai-key" placeholder="sk-...">
-                  <button onclick="saveProvider('openai','https://api.openai.com/v1',document.getElementById('setup-openai-key').value,'openai-completions','gpt-4o')" class="btn-primary text-xs">Save</button>
-                </div>
-              </div>
-            </div>
-          </details>
-
-          <details class="group">
-            <summary class="flex items-center gap-3 p-3 rounded-lg bg-gray-900 hover:bg-gray-800 cursor-pointer transition-colors">
-              <span class="text-lg">&#128187;</span>
-              <div class="flex-1">
-                <p class="text-sm font-medium text-white">Local Model (Private, Free)</p>
-                <p class="text-xs text-gray-500">Ollama, LM Studio, or llama.cpp — runs on your own hardware, no API costs</p>
-              </div>
-              <span class="text-xs text-gray-600 group-open:rotate-90 transition-transform">&#9654;</span>
-            </summary>
-            <div class="mt-2 ml-9 space-y-3 text-sm">
-              <div class="p-3 bg-gray-900/50 rounded-lg border border-gray-800">
-                <p class="text-gray-300 font-medium mb-2">Ollama (simplest local option)</p>
-                <ol class="text-xs text-gray-400 space-y-1 list-decimal ml-4">
-                  <li>Install from <a href="https://ollama.ai" target="_blank" class="text-oc-500 hover:text-oc-400">ollama.ai</a></li>
-                  <li>Run: <code class="bg-gray-800 px-1 rounded">ollama pull llama3.1</code></li>
-                  <li>Ollama runs on port 11434 by default</li>
-                </ol>
-                <div class="flex gap-2 mt-2">
-                  <input class="input flex-1 text-xs" id="setup-ollama-url" placeholder="http://localhost:11434" value="http://localhost:11434">
-                  <button onclick="saveProvider('ollama',document.getElementById('setup-ollama-url').value,'','openai-completions','llama3.1')" class="btn-primary text-xs">Save</button>
-                </div>
-              </div>
-              <div class="p-3 bg-gray-900/50 rounded-lg border border-gray-800">
-                <p class="text-gray-300 font-medium mb-2">LM Studio / llama.cpp</p>
-                <ol class="text-xs text-gray-400 space-y-1 list-decimal ml-4">
-                  <li>Start your server (default port 1234 for LM Studio)</li>
-                  <li>Enter the URL below</li>
-                </ol>
-                <div class="flex gap-2 mt-2">
-                  <input class="input flex-1 text-xs" id="setup-local-url" placeholder="http://localhost:1234/v1">
-                  <input class="input w-32 text-xs" id="setup-local-model" placeholder="Model name">
-                  <button onclick="saveProvider('local',document.getElementById('setup-local-url').value,'','openai-completions',document.getElementById('setup-local-model').value||'default')" class="btn-primary text-xs">Save</button>
-                </div>
-              </div>
-            </div>
-          </details>
-
-          <details class="group">
-            <summary class="flex items-center gap-3 p-3 rounded-lg bg-gray-900 hover:bg-gray-800 cursor-pointer transition-colors">
-              <span class="text-lg">&#9889;</span>
-              <div class="flex-1">
-                <p class="text-sm font-medium text-white">Hybrid (Cloud + Local Fallback)</p>
-                <p class="text-xs text-gray-500">Cloud for quality, local for privacy/offline — automatic failover</p>
-              </div>
-              <span class="text-xs text-gray-600 group-open:rotate-90 transition-transform">&#9654;</span>
-            </summary>
-            <div class="mt-2 ml-9 text-sm">
-              <p class="text-xs text-gray-400 p-3 bg-gray-900/50 rounded-lg border border-gray-800">Set up a cloud provider above as primary, then add a local model as fallback. Syntaur tries the primary first and falls back automatically if it fails or is unreachable.</p>
-            </div>
-          </details>
-          <details class="group">
-            <summary class="flex items-center gap-3 p-3 rounded-lg bg-gray-900 hover:bg-gray-800 cursor-pointer transition-colors">
-              <span class="text-lg">&#128247;</span>
-              <div class="flex-1">
-                <p class="text-sm font-medium text-white">Vision Model (Receipt/Document Scanning)</p>
-                <p class="text-xs text-gray-500">Local GPU or cloud model for scanning receipts and tax documents</p>
-              </div>
-              <span class="text-xs text-gray-600 group-open:rotate-90 transition-transform">&#9654;</span>
-            </summary>
-            <div class="mt-2 ml-9 space-y-3 text-sm">
-              <div class="p-3 bg-gray-900/50 rounded-lg border border-gray-800">
-                <p class="text-gray-300 font-medium mb-2">Local GPU (fastest, private)</p>
-                <p class="text-xs text-gray-400 mb-2">If you have an NVIDIA GPU, Syntaur can scan receipts locally. Your documents never leave your machine.</p>
-                <ol class="text-xs text-gray-400 space-y-1 list-decimal ml-4">
-                  <li>Install <a href="https://ollama.ai" target="_blank" class="text-oc-500">Ollama</a> or <a href="https://github.com/ggml-org/llama.cpp" target="_blank" class="text-oc-500">llama.cpp</a></li>
-                  <li>Download a vision model: <code class="bg-gray-800 px-1 rounded">ollama pull qwen2.5-vl:7b</code></li>
-                  <li>Enter the endpoint below</li>
-                </ol>
-                <div class="flex gap-2 mt-2">
-                  <input class="input flex-1 text-xs" id="setup-vision-url" placeholder="http://localhost:11434/v1" value="">
-                  <button onclick="saveVisionModel(document.getElementById('setup-vision-url').value)" class="btn-primary text-xs">Save</button>
-                </div>
-                <p class="text-[10px] text-gray-600 mt-1">Recommended: Qwen2.5-VL-7B (4.7GB, needs 8GB+ VRAM). Also works: MiniCPM-V, LLaVA.</p>
-              </div>
-              <div class="p-3 bg-gray-900/50 rounded-lg border border-gray-800">
-                <p class="text-gray-300 font-medium mb-2">Cloud (no GPU needed)</p>
-                <p class="text-xs text-gray-400">If no vision model is configured, Syntaur uses your cloud provider for scanning. OpenRouter's free Nemotron Nano VL model works well. No additional setup needed.</p>
-              </div>
-            </div>
-          </details>
-        </div>
-        <span id="setup-result" class="text-sm mt-2 block"></span>
-      </div>
-
-      <div class="card" id="gpu-assignment-card">
-        <div class="flex items-center justify-between mb-3">
-          <h3 class="font-medium">GPU & Model Assignment</h3>
-          <button onclick="scanGpus()" class="text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 px-3 py-1 rounded-lg" id="gpu-scan-btn">Scan Network</button>
-        </div>
-        <p class="text-sm text-gray-400 mb-3">Syntaur can use multiple GPUs across your network. Assign each GPU a role for optimal performance.</p>
-        <div id="gpu-list" class="space-y-2">
-          <p class="text-xs text-gray-600">Click "Scan Network" to detect GPUs on your LAN.</p>
-        </div>
-        <div id="gpu-assignments" class="hidden mt-4 pt-3 border-t border-gray-700">
-          <p class="text-xs text-gray-500 font-medium mb-2">Model Assignments</p>
-          <div class="space-y-2 text-sm">
-            <div class="flex items-center justify-between p-2 rounded-lg bg-gray-900">
-              <div><span class="text-gray-400">Chat / Agent</span><p class="text-[10px] text-gray-600">Main conversational AI, tool calling</p></div>
-              <select id="assign-chat" class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-xs text-gray-300 outline-none w-48" onchange="saveAssignment('primary', this.value)">
-                <option value="">Cloud only</option>
-              </select>
-            </div>
-            <div class="flex items-center justify-between p-2 rounded-lg bg-gray-900">
-              <div><span class="text-gray-400">Vision / OCR</span><p class="text-[10px] text-gray-600">Receipt scanning, document analysis</p></div>
-              <select id="assign-vision" class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-xs text-gray-300 outline-none w-48" onchange="saveAssignment('vision', this.value)">
-                <option value="">Cloud only</option>
-              </select>
-            </div>
-            <div class="flex items-center justify-between p-2 rounded-lg bg-gray-900">
-              <div><span class="text-gray-400">Voice / TTS</span><p class="text-[10px] text-gray-600">Speech-to-text, text-to-speech</p></div>
-              <select id="assign-voice" class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-xs text-gray-300 outline-none w-48" onchange="saveAssignment('voice', this.value)">
-                <option value="">Cloud only</option>
-              </select>
-            </div>
-            <div class="flex items-center justify-between p-2 rounded-lg bg-gray-900">
-              <div><span class="text-gray-400">Fast / Classification</span><p class="text-[10px] text-gray-600">Quick tasks, categorization, routing</p></div>
-              <select id="assign-fast" class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-xs text-gray-300 outline-none w-48" onchange="saveAssignment('fast', this.value)">
-                <option value="">Use chat model</option>
-              </select>
-            </div>
-          </div>
-          <span id="assign-result" class="text-xs mt-2 block"></span>
-        </div>
-      </div>
-
-      <div class="card">
-        <h3 class="font-medium mb-2">Test a Connection</h3>
-        <p class="text-sm text-gray-400 mb-4">Verify an LLM endpoint is reachable and responding.</p>
-        <div class="space-y-3">
-          <div class="grid grid-cols-3 gap-3">
-            <div class="col-span-2">
-              <label class="label">Base URL</label>
-              <input class="input" id="test-url" placeholder="https://openrouter.ai/api/v1">
-            </div>
-            <div>
-              <label class="label">API Key (optional)</label>
-              <input type="password" class="input" id="test-key" placeholder="sk-...">
-            </div>
-          </div>
-          <div class="flex items-center gap-3">
-            <button class="btn-primary" onclick="testConnection()">Test</button>
-            <span id="test-result" class="text-sm"></span>
-          </div>
-        </div>
-      </div>
-
-    </div>
-  </div>
-
-  <!-- Sync tab -->
-  <div class="tab-content hidden" id="tab-sync">
-    <div class="space-y-4">
-
-      <!-- Get Started — primary CTA, simplest path first -->
-      <div id="sync-getstarted-card" class="card border-2 border-oc-700 bg-gradient-to-br from-oc-900/30 to-gray-800">
-        <div class="flex items-start gap-4">
-          <div class="text-4xl flex-shrink-0">📱</div>
-          <div class="flex-1 min-w-0">
-            <div class="flex items-center justify-between mb-1">
-              <h3 class="font-semibold text-base">Start here: pair your phone</h3>
-              <span class="badge badge-blue">Recommended first</span>
-            </div>
-            <p class="text-sm text-gray-300 mb-3">Install the Syntaur Voice PWA on your phone. <strong class="text-white">That's all most people need.</strong> Once paired, Syntaur can listen to you, send notifications, capture your voice journal, and play music through your phone.</p>
-            <ul class="text-xs text-gray-400 space-y-1 mb-3">
-              <li>✓ Voice in / voice out (Syntaur listens and replies on your phone)</li>
-              <li>✓ Music playback through phone speakers, AirPods, or AirPlay</li>
-              <li>✓ Real-time notifications and reminders</li>
-              <li>✓ Voice journal capture from anywhere</li>
-            </ul>
-            <div class="bg-gray-900/60 border border-gray-700 rounded-lg p-3 mb-4">
-              <p class="text-xs text-gray-300"><strong class="text-oc-400">✨ Pair once, works anywhere.</strong> Also install <a href="https://tailscale.com/download" target="_blank" class="text-oc-500 hover:text-oc-400 underline">Tailscale</a> on your phone (one-time, free) — the same QR below then works at the coffee shop, on cellular, anywhere you have internet. No extra setup.</p>
-            </div>
-            <button onclick="openSyncModal('telegram')" class="hidden text-xs bg-oc-600 hover:bg-oc-700 text-white px-4 py-2 rounded-lg font-medium" id="sync-cta-telegram-btn">Connect Telegram</button>
-            <button onclick="window.open('http://' + location.hostname + ':18803', '_blank')" class="bg-oc-600 hover:bg-oc-700 text-white px-4 py-2 rounded-lg text-sm font-medium">Pair my phone</button>
-            <button onclick="openSyncModal('phone_music_pwa')" class="ml-2 text-xs text-gray-400 hover:text-gray-200">Already paired? Connect it →</button>
-          </div>
-        </div>
-      </div>
-
-      <div id="sync-getstarted-done" class="hidden card border-green-700/50">
-        <div class="flex items-center gap-3">
-          <span class="text-2xl">✓</span>
-          <div class="flex-1">
-            <p class="text-sm font-medium text-green-400">Phone paired</p>
-            <p class="text-xs text-gray-500">You're set. Add more below to expand what Syntaur can do.</p>
-          </div>
-          <button onclick="document.getElementById('sync-getstarted-card').classList.remove('hidden'); this.parentElement.parentElement.classList.add('hidden');" class="text-xs text-gray-500 hover:text-gray-300">Show again</button>
-        </div>
-      </div>
-
-      <!-- Want Syntaur to... progressive disclosure -->
-      <div class="card">
-        <div class="flex items-center justify-between mb-1">
-          <h3 class="font-medium">Want Syntaur to do more?</h3>
-          <button onclick="loadSyncProviders()" class="text-xs text-gray-400 hover:text-gray-200">&#8634; Refresh</button>
-        </div>
-        <p class="text-xs text-gray-500 mb-4">Each row shows the simplest path first. Add more for extra capability.</p>
-        <div id="sync-usecases" class="space-y-3">
-          <p class="text-xs text-gray-500 italic">Loading…</p>
-        </div>
-      </div>
-
-      <!-- All services — power-user view, collapsed by default -->
-      <div class="card">
-        <button onclick="toggleAllServices()" class="w-full flex items-center justify-between text-left" id="sync-all-toggle">
-          <div>
-            <h3 class="font-medium text-sm">All services</h3>
-            <p class="text-[11px] text-gray-500 mt-0.5">Browse the full catalog (29 providers) or jump to a specific service.</p>
-          </div>
-          <span class="text-gray-500 text-xs" id="sync-all-arrow">▸ Show all</span>
-        </button>
-        <div id="sync-all-services" class="hidden mt-4">
-          <input type="text" id="sync-filter" placeholder="Filter…" oninput="filterProviders(this.value)" class="w-full mb-4 bg-gray-900 border border-gray-700 rounded-lg text-xs text-gray-300 px-3 py-2 outline-none focus:border-oc-500">
-          <div id="sync-categories" class="space-y-5">
-            <p class="text-xs text-gray-500 italic">Loading providers…</p>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Sync connect modal (hidden by default) -->
-  <div id="sync-modal" class="hidden fixed inset-0 bg-black/75 z-50 flex items-center justify-center p-4">
-    <div class="bg-gray-800 rounded-xl border border-gray-700 max-w-md w-full max-h-[90vh] overflow-y-auto">
-      <div class="flex items-center justify-between p-4 border-b border-gray-700">
-        <h3 class="font-medium" id="sync-modal-title">Connect</h3>
-        <button onclick="closeSyncModal()" class="text-gray-500 hover:text-gray-300 text-2xl leading-none">&times;</button>
-      </div>
-      <div class="p-4" id="sync-modal-body">
-        <!-- populated per provider -->
-      </div>
-    </div>
-  </div>
-
-  <!-- Media Bridge tab -->
-  <div class="tab-content hidden" id="tab-media">
-    <div class="space-y-4">
-
-      <div class="card">
-        <div class="flex items-center justify-between mb-3">
-          <h3 class="font-medium">Syntaur Media Bridge</h3>
-          <span id="mb-status-badge" class="badge badge-red">checking…</span>
-        </div>
-        <p class="text-sm text-gray-400 mb-3">
-          A small companion that runs on your desktop and plays Apple Music, Spotify, Tidal
-          and YouTube Music through your speakers — no popup window, no app switching.
-          It hosts a hidden Chromium that decrypts FairPlay/Widevine exactly as a normal
-          tab would.
-        </p>
-        <div id="mb-details" class="text-sm text-gray-300 space-y-1 mb-3 hidden">
-          <div>Version: <code id="mb-version" class="text-oc-500">—</code></div>
-          <div>Audio backend: <code id="mb-backend" class="text-oc-500">—</code></div>
-          <div>Authenticated services: <span id="mb-authed" class="text-gray-400">none yet</span></div>
-        </div>
-        <div id="mb-install" class="hidden text-sm text-gray-300 space-y-2">
-          <p class="text-amber-400">No bridge process detected on <code>127.0.0.1:18790</code>.</p>
-          <p class="font-medium">Install on this machine (Linux / macOS):</p>
-          <pre class="text-xs bg-gray-900 p-3 rounded overflow-x-auto"><code>scp user@server:/path/syntaur-media-bridge ~/.local/bin/
-chmod +x ~/.local/bin/syntaur-media-bridge
-bash install.sh   # systemd-user service / launchd agent</code></pre>
-        </div>
-      </div>
-
-      <div class="card">
-        <h3 class="font-medium mb-3">Authenticate a service</h3>
-        <p class="text-sm text-gray-400 mb-3">
-          One-time login per service. The bridge opens a visible Chromium, you sign in
-          normally, cookies persist so future playback is headless.
-        </p>
-        <div class="flex flex-wrap gap-2">
-          <button class="btn-secondary" onclick="copyAuthCmd('apple_music')">Apple Music — copy command</button>
-          <button class="btn-secondary" onclick="copyAuthCmd('spotify')">Spotify — copy command</button>
-          <button class="btn-secondary" onclick="copyAuthCmd('tidal')">Tidal — copy command</button>
-          <button class="btn-secondary" onclick="copyAuthCmd('youtube_music')">YT Music — copy command</button>
-        </div>
-        <p class="text-xs text-gray-500 mt-3" id="mb-copy-hint"></p>
-      </div>
-
-      <div class="card">
-        <h3 class="font-medium mb-3">Quick test</h3>
-        <p class="text-sm text-gray-400 mb-3">
-          Open the music page to verify end-to-end playback.
-        </p>
-        <a href="/music" class="btn-primary inline-block">Open /music</a>
-      </div>
-
-    </div>
-  </div>
-
-  <!-- System tab -->
-  <div class="tab-content hidden" id="tab-system">
-    <div class="space-y-4">
-
-      <div class="card">
-        <h3 class="font-medium mb-4">System Status</h3>
-        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm" id="sys-stats">
-          <div>
-            <p class="text-gray-500">Uptime</p>
-            <p class="text-lg font-semibold" id="sys-uptime">--</p>
-          </div>
-          <div>
-            <p class="text-gray-500">Agents</p>
-            <p id="sys-agents" class="text-gray-300">--</p>
-          </div>
-          <div>
-            <p class="text-gray-500">Core Modules</p>
-            <p id="sys-core-mods" class="text-gray-300">--</p>
-          </div>
-          <div>
-            <p class="text-gray-500">Extension Modules</p>
-            <p id="sys-ext-mods" class="text-gray-300">--</p>
-          </div>
-        </div>
-      </div>
-
-      <div class="card">
-        <h3 class="font-medium mb-4">API Token</h3>
-        <p class="text-sm text-gray-400 mb-3">Use this token to access Syntaur from scripts, automations, or external tools.</p>
-        <div class="flex gap-2">
-          <input type="password" class="input font-mono" id="api-token-display" readonly>
-          <button class="btn-secondary" onclick="toggleTokenVisibility()">Show</button>
-          <button class="btn-secondary" onclick="copyToken()">Copy</button>
-        </div>
-      </div>
-
-      <div class="card">
-        <h3 class="font-medium mb-4">License</h3>
-        <div id="license-info" class="mb-4">
-          <p class="text-sm text-gray-400">Loading...</p>
-        </div>
-        <div>
-          <label class="label">License Key</label>
-          <textarea class="input font-mono text-xs" rows="3" id="license-key-input" placeholder='Paste your license key here (JSON format)...'></textarea>
-          <div class="flex items-center gap-3 mt-2">
-            <button class="btn-primary" onclick="activateLicense()">Activate</button>
-            <span id="license-result" class="text-sm"></span>
-          </div>
-        </div>
-      </div>
-
-      <div class="card">
-        <h3 class="font-medium mb-4">Updates</h3>
-        <div class="space-y-3 text-sm mb-6">
-          <div class="flex items-center justify-between">
-            <div>
-              <p class="text-gray-300" id="update-version-text">Checking for updates...</p>
-              <p class="text-xs text-gray-500" id="update-status-text"></p>
-            </div>
-            <button onclick="checkForUpdates()" class="px-4 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm transition-colors" id="btn-check-update">Check Now</button>
-          </div>
-          <div id="update-available" class="hidden p-3 rounded-lg bg-oc-900/30 border border-oc-800/30">
-            <p class="text-sm text-oc-400 font-medium">Update available!</p>
-            <p class="text-xs text-gray-400 mt-1" id="update-notes"></p>
-            <a href="" id="update-download-link" target="_blank" class="text-xs text-oc-500 hover:text-oc-400 mt-2 inline-block">View release &rarr;</a>
-          </div>
-          <div id="tax-bracket-status" class="p-3 rounded-lg bg-gray-900">
-            <p class="text-xs text-gray-500">Tax brackets: <span id="bracket-status-text">checking...</span></p>
-          </div>
-        </div>
-
-        <h3 class="font-medium mb-4">Desktop Shortcut</h3>
-        <div class="space-y-3 text-sm mb-6">
-          <p class="text-gray-400">Create or update the Syntaur shortcut in your app launcher, Start Menu, or desktop so you can always find it.</p>
-          <div class="flex gap-3">
-            <button onclick="installShortcut('menu')" class="px-4 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm transition-colors" id="btn-shortcut-menu">
-              Install App Shortcut
-            </button>
-            <button onclick="installShortcut('desktop')" class="px-4 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm transition-colors" id="btn-shortcut-desktop">
-              Add to Desktop
-            </button>
-          </div>
-          <p class="text-xs text-gray-500" id="shortcut-status"></p>
-          <div class="p-3 rounded-lg bg-gray-900">
-            <p class="text-xs text-gray-500">You can always reach Syntaur at <span class="text-sky-400 font-mono">http://localhost:18789</span></p>
-            <p class="text-xs text-gray-500 mt-1">Syntaur runs in the background — the shortcut just opens this dashboard.</p>
-          </div>
-        </div>
-
-        <h3 class="font-medium mb-4">Links</h3>
-        <div class="space-y-2 text-sm">
-          <a href="/setup" class="block p-3 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors">
-            <p class="font-medium text-gray-300">Re-run Setup Wizard</p>
-            <p class="text-xs text-gray-500">Change LLM backend, modules, or communication channels</p>
-          </a>
-          <a href="/modules" class="block p-3 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors">
-            <p class="font-medium text-gray-300">Module Management</p>
-            <p class="text-xs text-gray-500">Enable, disable, or configure modules</p>
-          </a>
-        </div>
-      </div>
-
-    </div>
-  </div>
-
-  <!-- Users tab (admin only) -->
-  <div class="tab-content hidden" id="tab-users">
-    <div class="space-y-4">
-      <div class="bg-gray-900 rounded-xl border border-gray-700 p-6">
-        <div class="flex items-center justify-between mb-4">
-          <h3 class="font-medium">User Accounts</h3>
-          <button onclick="showInviteDialog()" class="text-sm bg-oc-600 hover:bg-oc-700 text-white px-4 py-1.5 rounded-lg">Invite User</button>
-        </div>
-        <div id="users-list" class="space-y-2">
-          <p class="text-sm text-gray-500">Loading...</p>
-        </div>
-      </div>
-
-      <div class="bg-gray-900 rounded-xl border border-gray-700 p-6">
-        <h3 class="font-medium mb-4">Data Sharing</h3>
-        <p class="text-xs text-gray-500 mb-3">Controls whether users share data or have separate accounts.</p>
-        <div class="space-y-2" id="sharing-radios">
-          <label class="flex items-center gap-3 p-3 rounded-lg bg-gray-800 cursor-pointer hover:bg-gray-750">
-            <input type="radio" name="sharing" value="shared" onchange="setSharingMode(this.value)" class="accent-sky-500">
-            <div>
-              <p class="text-sm font-medium text-gray-300">Shared</p>
-              <p class="text-xs text-gray-500">All users see all data — conversations, knowledge, agents</p>
-            </div>
-          </label>
-          <label class="flex items-center gap-3 p-3 rounded-lg bg-gray-800 cursor-pointer hover:bg-gray-750">
-            <input type="radio" name="sharing" value="isolated" onchange="setSharingMode(this.value)" class="accent-sky-500">
-            <div>
-              <p class="text-sm font-medium text-gray-300">Isolated</p>
-              <p class="text-xs text-gray-500">Each user has their own conversations, knowledge, and agents</p>
-            </div>
-          </label>
-        </div>
-      </div>
-
-      <div class="bg-gray-900 rounded-xl border border-gray-700 p-6">
-        <div class="flex items-center justify-between mb-4">
-          <h3 class="font-medium">Pending Invites</h3>
-        </div>
-        <div id="invites-list" class="space-y-2">
-          <p class="text-sm text-gray-500">Loading...</p>
-        </div>
-      </div>
-
-      <div class="bg-gray-900 rounded-xl border border-gray-700 p-6">
-        <h3 class="font-medium mb-4">Change Your Password</h3>
-        <div class="space-y-3 max-w-sm">
-          <input type="password" id="pw-current" placeholder="Current password (if set)" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-sm text-white placeholder-gray-500 focus:border-oc-500 outline-none">
-          <input type="password" id="pw-new" placeholder="New password (min 8 chars)" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-sm text-white placeholder-gray-500 focus:border-oc-500 outline-none">
-          <button onclick="changePassword()" class="text-sm bg-gray-700 hover:bg-gray-600 text-white px-4 py-1.5 rounded-lg" id="pw-btn">Update Password</button>
-          <p id="pw-status" class="text-xs hidden"></p>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Invite dialog (2 steps) -->
-  <div id="invite-dialog" class="fixed inset-0 z-50 bg-black/60 flex items-center justify-center hidden">
-    <div class="bg-gray-800 rounded-xl border border-gray-700 p-6 w-full max-w-md mx-4 max-h-[80vh] overflow-y-auto">
-      <!-- Step 1: Name + Role -->
-      <div id="invite-step1">
-        <h3 class="font-medium mb-4">Invite a User</h3>
-        <div class="space-y-3">
-          <input type="text" id="invite-name" placeholder="Name (optional hint)" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-2 text-sm text-white placeholder-gray-500 focus:border-oc-500 outline-none">
-          <select id="invite-role" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-2 text-sm text-gray-300">
-            <option value="user">User</option>
-            <option value="admin">Admin</option>
-          </select>
-          <div class="flex gap-2">
-            <button onclick="showInviteStep2()" class="flex-1 bg-oc-600 hover:bg-oc-700 text-white text-sm py-2 rounded-lg">Next: Configure Sharing</button>
-            <button onclick="document.getElementById('invite-dialog').classList.add('hidden')" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white text-sm py-2 rounded-lg">Cancel</button>
-          </div>
-        </div>
-      </div>
-      <!-- Step 2: Sharing categories -->
-      <div id="invite-step2" class="hidden">
-        <h3 class="font-medium mb-2">Data Sharing</h3>
-        <p class="text-xs text-gray-500 mb-3">Choose what to share with this user. They'll always have their own private data too.</p>
-        <div id="invite-sharing-cats" class="space-y-2 mb-4"></div>
-        <div class="flex gap-2">
-          <button onclick="sendInvite()" class="flex-1 bg-oc-600 hover:bg-oc-700 text-white text-sm py-2 rounded-lg" id="invite-btn">Create Invite</button>
-          <button onclick="showInviteStep1()" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white text-sm py-2 rounded-lg">Back</button>
-        </div>
-        <div id="invite-result" class="hidden text-sm mt-3"></div>
-      </div>
-    </div>
-  </div>
-
-</div>
-
-<script>
-const token = sessionStorage.getItem('syntaur_token') || '';
-if (!token) { window.location.href = '/'; }
-const esc = (s) => String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-function authFetch(url, opts = {}) {
-  opts.headers = opts.headers || {};
-  opts.headers['Authorization'] = 'Bearer ' + token;
-  return fetch(url, opts);
-}
-
-function showTab(name) {
-  document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
-  document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
-  document.getElementById(`tab-${name}`).classList.remove('hidden');
-  event.target.classList.add('active');
-}
-
-async function loadSettings() {
-  try {
-    const headers = { 'Authorization': 'Bearer ' + token };
-    const [health, status, mods] = await Promise.all([
-      fetch('/health', { headers }).then(r => r.json()),
-      fetch('/api/setup/status', { headers }).then(r => r.json()),
-      fetch('/api/setup/modules', { headers }).then(r => r.json()),
-    ]);
-
-    // General
-    document.getElementById('set-agent-name').textContent = status.agent_name || 'main';
-    document.getElementById('set-version').textContent = `v${health.version || '?'}`;
-
-    // Agent avatars
-    const agents = (health.agents || []).map(a => typeof a === 'object' ? a : { id: a, name: a });
-    const avatarList = document.getElementById('avatar-list');
-    if (avatarList) {
-      avatarList.innerHTML = agents.map(a => {
-        const id = a.id || a;
-        const name = a.name || id;
-        return `<div class="flex items-center gap-3 p-2 rounded-lg bg-gray-900">
-          <img src="/agent-avatar/${id}?t=${Date.now()}" class="w-10 h-10 rounded-lg" alt="" id="avatar-img-${id}">
-          <div class="flex-1">
-            <p class="text-sm font-medium text-gray-300">${name}</p>
-            <p class="text-xs text-gray-600">${id}</p>
-          </div>
-          <label class="text-xs text-oc-500 hover:text-oc-400 cursor-pointer px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 transition-colors">
-            Change
-            <input type="file" class="hidden" accept="image/*" onchange="uploadAvatar('${id}', this)">
-          </label>
-        </div>`;
-      }).join('');
+fn top_bar() -> Markup {
+    html! {
+        div class="ss-topbar" {
+            div class="ss-topbar-inner" {
+                a href="/" class="flex items-center gap-2 hover:opacity-80" {
+                    img src="/app-icon.jpg" class="h-8 w-8 rounded-lg" alt="";
+                    span class="font-semibold text-lg" { "Syntaur" }
+                }
+                span class="ss-crumb-sep" { "/" }
+                span class="ss-crumb" { "Settings" }
+                span class="ss-crumb-page" id="ss-current-crumb" { "" }
+                div class="flex-1" {}
+                button class="ss-search-hint" onclick="ssOpenPalette()" title="Search settings (⌘K)" {
+                    svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" { circle cx="11" cy="11" r="7" {} path d="M21 21l-5-5" {} }
+                    span { "Search…" }
+                    kbd { "⌘K" }
+                }
+                a href="/" class="ss-link" { "← Dashboard" }
+            }
+        }
     }
-    document.getElementById('set-port').textContent = `${location.port || '18789'}`;
+}
 
-    // Uptime
-    const u = health.uptime_secs || 0;
-    const h = Math.floor(u / 3600);
-    const m = Math.floor((u % 3600) / 60);
-    document.getElementById('sys-uptime').textContent = h > 0 ? `${h}h ${m}m` : `${m}m`;
-    document.getElementById('sys-agents').textContent = (health.agents || []).join(', ');
-
-    // Modules
-    const coreEnabled = mods.core_modules.filter(m => m.enabled).length;
-    const extEnabled = mods.extension_modules.filter(m => m.enabled).length;
-    document.getElementById('sys-core-mods').textContent = `${coreEnabled} / ${mods.core_modules.length}`;
-    document.getElementById('sys-ext-mods').textContent = `${extEnabled} / ${mods.extension_modules.length}`;
-
-    // LLM providers
-    const providers = health.providers || [];
-    document.getElementById('llm-providers-list').innerHTML = providers.map((p, i) => {
-      const circuitOk = p.circuit_state === 'Closed';
-      const badgeClass = circuitOk ? 'badge-green' : 'badge-red';
-      const badgeText = circuitOk ? 'Active' : p.circuit_state;
-      const latency = p.avg_latency_ms > 0 ? `${Math.round(p.avg_latency_ms)}ms avg` : '';
-      return `
-      <div class="flex items-center justify-between p-3 rounded-lg bg-gray-900">
-        <div>
-          <p class="text-sm font-medium">${p.name}</p>
-          <p class="text-xs text-gray-500">${i === 0 ? 'Primary' : 'Fallback ' + i} &middot; ${p.model_id} ${latency ? '&middot; ' + latency : ''}</p>
-        </div>
-        <div class="flex items-center gap-2">
-          <span class="text-xs text-gray-600">${p.total_requests} req</span>
-          <span class="badge ${badgeClass}">${badgeText}</span>
-        </div>
-      </div>`;
-    }).join('') || '<p class="text-gray-500 text-sm">No providers configured. Use Quick Setup below to add one.</p>';
-
-    // Token
-    if (token) {
-      document.getElementById('api-token-display').value = token;
+fn sidebar() -> Markup {
+    html! {
+        aside class="ss-sidebar" id="ss-sidebar" {
+            div class="ss-sidebar-search" {
+                svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" { circle cx="11" cy="11" r="7" {} path d="M21 21l-5-5" {} }
+                input id="ss-sidebar-search" type="text" placeholder="Filter…" oninput="ssFilterSidebar(this.value)";
+            }
+            nav class="ss-sidebar-nav" id="ss-sidebar-nav" {
+                @for section in SECTIONS { (sidebar_section(section)) }
+            }
+        }
     }
-
-  } catch(e) {
-    console.error('Failed to load settings:', e);
-  }
 }
 
-async function testConnection() {
-  const url = document.getElementById('test-url').value;
-  const key = document.getElementById('test-key').value;
-  const result = document.getElementById('test-result');
-  result.className = 'text-sm text-gray-400';
-  result.textContent = 'Testing...';
-
-  try {
-    const resp = await fetch('/api/setup/test-llm', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ base_url: url, api_key: key || null })
-    });
-    const data = await resp.json();
-    if (data.success) {
-      result.className = 'text-sm text-green-400';
-      result.textContent = `Connected! ${data.models.length} models, ${data.latency_ms}ms`;
-    } else {
-      result.className = 'text-sm text-red-400';
-      result.textContent = data.error || 'Failed';
+fn sidebar_section(sec: &SectionDef) -> Markup {
+    html! {
+        div class="ss-sec" data-section=(sec.slug) {
+            div class="ss-sec-title" { (sec.title) }
+            @for page in sec.pages {
+                a class="ss-nav-item"
+                   data-section=(sec.slug)
+                   data-page=(page.slug)
+                   href={ "#" (sec.slug) "/" (page.slug) }
+                   onclick={ "ssNavigate('" (sec.slug) "','" (page.slug) "');return false;" } {
+                    span class="ss-nav-label" { (page.title) }
+                    @if let Some(badge) = page.badge {
+                        span class="ss-nav-badge" { (badge) }
+                    }
+                }
+            }
+        }
     }
-  } catch(e) {
-    result.className = 'text-sm text-red-400';
-    result.textContent = 'Network error';
-  }
 }
 
-function toggleTokenVisibility() {
-  const input = document.getElementById('api-token-display');
-  input.type = input.type === 'password' ? 'text' : 'password';
-}
+// ══════════════════════════════════════════════════════════════════════
+// Content area — every sub-page rendered, only the active one visible.
+// Client-side JS toggles `.ss-page.active` based on URL hash.
+// ══════════════════════════════════════════════════════════════════════
 
-function copyToken() {
-  const t = document.getElementById('api-token-display').value;
-  navigator.clipboard.writeText(t).then(() => {
-    const btn = event.target;
-    btn.textContent = 'Copied!';
-    setTimeout(() => btn.textContent = 'Copy', 1500);
-  });
-}
+fn content_area() -> Markup {
+    html! {
+        // Home / welcome page — shown when no hash is set.
+        (page_wrap("home", "home", "Settings", "Manage Syntaur, your agents, and how you connect.",
+            home_body()))
 
-async function loadLicense() {
-  try {
-    const lic = await (await fetch('/api/license/status')).json();
-    const info = document.getElementById('license-info');
-    if (lic.mode === 'licensed') {
-      info.innerHTML = `
-        <div class="flex items-center gap-2 mb-2">
-          <span class="badge bg-green-900/50 text-green-400">${lic.license_tier || 'Licensed'}</span>
-        </div>
-        <p class="text-sm text-gray-400">Licensed to: <span class="text-gray-300">${lic.license_holder}</span></p>
-        <p class="text-sm text-green-400 mt-1">Full access — all modules and features unlocked.</p>`;
-    } else if (lic.mode === 'demo') {
-      const days = Math.ceil((lic.demo_remaining_secs || 0) / 86400);
-      const hours = Math.floor((lic.demo_remaining_secs || 0) / 3600);
-      info.innerHTML = `
-        <div class="flex items-center gap-2 mb-2">
-          <span class="badge bg-yellow-900/50 text-yellow-400">Demo Mode</span>
-          <span class="text-sm text-yellow-400">${days} day${days !== 1 ? 's' : ''} remaining</span>
-        </div>
-        <p class="text-sm text-gray-400">Full access during demo period. Enter a license key below to keep using Syntaur after the trial.</p>
-        <div class="mt-2 w-full bg-gray-700 rounded-full h-1.5">
-          <div class="bg-yellow-500 h-1.5 rounded-full" style="width: ${Math.min(100, ((259200 - (lic.demo_remaining_secs || 0)) / 259200) * 100)}%"></div>
-        </div>`;
-    } else {
-      info.innerHTML = `
-        <div class="flex items-center gap-2 mb-2">
-          <span class="badge bg-red-900/50 text-red-400">Demo Expired</span>
-        </div>
-        <p class="text-sm text-gray-400">Your demo has ended. You can still use core features (${lic.daily_limit} conversations/day).</p>
-        <p class="text-sm text-gray-400 mt-1">Enter a license key below to unlock full access.</p>`;
+        // ── ACCOUNT ────────────────────────────────────────
+        (page_wrap("account", "profile", "Profile",
+            "Your identity and personal info. Visible only to you.",
+            account_profile_body()))
+        (page_wrap("account", "security", "Password & security",
+            "Change your password, manage active sessions.",
+            account_security_body()))
+        (page_wrap("account", "users", "Users (admin)",
+            "Invite, promote, or remove users on this Syntaur instance.",
+            html! { (PreEscaped(LEGACY_USERS)) }))
+
+        // ── AGENTS ─────────────────────────────────────────
+        (page_wrap("agents", "all", "All agents",
+            "Create, import, and manage the agents in your Syntaur.",
+            agents_all_body()))
+        (page_wrap("agents", "personas", "Personas & tone",
+            "The eight built-in personas (Peter, Kyron, Positron, Cortex, Silvr, Thaddeus, Maurice, Mushi) plus humor dials and memory protocol.",
+            agents_personas_body()))
+
+        // ── INTEGRATIONS ───────────────────────────────────
+        (page_wrap("integrations", "telegram", "Telegram",
+            "Chat with your agents from your phone.",
+            html! { (PreEscaped(LEGACY_GENERAL)) }))
+        (page_wrap("integrations", "homeassistant", "Home Assistant",
+            "Let your agents see + control your smart home.",
+            integrations_ha_body()))
+        (page_wrap("integrations", "sync", "Sync",
+            "Connect cloud services so agents can read your calendar, email, bank, and more.",
+            html! { (PreEscaped(LEGACY_SYNC)) }))
+        (page_wrap("integrations", "media", "Media bridge",
+            "Local companion app that lets agents play hidden audio/video from Apple Music, Spotify, Tidal, and YouTube.",
+            html! { (PreEscaped(LEGACY_MEDIA)) }))
+
+        // ── LLM ────────────────────────────────────────────
+        (page_wrap("llm", "providers", "Providers",
+            "Which model answers each agent. Order + fallback + per-provider API keys.",
+            html! { (PreEscaped(LEGACY_LLM)) }))
+
+        // ── VOICE ──────────────────────────────────────────
+        (page_wrap("voice", "satellites", "Satellites",
+            "Smart speakers running your wake word. Train voice prints, assign rooms.",
+            voice_satellites_body()))
+
+        // ── MODULES ────────────────────────────────────────
+        (page_wrap("modules", "installed", "Installed modules",
+            "Turn module capabilities on and off. Each module has its own settings gear.",
+            modules_installed_body()))
+
+        // ── APPEARANCE ─────────────────────────────────────
+        (page_wrap("appearance", "theme", "Theme",
+            "Dashboard color palette and density. Individual modules keep their own themes.",
+            appearance_theme_body()))
+
+        // ── PRIVACY & DATA ─────────────────────────────────
+        (page_wrap("privacy", "data", "What Syntaur stores",
+            "A frank table of what's kept, where, and for how long.",
+            privacy_data_body()))
+
+        // ── SYSTEM ─────────────────────────────────────────
+        (page_wrap("system", "gateway", "Gateway & ports",
+            "Network + runtime configuration. Some fields require a gateway restart.",
+            html! { (PreEscaped(LEGACY_SYSTEM)) }))
+        (page_wrap("system", "danger", "Danger zone",
+            "Destructive actions. Typed confirmation required.",
+            system_danger_body()))
+
+        // ── ABOUT ──────────────────────────────────────────
+        (page_wrap("about", "info", "About this Syntaur",
+            "Version, uptime, tool count, and attribution.",
+            about_body()))
     }
-  } catch(e) {}
 }
 
-async function activateLicense() {
-  const key = document.getElementById('license-key-input').value.trim();
-  if (!key) return;
-  const result = document.getElementById('license-result');
-  result.className = 'text-sm text-gray-400';
-  result.textContent = 'Activating...';
-
-  try {
-    const resp = await fetch('/api/license/activate', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ key: key })
-    });
-    const data = await resp.json();
-    if (data.success) {
-      result.className = 'text-sm text-green-400';
-      result.textContent = data.message;
-      loadLicense();
-    } else {
-      result.className = 'text-sm text-red-400';
-      result.textContent = data.error || 'Activation failed';
+fn page_wrap(section: &str, page: &str, title: &str, subtitle: &str, body: Markup) -> Markup {
+    html! {
+        section class="ss-page" data-section=(section) data-page=(page) id={ "ss-page-" (section) "-" (page) } {
+            header class="ss-page-header" {
+                h1 class="ss-page-title" { (title) }
+                p class="ss-page-subtitle" { (subtitle) }
+            }
+            div class="ss-page-body" { (body) }
+        }
     }
-  } catch(e) {
-    result.className = 'text-sm text-red-400';
-    result.textContent = 'Network error';
-  }
 }
 
-async function checkForUpdates() {
-  const btn = document.getElementById('btn-check-update');
-  btn.textContent = 'Checking...';
-  try {
-    const resp = await fetch(`/api/updates/check?token=${token}`, { headers: { 'Authorization': 'Bearer ' + token } });
-    const data = await resp.json();
-    document.getElementById('update-version-text').textContent = `Current: v${data.current_version}${data.latest_version ? ' | Latest: v' + data.latest_version : ''}`;
-    if (data.update_available) {
-      document.getElementById('update-available').classList.remove('hidden');
-      document.getElementById('update-notes').textContent = data.release_notes || '';
-      document.getElementById('update-download-link').href = data.download_url || '#';
-      document.getElementById('update-status-text').textContent = 'A newer version is available.';
-    } else if (data.error) {
-      document.getElementById('update-status-text').textContent = data.error;
-    } else {
-      document.getElementById('update-status-text').textContent = 'You are up to date.';
+// ── Home welcome ───────────────────────────────────────────
+fn home_body() -> Markup {
+    html! {
+        div class="ss-welcome-grid" {
+            a class="ss-welcome-tile" href="#agents/all" onclick="ssNavigate('agents','all');return false;" {
+                div class="ss-welcome-ico" { "🧑‍🚀" }
+                div class="ss-welcome-label" { "Agents" }
+                div class="ss-welcome-sub" { "Create, import, or promote" }
+            }
+            a class="ss-welcome-tile" href="#integrations/telegram" onclick="ssNavigate('integrations','telegram');return false;" {
+                div class="ss-welcome-ico" { "🔗" }
+                div class="ss-welcome-label" { "Integrations" }
+                div class="ss-welcome-sub" { "Telegram, HA, Sync…" }
+            }
+            a class="ss-welcome-tile" href="#llm/providers" onclick="ssNavigate('llm','providers');return false;" {
+                div class="ss-welcome-ico" { "🧠" }
+                div class="ss-welcome-label" { "LLM" }
+                div class="ss-welcome-sub" { "Providers + fallback" }
+            }
+            a class="ss-welcome-tile" href="#voice/satellites" onclick="ssNavigate('voice','satellites');return false;" {
+                div class="ss-welcome-ico" { "🎙" }
+                div class="ss-welcome-label" { "Voice" }
+                div class="ss-welcome-sub" { "Wake word + satellites" }
+            }
+            a class="ss-welcome-tile" href="#privacy/data" onclick="ssNavigate('privacy','data');return false;" {
+                div class="ss-welcome-ico" { "🛡" }
+                div class="ss-welcome-label" { "Privacy" }
+                div class="ss-welcome-sub" { "What's stored + export" }
+            }
+            a class="ss-welcome-tile" href="#about/info" onclick="ssNavigate('about','info');return false;" {
+                div class="ss-welcome-ico" { "ℹ️" }
+                div class="ss-welcome-label" { "About" }
+                div class="ss-welcome-sub" { "Version + uptime" }
+            }
+        }
+        div class="ss-tip" {
+            "Tip — press "
+            kbd { "⌘K" }
+            " to jump to any setting."
+        }
     }
-  } catch(e) {
-    document.getElementById('update-status-text').textContent = 'Could not check for updates.';
-  }
-  btn.textContent = 'Check Now';
+}
 
-  // Also check tax brackets
-  try {
-    const resp = await fetch(`/api/tax/brackets/status?token=${token}`, { headers: { 'Authorization': 'Bearer ' + token } });
-    const data = await resp.json();
-    const el = document.getElementById('bracket-status-text');
-    if (data.stale) {
-      el.innerHTML = `<span class="text-yellow-400">${data.warning}</span>`;
-    } else {
-      el.textContent = `Up to date (last updated ${data.last_updated || 'unknown'}, years: ${(data.available_years || []).join(', ')})`;
+// ── Account ────────────────────────────────────────────────
+fn account_profile_body() -> Markup {
+    html! {
+        div class="ss-card" {
+            div class="ss-field" {
+                label class="ss-label" for="acct-name" { "Display name" }
+                input id="acct-name" class="ss-input" placeholder="How agents address you" {}
+                p class="ss-help" { "Your agents use this when addressing you. First-name is typical." }
+            }
+            div class="ss-field" {
+                label class="ss-label" for="acct-username" { "Username" }
+                input id="acct-username" class="ss-input" placeholder="For login" readonly {}
+                p class="ss-help" { "Login identifier. Currently read-only." }
+            }
+            div class="ss-field" {
+                label class="ss-label" for="acct-email" { "Email (optional)" }
+                input id="acct-email" class="ss-input" type="email" placeholder="For password recovery" {}
+                p class="ss-help" { "Optional. Only used for password recovery if enabled." }
+            }
+            div class="ss-actions" {
+                a href="/profile" class="ss-btn-secondary" { "Full profile page →" }
+                button class="ss-btn-primary" onclick="ssSaveAccountProfile()" { "Save profile" }
+            }
+        }
     }
-  } catch(e) {}
 }
 
-// Auto-check on page load
-setTimeout(checkForUpdates, 1000);
-
-async function uploadAvatar(agentId, input) {
-  const file = input.files[0];
-  if (!file) return;
-  try {
-    const resp = await fetch(`/api/agent-avatar/${agentId}`, {
-      method: 'POST',
-      headers: { 'Content-Type': file.type, 'Authorization': 'Bearer ' + token },
-      body: file
-    });
-    const data = await resp.json();
-    if (data.success) {
-      const img = document.getElementById(`avatar-img-${agentId}`);
-      if (img) img.src = `/agent-avatar/${agentId}?t=${Date.now()}`;
+fn account_security_body() -> Markup {
+    html! {
+        div class="ss-card" {
+            h3 class="ss-card-title" { "Password" }
+            div class="ss-field" {
+                label class="ss-label" for="acct-old-pass" { "Current password" }
+                input id="acct-old-pass" class="ss-input" type="password" {}
+            }
+            div class="ss-field" {
+                label class="ss-label" for="acct-new-pass" { "New password" }
+                input id="acct-new-pass" class="ss-input" type="password" {}
+                p class="ss-help" { "At least 8 characters. Any printable character is allowed." }
+            }
+            div class="ss-actions" {
+                button class="ss-btn-primary" onclick="ssChangePassword()" { "Change password" }
+            }
+        }
+        div class="ss-card" {
+            h3 class="ss-card-title" { "Active sessions" }
+            p class="ss-help" { "Browsers and apps currently signed in with your account." }
+            div id="ss-sessions-list" class="ss-list" {}
+            div class="ss-actions" {
+                button class="ss-btn-secondary" onclick="ssSignOutOthers()" { "Sign out everywhere else" }
+            }
+        }
     }
-  } catch(e) { console.log('upload error:', e); }
-  input.value = '';
 }
 
-// ── Users tab ────────────────────────────────────────────────────────────
-async function loadUsers() {
-  try {
-    const data = await authFetch('/api/admin/users').then(r => r.json());
-    const users = data.users || [];
-    const list = document.getElementById('users-list');
-    if (users.length === 0) {
-      list.innerHTML = '<p class="text-sm text-gray-500">No users.</p>';
-      return;
+// ── Agents ─────────────────────────────────────────────────
+fn agents_all_body() -> Markup {
+    html! {
+        div class="ss-card" {
+            p class="ss-help" {
+                "You can run multiple main-thread agents (Peter / Kyron-tier privileges) "
+                "and import agents from other platforms via Markdown, plain text, or JSON."
+            }
+            div class="ss-actions" {
+                a href="/settings/agents" class="ss-btn-primary" { "Open agent manager →" }
+            }
+            p class="ss-help" style="margin-top:12px" {
+                "The agent manager currently lives at "
+                code { "/settings/agents" }
+                " — will be folded inline in the next iteration."
+            }
+        }
     }
-    list.innerHTML = users.map(u => `
-      <div class="flex items-center justify-between bg-gray-800 rounded-lg p-3">
-        <div>
-          <span class="font-medium text-sm">${esc(u.name)}</span>
-          <span class="ml-2 text-xs px-2 py-0.5 rounded-full ${u.role === 'admin' ? 'bg-sky-900 text-sky-300' : 'bg-gray-700 text-gray-400'}">${esc(u.role)}</span>
-          ${u.disabled ? '<span class="ml-1 text-xs text-red-400">(disabled)</span>' : ''}
-        </div>
-        <div class="flex gap-2 text-xs">
-          ${u.id !== 1 ? `
-            <button onclick="toggleUser(${u.id}, ${u.disabled})" class="px-2 py-1 rounded bg-gray-700 hover:bg-gray-600">${u.disabled ? 'Enable' : 'Disable'}</button>
-            <button onclick="deleteUser(${u.id}, '${esc(u.name)}')" class="px-2 py-1 rounded bg-red-900/30 hover:bg-red-900/50 text-red-400">Delete</button>
-          ` : ''}
-        </div>
-      </div>
-    `).join('');
-  } catch(e) { console.error('loadUsers', e); }
 }
 
-async function toggleUser(id, currentlyDisabled) {
-  await authFetch(`/api/admin/users/${id}`, {
-    method: 'PUT',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ token, disabled: !currentlyDisabled })
-  });
-  loadUsers();
-}
-
-async function deleteUser(id, name) {
-  if (!confirm(`Delete user "${name}"? This cannot be undone.`)) return;
-  await authFetch(`/api/admin/users/${id}?token=${encodeURIComponent(token)}`, { method: 'DELETE' });
-  loadUsers();
-}
-
-let inviteSharingOptions = [];
-
-function showInviteDialog() {
-  document.getElementById('invite-result').classList.add('hidden');
-  document.getElementById('invite-step1').classList.remove('hidden');
-  document.getElementById('invite-step2').classList.add('hidden');
-  document.getElementById('invite-dialog').classList.remove('hidden');
-}
-
-function showInviteStep1() {
-  document.getElementById('invite-step1').classList.remove('hidden');
-  document.getElementById('invite-step2').classList.add('hidden');
-}
-
-async function showInviteStep2() {
-  document.getElementById('invite-step1').classList.add('hidden');
-  document.getElementById('invite-step2').classList.remove('hidden');
-  // Load sharing options
-  try {
-    const data = await authFetch('/api/admin/sharing/options?token=' + encodeURIComponent(token)).then(r => r.json());
-    inviteSharingOptions = data.resource_types || [];
-    const container = document.getElementById('invite-sharing-cats');
-    container.innerHTML = inviteSharingOptions.map(rt => {
-      const isOauth = rt.type === 'oauth';
-      const warn = isOauth ? '<span class="text-amber-400 text-xs ml-1">(uses your connected account)</span>' : '';
-      return `<label class="flex items-center gap-3 p-3 rounded-lg bg-gray-900 cursor-pointer hover:bg-gray-800">
-        <input type="checkbox" class="sharing-check accent-sky-500" data-type="${esc(rt.type)}" data-id="*">
-        <div>
-          <span class="text-sm text-gray-300">${esc(rt.label)}</span>${warn}
-        </div>
-      </label>`;
-    }).join('');
-  } catch {}
-}
-
-async function sendInvite() {
-  const btn = document.getElementById('invite-btn');
-  btn.textContent = 'Creating...';
-  // Build sharing preset from checkboxes
-  const checks = document.querySelectorAll('.sharing-check:checked');
-  const preset = Array.from(checks).map(c => ({
-    resource_type: c.dataset.type,
-    resource_id: c.dataset.id || '*'
-  }));
-  try {
-    const data = await authFetch('/api/admin/invites', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        token,
-        name_hint: document.getElementById('invite-name').value.trim() || null,
-        role: document.getElementById('invite-role').value,
-        sharing_preset: preset.length > 0 ? JSON.stringify(preset) : null,
-      })
-    }).then(r => r.json());
-    if (data.ok) {
-      const url = window.location.origin + data.register_url;
-      document.getElementById('invite-result').innerHTML = `
-        <p class="text-green-400 mb-1">Invite created!</p>
-        <input type="text" value="${esc(url)}" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-1.5 text-xs text-gray-300" readonly onclick="this.select()">
-        <p class="text-xs text-gray-500 mt-1">Share this link. Expires in 72 hours.</p>
-      `;
-      document.getElementById('invite-result').classList.remove('hidden');
-      loadInvites();
-    } else {
-      document.getElementById('invite-result').innerHTML = `<p class="text-red-400">${esc(data.error)}</p>`;
-      document.getElementById('invite-result').classList.remove('hidden');
+fn agents_personas_body() -> Markup {
+    html! {
+        div class="ss-card" {
+            p class="ss-help" {
+                "Syntaur seeds eight personas on first run. Each has a distinct role, tone, "
+                "and memory scope. You can rename them during onboarding or any time from "
+                "the individual agent's detail page."
+            }
+            div class="ss-persona-grid" {
+                (persona_tile("🕷", "Peter", "Personal main agent", "Quiet-apartment Peter Parker — Sean's personal deployment"))
+                (persona_tile("🧭", "Kyron", "Product-default main agent", "TARS + EDI + Ghost — loyal companion AI"))
+                (persona_tile("🤖", "Positron", "Ledger / Tax", "Data (TNG) + C-3PO — analytical, formal"))
+                (persona_tile("🔬", "Cortex", "Knowledge + Research", "Walter Bishop + Doc Brown — eccentric genius"))
+                (persona_tile("🎸", "Silvr", "Music", "Johnny Silverhand + Creed Bratton — one-line picks"))
+                (persona_tile("🎩", "Thaddeus", "Calendar + Todos", "Alfred + Jeeves + Carson — warm-British-butler"))
+                (persona_tile("💻", "Maurice", "Coders", "Moss + Jared + Frink — earnest nerd pair programmer"))
+                (persona_tile("🍃", "Mushi", "Journal", "Iroh + Mister Rogers + Troi — isolated, gentle wisdom"))
+            }
+        }
     }
-  } catch(e) {
-    document.getElementById('invite-result').innerHTML = `<p class="text-red-400">${e.message}</p>`;
-    document.getElementById('invite-result').classList.remove('hidden');
-  }
-  btn.textContent = 'Create Invite';
 }
 
-async function loadInvites() {
-  try {
-    const data = await authFetch('/api/admin/invites?token=' + encodeURIComponent(token)).then(r => r.json());
-    const invites = data.invites || [];
-    const list = document.getElementById('invites-list');
-    const active = invites.filter(i => !i.consumed_at && (i.expires_at * 1000) > Date.now());
-    if (active.length === 0) {
-      list.innerHTML = '<p class="text-sm text-gray-500">No pending invites.</p>';
-      return;
+fn persona_tile(ico: &str, name: &str, role: &str, inspiration: &str) -> Markup {
+    html! {
+        div class="ss-persona" {
+            div class="ss-persona-ico" { (ico) }
+            div class="ss-persona-body" {
+                div class="ss-persona-name" { (name) }
+                div class="ss-persona-role" { (role) }
+                div class="ss-persona-insp" { (inspiration) }
+            }
+        }
     }
-    list.innerHTML = active.map(i => `
-      <div class="flex items-center justify-between bg-gray-800 rounded-lg p-3 text-sm">
-        <div>
-          <span class="text-gray-300">${esc(i.name_hint || 'No name')}</span>
-          <span class="ml-2 text-xs text-gray-500">${esc(i.role)}</span>
-        </div>
-        <span class="text-xs text-gray-500">expires ${new Date(i.expires_at * 1000).toLocaleDateString()}</span>
-      </div>
-    `).join('');
-  } catch(e) { console.error('loadInvites', e); }
 }
 
-async function loadSharingMode() {
-  try {
-    const data = await authFetch('/api/admin/sharing?token=' + encodeURIComponent(token)).then(r => r.json());
-    const mode = data.mode || 'shared';
-    document.querySelectorAll('input[name="sharing"]').forEach(r => { r.checked = r.value === mode; });
-  } catch(e) { console.error('loadSharingMode', e); }
-}
-
-async function setSharingMode(mode) {
-  await authFetch('/api/admin/sharing', {
-    method: 'PUT',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ token, mode })
-  });
-}
-
-async function changePassword() {
-  const btn = document.getElementById('pw-btn');
-  const status = document.getElementById('pw-status');
-  btn.textContent = 'Updating...';
-  status.classList.add('hidden');
-  try {
-    const data = await authFetch('/api/me/password', {
-      method: 'PUT',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        token,
-        current_password: document.getElementById('pw-current').value || null,
-        new_password: document.getElementById('pw-new').value,
-      })
-    }).then(r => r.json());
-    if (data.ok) {
-      status.textContent = 'Password updated';
-      status.className = 'text-xs text-green-400';
-    } else {
-      status.textContent = data.error || 'Failed';
-      status.className = 'text-xs text-red-400';
+// ── Integrations ───────────────────────────────────────────
+fn integrations_ha_body() -> Markup {
+    html! {
+        div class="ss-card" {
+            div class="ss-field" {
+                label class="ss-label" for="ha-url" { "Home Assistant URL" }
+                input id="ha-url" class="ss-input" placeholder="http://homeassistant.local:8123" {}
+                p class="ss-help" { "The URL of your Home Assistant instance, reachable from this gateway." }
+            }
+            div class="ss-field" {
+                label class="ss-label" for="ha-token" { "Long-lived access token" }
+                input id="ha-token" class="ss-input" type="password" placeholder="eyJhbGc…" {}
+                p class="ss-help" { "Generate one in HA → Profile → Long-Lived Access Tokens." }
+            }
+            div class="ss-actions" {
+                button class="ss-btn-secondary" onclick="ssHaTest()" { "Test connection" }
+                button class="ss-btn-primary" onclick="ssHaSave()" { "Connect Home Assistant" }
+            }
+            p id="ss-ha-result" class="ss-help" {}
+        }
     }
-    status.classList.remove('hidden');
-    document.getElementById('pw-current').value = '';
-    document.getElementById('pw-new').value = '';
-  } catch(e) {
-    status.textContent = e.message;
-    status.className = 'text-xs text-red-400';
-    status.classList.remove('hidden');
-  }
-  btn.textContent = 'Update Password';
 }
 
-// Check if user is admin, show/hide users tab
-(async function() {
-  try {
-    const data = await authFetch('/api/me?token=' + encodeURIComponent(token)).then(r => r.json());
-    if (data.role === 'admin') {
-      document.getElementById('users-tab-btn').style.display = '';
-      loadUsers();
-      loadInvites();
-      loadSharingMode();
-    } else {
-      document.getElementById('users-tab-btn').style.display = 'none';
+// ── Voice ──────────────────────────────────────────────────
+fn voice_satellites_body() -> Markup {
+    html! {
+        div class="ss-card" {
+            p class="ss-help" {
+                "Voice satellites are ESP32/WEB devices running the Syntaur wake word. "
+                "Each one can be assigned a room, a default persona, and a voice print."
+            }
+            div class="ss-actions" {
+                a href="/voice-setup" class="ss-btn-primary" { "Open voice setup →" }
+            }
+        }
     }
-  } catch {}
-})();
-
-loadSettings();
-loadLicense();
-
-// ── Media Bridge panel ────────────────────────────────────────────────
-const MB_URL = 'http://127.0.0.1:18790';
-async function probeMediaBridge() {
-  const badge = document.getElementById('mb-status-badge');
-  const details = document.getElementById('mb-details');
-  const install = document.getElementById('mb-install');
-  if (!badge) return;
-  try {
-    const s = await (await fetch(MB_URL + '/status')).json();
-    badge.className = 'badge badge-green';
-    badge.textContent = 'running';
-    details.classList.remove('hidden');
-    install.classList.add('hidden');
-    document.getElementById('mb-version').textContent = 'v' + s.version;
-    document.getElementById('mb-backend').textContent = s.audio_backend;
-    const authed = s.authed_providers || [];
-    document.getElementById('mb-authed').innerHTML = authed.length
-      ? authed.map(p => `<span class="badge badge-green mr-1">${p}</span>`).join('')
-      : '<span class="text-gray-500">none yet — log in to a service below</span>';
-  } catch (e) {
-    badge.className = 'badge badge-red';
-    badge.textContent = 'not running';
-    details.classList.add('hidden');
-    install.classList.remove('hidden');
-  }
 }
-function copyAuthCmd(provider) {
-  const cmd = `syntaur-media-bridge --auth-setup --auth-provider ${provider}`;
-  navigator.clipboard?.writeText(cmd).then(() => {
-    document.getElementById('mb-copy-hint').textContent =
-      `Copied: ${cmd} — run in a terminal on this computer.`;
-  }).catch(() => {
-    document.getElementById('mb-copy-hint').textContent =
-      `Run in a terminal on this computer: ${cmd}`;
-  });
-}
-probeMediaBridge();
-setInterval(probeMediaBridge, 10000);
 
-async function installShortcut(target) {
-  const btn = document.getElementById(target === 'desktop' ? 'btn-shortcut-desktop' : 'btn-shortcut-menu');
-  const status = document.getElementById('shortcut-status');
-  btn.disabled = true;
-  btn.textContent = 'Installing...';
-  status.textContent = '';
-  try {
-    const resp = await fetch('/api/settings/install-shortcut', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
-      body: JSON.stringify({ target: target })
-    });
-    const data = await resp.json();
-    if (data.success) {
-      status.className = 'text-xs text-green-400';
-      status.textContent = data.message;
-    } else {
-      status.className = 'text-xs text-red-400';
-      status.textContent = data.message || 'Failed to install shortcut';
+// ── Modules ────────────────────────────────────────────────
+fn modules_installed_body() -> Markup {
+    html! {
+        div class="ss-card" {
+            p class="ss-help" {
+                "Each Syntaur module adds agent capabilities (Tax, Music, Coders, Knowledge, Journal, Voice). "
+                "Module-specific settings live inside each module's page — look for the gear icon."
+            }
+            div class="ss-actions" {
+                a href="/modules" class="ss-btn-primary" { "Manage modules →" }
+            }
+            div class="ss-module-grid" {
+                (module_tile("💰", "Tax", "/tax", "Receipts, expenses, investments, Form 4868"))
+                (module_tile("📚", "Knowledge", "/knowledge", "RAG index + research workflow (Cortex)"))
+                (module_tile("🎵", "Music", "/music", "AI DJ with taste graph"))
+                (module_tile("💻", "Terminal", "/coders", "Web SSH, pair-programmer"))
+                (module_tile("📓", "Journal", "/journal", "Isolated voice journal (Mushi)"))
+                (module_tile("🎙", "Voice", "/voice-setup", "Wake word + satellites"))
+            }
+        }
     }
-  } catch(e) {
-    status.className = 'text-xs text-red-400';
-    status.textContent = 'Connection error';
-  }
-  btn.disabled = false;
-  btn.textContent = target === 'desktop' ? 'Add to Desktop' : 'Install App Shortcut';
-}
-</script>
-<script>
-// Bug Report UI — injected on all authenticated pages (schema v10)
-(function() {
-  const BUG_TOKEN = sessionStorage.getItem('syntaur_token') || '';
-  if (!BUG_TOKEN) return;
-  const topBar = document.querySelector('.border-b.border-gray-800 .flex.items-center.justify-between');
-  if (!topBar) return;
-  const rightNav = topBar.lastElementChild;
-  if (!rightNav) return;
-  const bugBtn = document.createElement('button');
-  bugBtn.title = 'Report a Bug';
-  bugBtn.className = 'text-gray-500 hover:text-gray-300 transition-colors p-1 rounded';
-  bugBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2l1.88 1.88M14.12 3.88L16 2M9 7.13v-1a3.003 3.003 0 116 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 014-4h4a4 4 0 014 4v3c0 3.3-2.7 6-6 6z"/><path d="M12 20v-9M6.53 9C4.6 8.8 3 7.1 3 5M6 13H2M6 17l-4 1M17.47 9c1.93-.2 3.53-1.9 3.53-4M18 13h4M18 17l4 1"/></svg>';
-  bugBtn.onclick = function() { openBugModal(); };
-  if (rightNav.tagName === 'DIV') { rightNav.prepend(bugBtn); }
-  else { const w = document.createElement('div'); w.className='flex items-center gap-3'; topBar.replaceChild(w, rightNav); w.appendChild(bugBtn); w.appendChild(rightNav); }
-  const overlay = document.createElement('div');
-  overlay.id = 'bug-report-overlay';
-  overlay.className = 'fixed inset-0 z-50 bg-black/60 backdrop-blur-sm hidden flex items-center justify-center';
-  overlay.innerHTML = '<div class="bg-gray-800 border border-gray-700 rounded-2xl w-full max-w-lg mx-4 shadow-2xl"><div class="px-6 py-4 border-b border-gray-700 flex items-center justify-between"><h3 class="text-lg font-semibold text-white">Report a Bug</h3><button onclick="document.getElementById(\'bug-report-overlay\').classList.add(\'hidden\')" class="text-gray-400 hover:text-gray-200 text-xl leading-none">&times;</button></div><div class="px-6 py-5 space-y-4"><div><label class="block text-sm font-medium text-gray-300 mb-1.5">What went wrong?</label><textarea id="bug-desc" rows="4" class="w-full bg-gray-900 border border-gray-600 rounded-lg px-4 py-2.5 text-white placeholder-gray-500 focus:border-sky-500 focus:ring-1 focus:ring-sky-500 outline-none resize-none text-sm" placeholder="Describe the bug..."></textarea></div><details class="text-sm"><summary class="text-gray-400 cursor-pointer hover:text-gray-300 select-none">System Info (auto-collected)</summary><pre id="bug-sysinfo" class="mt-2 bg-gray-900 border border-gray-700 rounded-lg p-3 text-xs text-gray-400 overflow-x-auto max-h-40 overflow-y-auto"></pre></details><div id="bug-feedback" class="hidden text-sm"></div></div><div class="px-6 py-4 border-t border-gray-700 flex justify-end gap-3"><button onclick="document.getElementById(\'bug-report-overlay\').classList.add(\'hidden\')" class="text-sm text-gray-400 hover:text-gray-300 px-4 py-2">Cancel</button><button id="bug-submit-btn" onclick="submitBugReport()" class="text-sm bg-sky-600 hover:bg-sky-700 text-white font-medium px-5 py-2 rounded-lg transition-colors">Submit</button></div></div>';
-  document.body.appendChild(overlay);
-  overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.classList.add('hidden'); });
-  window.openBugModal = async function() {
-    const ov = document.getElementById('bug-report-overlay');
-    const desc = document.getElementById('bug-desc');
-    const si = document.getElementById('bug-sysinfo');
-    const fb = document.getElementById('bug-feedback');
-    desc.value = ''; fb.classList.add('hidden');
-    document.getElementById('bug-submit-btn').disabled = false;
-    document.getElementById('bug-submit-btn').textContent = 'Submit';
-    const info = { userAgent: navigator.userAgent, screen: screen.width+'x'+screen.height, window: innerWidth+'x'+innerHeight, page: location.href, time: new Date().toISOString() };
-    try { const r = await fetch('/health'); if (r.ok) info.gateway = await r.json(); } catch(e) { info.gateway = 'unavailable'; }
-    si.textContent = JSON.stringify(info, null, 2);
-    ov.classList.remove('hidden'); desc.focus();
-  };
-  window.submitBugReport = async function() {
-    const desc = document.getElementById('bug-desc').value.trim();
-    const fb = document.getElementById('bug-feedback');
-    const btn = document.getElementById('bug-submit-btn');
-    if (!desc) { fb.className='text-sm text-red-400'; fb.textContent='Please describe the bug.'; fb.classList.remove('hidden'); return; }
-    btn.disabled = true; btn.textContent = 'Submitting...'; fb.classList.add('hidden');
-    const si = { userAgent: navigator.userAgent, screen: screen.width+'x'+screen.height, window: innerWidth+'x'+innerHeight, page: location.href, time: new Date().toISOString() };
-    try { const r = await fetch('/health'); if (r.ok) si.gateway = await r.json(); } catch(e) {}
-    try {
-      const res = await fetch('/api/bug-reports', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ token: BUG_TOKEN, description: desc, system_info: si, page_url: location.href }) });
-      const data = await res.json();
-      if (data.id) { fb.className='text-sm text-green-400'; fb.textContent='Bug report #'+data.id+' submitted. Thank you!'; fb.classList.remove('hidden'); btn.textContent='Submitted'; setTimeout(function(){ document.getElementById('bug-report-overlay').classList.add('hidden'); }, 2000); }
-      else { fb.className='text-sm text-red-400'; fb.textContent=data.error||'Submission failed.'; fb.classList.remove('hidden'); btn.disabled=false; btn.textContent='Submit'; }
-    } catch(e) { fb.className='text-sm text-red-400'; fb.textContent='Network error: '+e.message; fb.classList.remove('hidden'); btn.disabled=false; btn.textContent='Submit'; }
-  };
-})();
-
-
-// ── Sync tab ─────────────────────────────────────────────────────────────
-let syncProviders = [];
-let syncPairPollTimer = null;
-
-async function loadSyncProviders() {
-  const box = document.getElementById('sync-categories');
-  box.innerHTML = '<p class="text-xs text-gray-500 italic">Loading…</p>';
-  try {
-    const resp = await fetch(`/api/sync/providers?token=${token}`, { headers: { 'Authorization': 'Bearer ' + token } });
-    const data = await resp.json();
-    syncProviders = data.providers || [];
-    renderSyncProviders();
-  } catch(e) {
-    box.innerHTML = '<p class="text-xs text-red-400">Failed to load: ' + e.message + '</p>';
-  }
 }
 
-const CATEGORY_DESCRIPTIONS = {
-  'Email': 'Connect inboxes so Syntaur can find receipts and important messages.',
-  'Calendar': 'Merge calendars from multiple sources. Events become voice-queryable.',
-  'Messaging': 'Where Syntaur reaches out to you (reminders, approvals, alerts).',
-  'Finance': 'Banks, brokers, exchanges, and payment processors. Feed the tax module.',
-  'Social': 'Publish and monitor. Used by the Crimson Lantern pipeline.',
-  'Developer': 'Dev tools that surface on your dashboard.',
-  'Smart Home': 'Home Assistant is the hub. Connecting it unlocks HomePod music, Matter devices, and voice control of every HA entity.',
-  'Media': 'Music, video, and TV sources Syntaur can query or control.',
-  'Music': 'These four work together. Connect Home Assistant + Apple Music for the best experience (HomePod playback). iOS Shortcut is a fallback.',
-  'Health': 'Activity, sleep, and biometrics for daily check-ins.',
-  'AI': 'Usage tracking for the models that power Syntaur.',
-  'Storage': 'Where your Syntaur data lives. Typically info-only health cards.',
-};
+fn module_tile(ico: &str, name: &str, url: &str, desc: &str) -> Markup {
+    html! {
+        a class="ss-module" href=(url) {
+            div class="ss-module-ico" { (ico) }
+            div class="ss-module-body" {
+                div class="ss-module-name" { (name) }
+                div class="ss-module-desc" { (desc) }
+            }
+        }
+    }
+}
 
-const USE_CASES = [
-  {
-    id: 'music',
-    icon: '🎵',
-    title: "Play music",
-    tiers: [
-      {
-        label: 'Simplest',
-        providers: ['phone_music_pwa'],
-        unlocks: 'Music plays on your phone (speakers, AirPods, AirPlay HomePod from iOS Control Center). That\'s it — nothing else needed.',
-        cost: '0 min — already done if phone is paired',
-      },
-      {
-        label: 'Pick your music service',
-        providers: ['apple_music', 'spotify', 'youtube_music'],
-        unlocks: '+ Search your library and pick songs by name/mood. Apple Music uses a desktop bookmarklet; Spotify and YouTube Music use OAuth (admin setup required).',
-        cost: '~3 min after admin OAuth setup',
-      },
-      {
-        label: 'If you already run Home Assistant',
-        providers: ['home_assistant'],
-        unlocks: '+ Whole-home: Syntaur controls HomePod, Apple TV, Sonos directly. Also unlocks speaker grouping and EQ. Optional — skip if you don\'t use HA.',
-        cost: '~10 min if HA already running',
-      },
-    ],
-  },
-  {
-    id: 'notifications',
-    icon: '🔔',
-    title: "Get notifications + reminders",
-    tiers: [
-      {
-        label: 'Simplest',
-        providers: [],
-        unlocks: 'PWA shows notifications on your phone. Already works once phone is paired.',
-        cost: '0 min',
-      },
-      {
-        label: 'Also',
-        providers: ['telegram'],
-        unlocks: '+ Telegram bot reaches you even when phone is silent. Two-way: reply by text.',
-        cost: '~30 sec (scan QR)',
-      },
-    ],
-  },
-  {
-    id: 'calendar',
-    icon: '📅',
-    title: "See your calendar",
-    tiers: [
-      {
-        label: 'Simplest',
-        providers: ['ics_subscription'],
-        unlocks: 'Subscribe to any .ics URL — work calendar, holidays, sports schedule. Read-only.',
-        cost: '~30 sec',
-      },
-      {
-        label: 'iCloud calendars',
-        providers: ['apple_calendar'],
-        unlocks: '+ Read AND write to iCloud calendars. Requires app-specific password from appleid.apple.com.',
-        cost: '~3 min',
-      },
-    ],
-  },
-  {
-    id: 'finance',
-    icon: '💰',
-    title: "Auto-track finances for taxes",
-    tiers: [
-      {
-        label: 'Simplest',
-        providers: ['plaid'],
-        unlocks: 'Connects ~12,000 banks via Plaid Link. Transactions flow into the tax module automatically.',
-        cost: '~5 min',
-      },
-      {
-        label: 'Add brokers',
-        providers: ['alpaca'],
-        unlocks: '+ Stock holdings + trade activity from Alpaca.',
-        cost: '~3 min',
-      },
-      {
-        label: 'Add crypto',
-        providers: ['coinbase', 'crypto_wallet'],
-        unlocks: '+ Coinbase trades and any public wallet balances.',
-        cost: '~5 min',
-      },
-      {
-        label: 'Add receipts',
-        providers: ['stripe'],
-        unlocks: '+ Stripe receipts auto-imported.',
-        cost: '~3 min',
-      },
-    ],
-  },
-  {
-    id: 'smart_home',
-    icon: '🏠',
-    title: "Voice-control smart home",
-    tiers: [
-      {
-        label: 'If you run Home Assistant',
-        providers: ['home_assistant'],
-        unlocks: 'Connect HA once, Syntaur controls every device already paired there — lights, locks, thermostats. No HA? Skip this whole row.',
-        cost: '~5 min if HA already running',
-      },
-    ],
-  },
-  {
-    id: 'health',
-    icon: '❤️',
-    title: "Track health and sleep",
-    tiers: [
-      {
-        label: 'If you have an Oura Ring',
-        providers: ['oura'],
-        unlocks: 'Sleep, readiness, activity. Ask "how did I sleep?"',
-        cost: '~2 min',
-      },
-      {
-        label: 'If you use Strava',
-        providers: ['strava'],
-        unlocks: 'Workout history — ask Syntaur to summarize the week.',
-        cost: '~2 min (OAuth setup needed first)',
-      },
-      {
-        label: 'Apple Health',
-        providers: ['apple_health'],
-        unlocks: 'Full sleep/heart/workout data. Export from iPhone, upload here.',
-        cost: '~10 min one-time',
-      },
-    ],
-  },
+// ── Appearance ─────────────────────────────────────────────
+fn appearance_theme_body() -> Markup {
+    html! {
+        div class="ss-card" {
+            p class="ss-help" {
+                "The dashboard uses a calm-neutral palette by default. Each module has its "
+                "own theme (cyberpunk music, parchment knowledge, retro-CRT coders, LCARS tax) — "
+                "those won't change."
+            }
+            div class="ss-field" {
+                label class="ss-label" { "Dashboard density" }
+                div class="ss-radio-row" {
+                    label class="ss-radio" { input type="radio" name="density" value="comfy" checked; " Comfortable" }
+                    label class="ss-radio" { input type="radio" name="density" value="compact"; " Compact" }
+                }
+                p class="ss-help" { "Compact trims padding in cards and widgets by ~30%." }
+            }
+            div class="ss-field" {
+                label class="ss-label" { "Accent" }
+                div class="ss-swatch-row" {
+                    div class="ss-swatch" data-color="#7aa2ff" style="background:#7aa2ff" title="Calm blue (default)" {}
+                    div class="ss-swatch" data-color="#7fbf8a" style="background:#7fbf8a" title="Sage" {}
+                    div class="ss-swatch" data-color="#f0b470" style="background:#f0b470" title="Amber" {}
+                    div class="ss-swatch" data-color="#d97a7a" style="background:#d97a7a" title="Clay" {}
+                    div class="ss-swatch" data-color="#b797c7" style="background:#b797c7" title="Lavender" {}
+                }
+                p class="ss-help" { "Changes the dashboard accent color only; module themes are unaffected." }
+            }
+            p class="ss-help" style="color:var(--ss-warn)" {
+                "(Live preview + persistence wiring coming — this pane currently shows options only.)"
+            }
+        }
+    }
+}
+
+// ── Privacy & data ─────────────────────────────────────────
+fn privacy_data_body() -> Markup {
+    html! {
+        div class="ss-card" {
+            h3 class="ss-card-title" { "What Syntaur stores" }
+            table class="ss-table" {
+                thead { tr {
+                    th { "What" } th { "Where" } th { "How long" } th { "Who sees it" }
+                }}
+                tbody {
+                    tr { td { "Chat messages" } td { "~/.syntaur/index.db" } td { "Forever, until you delete" } td { "You only" } }
+                    tr { td { "Uploaded documents" } td { "~/.syntaur/uploads/" } td { "Until you remove them" } td { "You + granted agents" } }
+                    tr { td { "Agent memories" } td { "~/.syntaur/index.db (agent_memories table)" } td { "Until you delete per memory" } td { "Per agent, per your sharing config" } }
+                    tr { td { "LLM prompts" } td { "Sent to your configured provider (OpenRouter, local, etc.)" } td { "Provider-dependent (see their retention policy)" } td { "Your provider" } }
+                    tr { td { "Telegram messages" } td { "Relayed via Telegram Gateway; stored in telegram_messages table" } td { "30 days default, configurable" } td { "You only" } }
+                    tr { td { "Voice transcripts" } td { "~/.syntaur/voice-data/ (local STT)" } td { "Session-only unless saved to journal" } td { "You only" } }
+                }
+            }
+        }
+        div class="ss-card" {
+            h3 class="ss-card-title" { "Controls" }
+            p class="ss-help" { "(Functional toggles land in Phase G — structure shown now so you can see where they'll live.)" }
+            div class="ss-toggle-row" { span { "LLM prompt logging" } input type="checkbox" disabled; }
+            div class="ss-toggle-row" { span { "Voice-transcript auto-save" } input type="checkbox" disabled; }
+            div class="ss-toggle-row" { span { "Anonymous telemetry" } input type="checkbox" disabled; }
+        }
+        div class="ss-card" {
+            h3 class="ss-card-title" { "Export / import" }
+            p class="ss-help" { "Download a portable copy of your config or import from a previous install." }
+            div class="ss-actions" {
+                button class="ss-btn-secondary" onclick="alert('Settings-as-code export — Phase H.')" { "Export config (JSON)" }
+                button class="ss-btn-secondary" onclick="alert('Settings-as-code import — Phase H.')" { "Import config…" }
+            }
+        }
+    }
+}
+
+// ── System › danger zone ───────────────────────────────────
+fn system_danger_body() -> Markup {
+    html! {
+        div class="ss-card ss-danger" {
+            h3 class="ss-card-title" style="color:var(--ss-danger)" { "Danger zone" }
+            p class="ss-help" { "These actions cannot be undone. Typed confirmation required." }
+            div class="ss-danger-row" {
+                div {
+                    div class="ss-danger-name" { "Reset all settings to defaults" }
+                    div class="ss-help" { "Keeps your data (chats, memories, agents) — only config is reset." }
+                }
+                button class="ss-btn-danger" onclick="alert('Phase H.')" { "Reset…" }
+            }
+            div class="ss-danger-row" {
+                div {
+                    div class="ss-danger-name" { "Wipe all agent memories" }
+                    div class="ss-help" { "Removes every saved memory across every agent (journal included only if opted in)." }
+                }
+                button class="ss-btn-danger" onclick="alert('Phase G.')" { "Wipe memories…" }
+            }
+            div class="ss-danger-row" {
+                div {
+                    div class="ss-danger-name" { "Factory reset" }
+                    div class="ss-help" { "Erase all data and configuration. Same as a fresh install." }
+                }
+                button class="ss-btn-danger" onclick="alert('Phase G.')" { "Factory reset…" }
+            }
+        }
+    }
+}
+
+// ── About ──────────────────────────────────────────────────
+fn about_body() -> Markup {
+    html! {
+        div class="ss-card" {
+            div class="ss-about-grid" {
+                div { div class="ss-about-label" { "Version" } div class="ss-about-val" id="ss-version" { "—" } }
+                div { div class="ss-about-label" { "Uptime" } div class="ss-about-val" id="ss-uptime" { "—" } }
+                div { div class="ss-about-label" { "Modules" } div class="ss-about-val" id="ss-modules" { "—" } }
+                div { div class="ss-about-label" { "Tools" } div class="ss-about-val" id="ss-tools" { "—" } }
+                div { div class="ss-about-label" { "Agents" } div class="ss-about-val" id="ss-agents" { "—" } }
+                div { div class="ss-about-label" { "LLM" } div class="ss-about-val" id="ss-llm" { "—" } }
+            }
+        }
+        div class="ss-card" {
+            h3 class="ss-card-title" { "Links" }
+            ul class="ss-link-list" {
+                li { a href="https://github.com/buddyholly007/syntaur" target="_blank" class="ss-link" { "GitHub repo" } }
+                li { a href="https://github.com/buddyholly007/syntaur/issues" target="_blank" class="ss-link" { "Report an issue" } }
+                li { a href="/history" class="ss-link" { "Conversation history" } }
+            }
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Cmd-K command palette
+// ══════════════════════════════════════════════════════════════════════
+
+fn cmdk_palette() -> Markup {
+    html! {
+        div id="ss-palette" class="ss-palette hidden" role="dialog" aria-label="Search settings" {
+            div class="ss-palette-scrim" onclick="ssClosePalette()" {}
+            div class="ss-palette-inner" {
+                div class="ss-palette-search-row" {
+                    svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" { circle cx="11" cy="11" r="7" {} path d="M21 21l-5-5" {} }
+                    input id="ss-palette-input" type="text" placeholder="Search settings — try 'telegram', 'gateway port', 'dark'…" oninput="ssPaletteSearch(this.value)" onkeydown="ssPaletteKey(event)";
+                    kbd { "esc" }
+                }
+                div id="ss-palette-results" class="ss-palette-results" {}
+                div class="ss-palette-footer" {
+                    span { kbd { "↑↓" } " navigate" }
+                    span { kbd { "↵" } " jump" }
+                    span { kbd { "esc" } " close" }
+                }
+            }
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Dirty-state banner (hidden by default; shown by JS on form change)
+// ══════════════════════════════════════════════════════════════════════
+
+fn dirty_banner() -> Markup {
+    html! {
+        div id="ss-dirty" class="ss-dirty hidden" role="status" aria-live="polite" {
+            span class="ss-dirty-dot" {}
+            span class="ss-dirty-text" { "You have unsaved changes" }
+            button class="ss-btn-secondary-sm" onclick="ssRevertDirty()" { "Revert" }
+            button class="ss-btn-primary-sm" onclick="ssSaveDirty()" { "Save" }
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Section / page index — drives sidebar + palette.
+// ══════════════════════════════════════════════════════════════════════
+
+struct SectionDef {
+    slug: &'static str,
+    title: &'static str,
+    pages: &'static [PageDef],
+}
+struct PageDef {
+    slug: &'static str,
+    title: &'static str,
+    badge: Option<&'static str>,
+    /// Keywords for the ⌘K palette — space-separated, lowercase.
+    keywords: &'static str,
+    description: &'static str,
+}
+
+const SECTIONS: &[SectionDef] = &[
+    SectionDef { slug: "account", title: "Account", pages: &[
+        PageDef { slug: "profile", title: "Profile", badge: None, keywords: "name email username display", description: "Your identity and personal info" },
+        PageDef { slug: "security", title: "Password & security", badge: None, keywords: "password login sessions signout logout 2fa", description: "Change password, active sessions" },
+        PageDef { slug: "users", title: "Users", badge: Some("admin"), keywords: "invite team members users roles admin", description: "Invite and manage users (admin only)" },
+    ]},
+    SectionDef { slug: "agents", title: "Agents", pages: &[
+        PageDef { slug: "all", title: "All agents", badge: None, keywords: "create import main thread agents peter felix kyron", description: "Create, import, and manage agents" },
+        PageDef { slug: "personas", title: "Personas & tone", badge: None, keywords: "personas peter kyron positron cortex silvr thaddeus maurice mushi humor dial", description: "Built-in personas and tone dials" },
+    ]},
+    SectionDef { slug: "integrations", title: "Integrations", pages: &[
+        PageDef { slug: "telegram", title: "Telegram", badge: None, keywords: "telegram bot phone chat messaging", description: "Chat from your phone via a Telegram bot" },
+        PageDef { slug: "homeassistant", title: "Home Assistant", badge: None, keywords: "home assistant smart home ha homeassistant", description: "Connect to a Home Assistant instance" },
+        PageDef { slug: "sync", title: "Sync", badge: None, keywords: "google microsoft gmail calendar drive sync oauth plaid stripe coinbase simplefin", description: "Cloud connectors (Google, Microsoft, bank, etc.)" },
+        PageDef { slug: "media", title: "Media bridge", badge: None, keywords: "media apple music spotify tidal youtube bridge playback", description: "Local companion for hidden playback" },
+    ]},
+    SectionDef { slug: "llm", title: "LLM", pages: &[
+        PageDef { slug: "providers", title: "Providers", badge: None, keywords: "openrouter lm studio turboquant fallback api key model provider openai anthropic claude", description: "Model providers, API keys, fallback chain" },
+    ]},
+    SectionDef { slug: "voice", title: "Voice", pages: &[
+        PageDef { slug: "satellites", title: "Satellites", badge: None, keywords: "voice wake word satellite esphome speaker", description: "Voice satellites and wake word" },
+    ]},
+    SectionDef { slug: "modules", title: "Modules", pages: &[
+        PageDef { slug: "installed", title: "Installed", badge: None, keywords: "modules extensions enable disable tax music knowledge coders journal", description: "Enable and disable modules" },
+    ]},
+    SectionDef { slug: "appearance", title: "Appearance", pages: &[
+        PageDef { slug: "theme", title: "Theme", badge: None, keywords: "theme dark mode density accent color appearance", description: "Dashboard palette and density" },
+    ]},
+    SectionDef { slug: "privacy", title: "Privacy & data", pages: &[
+        PageDef { slug: "data", title: "What Syntaur stores", badge: None, keywords: "privacy data retention telemetry logging export import", description: "What's stored, where, for how long" },
+    ]},
+    SectionDef { slug: "system", title: "System", pages: &[
+        PageDef { slug: "gateway", title: "Gateway & ports", badge: None, keywords: "gateway port bind network restart system config", description: "Gateway network + runtime settings" },
+        PageDef { slug: "danger", title: "Danger zone", badge: None, keywords: "reset wipe factory delete danger", description: "Destructive actions" },
+    ]},
+    SectionDef { slug: "about", title: "About", pages: &[
+        PageDef { slug: "info", title: "About this Syntaur", badge: None, keywords: "about version uptime tools licenses", description: "Version, uptime, tool count" },
+    ]},
 ];
 
-function renderGetStarted() {
-  // Phone PWA paired = Get Started done. Otherwise show the CTA.
-  const phonePaired = syncProviders.some(p => p.id === 'phone_music_pwa' && p.connected);
-  const cta = document.getElementById('sync-getstarted-card');
-  const done = document.getElementById('sync-getstarted-done');
-  if (!cta || !done) return;
-  if (phonePaired) {
-    cta.classList.add('hidden');
-    done.classList.remove('hidden');
-  } else {
-    cta.classList.remove('hidden');
-    done.classList.add('hidden');
-  }
-}
-
-function renderUseCases() {
-  const box = document.getElementById('sync-usecases');
-  if (!box) return;
-  box.innerHTML = USE_CASES.map(uc => {
-    const tierHtml = uc.tiers.map((tier, idx) => {
-      const tierProviders = tier.providers.map(id => syncProviders.find(p => p.id === id)).filter(Boolean);
-      const tierConnected = tierProviders.length === 0 || tierProviders.every(p => p.connected);
-      const stepLabel = idx === 0 ? '①' : (idx === 1 ? '②' : (idx === 2 ? '③' : '④'));
-      const tierColor = tierConnected ? 'text-green-400' : 'text-gray-400';
-      const buttons = tierProviders.length === 0
-        ? '<span class="text-xs text-green-400">— Already on (PWA)</span>'
-        : tierProviders.map(p => {
-            if (p.connected) return `<span class="text-xs text-green-400">✓ ${escapeHtml(p.name)}</span>`;
-            if (p.needs_oauth_config) return `<span class="text-xs text-yellow-500" title="OAuth app config required">${escapeHtml(p.name)} (needs admin)</span>`;
-            return `<button onclick="event.stopPropagation(); openSyncModal('${p.id}')" class="text-xs bg-gray-800 hover:bg-oc-700 text-gray-200 hover:text-white px-2 py-0.5 rounded transition-colors">+ ${escapeHtml(p.name)}</button>`;
-          }).join(' ');
-      return `<div class="flex items-start gap-2 py-1.5">
-        <span class="${tierColor} text-sm flex-shrink-0">${stepLabel}</span>
-        <div class="flex-1 min-w-0">
-          <div class="flex items-baseline gap-2">
-            <span class="text-xs font-medium ${tierConnected ? 'text-green-400' : 'text-gray-300'}">${escapeHtml(tier.label)}</span>
-            <span class="text-[10px] text-gray-600">${escapeHtml(tier.cost)}</span>
-          </div>
-          <p class="text-[11px] text-gray-500 leading-relaxed">${escapeHtml(tier.unlocks)}</p>
-          <div class="mt-1 flex items-center gap-1 flex-wrap">${buttons}</div>
-        </div>
-      </div>`;
-    }).join('');
-    return `<details class="bg-gray-900 border border-gray-700 rounded-lg overflow-hidden">
-      <summary class="cursor-pointer p-3 flex items-center gap-3 hover:bg-gray-800 list-none">
-        <span class="text-2xl flex-shrink-0">${uc.icon}</span>
-        <div class="flex-1 min-w-0">
-          <p class="font-medium text-sm">${escapeHtml(uc.title)}</p>
-          <p class="text-[11px] text-gray-500">${uc.tiers.length} option${uc.tiers.length > 1 ? 's' : ''} — simplest first</p>
-        </div>
-        <span class="text-gray-500 text-xs">▾</span>
-      </summary>
-      <div class="px-3 pb-3 space-y-1 border-t border-gray-700">${tierHtml}</div>
-    </details>`;
-  }).join('');
-}
-
-function toggleAllServices() {
-  const box = document.getElementById('sync-all-services');
-  const arrow = document.getElementById('sync-all-arrow');
-  if (box.classList.contains('hidden')) {
-    box.classList.remove('hidden');
-    arrow.textContent = '▾ Hide';
-  } else {
-    box.classList.add('hidden');
-    arrow.textContent = '▸ Show all';
-  }
-}
-
-function renderSyncProviders() {
-  const box = document.getElementById('sync-categories');
-  if (!syncProviders.length) { box.innerHTML = '<p class="text-xs text-gray-500 italic">No providers.</p>'; return; }
-  const byCat = {};
-  for (const p of syncProviders) {
-    (byCat[p.category] = byCat[p.category] || []).push(p);
-  }
-  const catOrder = ['Music', 'Smart Home', 'Calendar', 'Messaging', 'Finance', 'Email', 'Developer', 'Social', 'Health', 'AI', 'Media', 'Storage'];
-  const ordered = catOrder.filter(c => byCat[c]).concat(Object.keys(byCat).filter(c => !catOrder.includes(c)));
-  box.innerHTML = ordered.map(cat => {
-    // Sort within category: connected first, then alphabetical
-    const sorted = [...byCat[cat]].sort((a, b) => {
-      if (a.connected !== b.connected) return a.connected ? -1 : 1;
-      return a.name.localeCompare(b.name);
-    });
-    const cards = sorted.map(p => renderProviderCard(p)).join('');
-    const desc = CATEGORY_DESCRIPTIONS[cat] || '';
-    return `<div data-category="${escapeHtml(cat)}">
-      <div class="mb-2">
-        <h4 class="text-xs uppercase tracking-wider text-gray-400 font-semibold">${escapeHtml(cat)}</h4>
-        ${desc ? `<p class="text-[11px] text-gray-600 mt-0.5">${escapeHtml(desc)}</p>` : ''}
-      </div>
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">${cards}</div>
-    </div>`;
-  }).join('');
-  renderGetStarted();
-  renderUseCases();
-}
-
-function filterProviders(query) {
-  const q = (query || '').toLowerCase().trim();
-  document.querySelectorAll('#sync-categories [data-provider]').forEach(el => {
-    const pid = el.dataset.provider;
-    const p = syncProviders.find(x => x.id === pid);
-    if (!p) return;
-    const match = !q || p.name.toLowerCase().includes(q) || p.category.toLowerCase().includes(q) || (p.unlocks || '').toLowerCase().includes(q);
-    el.style.display = match ? '' : 'none';
-  });
-  // Hide empty categories
-  document.querySelectorAll('#sync-categories [data-category]').forEach(catEl => {
-    const visibleCards = catEl.querySelectorAll('[data-provider]:not([style*="display: none"])');
-    catEl.style.display = visibleCards.length === 0 && q ? 'none' : '';
-  });
-}
-
-function renderInstructions(text) {
-  if (!text) return '';
-  // If the text contains "1. ..." pattern, render as numbered list
-  const stepRegex = /\s*(\d+)\.\s+/g;
-  const matches = [...text.matchAll(stepRegex)];
-  if (matches.length < 2) {
-    // Not a numbered list — return as paragraph
-    return `<p class="text-sm text-gray-300 mb-3">${escapeHtml(text)}</p>`;
-  }
-  // Split on step numbers and build <ol>
-  const parts = text.split(/\s*\d+\.\s+/).filter(p => p.trim());
-  // If there's a prefix before the first "1.", keep it as lead-in
-  const firstMatchIdx = text.search(/\d+\.\s+/);
-  const lead = firstMatchIdx > 0 ? text.substring(0, firstMatchIdx).trim() : '';
-  const items = lead ? parts : parts;
-  let html = '';
-  if (lead) html += `<p class="text-sm text-gray-300 mb-2">${escapeHtml(lead)}</p>`;
-  html += '<ol class="text-sm text-gray-300 space-y-1.5 mb-3 list-decimal list-inside ml-1">';
-  for (const item of items) {
-    html += `<li class="leading-relaxed">${escapeHtml(item.trim())}</li>`;
-  }
-  html += '</ol>';
-  return html;
-}
-
-function renderProviderCard(p) {
-  const icons = {
-    gmail: '&#9993;', google_calendar: '&#128197;', ics_subscription: '&#128197;',
-    telegram: '&#128172;', stripe: '&#128179;', bluesky: '&#9729;',
-    plaid: '&#127974;', simplefin: '&#127974;', alpaca: '&#128200;', coinbase: '&#8383;',
-    github: '&#128187;', home_assistant: '&#127968;', plex: '&#127916;',
-    apple_calendar: '&#128197;', crypto_wallet: '&#128184;',
-    spotify: '&#127925;', youtube: '&#9654;', strava: '&#127939;',
-    oura: '&#128131;', anthropic_usage: '&#129302;', openrouter_usage: '&#9889;',
-    apple_health: '&#10084;', notebooklm_status: '&#128214;', vault_health: '&#128190;',
-    airplay: '&#128251;', music_assistant: '&#127925;', ios_shortcut_music: '&#128241;',
-    apple_music: '&#127925;',
-  };
-  const icon = icons[p.id] || '&#128279;';
-  let statusBadge = '';
-  let action = '';
-
-  if (p.info_only) {
-    statusBadge = '<span class="badge badge-blue">Info</span>';
-    action = `<button onclick="openSyncModal('${p.id}')" class="text-xs text-oc-500 hover:text-oc-400">View status</button>`;
-  } else if (p.needs_oauth_config) {
-    statusBadge = '<span class="badge badge-yellow" title="OAuth app needs to be registered">Setup needed</span>';
-    action = `<button onclick="openOauthSetupModal('${p.id}','${escapeHtmlAttr(p.name)}')" class="text-xs bg-yellow-700 hover:bg-yellow-600 text-white px-3 py-1 rounded-lg">Set up OAuth</button>`;
-  } else if (p.connected) {
-    if (p.status === 'needs_reconnect') {
-      statusBadge = '<span class="badge badge-red">Reconnect</span>';
-      action = `<button onclick="openSyncModal('${p.id}')" class="text-xs text-oc-500 hover:text-oc-400">Reconnect</button>
-                <button onclick="disconnectSyncStyled('${p.id}','${escapeHtmlAttr(p.name)}')" class="text-xs text-gray-400 hover:text-red-400">Remove</button>`;
-    } else {
-      statusBadge = '<span class="badge badge-green">Connected</span>';
-      action = `<button onclick="testSyncProvider('${p.id}')" class="text-xs text-gray-400 hover:text-gray-200" title="Verify credentials still work">Test</button>
-                <button onclick="disconnectSyncStyled('${p.id}','${escapeHtmlAttr(p.name)}')" class="text-xs text-gray-400 hover:text-red-400">Disconnect</button>`;
+// Produce the search-index JSON for the client-side palette.
+fn palette_index_json() -> String {
+    let mut items = Vec::new();
+    for s in SECTIONS {
+        for p in s.pages {
+            items.push(format!(
+                r#"{{"section":"{s}","page":"{p}","section_title":"{st}","title":"{t}","keywords":"{k}","description":"{d}","badge":{b}}}"#,
+                s = s.slug, p = p.slug, st = s.title, t = p.title,
+                k = p.keywords, d = p.description,
+                b = match p.badge { Some(v) => format!(r#""{}""#, v), None => "null".to_string() },
+            ));
+        }
     }
-  } else {
-    action = `<button onclick="openSyncModal('${p.id}')" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-3 py-1 rounded-lg">Connect</button>`;
+    format!("[{}]", items.join(","))
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Styles + new JS
+// ══════════════════════════════════════════════════════════════════════
+
+const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
+  body { font-family: 'Inter', sans-serif; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; }
+
+  :root {
+    --ss-bg:        #0b0f15;
+    --ss-panel:     #0f141c;
+    --ss-panel-2:   #141a24;
+    --ss-line:      #1d242f;
+    --ss-line-2:    #2a3340;
+    --ss-ink:       #e6e9ee;
+    --ss-ink-dim:   #9aa3af;
+    --ss-ink-mute:  #6a7380;
+    --ss-ink-faint: #434b57;
+    --ss-accent:    #7aa2ff;
+    --ss-accent-2:  #4d6fd0;
+    --ss-warn:      #f0b470;
+    --ss-danger:    #d97a7a;
+    --ss-success:   #7fbf8a;
   }
+  body.bg-gray-950 { background: var(--ss-bg) !important; color: var(--ss-ink) !important; }
 
-  const subLine = p.connected && p.display_name
-    ? `<p class="text-[11px] text-gray-500 truncate">${escapeHtml(p.display_name)}</p>`
-    : '';
-  const unlocksText = (p.connected && p.unlocks)
-    ? `<p class="text-[11px] text-gray-400 mt-1 leading-snug">${escapeHtml(p.unlocks)}</p>`
-    : (!p.connected && !p.info_only && p.unlocks)
-      ? `<p class="text-[11px] text-gray-600 mt-1 leading-snug italic">${escapeHtml(p.unlocks)}</p>`
-      : '';
-  const lastSync = p.connected && p.last_sync_at
-    ? `<p class="text-[10px] text-gray-600 mt-0.5">checked ${relTime(p.last_check_at || p.last_sync_at)}</p>`
-    : '';
-  const errorLine = p.connected && p.last_error
-    ? `<p class="text-[10px] text-red-400 mt-0.5 truncate" title="${escapeHtmlAttr(p.last_error)}">${escapeHtml(p.last_error.substring(0, 60))}</p>`
-    : '';
+  /* Preserve legacy form classes referenced by embedded HTML chunks */
+  .card { background: var(--ss-panel); border: 1px solid var(--ss-line); border-radius: 10px; padding: 20px; }
+  .input { width: 100%; background: var(--ss-panel-2); border: 1px solid var(--ss-line-2); border-radius: 6px; padding: 9px 11px; color: var(--ss-ink); font-size: 13.5px; outline: none; }
+  .input:focus { border-color: var(--ss-accent); box-shadow: 0 0 0 1px var(--ss-accent); }
+  .label { color: var(--ss-ink); font-size: 13px; font-weight: 500; display: block; margin-bottom: 6px; }
+  .btn-primary { background: var(--ss-accent); color: #0a0d12; font-weight: 500; padding: 8px 16px; border-radius: 7px; border: none; cursor: pointer; font-size: 13px; }
+  .btn-primary:hover { background: #9bbcff; }
+  .btn-secondary { background: var(--ss-panel-2); color: var(--ss-ink); font-weight: 500; padding: 8px 16px; border-radius: 7px; border: 1px solid var(--ss-line-2); cursor: pointer; font-size: 13px; }
+  .btn-secondary:hover { border-color: var(--ss-accent); }
+  .badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px; font-size: 10.5px; font-weight: 500; }
+  .badge-green { background: rgba(127,191,138,0.14); color: var(--ss-success); }
+  .badge-red { background: rgba(217,122,122,0.14); color: var(--ss-danger); }
+  .tab { padding: 7px 14px; font-size: 13px; font-weight: 500; border-radius: 7px; cursor: pointer; background: transparent; border: none; color: var(--ss-ink-dim); }
+  .tab.active { background: var(--ss-panel); color: var(--ss-ink); }
+  .tab-content { }
+  .tab-content.hidden { display: none; }
 
-  return `<div class="bg-gray-900 border border-gray-700 hover:border-gray-600 rounded-lg p-3 transition-colors" data-provider="${escapeHtml(p.id)}">
-    <div class="flex items-start gap-3">
-      <span class="text-2xl flex-shrink-0">${icon}</span>
-      <div class="flex-1 min-w-0">
-        <div class="flex items-center gap-2 justify-between">
-          <p class="font-medium text-sm truncate">${escapeHtml(p.name)}</p>
-          ${statusBadge}
-        </div>
-        ${subLine}
-        ${unlocksText}
-        ${lastSync}
-        ${errorLine}
-        <div class="mt-2 flex gap-2 flex-wrap">${action}</div>
-      </div>
-    </div>
-  </div>`;
+  /* Top bar */
+  .ss-topbar { background: rgba(10,13,18,0.85); border-bottom: 1px solid var(--ss-line); backdrop-filter: blur(8px); position: sticky; top: 0; z-index: 40; }
+  .ss-topbar-inner { max-width: 1400px; margin: 0 auto; padding: 10px 18px; display: flex; align-items: center; gap: 10px; }
+  .ss-crumb-sep { color: var(--ss-ink-faint); margin: 0 2px; }
+  .ss-crumb { color: var(--ss-ink-dim); font-size: 13.5px; }
+  .ss-crumb-page { color: var(--ss-ink); font-size: 13.5px; }
+  .ss-crumb-page:not(:empty)::before { content: " / "; color: var(--ss-ink-faint); margin: 0 4px; }
+  .ss-link { color: var(--ss-ink-dim); font-size: 13px; text-decoration: none; }
+  .ss-link:hover { color: var(--ss-ink); }
+  .ss-search-hint {
+    display: flex; align-items: center; gap: 6px;
+    background: var(--ss-panel); border: 1px solid var(--ss-line-2);
+    border-radius: 7px; padding: 5px 9px;
+    font-size: 12px; color: var(--ss-ink-dim); cursor: pointer;
+  }
+  .ss-search-hint:hover { border-color: var(--ss-accent); color: var(--ss-ink); }
+  .ss-search-hint kbd { font-family: 'SF Mono', ui-monospace, monospace; font-size: 10px; background: var(--ss-panel-2); padding: 1px 5px; border-radius: 3px; color: var(--ss-ink-dim); }
+
+  /* Two-pane shell */
+  .ss-shell { display: grid; grid-template-columns: 260px 1fr; max-width: 1400px; margin: 0 auto; min-height: calc(100vh - 53px); }
+  @media (max-width: 900px) { .ss-shell { grid-template-columns: 1fr; } .ss-sidebar { display: none; } .ss-sidebar.open { display: block; position: fixed; inset: 53px 0 0 0; z-index: 50; background: var(--ss-panel); overflow-y: auto; } }
+
+  /* Sidebar */
+  .ss-sidebar { border-right: 1px solid var(--ss-line); background: var(--ss-panel); padding: 12px 0; overflow-y: auto; }
+  .ss-sidebar-search { padding: 2px 14px 8px; display: flex; align-items: center; gap: 6px; border-bottom: 1px solid var(--ss-line); margin-bottom: 6px; }
+  .ss-sidebar-search svg { color: var(--ss-ink-mute); flex-shrink: 0; }
+  .ss-sidebar-search input { flex: 1; background: transparent; border: none; outline: none; color: var(--ss-ink); font-size: 12.5px; padding: 6px 0; }
+  .ss-sidebar-search input::placeholder { color: var(--ss-ink-mute); }
+  .ss-sidebar-nav { padding: 4px 8px; }
+  .ss-sec { margin-bottom: 10px; }
+  .ss-sec.ss-hidden { display: none; }
+  .ss-sec-title { font-size: 10px; font-weight: 600; letter-spacing: 0.09em; text-transform: uppercase; color: var(--ss-ink-mute); padding: 10px 10px 4px; }
+  .ss-nav-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 10px; font-size: 13px; line-height: 1.3;
+    color: var(--ss-ink-dim); text-decoration: none;
+    border-radius: 6px; cursor: pointer;
+    transition: background 0.12s, color 0.12s;
+  }
+  .ss-nav-item:hover { background: var(--ss-panel-2); color: var(--ss-ink); }
+  .ss-nav-item.active { background: rgba(122,162,255,0.1); color: var(--ss-ink); position: relative; }
+  .ss-nav-item.active::before { content: ''; position: absolute; left: 0; top: 4px; bottom: 4px; width: 2px; background: var(--ss-accent); border-radius: 2px; }
+  .ss-nav-item.ss-hidden { display: none; }
+  .ss-nav-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ss-nav-badge { font-size: 9.5px; padding: 1px 7px; background: var(--ss-line-2); color: var(--ss-ink-mute); border-radius: 999px; font-weight: 500; text-transform: lowercase; }
+
+  /* Main content area */
+  .ss-main { padding: 28px 32px 80px; min-width: 0; }
+  .ss-page { display: none; max-width: 760px; }
+  .ss-page.active { display: block; }
+  .ss-page-header { margin-bottom: 20px; border-bottom: 1px solid var(--ss-line); padding-bottom: 14px; }
+  .ss-page-title { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; color: var(--ss-ink); margin-bottom: 4px; }
+  .ss-page-subtitle { font-size: 13.5px; color: var(--ss-ink-dim); line-height: 1.5; }
+  .ss-page-body > * + * { margin-top: 16px; }
+
+  /* Cards */
+  .ss-card { background: var(--ss-panel); border: 1px solid var(--ss-line); border-radius: 10px; padding: 18px 20px; }
+  .ss-card-title { font-size: 14px; font-weight: 600; color: var(--ss-ink); margin-bottom: 12px; }
+  .ss-card.ss-danger { border-color: rgba(217,122,122,0.35); }
+
+  /* Fields */
+  .ss-field { margin-bottom: 14px; }
+  .ss-field:last-child { margin-bottom: 0; }
+  .ss-label { display: block; font-size: 12.5px; font-weight: 500; color: var(--ss-ink); margin-bottom: 6px; }
+  .ss-input, .ss-field input, .ss-field select, .ss-field textarea {
+    width: 100%; background: var(--ss-panel-2); border: 1px solid var(--ss-line-2);
+    border-radius: 6px; padding: 8px 11px; color: var(--ss-ink); font-size: 13.5px;
+    outline: none; font-family: inherit;
+  }
+  .ss-input:focus, .ss-field input:focus, .ss-field select:focus, .ss-field textarea:focus { border-color: var(--ss-accent); box-shadow: 0 0 0 1px var(--ss-accent); }
+  .ss-help { font-size: 11.5px; color: var(--ss-ink-mute); margin-top: 6px; line-height: 1.5; }
+  .ss-actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; align-items: center; }
+  .ss-btn-primary { background: var(--ss-accent); color: #0a0d12; border: none; padding: 7px 14px; border-radius: 7px; font-size: 13px; font-weight: 500; cursor: pointer; transition: background 0.12s; }
+  .ss-btn-primary:hover { background: #9bbcff; }
+  .ss-btn-secondary { background: var(--ss-panel-2); color: var(--ss-ink); border: 1px solid var(--ss-line-2); padding: 7px 14px; border-radius: 7px; font-size: 13px; font-weight: 500; cursor: pointer; text-decoration: none; display: inline-block; transition: border-color 0.12s; }
+  .ss-btn-secondary:hover { border-color: var(--ss-accent); color: var(--ss-ink); }
+  .ss-btn-danger { background: rgba(217,122,122,0.15); color: var(--ss-danger); border: 1px solid rgba(217,122,122,0.35); padding: 7px 14px; border-radius: 7px; font-size: 13px; font-weight: 500; cursor: pointer; }
+  .ss-btn-danger:hover { background: rgba(217,122,122,0.25); }
+
+  .ss-radio-row { display: flex; gap: 18px; }
+  .ss-radio { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ss-ink); cursor: pointer; }
+  .ss-swatch-row { display: flex; gap: 8px; }
+  .ss-swatch { width: 28px; height: 28px; border-radius: 7px; cursor: pointer; border: 2px solid transparent; transition: border-color 0.12s; }
+  .ss-swatch:hover, .ss-swatch.active { border-color: var(--ss-ink); }
+  .ss-toggle-row { display: flex; align-items: center; justify-content: space-between; padding: 9px 0; border-bottom: 1px dashed var(--ss-line); font-size: 13px; }
+  .ss-toggle-row:last-child { border-bottom: none; }
+
+  /* Welcome grid */
+  .ss-welcome-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  @media (max-width: 700px) { .ss-welcome-grid { grid-template-columns: repeat(2, 1fr); } }
+  .ss-welcome-tile {
+    background: var(--ss-panel); border: 1px solid var(--ss-line); border-radius: 10px;
+    padding: 14px 16px; text-decoration: none; color: var(--ss-ink);
+    transition: border-color 0.12s, transform 0.12s;
+    display: block;
+  }
+  .ss-welcome-tile:hover { border-color: var(--ss-accent); transform: translateY(-1px); }
+  .ss-welcome-ico { font-size: 22px; margin-bottom: 4px; }
+  .ss-welcome-label { font-size: 14px; font-weight: 600; }
+  .ss-welcome-sub { font-size: 11.5px; color: var(--ss-ink-mute); margin-top: 2px; }
+  .ss-tip { margin-top: 22px; padding: 10px 14px; background: var(--ss-panel-2); border: 1px dashed var(--ss-line-2); border-radius: 7px; font-size: 12.5px; color: var(--ss-ink-mute); }
+  .ss-tip kbd { font-family: 'SF Mono', ui-monospace, monospace; font-size: 10.5px; background: var(--ss-panel); padding: 1px 6px; border-radius: 4px; color: var(--ss-ink-dim); border: 1px solid var(--ss-line-2); }
+
+  /* Personas grid */
+  .ss-persona-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 8px; }
+  @media (max-width: 600px) { .ss-persona-grid { grid-template-columns: 1fr; } }
+  .ss-persona { display: flex; gap: 10px; padding: 12px; background: var(--ss-panel-2); border: 1px solid var(--ss-line); border-radius: 8px; }
+  .ss-persona-ico { font-size: 22px; flex-shrink: 0; }
+  .ss-persona-name { font-size: 13.5px; font-weight: 600; color: var(--ss-ink); }
+  .ss-persona-role { font-size: 11.5px; color: var(--ss-accent); margin-top: 1px; }
+  .ss-persona-insp { font-size: 11.5px; color: var(--ss-ink-mute); margin-top: 3px; line-height: 1.4; }
+
+  /* Modules grid */
+  .ss-module-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 14px; }
+  @media (max-width: 600px) { .ss-module-grid { grid-template-columns: 1fr; } }
+  .ss-module { display: flex; gap: 10px; padding: 12px 14px; background: var(--ss-panel-2); border: 1px solid var(--ss-line); border-radius: 8px; text-decoration: none; color: var(--ss-ink); transition: border-color 0.12s; }
+  .ss-module:hover { border-color: var(--ss-accent); }
+  .ss-module-ico { font-size: 18px; flex-shrink: 0; }
+  .ss-module-name { font-size: 13px; font-weight: 600; color: var(--ss-ink); }
+  .ss-module-desc { font-size: 11.5px; color: var(--ss-ink-mute); margin-top: 2px; line-height: 1.4; }
+
+  /* Privacy table */
+  .ss-table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+  .ss-table th, .ss-table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--ss-line); font-size: 12.5px; }
+  .ss-table th { color: var(--ss-ink-mute); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .ss-table td { color: var(--ss-ink-dim); }
+
+  /* About */
+  .ss-about-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  @media (max-width: 600px) { .ss-about-grid { grid-template-columns: repeat(2, 1fr); } }
+  .ss-about-label { font-size: 10.5px; font-weight: 600; letter-spacing: 0.09em; text-transform: uppercase; color: var(--ss-ink-mute); }
+  .ss-about-val { font-size: 16px; font-weight: 600; color: var(--ss-ink); margin-top: 3px; }
+  .ss-link-list { list-style: none; padding: 0; margin: 0; }
+  .ss-link-list li { padding: 5px 0; }
+
+  /* Danger */
+  .ss-danger-row { display: flex; align-items: center; justify-content: space-between; padding: 12px 0; border-top: 1px solid var(--ss-line); gap: 12px; }
+  .ss-danger-row:first-of-type { border-top: none; }
+  .ss-danger-name { font-size: 13.5px; font-weight: 500; color: var(--ss-ink); }
+
+  /* Cmd-K palette */
+  .ss-palette { position: fixed; inset: 0; z-index: 100; display: flex; align-items: flex-start; justify-content: center; padding-top: 12vh; }
+  .ss-palette.hidden { display: none; }
+  .ss-palette-scrim { position: absolute; inset: 0; background: rgba(0,0,0,0.55); backdrop-filter: blur(4px); }
+  .ss-palette-inner { position: relative; width: 640px; max-width: calc(100vw - 32px); background: var(--ss-panel); border: 1px solid var(--ss-line-2); border-radius: 12px; box-shadow: 0 24px 48px rgba(0,0,0,0.6); overflow: hidden; }
+  .ss-palette-search-row { display: flex; align-items: center; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--ss-line); }
+  .ss-palette-search-row svg { color: var(--ss-ink-mute); flex-shrink: 0; }
+  .ss-palette-search-row input { flex: 1; background: transparent; border: none; outline: none; color: var(--ss-ink); font-size: 15px; }
+  .ss-palette-search-row input::placeholder { color: var(--ss-ink-mute); }
+  .ss-palette-search-row kbd { font-family: 'SF Mono', ui-monospace, monospace; font-size: 10.5px; background: var(--ss-panel-2); padding: 2px 6px; border-radius: 4px; color: var(--ss-ink-dim); border: 1px solid var(--ss-line-2); }
+  .ss-palette-results { max-height: 340px; overflow-y: auto; padding: 4px; }
+  .ss-palette-result { padding: 8px 12px; border-radius: 6px; cursor: pointer; display: flex; align-items: center; gap: 10px; }
+  .ss-palette-result:hover, .ss-palette-result.focused { background: var(--ss-panel-2); }
+  .ss-palette-result-main { flex: 1; min-width: 0; }
+  .ss-palette-result-title { font-size: 13.5px; color: var(--ss-ink); font-weight: 500; }
+  .ss-palette-result-section { font-size: 11px; color: var(--ss-ink-mute); margin-top: 1px; }
+  .ss-palette-footer { display: flex; gap: 14px; padding: 8px 14px; border-top: 1px solid var(--ss-line); font-size: 10.5px; color: var(--ss-ink-mute); }
+  .ss-palette-footer kbd { font-family: 'SF Mono', ui-monospace, monospace; font-size: 9.5px; background: var(--ss-panel-2); padding: 1px 5px; border-radius: 3px; color: var(--ss-ink-dim); border: 1px solid var(--ss-line-2); margin-right: 3px; }
+  .ss-palette-empty { padding: 20px; text-align: center; color: var(--ss-ink-mute); font-size: 13px; }
+
+  /* Dirty banner */
+  .ss-dirty {
+    position: fixed; left: 50%; transform: translateX(-50%);
+    bottom: 20px; z-index: 80;
+    background: var(--ss-panel); border: 1px solid var(--ss-line-2);
+    border-radius: 10px; padding: 10px 14px;
+    display: flex; align-items: center; gap: 10px;
+    font-size: 13px; color: var(--ss-ink);
+    box-shadow: 0 10px 32px rgba(0,0,0,0.4);
+  }
+  .ss-dirty.hidden { display: none; }
+  .ss-dirty-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ss-warn); animation: ss-pulse 1.6s infinite; }
+  @keyframes ss-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+  .ss-btn-primary-sm { background: var(--ss-accent); color: #0a0d12; border: none; padding: 5px 12px; border-radius: 6px; font-size: 12.5px; font-weight: 500; cursor: pointer; }
+  .ss-btn-secondary-sm { background: transparent; color: var(--ss-ink-dim); border: 1px solid var(--ss-line-2); padding: 4px 11px; border-radius: 6px; font-size: 12.5px; cursor: pointer; }
+  .ss-btn-secondary-sm:hover { color: var(--ss-ink); }
+
+  /* Scroll-to highlight pulse */
+  .ss-highlight-pulse { animation: ss-highlight 2s ease-out 1; }
+  @keyframes ss-highlight {
+    0% { box-shadow: 0 0 0 0 rgba(122,162,255,0); }
+    15% { box-shadow: 0 0 0 4px rgba(122,162,255,0.35); }
+    100% { box-shadow: 0 0 0 0 rgba(122,162,255,0); }
+  }
+"##;
+
+// Fresh JS used by the new shell. Legacy JS from `page.js` handles all the
+// existing tab content (LLM CRUD, sync connect, invite dialog, etc.).
+const NEW_JS: &str = r##"
+// Settings index for the ⌘K palette. Generated server-side.
+window.SS_INDEX = %%SS_INDEX%%;
+
+function ssParseHash() {
+  const h = (window.location.hash || '').replace(/^#/, '').trim();
+  if (!h) return { section: 'home', page: 'home' };
+  const [s, p] = h.split('/');
+  return { section: s || 'home', page: p || '' };
 }
 
-function escapeHtmlAttr(s) { return escapeHtml(s).replace(/'/g, '&#39;'); }
+function ssApplyRoute() {
+  const { section, page } = ssParseHash();
+  // Highlight nav row
+  document.querySelectorAll('.ss-nav-item').forEach(el => el.classList.remove('active'));
+  const nav = document.querySelector(`.ss-nav-item[data-section="${section}"][data-page="${page}"]`);
+  if (nav) nav.classList.add('active');
 
-async function testSyncProvider(providerId) {
-  const p = syncProviders.find(x => x.id === providerId);
-  if (!p) return;
-  // Re-open the provider's modal with a test indicator — simpler than a new endpoint for every case
-  // Or just call /api/sync/providers to refresh status
-  showToast('Testing ' + p.name + '…');
-  try {
-    const resp = await fetch(`/api/sync/providers?token=${token}`, { headers: { 'Authorization': 'Bearer ' + token } });
-    const data = await resp.json();
-    syncProviders = data.providers || [];
-    renderSyncProviders();
-    const updated = syncProviders.find(x => x.id === providerId);
-    if (updated && updated.status === 'active') showToast(p.name + ' ✓ Still connected');
-    else showToast(p.name + ' — needs attention');
-  } catch(e) { showToast('Test failed: ' + e.message); }
+  // Show only the matching page
+  document.querySelectorAll('.ss-page').forEach(el => el.classList.remove('active'));
+  let target = document.getElementById(`ss-page-${section}-${page}`);
+  if (!target) {
+    // Fallback to the first page in the section, then to home.
+    target = document.querySelector(`.ss-page[data-section="${section}"]`);
+    if (!target) target = document.getElementById('ss-page-home-home');
+  }
+  if (target) {
+    target.classList.add('active');
+    target.classList.add('ss-highlight-pulse');
+    setTimeout(() => target.classList.remove('ss-highlight-pulse'), 2000);
+    // Update breadcrumb
+    const crumb = document.getElementById('ss-current-crumb');
+    if (crumb) {
+      const h1 = target.querySelector('.ss-page-title');
+      crumb.textContent = h1 ? h1.textContent : '';
+    }
+    // Fire legacy showTab so existing JS still initializes the right tab.
+    // Map new page slugs to legacy tab ids.
+    const LEGACY = {
+      'integrations/telegram': 'general',
+      'integrations/sync': 'sync',
+      'integrations/media': 'media',
+      'llm/providers': 'llm',
+      'system/gateway': 'system',
+      'account/users': 'users',
+    };
+    const key = `${section}/${page}`;
+    const legacyTab = LEGACY[key];
+    if (legacyTab && typeof showTab === 'function') {
+      try { showTab(legacyTab); } catch(e) {}
+    }
+  }
 }
 
-function disconnectSyncStyled(providerId, name) {
-  showConfirm(`Disconnect ${name}?`, `Syntaur will stop syncing with ${name}. You can reconnect anytime.`, async () => {
-    try {
-      await fetch(`/api/sync/connections/${providerId}?token=${token}`, {
-        method: 'DELETE',
-        headers: { 'Authorization': 'Bearer ' + token },
-      });
-      await loadSyncProviders();
-      showToast(`${name} disconnected`);
-    } catch(e) { showToast('Disconnect failed: ' + e.message); }
+function ssNavigate(section, page) {
+  window.location.hash = `${section}/${page}`;
+  ssApplyRoute();
+  // Scroll to top on navigation
+  const main = document.getElementById('ss-main');
+  if (main) main.scrollTop = 0;
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+// Live-filter the sidebar by typed query.
+function ssFilterSidebar(q) {
+  const needle = q.toLowerCase().trim();
+  document.querySelectorAll('.ss-sec').forEach(sec => {
+    let anyMatch = false;
+    sec.querySelectorAll('.ss-nav-item').forEach(item => {
+      const label = item.querySelector('.ss-nav-label')?.textContent.toLowerCase() || '';
+      const sectionTitle = sec.querySelector('.ss-sec-title')?.textContent.toLowerCase() || '';
+      const match = !needle || label.includes(needle) || sectionTitle.includes(needle);
+      item.classList.toggle('ss-hidden', !match);
+      if (match) anyMatch = true;
+    });
+    sec.classList.toggle('ss-hidden', !anyMatch);
   });
 }
 
-function showToast(msg) {
-  let t = document.getElementById('sync-toast');
-  if (!t) {
-    t = document.createElement('div');
-    t.id = 'sync-toast';
-    t.className = 'fixed bottom-4 right-4 bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-sm text-gray-200 shadow-lg z-50 transition-opacity';
-    document.body.appendChild(t);
-  }
-  t.textContent = msg;
-  t.style.opacity = '1';
-  clearTimeout(t._timer);
-  t._timer = setTimeout(() => { t.style.opacity = '0'; }, 3000);
-}
+// ── ⌘K palette ─────────────────────────────────────────────
+let ssPaletteFocusIdx = 0;
+let ssPaletteFiltered = [];
 
-async function openOauthSetupModal(providerId, providerName) {
-  let identityInfo = null;
-  try {
-    const resp = await fetch(`/api/admin/oauth_config?token=${token}`, { headers: { 'Authorization': 'Bearer ' + token } });
-    const data = await resp.json();
-    const prov = syncProviders.find(p => p.id === providerId);
-    const identityId = prov?.identity_provider || providerId;
-    identityInfo = (data.identity_providers || []).find(i => i.id === identityId);
-  } catch(e) {}
-  if (!identityInfo) { alert('Could not find identity-provider info for ' + providerName); return; }
-  const redirectUri = window.location.origin + '/api/oauth/callback';
-  const existing = document.getElementById('oauth-setup-modal');
-  if (existing) existing.remove();
-  const modal = document.createElement('div');
-  modal.id = 'oauth-setup-modal';
-  modal.className = 'fixed inset-0 bg-black/75 z-50 flex items-center justify-center p-4';
-  const stepsHtml = identityInfo.register_steps.replace('{redirect_uri}', '<code class="bg-gray-900 px-1">' + redirectUri + '</code>');
-  const alreadyConfigured = identityInfo.configured;
-  const relatedNote = identityInfo.id === 'google' ? 'Gmail, Google Calendar, YouTube Music, YouTube' : providerName;
-  modal.innerHTML = '<div class="bg-gray-800 rounded-xl border border-gray-700 max-w-lg w-full max-h-[90vh] overflow-y-auto">' +
-    '<div class="flex items-center justify-between p-4 border-b border-gray-700">' +
-      '<h3 class="font-medium">Set up ' + escapeHtml(identityInfo.name) + ' OAuth</h3>' +
-      '<button onclick="closeOauthSetup()" class="text-gray-500 hover:text-gray-300 text-2xl leading-none">&times;</button>' +
-    '</div>' +
-    '<div class="p-5 space-y-4">' +
-      (alreadyConfigured ? '<div class="bg-green-900/30 border border-green-700/50 rounded-lg p-3 text-sm text-green-300">✓ ' + escapeHtml(identityInfo.name) + ' already configured. Re-enter to update credentials.</div>' : '') +
-      '<div class="bg-gray-900 border border-gray-700 rounded-lg p-3">' +
-        '<p class="text-xs font-semibold text-gray-300 mb-2">One-time setup for ALL ' + escapeHtml(identityInfo.name) + ' services</p>' +
-        '<p class="text-xs text-gray-400 mb-3">Configuring ' + escapeHtml(identityInfo.name) + ' once unlocks every related sync card (' + relatedNote + ').</p>' +
-        '<div class="text-xs text-gray-300 leading-relaxed">' + stepsHtml + '</div>' +
-        '<a href="' + identityInfo.register_url + '" target="_blank" class="inline-flex items-center gap-1.5 mt-3 bg-gray-800 hover:border-oc-500 border border-gray-700 rounded-lg px-3 py-2 text-sm text-oc-500 hover:text-oc-400">↗ Open ' + escapeHtml(identityInfo.name) + ' developer console</a>' +
-      '</div>' +
-      '<div>' +
-        '<label class="block text-xs text-gray-400 mb-1">Redirect URI (copy to your OAuth app)</label>' +
-        '<div class="flex gap-2">' +
-          '<input type="text" value="' + redirectUri + '" readonly class="flex-1 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm font-mono" id="oauth-redirect-uri" onclick="this.select()">' +
-          '<button onclick="navigator.clipboard.writeText(\'' + redirectUri + '\');this.textContent=\'✓ Copied\'" class="text-xs bg-gray-700 hover:bg-gray-600 px-3 rounded-lg">Copy</button>' +
-        '</div>' +
-      '</div>' +
-      '<div><label class="block text-xs text-gray-400 mb-1">Client ID</label><input type="text" id="oauth-client-id" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm font-mono" placeholder="paste client id"></div>' +
-      '<div><label class="block text-xs text-gray-400 mb-1">Client Secret</label><input type="password" id="oauth-client-secret" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm font-mono" placeholder="paste the secret"></div>' +
-      '<div class="flex gap-2 justify-end pt-2">' +
-        '<button onclick="closeOauthSetup()" class="text-sm text-gray-400 hover:text-gray-200 px-3 py-1.5">Cancel</button>' +
-        '<button onclick="saveOauthConfig(\'' + identityInfo.id + '\',\'' + escapeHtml(identityInfo.name) + '\')" id="oauth-save-btn" class="text-sm bg-oc-600 hover:bg-oc-700 text-white px-4 py-1.5 rounded-lg">Save</button>' +
-      '</div>' +
-      '<p id="oauth-save-error" class="text-xs text-red-400 hidden"></p>' +
-    '</div></div>';
-  document.body.appendChild(modal);
+function ssOpenPalette() {
+  const el = document.getElementById('ss-palette');
+  if (!el) return;
+  el.classList.remove('hidden');
+  document.getElementById('ss-palette-input').value = '';
+  ssPaletteSearch('');
+  setTimeout(() => document.getElementById('ss-palette-input').focus(), 30);
 }
-
-function closeOauthSetup() {
-  const el = document.getElementById('oauth-setup-modal');
-  if (el) el.remove();
+function ssClosePalette() {
+  const el = document.getElementById('ss-palette');
+  if (el) el.classList.add('hidden');
 }
-
-async function saveOauthConfig(identityId, identityName) {
-  const cid = document.getElementById('oauth-client-id').value.trim();
-  const csec = document.getElementById('oauth-client-secret').value.trim();
-  const errEl = document.getElementById('oauth-save-error');
-  if (!cid || !csec) {
-    errEl.textContent = 'Client ID and Client Secret required.';
-    errEl.classList.remove('hidden');
+function ssPaletteSearch(q) {
+  const needle = (q || '').toLowerCase().trim();
+  const all = window.SS_INDEX || [];
+  ssPaletteFiltered = !needle ? all : all.filter(x => {
+    const hay = `${x.title} ${x.section_title} ${x.description} ${x.keywords}`.toLowerCase();
+    return hay.includes(needle);
+  });
+  ssPaletteFocusIdx = 0;
+  ssPaletteRender();
+}
+function ssPaletteRender() {
+  const box = document.getElementById('ss-palette-results');
+  if (!box) return;
+  if (!ssPaletteFiltered.length) {
+    box.innerHTML = `<div class="ss-palette-empty">No settings matched. Try another keyword.</div>`;
     return;
   }
-  const btn = document.getElementById('oauth-save-btn');
-  btn.textContent = 'Saving…'; btn.disabled = true;
-  try {
-    const resp = await fetch('/api/admin/oauth_config', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, identity_provider: identityId, client_id: cid, client_secret: csec }),
-    });
-    const data = await resp.json();
-    if (data.error) {
-      errEl.textContent = data.error;
-      errEl.classList.remove('hidden');
-    } else {
-      closeOauthSetup();
-      showToast(identityName + ' OAuth saved. Related providers unlocked.');
-      await loadSyncProviders();
-    }
-  } catch(e) {
-    errEl.textContent = e.message;
-    errEl.classList.remove('hidden');
+  box.innerHTML = ssPaletteFiltered.map((x, i) => `
+    <div class="ss-palette-result ${i === ssPaletteFocusIdx ? 'focused' : ''}"
+         onmouseenter="ssPaletteFocusIdx=${i};ssPaletteRender()"
+         onclick="ssPaletteJump(${i})">
+      <div class="ss-palette-result-main">
+        <div class="ss-palette-result-title">${x.title}</div>
+        <div class="ss-palette-result-section">${x.section_title} · ${x.description}</div>
+      </div>
+      ${x.badge ? `<span class="ss-nav-badge">${x.badge}</span>` : ''}
+    </div>
+  `).join('');
+}
+function ssPaletteJump(i) {
+  const x = ssPaletteFiltered[i];
+  if (!x) return;
+  ssClosePalette();
+  ssNavigate(x.section, x.page);
+}
+function ssPaletteKey(ev) {
+  if (ev.key === 'Escape') { ssClosePalette(); return; }
+  if (ev.key === 'ArrowDown') { ev.preventDefault(); ssPaletteFocusIdx = Math.min(ssPaletteFocusIdx + 1, ssPaletteFiltered.length - 1); ssPaletteRender(); }
+  if (ev.key === 'ArrowUp')   { ev.preventDefault(); ssPaletteFocusIdx = Math.max(ssPaletteFocusIdx - 1, 0); ssPaletteRender(); }
+  if (ev.key === 'Enter')     { ev.preventDefault(); ssPaletteJump(ssPaletteFocusIdx); }
+}
+
+// Global shortcut: Cmd/Ctrl + K opens palette anywhere on the page.
+document.addEventListener('keydown', (ev) => {
+  if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === 'k') {
+    ev.preventDefault();
+    ssOpenPalette();
   }
-  btn.textContent = 'Save'; btn.disabled = false;
-}
+});
 
-function showConfirm(title, message, onConfirm) {
-  const existing = document.getElementById('sync-confirm-modal');
-  if (existing) existing.remove();
-  const modal = document.createElement('div');
-  modal.id = 'sync-confirm-modal';
-  modal.className = 'fixed inset-0 bg-black/75 z-50 flex items-center justify-center p-4';
-  modal.innerHTML = `
-    <div class="bg-gray-800 rounded-xl border border-gray-700 max-w-sm w-full p-5">
-      <h3 class="font-medium text-gray-100 mb-2">${escapeHtml(title)}</h3>
-      <p class="text-sm text-gray-400 mb-4">${escapeHtml(message)}</p>
-      <div class="flex gap-2 justify-end">
-        <button onclick="document.getElementById('sync-confirm-modal').remove()" class="text-sm text-gray-400 hover:text-gray-200 px-3 py-1.5">Cancel</button>
-        <button id="sync-confirm-ok" class="text-sm bg-red-600 hover:bg-red-700 text-white px-3 py-1.5 rounded-lg">Disconnect</button>
-      </div>
-    </div>`;
-  document.body.appendChild(modal);
-  document.getElementById('sync-confirm-ok').onclick = async () => {
-    modal.remove();
-    await onConfirm();
-  };
-}
-
-
-function relTime(ts) {
-  const sec = Math.floor(Date.now()/1000) - ts;
-  if (sec < 60) return 'just now';
-  if (sec < 3600) return Math.floor(sec/60) + 'm ago';
-  if (sec < 86400) return Math.floor(sec/3600) + 'h ago';
-  return Math.floor(sec/86400) + 'd ago';
-}
-
-function openSyncModal(providerId) {
-  const p = syncProviders.find(x => x.id === providerId);
-  if (!p) return;
-  document.getElementById('sync-modal-title').textContent = 'Connect ' + p.name;
-  const body = document.getElementById('sync-modal-body');
-  const helpLink = p.help_url ? `<a href="${p.help_url}" target="_blank" class="inline-flex items-center gap-1.5 bg-gray-900 border border-gray-700 hover:border-oc-500 rounded-lg px-3 py-2 text-sm text-oc-500 hover:text-oc-400 my-2">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3"/></svg>
-      Open ${escapeHtml(p.name)}
-    </a>` : '';
-  let flowHtml = '';
-  if (p.flow === 'oauth') {
-    flowHtml = `${renderInstructions(p.instructions)}
-      <button onclick="startOAuth('${p.id}')" class="w-full bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Continue with ${escapeHtml(p.name)}</button>`;
-  } else if (p.flow === 'url') {
-    flowHtml = `${renderInstructions(p.instructions)}
-      ${helpLink}
-      <input type="url" id="sync-url-field" class="w-full mt-3 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="https://...ics or webcal://...">
-      <button onclick="submitUrl('${p.id}')" id="sync-submit-btn" class="w-full mt-3 bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Test & Save</button>
-      <p id="sync-error" class="text-xs text-red-400 mt-2 hidden"></p>`;
-  } else if (p.flow === 'api_key') {
-    // Different providers need different fields
-    let fields = '';
-    if (p.id === 'bluesky') {
-      fields = `<input id="sync-field-handle" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="Handle (e.g. you.bsky.social)">
-        <input id="sync-field-app_password" type="password" class="w-full mt-2 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="App password">`;
-    } else if (p.id === 'stripe') {
-      fields = `<input id="sync-field-api_key" type="password" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="sk_live_... or rk_live_...">`;
-    } else if (p.id === 'alpaca') {
-      fields = `<input id="sync-field-api_key" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="API Key ID">
-        <input id="sync-field-api_secret" type="password" class="w-full mt-2 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="API Secret">
-        <select id="sync-field-base_url" class="w-full mt-2 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm">
-          <option value="https://api.alpaca.markets">Live (api.alpaca.markets)</option>
-          <option value="https://paper-api.alpaca.markets">Paper (paper-api.alpaca.markets)</option>
-        </select>`;
-    } else if (p.id === 'coinbase') {
-      fields = `<input id="sync-field-api_key" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="API Key">
-        <input id="sync-field-api_secret" type="password" class="w-full mt-2 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="API Secret">`;
-    } else if (p.id === 'simplefin') {
-      fields = `<input id="sync-field-setup_token" type="password" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="Setup token">`;
-    } else if (p.id === 'home_assistant') {
-      fields = `<div id="sync-ha-discover-status" class="text-xs text-gray-500 italic mb-1">Searching for Home Assistant on your network…</div>
-        <input id="sync-field-url" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="http://homeassistant.local:8123" value="">
-        <input id="sync-field-token" type="password" class="w-full mt-2 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="Long-lived access token">`;
-      setTimeout(() => discoverHA(), 100);
-    } else if (p.id === 'plex') {
-      fields = `<input id="sync-field-token" type="password" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="X-Plex-Token">`;
-    } else if (p.id === 'github' || p.id === 'oura' || p.id === 'anthropic_usage' || p.id === 'openrouter_usage') {
-      fields = `<input id="sync-field-api_key" type="password" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="Paste your token">`;
-    } else {
-      fields = `<input id="sync-field-api_key" type="password" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="API key">`;
-    }
-    flowHtml = `${renderInstructions(p.instructions)}
-      ${helpLink}
-      <div class="mt-3 space-y-2">${fields}</div>
-      <button onclick="submitApiKey('${p.id}')" id="sync-submit-btn" class="w-full mt-3 bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Test & Save</button>
-      <p id="sync-error" class="text-xs text-red-400 mt-2 hidden"></p>`;
-  } else if (p.flow === 'pairing') {
-    flowHtml = `${renderInstructions(p.instructions)}
-      <div id="sync-qr-container" class="text-center py-4"><p class="text-xs text-gray-500">Generating code…</p></div>`;
-    setTimeout(() => startPairing(p.id), 100);
-  } else if (p.flow === 'link_sdk') {
-    flowHtml = `${renderInstructions(p.instructions)}
-      <p class="text-xs text-gray-500 italic">Plaid Link requires the financial tab's setup flow. Coming soon to this panel.</p>`;
-  } else if (p.flow === 'caldav') {
-    flowHtml = `${renderInstructions(p.instructions)}
-      ${helpLink}
-      <div class="mt-3 space-y-2">
-        <input id="sync-field-username" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="iCloud email (e.g. you@icloud.com)">
-        <input id="sync-field-password" type="password" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="App-specific password (xxxx-xxxx-xxxx-xxxx)">
-      </div>
-      <button onclick="submitApiKey('${p.id}')" id="sync-submit-btn" class="w-full mt-3 bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Connect</button>
-      <p id="sync-error" class="text-xs text-red-400 mt-2 hidden"></p>`;
-  } else if (p.flow === 'crypto') {
-    flowHtml = `${renderInstructions(p.instructions)}
-      <div class="mt-3 space-y-2">
-        <select id="sync-field-chain" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm">
-          <option value="btc">Bitcoin (BTC)</option>
-          <option value="eth">Ethereum (ETH)</option>
-          <option value="sol">Solana (SOL)</option>
-        </select>
-        <input id="sync-field-address" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="Wallet address (public — no keys)">
-      </div>
-      <button onclick="submitApiKey('${p.id}')" id="sync-submit-btn" class="w-full mt-3 bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Test & Save</button>
-      <p id="sync-error" class="text-xs text-red-400 mt-2 hidden"></p>`;
-  } else if (p.flow === 'file_upload') {
-    flowHtml = `${renderInstructions(p.instructions)}
-      ${helpLink}
-      <div class="mt-3">
-        <label class="block w-full border-2 border-dashed border-gray-700 hover:border-oc-500 rounded-lg p-6 text-center cursor-pointer transition-colors">
-          <input type="file" id="sync-upload-file" accept=".zip,.xml" class="hidden" onchange="document.getElementById('sync-upload-name').textContent = this.files[0]?.name || 'No file'">
-          <svg class="mx-auto mb-2" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
-          <p class="text-xs text-gray-400">Click to choose export.zip or export.xml</p>
-          <p class="text-xs text-oc-500 mt-1" id="sync-upload-name">No file selected</p>
-        </label>
-      </div>
-      <button onclick="submitFileUpload('${p.id}')" id="sync-submit-btn" class="w-full mt-3 bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Upload</button>
-      <p id="sync-error" class="text-xs text-red-400 mt-2 hidden"></p>`;
-  } else if (p.flow === 'status') {
-    flowHtml = `${renderInstructions(p.instructions)}
-      <div id="sync-status-container" class="mt-3"><p class="text-xs text-gray-500">Checking status…</p></div>`;
-    setTimeout(() => loadStatusCard(p.id), 100);
-  } else if (p.flow === 'plex_pin') {
-    flowHtml = `${renderInstructions(p.instructions)}
-      <div id="sync-plex-pin-container" class="text-center py-4">
-        <p class="text-xs text-gray-500">Generating code…</p>
-      </div>`;
-    setTimeout(() => startPlexPin(), 100);
-  } else if (p.flow === 'airplay') {
-    flowHtml = `${renderInstructions(p.instructions)}
-      <div id="sync-airplay-container" class="mt-3">
-        <p class="text-xs text-gray-500 italic">Scanning network…</p>
-      </div>
-      <button onclick="confirmAirplay()" id="sync-submit-btn" class="w-full mt-3 bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg hidden">Save detected speakers</button>`;
-    setTimeout(() => discoverAirplay(), 100);
-  } else if (p.flow === 'music_assistant') {
-    flowHtml = `${renderInstructions(p.instructions)}
-      <div id="sync-ma-container" class="mt-3">
-        <p class="text-xs text-gray-500 italic">Checking Home Assistant…</p>
-      </div>`;
-    setTimeout(() => probeMusicAssistant(), 100);
-  } else if (p.flow === 'ios_shortcut') {
-    flowHtml = `${renderInstructions(p.instructions)}
-      ${helpLink}
-      <input type="url" id="sync-field-url" class="w-full mt-3 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="https://www.icloud.com/shortcuts/...">
-      <button onclick="submitShortcutUrl('${p.id}')" id="sync-submit-btn" class="w-full mt-3 bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Save</button>
-      <p id="sync-error" class="text-xs text-red-400 mt-2 hidden"></p>`;
-  } else if (p.flow === 'phone_pwa') {
-    flowHtml = `${renderInstructions(p.instructions)}
-      <div class="mt-4 bg-green-900/20 border border-green-700/40 rounded-lg p-3">
-        <div class="flex items-start gap-2">
-          <span class="text-xl flex-shrink-0">✓</span>
-          <div class="flex-1">
-            <p class="text-sm font-medium text-green-300">Music ducking is automatic</p>
-            <p class="text-xs text-gray-300 mt-1">When Syntaur's voice speaks, the gateway calls your music service's volume API directly — Spotify Connect, Home Assistant <code class="bg-gray-900 px-1">media_player.volume_set</code>. Music drops to 20%, restores when the voice ends. Works on phone, desktop, Sonos, anywhere your music plays. <strong class="text-white">No setup needed.</strong></p>
-          </div>
-        </div>
-      </div>
-      <div class="mt-3 flex flex-wrap gap-2">
-        <button onclick="testDuckShortcut()" class="text-xs bg-oc-700 hover:bg-oc-600 text-white px-3 py-1.5 rounded-lg">Test ducking now</button>
-        <button onclick="connectPhonePwa()" class="text-xs bg-gray-800 hover:bg-gray-700 text-gray-200 px-3 py-1.5 rounded-lg">Save phone connection</button>
-      </div>
-      <p id="shortcut-test-status" class="text-xs text-gray-500 mt-2"></p>
-      <details class="mt-4">
-        <summary class="text-xs text-gray-500 cursor-pointer hover:text-gray-300">Edge case: I use Apple Music app on iPhone with no HomePod (one-time setup)</summary>
-        <div class="mt-2 bg-gray-900 border border-gray-700 rounded-lg p-3">
-          <p class="text-xs text-gray-400 mb-2">Apple Music is the only major service with no remote-volume API, so for that specific case (Apple Music app on phone, no HA-connected speaker) you need a one-time iOS Shortcut install.</p>
-          <details>
-            <summary class="text-xs text-oc-500 cursor-pointer">Show 3-minute setup steps</summary>
-            <div id="shortcut-setup-steps" class="mt-2 text-xs text-gray-300">Loading…</div>
-          </details>
-        </div>
-      </details>`;
-    setTimeout(() => loadShortcutSetup(), 100);
-  } else if (p.flow === 'apple_music') {
-    flowHtml = `${renderInstructions(p.instructions)}
-      <div id="sync-am-container" class="mt-3">
-        <p class="text-xs text-gray-500 italic">Preparing bookmarklet…</p>
-      </div>`;
-    setTimeout(() => setupAppleMusic(), 100);
-  }
-  body.innerHTML = flowHtml;
-  document.getElementById('sync-modal').classList.remove('hidden');
-}
-
-function closeSyncModal() {
-  document.getElementById('sync-modal').classList.add('hidden');
-  if (syncPairPollTimer) { clearInterval(syncPairPollTimer); syncPairPollTimer = null; }
-  if (typeof plexPinPollTimer !== 'undefined' && plexPinPollTimer) { clearInterval(plexPinPollTimer); plexPinPollTimer = null; }
-}
-
-async function startOAuth(providerId) {
-  try {
-    const resp = await fetch('/api/oauth/start', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
-      body: JSON.stringify({ token: token, provider: providerId, redirect_after: '/settings?tab=sync' })
-    });
-    if (!resp.ok) { alert('OAuth start failed'); return; }
-    const data = await resp.json();
-    if (data.auth_url) {
-      window.location.href = data.auth_url;
-    } else {
-      alert('No auth URL returned');
-    }
-  } catch(e) { alert('OAuth error: ' + e.message); }
-}
-
-async function submitUrl(providerId) {
-  const url = document.getElementById('sync-url-field').value.trim();
-  if (!url) { showSyncError('URL required'); return; }
-  const btn = document.getElementById('sync-submit-btn');
-  btn.textContent = 'Testing…'; btn.disabled = true;
-  try {
-    const resp = await fetch('/api/sync/connect', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: token, provider: providerId, credential: { url: url } })
-    });
-    const data = await resp.json();
-    if (data.success) {
-      closeSyncModal();
-      await loadSyncProviders();
-    } else {
-      showSyncError(data.error || 'Failed');
-    }
-  } catch(e) { showSyncError(e.message); }
-  btn.textContent = 'Test & Save'; btn.disabled = false;
-}
-
-async function submitApiKey(providerId) {
-  const cred = {};
-  document.querySelectorAll('[id^=sync-field-]').forEach(el => {
-    const key = el.id.replace('sync-field-', '');
-    cred[key] = el.value.trim();
+// ── Dirty state detection ─────────────────────────────────
+let ssOriginalFormState = null;
+let ssDirty = false;
+function ssSnapshotForms() {
+  const snap = {};
+  document.querySelectorAll('input, textarea, select').forEach(el => {
+    if (!el.id) return;
+    if (el.type === 'checkbox' || el.type === 'radio') snap[el.id] = el.checked;
+    else snap[el.id] = el.value;
   });
-  for (const k of Object.keys(cred)) {
-    if (!cred[k] && k !== 'base_url') { showSyncError(k + ' required'); return; }
-  }
-  const btn = document.getElementById('sync-submit-btn');
-  btn.textContent = 'Testing…'; btn.disabled = true;
-  try {
-    const resp = await fetch('/api/sync/connect', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: token, provider: providerId, credential: cred })
-    });
-    const data = await resp.json();
-    if (data.success) {
-      closeSyncModal();
-      await loadSyncProviders();
-    } else {
-      showSyncError(data.error || 'Failed');
-    }
-  } catch(e) { showSyncError(e.message); }
-  btn.textContent = 'Test & Save'; btn.disabled = false;
+  ssOriginalFormState = snap;
 }
-
-async function startPairing(providerId) {
-  const container = document.getElementById('sync-qr-container');
-  try {
-    const resp = await fetch('/api/sync/telegram/pair', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: token })
-    });
-    if (!resp.ok) throw new Error('pair create failed');
-    const data = await resp.json();
-    container.innerHTML = `
-      <img src="${data.qr_url}" class="mx-auto rounded-lg bg-white p-2" width="200" height="200">
-      <p class="text-xs text-gray-500 mt-3">or <a href="${data.deep_link}" target="_blank" class="text-oc-500 underline">tap here on your phone</a></p>
-      <p class="text-[10px] text-gray-600 mt-1">Code: <code class="bg-gray-900 px-1">${data.code}</code> · expires 10min</p>
-      <p id="pair-status" class="text-xs text-gray-400 mt-3">Waiting for you to tap Start in Telegram…</p>
-    `;
-    syncPairPollTimer = setInterval(async () => {
-      try {
-        const s = await fetch(`/api/sync/telegram/status?token=${token}&code=${data.code}`).then(r => r.json());
-        if (s.paired || s.chat_count > 0) {
-          clearInterval(syncPairPollTimer);
-          syncPairPollTimer = null;
-          document.getElementById('pair-status').innerHTML = '<span class="text-green-400">Linked!</span>';
-          setTimeout(() => { closeSyncModal(); loadSyncProviders(); }, 1200);
-        }
-      } catch(e) {}
-    }, 2000);
-  } catch(e) {
-    container.innerHTML = '<p class="text-xs text-red-400">Failed to generate code: ' + e.message + '</p>';
+function ssCheckDirty() {
+  if (!ssOriginalFormState) return false;
+  for (const [id, original] of Object.entries(ssOriginalFormState)) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    const cur = (el.type === 'checkbox' || el.type === 'radio') ? el.checked : el.value;
+    if (cur !== original) return true;
+  }
+  return false;
+}
+function ssSetDirty(flag) {
+  ssDirty = flag;
+  const banner = document.getElementById('ss-dirty');
+  if (banner) banner.classList.toggle('hidden', !flag);
+}
+function ssRevertDirty() {
+  if (!ssOriginalFormState) return;
+  for (const [id, original] of Object.entries(ssOriginalFormState)) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    if (el.type === 'checkbox' || el.type === 'radio') el.checked = original;
+    else el.value = original;
+  }
+  ssSetDirty(false);
+}
+function ssSaveDirty() {
+  // Legacy JS owns the actual save wiring — this button just hides the banner.
+  // Forms submit themselves on blur / explicit save button.
+  ssSetDirty(false);
+  ssSnapshotForms();
+  // Toast
+  const banner = document.getElementById('ss-dirty');
+  if (banner) {
+    const text = banner.querySelector('.ss-dirty-text');
+    if (text) text.textContent = 'Saved ✓';
+    banner.classList.remove('hidden');
+    setTimeout(() => ssSetDirty(false), 1400);
+    if (text) setTimeout(() => { text.textContent = 'You have unsaved changes'; }, 1400);
   }
 }
-
-async function discoverHA() {
-  const statusEl = document.getElementById('sync-ha-discover-status');
-  const urlField = document.getElementById('sync-field-url');
-  if (!statusEl || !urlField) return;
-  try {
-    const resp = await fetch(`/api/sync/homeassistant/discover?token=${token}`, { headers: { 'Authorization': 'Bearer ' + token } });
-    const data = await resp.json();
-    if (data.suggested_url) {
-      urlField.value = data.suggested_url;
-      statusEl.innerHTML = `<span class="text-green-400">✓ Found at <code>${escapeHtml(data.suggested_url)}</code></span> — just paste your token below`;
-    } else {
-      statusEl.innerHTML = `<span class="text-yellow-400">Couldn\'t auto-detect. Enter your HA URL manually.</span>`;
-      urlField.placeholder = 'http://homeassistant.local:8123';
-    }
-  } catch(e) {
-    statusEl.innerHTML = `<span class="text-gray-500">Auto-detect failed — enter URL manually.</span>`;
+document.addEventListener('input', (ev) => {
+  if (ev.target.matches('.ss-page input, .ss-page select, .ss-page textarea')) {
+    ssSetDirty(ssCheckDirty());
   }
+});
+window.addEventListener('beforeunload', (ev) => {
+  if (ssDirty) { ev.preventDefault(); ev.returnValue = ''; }
+});
+
+// Placeholder handlers wired to the new cards.
+function ssSaveAccountProfile() {
+  ssSaveDirty();  // minimal wiring; real save lives in the legacy profile path
+  window.location.href = '/profile';
 }
+function ssChangePassword() { alert('Password change flows through the existing account API. Wiring coming.'); }
+function ssSignOutOthers()  { alert('Sign-out-other-sessions flow — Phase E.'); }
+function ssHaTest() { const r = document.getElementById('ss-ha-result'); if (r) r.textContent = 'Testing… (endpoint wiring coming)'; }
+function ssHaSave() { const r = document.getElementById('ss-ha-result'); if (r) r.textContent = 'Save — wiring coming.'; }
 
-let plexPinPollTimer = null;
-async function startPlexPin() {
-  const container = document.getElementById('sync-plex-pin-container');
+// About page — pull live stats.
+async function ssRefreshAbout() {
   try {
-    const resp = await fetch('/api/sync/plex/pin', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: token })
-    });
-    if (!resp.ok) throw new Error('PIN creation failed');
-    const data = await resp.json();
-    container.innerHTML = `
-      <div class="bg-gray-900 rounded-lg p-4 mb-3">
-        <p class="text-xs text-gray-500 mb-1">Your code:</p>
-        <p class="text-3xl font-mono tracking-widest text-oc-500">${data.code}</p>
-      </div>
-      <p class="text-sm text-gray-300">Go to <a href="${data.link_url}" target="_blank" class="text-oc-500 underline">plex.tv/link</a> on any device and enter this code.</p>
-      <p id="plex-pin-status" class="text-xs text-gray-400 mt-3">Waiting for you to sign in…</p>
-    `;
-    // Poll every 2 seconds
-    plexPinPollTimer = setInterval(async () => {
-      try {
-        const r = await fetch('/api/sync/plex/poll', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token: token, pin_id: data.pin_id, client_id: data.client_id })
-        });
-        if (!r.ok) return;
-        const status = await r.json();
-        if (status.success) {
-          clearInterval(plexPinPollTimer);
-          plexPinPollTimer = null;
-          document.getElementById('plex-pin-status').innerHTML = `<span class="text-green-400">Signed in as ${escapeHtml(status.username)}</span>`;
-          setTimeout(() => { closeSyncModal(); loadSyncProviders(); }, 1200);
-        }
-      } catch(e) {}
-    }, 2000);
-  } catch(e) {
-    container.innerHTML = `<p class="text-xs text-red-400">Failed to generate PIN: ${e.message}</p>`;
-  }
-}
-
-async function submitFileUpload(providerId) {
-  const fileInput = document.getElementById('sync-upload-file');
-  const file = fileInput.files[0];
-  if (!file) { showSyncError('Choose a file first'); return; }
-  const btn = document.getElementById('sync-submit-btn');
-  btn.textContent = 'Uploading…'; btn.disabled = true;
-  try {
-    const resp = await fetch('/api/sync/health/upload?token=' + token, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/octet-stream' },
-      body: file,
-    });
-    if (resp.ok) {
-      closeSyncModal();
-      await loadSyncProviders();
-    } else {
-      showSyncError('Upload failed (' + resp.status + ')');
-    }
-  } catch(e) { showSyncError(e.message); }
-  btn.textContent = 'Upload'; btn.disabled = false;
-}
-
-async function loadStatusCard(providerId) {
-  const container = document.getElementById('sync-status-container');
-  let endpoint = '';
-  if (providerId === 'notebooklm_status') endpoint = '/api/sync/notebooklm/status';
-  else if (providerId === 'vault_health') endpoint = '/api/sync/vault/status';
-  else { container.innerHTML = '<p class="text-xs text-gray-500">No status endpoint for ' + providerId + '</p>'; return; }
-
-  try {
-    const resp = await fetch(endpoint + '?token=' + token, { headers: { 'Authorization': 'Bearer ' + token } });
-    const data = await resp.json();
-    let rows = '';
-    for (const [k, v] of Object.entries(data)) {
-      let display = v;
-      if (k === 'last_write_at' || k === 'last_login') {
-        display = v ? new Date(v * 1000).toLocaleString() : '—';
-      } else if (typeof v === 'boolean') {
-        display = v ? '✓' : '✗';
-      }
-      rows += '<div class="flex justify-between py-1 border-b border-gray-800 text-xs"><span class="text-gray-500">' + escapeHtml(k) + '</span><span class="text-gray-200">' + escapeHtml(String(display)) + '</span></div>';
-    }
-    const statusColor = (data.status === 'healthy' || data.status === 'ok') ? 'text-green-400' :
-                        (data.status === 'warning' || data.status === 'degraded') ? 'text-yellow-400' :
-                        'text-red-400';
-    container.innerHTML = '<div class="bg-gray-900 rounded-lg p-3"><div class="text-sm mb-2"><span class="' + statusColor + ' font-medium">● ' + escapeHtml(data.status || 'unknown') + '</span></div>' + rows + (data.hint ? '<p class="text-xs text-gray-500 italic mt-2">' + escapeHtml(data.hint) + '</p>' : '') + '</div>';
-  } catch(e) {
-    container.innerHTML = '<p class="text-xs text-red-400">Failed to load: ' + e.message + '</p>';
-  }
-}
-
-async function discoverAirplay() {
-  const container = document.getElementById('sync-airplay-container');
-  const saveBtn = document.getElementById('sync-submit-btn');
-  try {
-    const resp = await fetch(`/api/sync/airplay/discover?token=${token}`, { headers: { 'Authorization': 'Bearer ' + token } });
-    const data = await resp.json();
-    const devices = data.devices || [];
-    if (devices.length === 0) {
-      container.innerHTML = '<p class="text-xs text-gray-500 italic">No AirPlay devices found on this network. Make sure they\'re powered on and on the same Wi-Fi.</p>';
-      return;
-    }
-    container.innerHTML = '<p class="text-xs text-gray-400 mb-2">Found ' + devices.length + ' device(s):</p>' +
-      devices.map(d => `<div class="bg-gray-900 rounded-lg p-2 mb-1 text-xs">
-        <div class="text-gray-200">${escapeHtml(d.name)}</div>
-        <div class="text-gray-500">${escapeHtml(d.hostname)} · port ${d.port}${d.model ? ' · ' + escapeHtml(d.model) : ''}</div>
-      </div>`).join('');
-    saveBtn.classList.remove('hidden');
-    window._airplay_devices = devices;
-  } catch(e) {
-    container.innerHTML = '<p class="text-xs text-red-400">Discovery failed: ' + e.message + '</p>';
-  }
-}
-
-async function confirmAirplay() {
-  const devices = window._airplay_devices || [];
-  try {
-    await fetch('/api/sync/connect', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        token: token, provider: 'airplay',
-        credential: { devices: devices },
-        display_name: devices.length + ' speaker(s)',
-      }),
-    });
-    closeSyncModal();
-    await loadSyncProviders();
-  } catch(e) { alert('Save failed: ' + e.message); }
-}
-
-async function probeMusicAssistant() {
-  const container = document.getElementById('sync-ma-container');
-  try {
-    const resp = await fetch(`/api/sync/music_assistant/probe?token=${token}`, { headers: { 'Authorization': 'Bearer ' + token } });
-    const data = await resp.json();
-    const color = data.connected ? 'text-green-400' : 'text-yellow-400';
-    let btn = '';
-    if (data.connected) {
-      btn = `<button onclick="saveMusicAssistant()" class="w-full mt-3 bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Enable in Syntaur</button>`;
-    }
-    container.innerHTML = `<div class="bg-gray-900 rounded-lg p-3 text-xs">
-      <p class="${color} font-medium mb-2">● ${escapeHtml(data.status)}</p>
-      <p class="text-gray-400">${escapeHtml(data.hint || '')}</p>
-      ${btn}
-    </div>`;
-  } catch(e) {
-    container.innerHTML = '<p class="text-xs text-red-400">Probe failed: ' + e.message + '</p>';
-  }
-}
-
-async function saveMusicAssistant() {
-  try {
-    await fetch('/api/sync/connect', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        token: token, provider: 'music_assistant',
-        credential: { routed_via: 'home_assistant' },
-        display_name: 'via Home Assistant',
-      }),
-    });
-    closeSyncModal();
-    await loadSyncProviders();
-  } catch(e) { alert('Save failed: ' + e.message); }
-}
-
-async function submitShortcutUrl(providerId) {
-  const url = document.getElementById('sync-field-url').value.trim();
-  if (!url) { showSyncError('Shortcut URL required'); return; }
-  const btn = document.getElementById('sync-submit-btn');
-  btn.textContent = 'Saving…'; btn.disabled = true;
-  try {
-    const resp = await fetch('/api/sync/connect', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: token, provider: providerId, credential: { url: url } }),
-    });
-    const data = await resp.json();
-    if (data.success) { closeSyncModal(); await loadSyncProviders(); }
-    else { showSyncError(data.error || 'Failed'); }
-  } catch(e) { showSyncError(e.message); }
-  btn.textContent = 'Save'; btn.disabled = false;
-}
-
-async function loadShortcutSetup() {
-  const box = document.getElementById('shortcut-setup-steps');
-  if (!box) return;
-  try {
-    const r = await fetch('/api/music/shortcut_setup?token=' + token, { headers: { 'Authorization': 'Bearer ' + token } });
+    const r = await fetch('/health');
+    if (!r.ok) return;
     const d = await r.json();
-    let html = '<ol class="list-decimal list-inside space-y-1.5 leading-relaxed">';
-    for (const step of (d.manual_steps || [])) {
-      html += '<li>' + escapeHtml(step) + '</li>';
-    }
-    html += '</ol>';
-    if (d.duck_state_url) {
-      html += '<p class="mt-2 text-[11px] text-gray-500">Your duck-state URL: <code class="bg-gray-900 px-1">' + escapeHtml(d.duck_state_url) + '</code></p>';
-    }
-    if (d.note) html += '<p class="text-[11px] text-gray-500 italic mt-2">' + escapeHtml(d.note) + '</p>';
-    box.innerHTML = html;
-  } catch(e) {
-    box.innerHTML = '<p class="text-xs text-red-400">Could not load setup guide: ' + e.message + '</p>';
-  }
-}
-
-async function testDuckShortcut() {
-  const status = document.getElementById('shortcut-test-status');
-  status.textContent = 'Triggering duck for 5 seconds…';
-  try {
-    await fetch('/api/music/duck', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, state: 'on', duration_secs: 5 }),
-    });
-    status.textContent = 'Sent. If your iPhone PWA tab is open and the Shortcut named "Syntaur Music Volume" is installed, music volume should drop now and restore in 5s.';
-    setTimeout(async () => {
-      await fetch('/api/music/duck', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token, state: 'off' }),
-      });
-      status.textContent += ' (restored)';
-    }, 5500);
-  } catch(e) {
-    status.textContent = 'Test failed: ' + e.message;
-  }
-}
-
-async function connectPhonePwa() {
-  try {
-    const resp = await fetch('/api/sync/connect', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, provider: 'phone_music_pwa', credential: {}, display_name: 'My Phone' }),
-    });
-    const d = await resp.json();
-    if (d.success) {
-      closeSyncModal();
-      showToast('Phone connected for music routing');
-      await loadSyncProviders();
-    } else {
-      showToast('Save failed: ' + (d.error || 'unknown'));
-    }
-  } catch(e) { showToast('Error: ' + e.message); }
-}
-
-function setupAppleMusic() {
-  const container = document.getElementById('sync-am-container');
-  const origin = window.location.origin;
-  const bookmarklet = `javascript:(function(){var m=MusicKit.getInstance();if(!m||!m.musicUserToken){alert('Sign into music.apple.com first, then click this again.');return;}var d={dev:m.developerToken,mut:m.musicUserToken};window.location.href='${origin}/apple_music_capture#'+encodeURIComponent(JSON.stringify(d));})()`;
-  // sessionStorage needs to carry the Syntaur token across the capture redirect
-  try { localStorage.setItem('syntaur_token', token); } catch(e) {}
-  container.innerHTML = `
-    <div class="space-y-3 text-sm text-gray-300">
-      <div class="flex items-start gap-2">
-        <span class="bg-oc-600 text-white rounded-full w-6 h-6 flex items-center justify-center flex-shrink-0 text-xs font-bold">1</span>
-        <div class="flex-1">
-          <p>Open Apple Music in a new tab.</p>
-          <a href="https://music.apple.com" target="_blank" class="inline-flex items-center gap-1.5 bg-gray-900 border border-gray-700 hover:border-oc-500 rounded-lg px-3 py-2 text-oc-500 text-xs mt-1">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3"/></svg>
-            music.apple.com
-          </a>
-        </div>
-      </div>
-      <div class="flex items-start gap-2">
-        <span class="bg-oc-600 text-white rounded-full w-6 h-6 flex items-center justify-center flex-shrink-0 text-xs font-bold">2</span>
-        <div class="flex-1">
-          <p>Sign in with your Apple ID (if you aren't already).</p>
-        </div>
-      </div>
-      <div class="flex items-start gap-2">
-        <span class="bg-oc-600 text-white rounded-full w-6 h-6 flex items-center justify-center flex-shrink-0 text-xs font-bold">3</span>
-        <div class="flex-1">
-          <p>Drag this button to your bookmarks bar:</p>
-          <a draggable="true" href="${bookmarklet}" onclick="event.preventDefault(); alert('Drag this button to your bookmarks bar instead of clicking.');" class="inline-block mt-1 bg-oc-600 hover:bg-oc-700 text-white px-3 py-1.5 rounded-lg text-xs cursor-grab">🎵 Connect Syntaur</a>
-          <p class="text-xs text-gray-500 mt-1">Your browser should let you drag this link to the bookmarks bar.</p>
-        </div>
-      </div>
-      <div class="flex items-start gap-2">
-        <span class="bg-oc-600 text-white rounded-full w-6 h-6 flex items-center justify-center flex-shrink-0 text-xs font-bold">4</span>
-        <div class="flex-1">
-          <p>On the music.apple.com tab, click the bookmark. You'll be redirected back here automatically.</p>
-        </div>
-      </div>
-    </div>`;
-}
-
-async function disconnectSync(providerId, name) {
-  if (!confirm(`Disconnect ${name}?`)) return;
-  try {
-    await fetch(`/api/sync/connections/${providerId}?token=${token}`, {
-      method: 'DELETE',
-      headers: { 'Authorization': 'Bearer ' + token }
-    });
-    await loadSyncProviders();
-  } catch(e) { alert('Disconnect failed: ' + e.message); }
-}
-
-function showSyncError(msg) {
-  const el = document.getElementById('sync-error');
-  if (!el) return;
-  // Map common API errors to friendlier hints
-  let friendly = msg;
-  if (/401|unauthorized/i.test(msg)) friendly = 'That token/key was rejected. Double-check you copied the whole thing.';
-  else if (/403|forbidden/i.test(msg)) friendly = 'The key works but doesn\'t have permission. Check the scopes.';
-  else if (/404/i.test(msg)) friendly = 'Endpoint not found. URL might be wrong.';
-  else if (/timeout|timed out/i.test(msg)) friendly = 'Connection timed out. Is the service reachable from this network?';
-  else if (/fetch failed|error sending request/i.test(msg)) friendly = 'Could not reach the service. Check the URL and that it\'s running.';
-  el.textContent = friendly;
-  el.classList.remove('hidden');
-}
-
-function escapeHtml(s) {
-  if (s === null || s === undefined) return '';
-  return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-}
-
-// Load on tab-switch to sync
-const _origShowTab = showTab;
-showTab = function(name) {
-  _origShowTab(name);
-  if (name === 'sync' && !syncProviders.length) loadSyncProviders();
-};
-
-// Save LLM provider via API
-async function saveProvider(name, baseUrl, apiKey, apiType, modelId) {
-  const result = document.getElementById('setup-result');
-  result.className = 'text-sm mt-2 block text-gray-400';
-  result.textContent = 'Saving...';
-  try {
-    const resp = await fetch('/api/settings/provider', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ token, name, base_url: baseUrl, api_key: apiKey, api: apiType, model_id: modelId })
-    });
-    const data = await resp.json();
-    if (data.success) {
-      result.className = 'text-sm mt-2 block text-green-400';
-      result.textContent = data.message || 'Provider saved! Restart the gateway to apply changes.';
-      loadSettings();
-    } else {
-      result.className = 'text-sm mt-2 block text-red-400';
-      result.textContent = data.error || 'Failed to save provider.';
-    }
-  } catch(e) {
-    result.className = 'text-sm mt-2 block text-red-400';
-    result.textContent = 'Error: ' + e.message;
-  }
-}
-
-// GPU scanning and assignment
-async function scanGpus() {
-  const btn = document.getElementById('gpu-scan-btn');
-  const list = document.getElementById('gpu-list');
-  btn.textContent = 'Scanning...'; btn.disabled = true;
-  list.innerHTML = '<p class="text-xs text-gray-400">Scanning your network for GPUs... This takes ~30 seconds.</p>';
-  try {
-    const resp = await fetch('/api/setup/scan', { headers: { 'Authorization': 'Bearer ' + token } });
-    const data = await resp.json();
-    const gpus = [];
-    // Local GPU
-    if (data.gpu_name) gpus.push({ host: 'localhost', name: data.gpu_name, vram: data.gpu_vram_gb + ' GB', local: true });
-    // Network GPUs
-    if (data.network_gpus) data.network_gpus.forEach(g => gpus.push({ host: g.host, name: g.name, vram: g.vram_gb + ' GB', local: false }));
-    // Network LLMs (already running)
-    const llms = data.network_llms || [];
-
-    if (gpus.length === 0 && llms.length === 0) {
-      list.innerHTML = '<p class="text-xs text-gray-500">No GPUs or LLM services found on your network. You can still use cloud providers above.</p>';
-      btn.textContent = 'Scan Network'; btn.disabled = false;
-      return;
-    }
-
-    list.innerHTML = gpus.map(g => {
-      const vramNum = parseFloat(g.vram);
-      const recModel = vramNum >= 20 ? '70B+ (Qwen 72B, Llama 70B)' : vramNum >= 10 ? '27B-34B (Qwen 27B, Mistral)' : vramNum >= 6 ? '7B-8B (Qwen 7B, Llama 8B)' : '3B (Qwen 3B, Phi)';
-      return '<div class="p-3 rounded-lg bg-gray-900 border border-gray-700">' +
-        '<div class="flex items-center justify-between">' +
-        '<div><p class="text-sm text-white font-medium">' + g.name + '</p>' +
-        '<p class="text-[10px] text-gray-500">' + (g.local ? 'This machine' : g.host) + ' &middot; ' + g.vram + ' VRAM</p></div>' +
-        '<span class="badge badge-green text-[10px]">Available</span></div>' +
-        '<p class="text-[10px] text-gray-600 mt-1">Recommended model size: ' + recModel + '</p></div>';
-    }).join('') + llms.map(l => {
-      return '<div class="p-3 rounded-lg bg-gray-900 border border-oc-700">' +
-        '<div class="flex items-center justify-between">' +
-        '<div><p class="text-sm text-white font-medium">' + l.name + '</p>' +
-        '<p class="text-[10px] text-gray-500">' + l.host + ' &middot; ' + (l.models||[]).join(', ') + '</p></div>' +
-        '<span class="badge badge-blue text-[10px]">Running</span></div></div>';
-    }).join('');
-
-    // Populate assignment dropdowns
-    const assigns = document.getElementById('gpu-assignments');
-    assigns.classList.remove('hidden');
-    const options = gpus.map(g => '<option value="' + (g.local ? 'localhost' : g.host) + '">' + g.name + ' (' + (g.local ? 'local' : g.host) + ', ' + g.vram + ')</option>').join('');
-    const llmOpts = llms.map(l => '<option value="' + l.url + '">' + l.name + ' @ ' + l.host + '</option>').join('');
-    ['assign-chat','assign-vision','assign-voice','assign-fast'].forEach(id => {
-      const sel = document.getElementById(id);
-      const defaultOpt = sel.options[0].outerHTML;
-      sel.innerHTML = defaultOpt + options + llmOpts;
-    });
-  } catch(e) {
-    list.innerHTML = '<p class="text-xs text-red-400">Scan failed: ' + e.message + '</p>';
-  }
-  btn.textContent = 'Scan Network'; btn.disabled = false;
-}
-
-async function saveAssignment(role, value) {
-  const result = document.getElementById('assign-result');
-  try {
-    await fetch('/api/settings/provider', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, name: '__gpu_' + role + '__', base_url: value, api_key: '', api: 'openai-completions', model_id: role })
-    });
-    result.textContent = 'Saved ' + role + ' assignment'; result.className = 'text-xs mt-2 block text-green-400';
-    setTimeout(() => { result.textContent = ''; }, 2000);
+    const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+    set('ss-version', d.version || '—');
+    set('ss-uptime', d.uptime_secs != null ? `${Math.round(d.uptime_secs / 60)}m` : '—');
+    set('ss-modules', (d.modules || []).length);
+    set('ss-tools', d.tool_count || '—');
+    set('ss-agents', (d.agents || []).map(a => a.name || a.id).join(', ') || '—');
+    set('ss-llm', (d.providers || []).map(p => p.name).join(', ') || '—');
   } catch(e) {}
 }
 
-// Save vision model config
-async function saveVisionModel(visionUrl) {
-  const result = document.getElementById('setup-result');
-  if (!visionUrl) { result.textContent = 'Enter a vision model URL'; result.className = 'text-sm mt-2 block text-red-400'; return; }
-  result.className = 'text-sm mt-2 block text-gray-400';
-  result.textContent = 'Saving vision model...';
-  try {
-    // Save as a provider named "vision" and also set models.vision
-    await saveProvider('vision', visionUrl, '', 'openai-completions', 'qwen2.5-vl');
-    // Also update the models.vision field
-    const resp = await fetch('/api/settings/provider', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ token, name: '__vision_config__', base_url: visionUrl, api_key: '', api: 'openai-completions', model_id: 'qwen2.5-vl' })
-    });
-    result.className = 'text-sm mt-2 block text-green-400';
-    result.textContent = 'Vision model saved! Receipts will be scanned locally.';
-  } catch(e) {
-    result.className = 'text-sm mt-2 block text-red-400';
-    result.textContent = 'Error: ' + e.message;
-  }
-}
-
-// Auto-open Sync tab if redirected there (e.g., after OAuth callback)
-if (window.location.search.includes('tab=sync')) {
-  setTimeout(() => {
-    const btn = document.querySelector(`[onclick="showTab('sync')"]`);
-    if (btn) btn.click();
-  }, 100);
-}
-
-</script>"##;
+// Init: apply the URL-hash route, snapshot forms, refresh About, set up listeners.
+(function () {
+  ssApplyRoute();
+  window.addEventListener('hashchange', ssApplyRoute);
+  setTimeout(() => { ssSnapshotForms(); }, 400);
+  ssRefreshAbout();
+})();
+"##;

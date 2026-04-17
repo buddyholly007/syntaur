@@ -1,0 +1,103 @@
+<div class="tab-content hidden" id="tab-system">
+    <div class="space-y-4">
+
+      <div class="card">
+        <h3 class="font-medium mb-4">System Status</h3>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm" id="sys-stats">
+          <div>
+            <p class="text-gray-500">Uptime</p>
+            <p class="text-lg font-semibold" id="sys-uptime">--</p>
+          </div>
+          <div>
+            <p class="text-gray-500">Agents</p>
+            <p id="sys-agents" class="text-gray-300">--</p>
+          </div>
+          <div>
+            <p class="text-gray-500">Core Modules</p>
+            <p id="sys-core-mods" class="text-gray-300">--</p>
+          </div>
+          <div>
+            <p class="text-gray-500">Extension Modules</p>
+            <p id="sys-ext-mods" class="text-gray-300">--</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 class="font-medium mb-4">API Token</h3>
+        <p class="text-sm text-gray-400 mb-3">Use this token to access Syntaur from scripts, automations, or external tools.</p>
+        <div class="flex gap-2">
+          <input type="password" class="input font-mono" id="api-token-display" readonly>
+          <button class="btn-secondary" onclick="toggleTokenVisibility()">Show</button>
+          <button class="btn-secondary" onclick="copyToken()">Copy</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 class="font-medium mb-4">License</h3>
+        <div id="license-info" class="mb-4">
+          <p class="text-sm text-gray-400">Loading...</p>
+        </div>
+        <div>
+          <label class="label">License Key</label>
+          <textarea class="input font-mono text-xs" rows="3" id="license-key-input" placeholder='Paste your license key here (JSON format)...'></textarea>
+          <div class="flex items-center gap-3 mt-2">
+            <button class="btn-primary" onclick="activateLicense()">Activate</button>
+            <span id="license-result" class="text-sm"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 class="font-medium mb-4">Updates</h3>
+        <div class="space-y-3 text-sm mb-6">
+          <div class="flex items-center justify-between">
+            <div>
+              <p class="text-gray-300" id="update-version-text">Checking for updates...</p>
+              <p class="text-xs text-gray-500" id="update-status-text"></p>
+            </div>
+            <button onclick="checkForUpdates()" class="px-4 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm transition-colors" id="btn-check-update">Check Now</button>
+          </div>
+          <div id="update-available" class="hidden p-3 rounded-lg bg-oc-900/30 border border-oc-800/30">
+            <p class="text-sm text-oc-400 font-medium">Update available!</p>
+            <p class="text-xs text-gray-400 mt-1" id="update-notes"></p>
+            <a href="" id="update-download-link" target="_blank" class="text-xs text-oc-500 hover:text-oc-400 mt-2 inline-block">View release &rarr;</a>
+          </div>
+          <div id="tax-bracket-status" class="p-3 rounded-lg bg-gray-900">
+            <p class="text-xs text-gray-500">Tax brackets: <span id="bracket-status-text">checking...</span></p>
+          </div>
+        </div>
+
+        <h3 class="font-medium mb-4">Desktop Shortcut</h3>
+        <div class="space-y-3 text-sm mb-6">
+          <p class="text-gray-400">Create or update the Syntaur shortcut in your app launcher, Start Menu, or desktop so you can always find it.</p>
+          <div class="flex gap-3">
+            <button onclick="installShortcut('menu')" class="px-4 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm transition-colors" id="btn-shortcut-menu">
+              Install App Shortcut
+            </button>
+            <button onclick="installShortcut('desktop')" class="px-4 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm transition-colors" id="btn-shortcut-desktop">
+              Add to Desktop
+            </button>
+          </div>
+          <p class="text-xs text-gray-500" id="shortcut-status"></p>
+          <div class="p-3 rounded-lg bg-gray-900">
+            <p class="text-xs text-gray-500">You can always reach Syntaur at <span class="text-sky-400 font-mono">http://localhost:18789</span></p>
+            <p class="text-xs text-gray-500 mt-1">Syntaur runs in the background — the shortcut just opens this dashboard.</p>
+          </div>
+        </div>
+
+        <h3 class="font-medium mb-4">Links</h3>
+        <div class="space-y-2 text-sm">
+          <a href="/setup" class="block p-3 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors">
+            <p class="font-medium text-gray-300">Re-run Setup Wizard</p>
+            <p class="text-xs text-gray-500">Change LLM backend, modules, or communication channels</p>
+          </a>
+          <a href="/modules" class="block p-3 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors">
+            <p class="font-medium text-gray-300">Module Management</p>
+            <p class="text-xs text-gray-500">Enable, disable, or configure modules</p>
+          </a>
+        </div>
+      </div>
+
+    </div>
+  </div>

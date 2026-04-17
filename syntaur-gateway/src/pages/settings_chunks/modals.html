@@ -1,0 +1,1364 @@
+<div id="invite-dialog" class="fixed inset-0 z-50 bg-black/60 flex items-center justify-center hidden">
+    <div class="bg-gray-800 rounded-xl border border-gray-700 p-6 w-full max-w-md mx-4 max-h-[80vh] overflow-y-auto">
+      <!-- Step 1: Name + Role -->
+      <div id="invite-step1">
+        <h3 class="font-medium mb-4">Invite a User</h3>
+        <div class="space-y-3">
+          <input type="text" id="invite-name" placeholder="Name (optional hint)" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-2 text-sm text-white placeholder-gray-500 focus:border-oc-500 outline-none">
+          <select id="invite-role" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-2 text-sm text-gray-300">
+            <option value="user">User</option>
+            <option value="admin">Admin</option>
+          </select>
+          <div class="flex gap-2">
+            <button onclick="showInviteStep2()" class="flex-1 bg-oc-600 hover:bg-oc-700 text-white text-sm py-2 rounded-lg">Next: Configure Sharing</button>
+            <button onclick="document.getElementById('invite-dialog').classList.add('hidden')" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white text-sm py-2 rounded-lg">Cancel</button>
+          </div>
+        </div>
+      </div>
+      <!-- Step 2: Sharing categories -->
+      <div id="invite-step2" class="hidden">
+        <h3 class="font-medium mb-2">Data Sharing</h3>
+        <p class="text-xs text-gray-500 mb-3">Choose what to share with this user. They'll always have their own private data too.</p>
+        <div id="invite-sharing-cats" class="space-y-2 mb-4"></div>
+        <div class="flex gap-2">
+          <button onclick="sendInvite()" class="flex-1 bg-oc-600 hover:bg-oc-700 text-white text-sm py-2 rounded-lg" id="invite-btn">Create Invite</button>
+          <button onclick="showInviteStep1()" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white text-sm py-2 rounded-lg">Back</button>
+        </div>
+        <div id="invite-result" class="hidden text-sm mt-3"></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+
+<script>
+// Bug Report UI — injected on all authenticated pages (schema v10)
+(function() {
+  const BUG_TOKEN = sessionStorage.getItem('syntaur_token') || '';
+  if (!BUG_TOKEN) return;
+  const topBar = document.querySelector('.border-b.border-gray-800 .flex.items-center.justify-between');
+  if (!topBar) return;
+  const rightNav = topBar.lastElementChild;
+  if (!rightNav) return;
+  const bugBtn = document.createElement('button');
+  bugBtn.title = 'Report a Bug';
+  bugBtn.className = 'text-gray-500 hover:text-gray-300 transition-colors p-1 rounded';
+  bugBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2l1.88 1.88M14.12 3.88L16 2M9 7.13v-1a3.003 3.003 0 116 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 014-4h4a4 4 0 014 4v3c0 3.3-2.7 6-6 6z"/><path d="M12 20v-9M6.53 9C4.6 8.8 3 7.1 3 5M6 13H2M6 17l-4 1M17.47 9c1.93-.2 3.53-1.9 3.53-4M18 13h4M18 17l4 1"/></svg>';
+  bugBtn.onclick = function() { openBugModal(); };
+  if (rightNav.tagName === 'DIV') { rightNav.prepend(bugBtn); }
+  else { const w = document.createElement('div'); w.className='flex items-center gap-3'; topBar.replaceChild(w, rightNav); w.appendChild(bugBtn); w.appendChild(rightNav); }
+  const overlay = document.createElement('div');
+  overlay.id = 'bug-report-overlay';
+  overlay.className = 'fixed inset-0 z-50 bg-black/60 backdrop-blur-sm hidden flex items-center justify-center';
+  overlay.innerHTML = '<div class="bg-gray-800 border border-gray-700 rounded-2xl w-full max-w-lg mx-4 shadow-2xl"><div class="px-6 py-4 border-b border-gray-700 flex items-center justify-between"><h3 class="text-lg font-semibold text-white">Report a Bug</h3><button onclick="document.getElementById(\'bug-report-overlay\').classList.add(\'hidden\')" class="text-gray-400 hover:text-gray-200 text-xl leading-none">&times;</button></div><div class="px-6 py-5 space-y-4"><div><label class="block text-sm font-medium text-gray-300 mb-1.5">What went wrong?</label><textarea id="bug-desc" rows="4" class="w-full bg-gray-900 border border-gray-600 rounded-lg px-4 py-2.5 text-white placeholder-gray-500 focus:border-sky-500 focus:ring-1 focus:ring-sky-500 outline-none resize-none text-sm" placeholder="Describe the bug..."></textarea></div><details class="text-sm"><summary class="text-gray-400 cursor-pointer hover:text-gray-300 select-none">System Info (auto-collected)</summary><pre id="bug-sysinfo" class="mt-2 bg-gray-900 border border-gray-700 rounded-lg p-3 text-xs text-gray-400 overflow-x-auto max-h-40 overflow-y-auto"></pre></details><div id="bug-feedback" class="hidden text-sm"></div></div><div class="px-6 py-4 border-t border-gray-700 flex justify-end gap-3"><button onclick="document.getElementById(\'bug-report-overlay\').classList.add(\'hidden\')" class="text-sm text-gray-400 hover:text-gray-300 px-4 py-2">Cancel</button><button id="bug-submit-btn" onclick="submitBugReport()" class="text-sm bg-sky-600 hover:bg-sky-700 text-white font-medium px-5 py-2 rounded-lg transition-colors">Submit</button></div></div>';
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.classList.add('hidden'); });
+  window.openBugModal = async function() {
+    const ov = document.getElementById('bug-report-overlay');
+    const desc = document.getElementById('bug-desc');
+    const si = document.getElementById('bug-sysinfo');
+    const fb = document.getElementById('bug-feedback');
+    desc.value = ''; fb.classList.add('hidden');
+    document.getElementById('bug-submit-btn').disabled = false;
+    document.getElementById('bug-submit-btn').textContent = 'Submit';
+    const info = { userAgent: navigator.userAgent, screen: screen.width+'x'+screen.height, window: innerWidth+'x'+innerHeight, page: location.href, time: new Date().toISOString() };
+    try { const r = await fetch('/health'); if (r.ok) info.gateway = await r.json(); } catch(e) { info.gateway = 'unavailable'; }
+    si.textContent = JSON.stringify(info, null, 2);
+    ov.classList.remove('hidden'); desc.focus();
+  };
+  window.submitBugReport = async function() {
+    const desc = document.getElementById('bug-desc').value.trim();
+    const fb = document.getElementById('bug-feedback');
+    const btn = document.getElementById('bug-submit-btn');
+    if (!desc) { fb.className='text-sm text-red-400'; fb.textContent='Please describe the bug.'; fb.classList.remove('hidden'); return; }
+    btn.disabled = true; btn.textContent = 'Submitting...'; fb.classList.add('hidden');
+    const si = { userAgent: navigator.userAgent, screen: screen.width+'x'+screen.height, window: innerWidth+'x'+innerHeight, page: location.href, time: new Date().toISOString() };
+    try { const r = await fetch('/health'); if (r.ok) si.gateway = await r.json(); } catch(e) {}
+    try {
+      const res = await fetch('/api/bug-reports', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ token: BUG_TOKEN, description: desc, system_info: si, page_url: location.href }) });
+      const data = await res.json();
+      if (data.id) { fb.className='text-sm text-green-400'; fb.textContent='Bug report #'+data.id+' submitted. Thank you!'; fb.classList.remove('hidden'); btn.textContent='Submitted'; setTimeout(function(){ document.getElementById('bug-report-overlay').classList.add('hidden'); }, 2000); }
+      else { fb.className='text-sm text-red-400'; fb.textContent=data.error||'Submission failed.'; fb.classList.remove('hidden'); btn.disabled=false; btn.textContent='Submit'; }
+    } catch(e) { fb.className='text-sm text-red-400'; fb.textContent='Network error: '+e.message; fb.classList.remove('hidden'); btn.disabled=false; btn.textContent='Submit'; }
+  };
+})();
+
+
+// ── Sync tab ─────────────────────────────────────────────────────────────
+let syncProviders = [];
+let syncPairPollTimer = null;
+
+async function loadSyncProviders() {
+  const box = document.getElementById('sync-categories');
+  box.innerHTML = '<p class="text-xs text-gray-500 italic">Loading…</p>';
+  try {
+    const resp = await fetch(`/api/sync/providers?token=${token}`, { headers: { 'Authorization': 'Bearer ' + token } });
+    const data = await resp.json();
+    syncProviders = data.providers || [];
+    renderSyncProviders();
+  } catch(e) {
+    box.innerHTML = '<p class="text-xs text-red-400">Failed to load: ' + e.message + '</p>';
+  }
+}
+
+const CATEGORY_DESCRIPTIONS = {
+  'Email': 'Connect inboxes so Syntaur can find receipts and important messages.',
+  'Calendar': 'Merge calendars from multiple sources. Events become voice-queryable.',
+  'Messaging': 'Where Syntaur reaches out to you (reminders, approvals, alerts).',
+  'Finance': 'Banks, brokers, exchanges, and payment processors. Feed the tax module.',
+  'Social': 'Publish and monitor. Used by the Crimson Lantern pipeline.',
+  'Developer': 'Dev tools that surface on your dashboard.',
+  'Smart Home': 'Home Assistant is the hub. Connecting it unlocks HomePod music, Matter devices, and voice control of every HA entity.',
+  'Media': 'Music, video, and TV sources Syntaur can query or control.',
+  'Music': 'These four work together. Connect Home Assistant + Apple Music for the best experience (HomePod playback). iOS Shortcut is a fallback.',
+  'Health': 'Activity, sleep, and biometrics for daily check-ins.',
+  'AI': 'Usage tracking for the models that power Syntaur.',
+  'Storage': 'Where your Syntaur data lives. Typically info-only health cards.',
+};
+
+const USE_CASES = [
+  {
+    id: 'music',
+    icon: '🎵',
+    title: "Play music",
+    tiers: [
+      {
+        label: 'Simplest',
+        providers: ['phone_music_pwa'],
+        unlocks: 'Music plays on your phone (speakers, AirPods, AirPlay HomePod from iOS Control Center). That\'s it — nothing else needed.',
+        cost: '0 min — already done if phone is paired',
+      },
+      {
+        label: 'Pick your music service',
+        providers: ['apple_music', 'spotify', 'youtube_music'],
+        unlocks: '+ Search your library and pick songs by name/mood. Apple Music uses a desktop bookmarklet; Spotify and YouTube Music use OAuth (admin setup required).',
+        cost: '~3 min after admin OAuth setup',
+      },
+      {
+        label: 'If you already run Home Assistant',
+        providers: ['home_assistant'],
+        unlocks: '+ Whole-home: Syntaur controls HomePod, Apple TV, Sonos directly. Also unlocks speaker grouping and EQ. Optional — skip if you don\'t use HA.',
+        cost: '~10 min if HA already running',
+      },
+    ],
+  },
+  {
+    id: 'notifications',
+    icon: '🔔',
+    title: "Get notifications + reminders",
+    tiers: [
+      {
+        label: 'Simplest',
+        providers: [],
+        unlocks: 'PWA shows notifications on your phone. Already works once phone is paired.',
+        cost: '0 min',
+      },
+      {
+        label: 'Also',
+        providers: ['telegram'],
+        unlocks: '+ Telegram bot reaches you even when phone is silent. Two-way: reply by text.',
+        cost: '~30 sec (scan QR)',
+      },
+    ],
+  },
+  {
+    id: 'calendar',
+    icon: '📅',
+    title: "See your calendar",
+    tiers: [
+      {
+        label: 'Simplest',
+        providers: ['ics_subscription'],
+        unlocks: 'Subscribe to any .ics URL — work calendar, holidays, sports schedule. Read-only.',
+        cost: '~30 sec',
+      },
+      {
+        label: 'iCloud calendars',
+        providers: ['apple_calendar'],
+        unlocks: '+ Read AND write to iCloud calendars. Requires app-specific password from appleid.apple.com.',
+        cost: '~3 min',
+      },
+    ],
+  },
+  {
+    id: 'finance',
+    icon: '💰',
+    title: "Auto-track finances for taxes",
+    tiers: [
+      {
+        label: 'Simplest',
+        providers: ['plaid'],
+        unlocks: 'Connects ~12,000 banks via Plaid Link. Transactions flow into the tax module automatically.',
+        cost: '~5 min',
+      },
+      {
+        label: 'Add brokers',
+        providers: ['alpaca'],
+        unlocks: '+ Stock holdings + trade activity from Alpaca.',
+        cost: '~3 min',
+      },
+      {
+        label: 'Add crypto',
+        providers: ['coinbase', 'crypto_wallet'],
+        unlocks: '+ Coinbase trades and any public wallet balances.',
+        cost: '~5 min',
+      },
+      {
+        label: 'Add receipts',
+        providers: ['stripe'],
+        unlocks: '+ Stripe receipts auto-imported.',
+        cost: '~3 min',
+      },
+    ],
+  },
+  {
+    id: 'smart_home',
+    icon: '🏠',
+    title: "Voice-control smart home",
+    tiers: [
+      {
+        label: 'If you run Home Assistant',
+        providers: ['home_assistant'],
+        unlocks: 'Connect HA once, Syntaur controls every device already paired there — lights, locks, thermostats. No HA? Skip this whole row.',
+        cost: '~5 min if HA already running',
+      },
+    ],
+  },
+  {
+    id: 'health',
+    icon: '❤️',
+    title: "Track health and sleep",
+    tiers: [
+      {
+        label: 'If you have an Oura Ring',
+        providers: ['oura'],
+        unlocks: 'Sleep, readiness, activity. Ask "how did I sleep?"',
+        cost: '~2 min',
+      },
+      {
+        label: 'If you use Strava',
+        providers: ['strava'],
+        unlocks: 'Workout history — ask Syntaur to summarize the week.',
+        cost: '~2 min (OAuth setup needed first)',
+      },
+      {
+        label: 'Apple Health',
+        providers: ['apple_health'],
+        unlocks: 'Full sleep/heart/workout data. Export from iPhone, upload here.',
+        cost: '~10 min one-time',
+      },
+    ],
+  },
+];
+
+function renderGetStarted() {
+  // Phone PWA paired = Get Started done. Otherwise show the CTA.
+  const phonePaired = syncProviders.some(p => p.id === 'phone_music_pwa' && p.connected);
+  const cta = document.getElementById('sync-getstarted-card');
+  const done = document.getElementById('sync-getstarted-done');
+  if (!cta || !done) return;
+  if (phonePaired) {
+    cta.classList.add('hidden');
+    done.classList.remove('hidden');
+  } else {
+    cta.classList.remove('hidden');
+    done.classList.add('hidden');
+  }
+}
+
+function renderUseCases() {
+  const box = document.getElementById('sync-usecases');
+  if (!box) return;
+  box.innerHTML = USE_CASES.map(uc => {
+    const tierHtml = uc.tiers.map((tier, idx) => {
+      const tierProviders = tier.providers.map(id => syncProviders.find(p => p.id === id)).filter(Boolean);
+      const tierConnected = tierProviders.length === 0 || tierProviders.every(p => p.connected);
+      const stepLabel = idx === 0 ? '①' : (idx === 1 ? '②' : (idx === 2 ? '③' : '④'));
+      const tierColor = tierConnected ? 'text-green-400' : 'text-gray-400';
+      const buttons = tierProviders.length === 0
+        ? '<span class="text-xs text-green-400">— Already on (PWA)</span>'
+        : tierProviders.map(p => {
+            if (p.connected) return `<span class="text-xs text-green-400">✓ ${escapeHtml(p.name)}</span>`;
+            if (p.needs_oauth_config) return `<span class="text-xs text-yellow-500" title="OAuth app config required">${escapeHtml(p.name)} (needs admin)</span>`;
+            return `<button onclick="event.stopPropagation(); openSyncModal('${p.id}')" class="text-xs bg-gray-800 hover:bg-oc-700 text-gray-200 hover:text-white px-2 py-0.5 rounded transition-colors">+ ${escapeHtml(p.name)}</button>`;
+          }).join(' ');
+      return `<div class="flex items-start gap-2 py-1.5">
+        <span class="${tierColor} text-sm flex-shrink-0">${stepLabel}</span>
+        <div class="flex-1 min-w-0">
+          <div class="flex items-baseline gap-2">
+            <span class="text-xs font-medium ${tierConnected ? 'text-green-400' : 'text-gray-300'}">${escapeHtml(tier.label)}</span>
+            <span class="text-[10px] text-gray-600">${escapeHtml(tier.cost)}</span>
+          </div>
+          <p class="text-[11px] text-gray-500 leading-relaxed">${escapeHtml(tier.unlocks)}</p>
+          <div class="mt-1 flex items-center gap-1 flex-wrap">${buttons}</div>
+        </div>
+      </div>`;
+    }).join('');
+    return `<details class="bg-gray-900 border border-gray-700 rounded-lg overflow-hidden">
+      <summary class="cursor-pointer p-3 flex items-center gap-3 hover:bg-gray-800 list-none">
+        <span class="text-2xl flex-shrink-0">${uc.icon}</span>
+        <div class="flex-1 min-w-0">
+          <p class="font-medium text-sm">${escapeHtml(uc.title)}</p>
+          <p class="text-[11px] text-gray-500">${uc.tiers.length} option${uc.tiers.length > 1 ? 's' : ''} — simplest first</p>
+        </div>
+        <span class="text-gray-500 text-xs">▾</span>
+      </summary>
+      <div class="px-3 pb-3 space-y-1 border-t border-gray-700">${tierHtml}</div>
+    </details>`;
+  }).join('');
+}
+
+function toggleAllServices() {
+  const box = document.getElementById('sync-all-services');
+  const arrow = document.getElementById('sync-all-arrow');
+  if (box.classList.contains('hidden')) {
+    box.classList.remove('hidden');
+    arrow.textContent = '▾ Hide';
+  } else {
+    box.classList.add('hidden');
+    arrow.textContent = '▸ Show all';
+  }
+}
+
+function renderSyncProviders() {
+  const box = document.getElementById('sync-categories');
+  if (!syncProviders.length) { box.innerHTML = '<p class="text-xs text-gray-500 italic">No providers.</p>'; return; }
+  const byCat = {};
+  for (const p of syncProviders) {
+    (byCat[p.category] = byCat[p.category] || []).push(p);
+  }
+  const catOrder = ['Music', 'Smart Home', 'Calendar', 'Messaging', 'Finance', 'Email', 'Developer', 'Social', 'Health', 'AI', 'Media', 'Storage'];
+  const ordered = catOrder.filter(c => byCat[c]).concat(Object.keys(byCat).filter(c => !catOrder.includes(c)));
+  box.innerHTML = ordered.map(cat => {
+    // Sort within category: connected first, then alphabetical
+    const sorted = [...byCat[cat]].sort((a, b) => {
+      if (a.connected !== b.connected) return a.connected ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+    const cards = sorted.map(p => renderProviderCard(p)).join('');
+    const desc = CATEGORY_DESCRIPTIONS[cat] || '';
+    return `<div data-category="${escapeHtml(cat)}">
+      <div class="mb-2">
+        <h4 class="text-xs uppercase tracking-wider text-gray-400 font-semibold">${escapeHtml(cat)}</h4>
+        ${desc ? `<p class="text-[11px] text-gray-600 mt-0.5">${escapeHtml(desc)}</p>` : ''}
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">${cards}</div>
+    </div>`;
+  }).join('');
+  renderGetStarted();
+  renderUseCases();
+}
+
+function filterProviders(query) {
+  const q = (query || '').toLowerCase().trim();
+  document.querySelectorAll('#sync-categories [data-provider]').forEach(el => {
+    const pid = el.dataset.provider;
+    const p = syncProviders.find(x => x.id === pid);
+    if (!p) return;
+    const match = !q || p.name.toLowerCase().includes(q) || p.category.toLowerCase().includes(q) || (p.unlocks || '').toLowerCase().includes(q);
+    el.style.display = match ? '' : 'none';
+  });
+  // Hide empty categories
+  document.querySelectorAll('#sync-categories [data-category]').forEach(catEl => {
+    const visibleCards = catEl.querySelectorAll('[data-provider]:not([style*="display: none"])');
+    catEl.style.display = visibleCards.length === 0 && q ? 'none' : '';
+  });
+}
+
+function renderInstructions(text) {
+  if (!text) return '';
+  // If the text contains "1. ..." pattern, render as numbered list
+  const stepRegex = /\s*(\d+)\.\s+/g;
+  const matches = [...text.matchAll(stepRegex)];
+  if (matches.length < 2) {
+    // Not a numbered list — return as paragraph
+    return `<p class="text-sm text-gray-300 mb-3">${escapeHtml(text)}</p>`;
+  }
+  // Split on step numbers and build <ol>
+  const parts = text.split(/\s*\d+\.\s+/).filter(p => p.trim());
+  // If there's a prefix before the first "1.", keep it as lead-in
+  const firstMatchIdx = text.search(/\d+\.\s+/);
+  const lead = firstMatchIdx > 0 ? text.substring(0, firstMatchIdx).trim() : '';
+  const items = lead ? parts : parts;
+  let html = '';
+  if (lead) html += `<p class="text-sm text-gray-300 mb-2">${escapeHtml(lead)}</p>`;
+  html += '<ol class="text-sm text-gray-300 space-y-1.5 mb-3 list-decimal list-inside ml-1">';
+  for (const item of items) {
+    html += `<li class="leading-relaxed">${escapeHtml(item.trim())}</li>`;
+  }
+  html += '</ol>';
+  return html;
+}
+
+function renderProviderCard(p) {
+  const icons = {
+    gmail: '&#9993;', google_calendar: '&#128197;', ics_subscription: '&#128197;',
+    telegram: '&#128172;', stripe: '&#128179;', bluesky: '&#9729;',
+    plaid: '&#127974;', simplefin: '&#127974;', alpaca: '&#128200;', coinbase: '&#8383;',
+    github: '&#128187;', home_assistant: '&#127968;', plex: '&#127916;',
+    apple_calendar: '&#128197;', crypto_wallet: '&#128184;',
+    spotify: '&#127925;', youtube: '&#9654;', strava: '&#127939;',
+    oura: '&#128131;', anthropic_usage: '&#129302;', openrouter_usage: '&#9889;',
+    apple_health: '&#10084;', notebooklm_status: '&#128214;', vault_health: '&#128190;',
+    airplay: '&#128251;', music_assistant: '&#127925;', ios_shortcut_music: '&#128241;',
+    apple_music: '&#127925;',
+  };
+  const icon = icons[p.id] || '&#128279;';
+  let statusBadge = '';
+  let action = '';
+
+  if (p.info_only) {
+    statusBadge = '<span class="badge badge-blue">Info</span>';
+    action = `<button onclick="openSyncModal('${p.id}')" class="text-xs text-oc-500 hover:text-oc-400">View status</button>`;
+  } else if (p.needs_oauth_config) {
+    statusBadge = '<span class="badge badge-yellow" title="OAuth app needs to be registered">Setup needed</span>';
+    action = `<button onclick="openOauthSetupModal('${p.id}','${escapeHtmlAttr(p.name)}')" class="text-xs bg-yellow-700 hover:bg-yellow-600 text-white px-3 py-1 rounded-lg">Set up OAuth</button>`;
+  } else if (p.connected) {
+    if (p.status === 'needs_reconnect') {
+      statusBadge = '<span class="badge badge-red">Reconnect</span>';
+      action = `<button onclick="openSyncModal('${p.id}')" class="text-xs text-oc-500 hover:text-oc-400">Reconnect</button>
+                <button onclick="disconnectSyncStyled('${p.id}','${escapeHtmlAttr(p.name)}')" class="text-xs text-gray-400 hover:text-red-400">Remove</button>`;
+    } else {
+      statusBadge = '<span class="badge badge-green">Connected</span>';
+      action = `<button onclick="testSyncProvider('${p.id}')" class="text-xs text-gray-400 hover:text-gray-200" title="Verify credentials still work">Test</button>
+                <button onclick="disconnectSyncStyled('${p.id}','${escapeHtmlAttr(p.name)}')" class="text-xs text-gray-400 hover:text-red-400">Disconnect</button>`;
+    }
+  } else {
+    action = `<button onclick="openSyncModal('${p.id}')" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-3 py-1 rounded-lg">Connect</button>`;
+  }
+
+  const subLine = p.connected && p.display_name
+    ? `<p class="text-[11px] text-gray-500 truncate">${escapeHtml(p.display_name)}</p>`
+    : '';
+  const unlocksText = (p.connected && p.unlocks)
+    ? `<p class="text-[11px] text-gray-400 mt-1 leading-snug">${escapeHtml(p.unlocks)}</p>`
+    : (!p.connected && !p.info_only && p.unlocks)
+      ? `<p class="text-[11px] text-gray-600 mt-1 leading-snug italic">${escapeHtml(p.unlocks)}</p>`
+      : '';
+  const lastSync = p.connected && p.last_sync_at
+    ? `<p class="text-[10px] text-gray-600 mt-0.5">checked ${relTime(p.last_check_at || p.last_sync_at)}</p>`
+    : '';
+  const errorLine = p.connected && p.last_error
+    ? `<p class="text-[10px] text-red-400 mt-0.5 truncate" title="${escapeHtmlAttr(p.last_error)}">${escapeHtml(p.last_error.substring(0, 60))}</p>`
+    : '';
+
+  return `<div class="bg-gray-900 border border-gray-700 hover:border-gray-600 rounded-lg p-3 transition-colors" data-provider="${escapeHtml(p.id)}">
+    <div class="flex items-start gap-3">
+      <span class="text-2xl flex-shrink-0">${icon}</span>
+      <div class="flex-1 min-w-0">
+        <div class="flex items-center gap-2 justify-between">
+          <p class="font-medium text-sm truncate">${escapeHtml(p.name)}</p>
+          ${statusBadge}
+        </div>
+        ${subLine}
+        ${unlocksText}
+        ${lastSync}
+        ${errorLine}
+        <div class="mt-2 flex gap-2 flex-wrap">${action}</div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function escapeHtmlAttr(s) { return escapeHtml(s).replace(/'/g, '&#39;'); }
+
+async function testSyncProvider(providerId) {
+  const p = syncProviders.find(x => x.id === providerId);
+  if (!p) return;
+  // Re-open the provider's modal with a test indicator — simpler than a new endpoint for every case
+  // Or just call /api/sync/providers to refresh status
+  showToast('Testing ' + p.name + '…');
+  try {
+    const resp = await fetch(`/api/sync/providers?token=${token}`, { headers: { 'Authorization': 'Bearer ' + token } });
+    const data = await resp.json();
+    syncProviders = data.providers || [];
+    renderSyncProviders();
+    const updated = syncProviders.find(x => x.id === providerId);
+    if (updated && updated.status === 'active') showToast(p.name + ' ✓ Still connected');
+    else showToast(p.name + ' — needs attention');
+  } catch(e) { showToast('Test failed: ' + e.message); }
+}
+
+function disconnectSyncStyled(providerId, name) {
+  showConfirm(`Disconnect ${name}?`, `Syntaur will stop syncing with ${name}. You can reconnect anytime.`, async () => {
+    try {
+      await fetch(`/api/sync/connections/${providerId}?token=${token}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': 'Bearer ' + token },
+      });
+      await loadSyncProviders();
+      showToast(`${name} disconnected`);
+    } catch(e) { showToast('Disconnect failed: ' + e.message); }
+  });
+}
+
+function showToast(msg) {
+  let t = document.getElementById('sync-toast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'sync-toast';
+    t.className = 'fixed bottom-4 right-4 bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-sm text-gray-200 shadow-lg z-50 transition-opacity';
+    document.body.appendChild(t);
+  }
+  t.textContent = msg;
+  t.style.opacity = '1';
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => { t.style.opacity = '0'; }, 3000);
+}
+
+async function openOauthSetupModal(providerId, providerName) {
+  let identityInfo = null;
+  try {
+    const resp = await fetch(`/api/admin/oauth_config?token=${token}`, { headers: { 'Authorization': 'Bearer ' + token } });
+    const data = await resp.json();
+    const prov = syncProviders.find(p => p.id === providerId);
+    const identityId = prov?.identity_provider || providerId;
+    identityInfo = (data.identity_providers || []).find(i => i.id === identityId);
+  } catch(e) {}
+  if (!identityInfo) { alert('Could not find identity-provider info for ' + providerName); return; }
+  const redirectUri = window.location.origin + '/api/oauth/callback';
+  const existing = document.getElementById('oauth-setup-modal');
+  if (existing) existing.remove();
+  const modal = document.createElement('div');
+  modal.id = 'oauth-setup-modal';
+  modal.className = 'fixed inset-0 bg-black/75 z-50 flex items-center justify-center p-4';
+  const stepsHtml = identityInfo.register_steps.replace('{redirect_uri}', '<code class="bg-gray-900 px-1">' + redirectUri + '</code>');
+  const alreadyConfigured = identityInfo.configured;
+  const relatedNote = identityInfo.id === 'google' ? 'Gmail, Google Calendar, YouTube Music, YouTube' : providerName;
+  modal.innerHTML = '<div class="bg-gray-800 rounded-xl border border-gray-700 max-w-lg w-full max-h-[90vh] overflow-y-auto">' +
+    '<div class="flex items-center justify-between p-4 border-b border-gray-700">' +
+      '<h3 class="font-medium">Set up ' + escapeHtml(identityInfo.name) + ' OAuth</h3>' +
+      '<button onclick="closeOauthSetup()" class="text-gray-500 hover:text-gray-300 text-2xl leading-none">&times;</button>' +
+    '</div>' +
+    '<div class="p-5 space-y-4">' +
+      (alreadyConfigured ? '<div class="bg-green-900/30 border border-green-700/50 rounded-lg p-3 text-sm text-green-300">✓ ' + escapeHtml(identityInfo.name) + ' already configured. Re-enter to update credentials.</div>' : '') +
+      '<div class="bg-gray-900 border border-gray-700 rounded-lg p-3">' +
+        '<p class="text-xs font-semibold text-gray-300 mb-2">One-time setup for ALL ' + escapeHtml(identityInfo.name) + ' services</p>' +
+        '<p class="text-xs text-gray-400 mb-3">Configuring ' + escapeHtml(identityInfo.name) + ' once unlocks every related sync card (' + relatedNote + ').</p>' +
+        '<div class="text-xs text-gray-300 leading-relaxed">' + stepsHtml + '</div>' +
+        '<a href="' + identityInfo.register_url + '" target="_blank" class="inline-flex items-center gap-1.5 mt-3 bg-gray-800 hover:border-oc-500 border border-gray-700 rounded-lg px-3 py-2 text-sm text-oc-500 hover:text-oc-400">↗ Open ' + escapeHtml(identityInfo.name) + ' developer console</a>' +
+      '</div>' +
+      '<div>' +
+        '<label class="block text-xs text-gray-400 mb-1">Redirect URI (copy to your OAuth app)</label>' +
+        '<div class="flex gap-2">' +
+          '<input type="text" value="' + redirectUri + '" readonly class="flex-1 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm font-mono" id="oauth-redirect-uri" onclick="this.select()">' +
+          '<button onclick="navigator.clipboard.writeText(\'' + redirectUri + '\');this.textContent=\'✓ Copied\'" class="text-xs bg-gray-700 hover:bg-gray-600 px-3 rounded-lg">Copy</button>' +
+        '</div>' +
+      '</div>' +
+      '<div><label class="block text-xs text-gray-400 mb-1">Client ID</label><input type="text" id="oauth-client-id" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm font-mono" placeholder="paste client id"></div>' +
+      '<div><label class="block text-xs text-gray-400 mb-1">Client Secret</label><input type="password" id="oauth-client-secret" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm font-mono" placeholder="paste the secret"></div>' +
+      '<div class="flex gap-2 justify-end pt-2">' +
+        '<button onclick="closeOauthSetup()" class="text-sm text-gray-400 hover:text-gray-200 px-3 py-1.5">Cancel</button>' +
+        '<button onclick="saveOauthConfig(\'' + identityInfo.id + '\',\'' + escapeHtml(identityInfo.name) + '\')" id="oauth-save-btn" class="text-sm bg-oc-600 hover:bg-oc-700 text-white px-4 py-1.5 rounded-lg">Save</button>' +
+      '</div>' +
+      '<p id="oauth-save-error" class="text-xs text-red-400 hidden"></p>' +
+    '</div></div>';
+  document.body.appendChild(modal);
+}
+
+function closeOauthSetup() {
+  const el = document.getElementById('oauth-setup-modal');
+  if (el) el.remove();
+}
+
+async function saveOauthConfig(identityId, identityName) {
+  const cid = document.getElementById('oauth-client-id').value.trim();
+  const csec = document.getElementById('oauth-client-secret').value.trim();
+  const errEl = document.getElementById('oauth-save-error');
+  if (!cid || !csec) {
+    errEl.textContent = 'Client ID and Client Secret required.';
+    errEl.classList.remove('hidden');
+    return;
+  }
+  const btn = document.getElementById('oauth-save-btn');
+  btn.textContent = 'Saving…'; btn.disabled = true;
+  try {
+    const resp = await fetch('/api/admin/oauth_config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, identity_provider: identityId, client_id: cid, client_secret: csec }),
+    });
+    const data = await resp.json();
+    if (data.error) {
+      errEl.textContent = data.error;
+      errEl.classList.remove('hidden');
+    } else {
+      closeOauthSetup();
+      showToast(identityName + ' OAuth saved. Related providers unlocked.');
+      await loadSyncProviders();
+    }
+  } catch(e) {
+    errEl.textContent = e.message;
+    errEl.classList.remove('hidden');
+  }
+  btn.textContent = 'Save'; btn.disabled = false;
+}
+
+function showConfirm(title, message, onConfirm) {
+  const existing = document.getElementById('sync-confirm-modal');
+  if (existing) existing.remove();
+  const modal = document.createElement('div');
+  modal.id = 'sync-confirm-modal';
+  modal.className = 'fixed inset-0 bg-black/75 z-50 flex items-center justify-center p-4';
+  modal.innerHTML = `
+    <div class="bg-gray-800 rounded-xl border border-gray-700 max-w-sm w-full p-5">
+      <h3 class="font-medium text-gray-100 mb-2">${escapeHtml(title)}</h3>
+      <p class="text-sm text-gray-400 mb-4">${escapeHtml(message)}</p>
+      <div class="flex gap-2 justify-end">
+        <button onclick="document.getElementById('sync-confirm-modal').remove()" class="text-sm text-gray-400 hover:text-gray-200 px-3 py-1.5">Cancel</button>
+        <button id="sync-confirm-ok" class="text-sm bg-red-600 hover:bg-red-700 text-white px-3 py-1.5 rounded-lg">Disconnect</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  document.getElementById('sync-confirm-ok').onclick = async () => {
+    modal.remove();
+    await onConfirm();
+  };
+}
+
+
+function relTime(ts) {
+  const sec = Math.floor(Date.now()/1000) - ts;
+  if (sec < 60) return 'just now';
+  if (sec < 3600) return Math.floor(sec/60) + 'm ago';
+  if (sec < 86400) return Math.floor(sec/3600) + 'h ago';
+  return Math.floor(sec/86400) + 'd ago';
+}
+
+function openSyncModal(providerId) {
+  const p = syncProviders.find(x => x.id === providerId);
+  if (!p) return;
+  document.getElementById('sync-modal-title').textContent = 'Connect ' + p.name;
+  const body = document.getElementById('sync-modal-body');
+  const helpLink = p.help_url ? `<a href="${p.help_url}" target="_blank" class="inline-flex items-center gap-1.5 bg-gray-900 border border-gray-700 hover:border-oc-500 rounded-lg px-3 py-2 text-sm text-oc-500 hover:text-oc-400 my-2">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3"/></svg>
+      Open ${escapeHtml(p.name)}
+    </a>` : '';
+  let flowHtml = '';
+  if (p.flow === 'oauth') {
+    flowHtml = `${renderInstructions(p.instructions)}
+      <button onclick="startOAuth('${p.id}')" class="w-full bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Continue with ${escapeHtml(p.name)}</button>`;
+  } else if (p.flow === 'url') {
+    flowHtml = `${renderInstructions(p.instructions)}
+      ${helpLink}
+      <input type="url" id="sync-url-field" class="w-full mt-3 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="https://...ics or webcal://...">
+      <button onclick="submitUrl('${p.id}')" id="sync-submit-btn" class="w-full mt-3 bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Test & Save</button>
+      <p id="sync-error" class="text-xs text-red-400 mt-2 hidden"></p>`;
+  } else if (p.flow === 'api_key') {
+    // Different providers need different fields
+    let fields = '';
+    if (p.id === 'bluesky') {
+      fields = `<input id="sync-field-handle" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="Handle (e.g. you.bsky.social)">
+        <input id="sync-field-app_password" type="password" class="w-full mt-2 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="App password">`;
+    } else if (p.id === 'stripe') {
+      fields = `<input id="sync-field-api_key" type="password" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="sk_live_... or rk_live_...">`;
+    } else if (p.id === 'alpaca') {
+      fields = `<input id="sync-field-api_key" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="API Key ID">
+        <input id="sync-field-api_secret" type="password" class="w-full mt-2 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="API Secret">
+        <select id="sync-field-base_url" class="w-full mt-2 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm">
+          <option value="https://api.alpaca.markets">Live (api.alpaca.markets)</option>
+          <option value="https://paper-api.alpaca.markets">Paper (paper-api.alpaca.markets)</option>
+        </select>`;
+    } else if (p.id === 'coinbase') {
+      fields = `<input id="sync-field-api_key" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="API Key">
+        <input id="sync-field-api_secret" type="password" class="w-full mt-2 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="API Secret">`;
+    } else if (p.id === 'simplefin') {
+      fields = `<input id="sync-field-setup_token" type="password" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="Setup token">`;
+    } else if (p.id === 'home_assistant') {
+      fields = `<div id="sync-ha-discover-status" class="text-xs text-gray-500 italic mb-1">Searching for Home Assistant on your network…</div>
+        <input id="sync-field-url" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="http://homeassistant.local:8123" value="">
+        <input id="sync-field-token" type="password" class="w-full mt-2 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="Long-lived access token">`;
+      setTimeout(() => discoverHA(), 100);
+    } else if (p.id === 'plex') {
+      fields = `<input id="sync-field-token" type="password" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="X-Plex-Token">`;
+    } else if (p.id === 'github' || p.id === 'oura' || p.id === 'anthropic_usage' || p.id === 'openrouter_usage') {
+      fields = `<input id="sync-field-api_key" type="password" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="Paste your token">`;
+    } else {
+      fields = `<input id="sync-field-api_key" type="password" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="API key">`;
+    }
+    flowHtml = `${renderInstructions(p.instructions)}
+      ${helpLink}
+      <div class="mt-3 space-y-2">${fields}</div>
+      <button onclick="submitApiKey('${p.id}')" id="sync-submit-btn" class="w-full mt-3 bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Test & Save</button>
+      <p id="sync-error" class="text-xs text-red-400 mt-2 hidden"></p>`;
+  } else if (p.flow === 'pairing') {
+    flowHtml = `${renderInstructions(p.instructions)}
+      <div id="sync-qr-container" class="text-center py-4"><p class="text-xs text-gray-500">Generating code…</p></div>`;
+    setTimeout(() => startPairing(p.id), 100);
+  } else if (p.flow === 'link_sdk') {
+    flowHtml = `${renderInstructions(p.instructions)}
+      <p class="text-xs text-gray-500 italic">Plaid Link requires the financial tab's setup flow. Coming soon to this panel.</p>`;
+  } else if (p.flow === 'caldav') {
+    flowHtml = `${renderInstructions(p.instructions)}
+      ${helpLink}
+      <div class="mt-3 space-y-2">
+        <input id="sync-field-username" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="iCloud email (e.g. you@icloud.com)">
+        <input id="sync-field-password" type="password" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="App-specific password (xxxx-xxxx-xxxx-xxxx)">
+      </div>
+      <button onclick="submitApiKey('${p.id}')" id="sync-submit-btn" class="w-full mt-3 bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Connect</button>
+      <p id="sync-error" class="text-xs text-red-400 mt-2 hidden"></p>`;
+  } else if (p.flow === 'crypto') {
+    flowHtml = `${renderInstructions(p.instructions)}
+      <div class="mt-3 space-y-2">
+        <select id="sync-field-chain" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm">
+          <option value="btc">Bitcoin (BTC)</option>
+          <option value="eth">Ethereum (ETH)</option>
+          <option value="sol">Solana (SOL)</option>
+        </select>
+        <input id="sync-field-address" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="Wallet address (public — no keys)">
+      </div>
+      <button onclick="submitApiKey('${p.id}')" id="sync-submit-btn" class="w-full mt-3 bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Test & Save</button>
+      <p id="sync-error" class="text-xs text-red-400 mt-2 hidden"></p>`;
+  } else if (p.flow === 'file_upload') {
+    flowHtml = `${renderInstructions(p.instructions)}
+      ${helpLink}
+      <div class="mt-3">
+        <label class="block w-full border-2 border-dashed border-gray-700 hover:border-oc-500 rounded-lg p-6 text-center cursor-pointer transition-colors">
+          <input type="file" id="sync-upload-file" accept=".zip,.xml" class="hidden" onchange="document.getElementById('sync-upload-name').textContent = this.files[0]?.name || 'No file'">
+          <svg class="mx-auto mb-2" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
+          <p class="text-xs text-gray-400">Click to choose export.zip or export.xml</p>
+          <p class="text-xs text-oc-500 mt-1" id="sync-upload-name">No file selected</p>
+        </label>
+      </div>
+      <button onclick="submitFileUpload('${p.id}')" id="sync-submit-btn" class="w-full mt-3 bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Upload</button>
+      <p id="sync-error" class="text-xs text-red-400 mt-2 hidden"></p>`;
+  } else if (p.flow === 'status') {
+    flowHtml = `${renderInstructions(p.instructions)}
+      <div id="sync-status-container" class="mt-3"><p class="text-xs text-gray-500">Checking status…</p></div>`;
+    setTimeout(() => loadStatusCard(p.id), 100);
+  } else if (p.flow === 'plex_pin') {
+    flowHtml = `${renderInstructions(p.instructions)}
+      <div id="sync-plex-pin-container" class="text-center py-4">
+        <p class="text-xs text-gray-500">Generating code…</p>
+      </div>`;
+    setTimeout(() => startPlexPin(), 100);
+  } else if (p.flow === 'airplay') {
+    flowHtml = `${renderInstructions(p.instructions)}
+      <div id="sync-airplay-container" class="mt-3">
+        <p class="text-xs text-gray-500 italic">Scanning network…</p>
+      </div>
+      <button onclick="confirmAirplay()" id="sync-submit-btn" class="w-full mt-3 bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg hidden">Save detected speakers</button>`;
+    setTimeout(() => discoverAirplay(), 100);
+  } else if (p.flow === 'music_assistant') {
+    flowHtml = `${renderInstructions(p.instructions)}
+      <div id="sync-ma-container" class="mt-3">
+        <p class="text-xs text-gray-500 italic">Checking Home Assistant…</p>
+      </div>`;
+    setTimeout(() => probeMusicAssistant(), 100);
+  } else if (p.flow === 'ios_shortcut') {
+    flowHtml = `${renderInstructions(p.instructions)}
+      ${helpLink}
+      <input type="url" id="sync-field-url" class="w-full mt-3 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="https://www.icloud.com/shortcuts/...">
+      <button onclick="submitShortcutUrl('${p.id}')" id="sync-submit-btn" class="w-full mt-3 bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Save</button>
+      <p id="sync-error" class="text-xs text-red-400 mt-2 hidden"></p>`;
+  } else if (p.flow === 'phone_pwa') {
+    flowHtml = `${renderInstructions(p.instructions)}
+      <div class="mt-4 bg-green-900/20 border border-green-700/40 rounded-lg p-3">
+        <div class="flex items-start gap-2">
+          <span class="text-xl flex-shrink-0">✓</span>
+          <div class="flex-1">
+            <p class="text-sm font-medium text-green-300">Music ducking is automatic</p>
+            <p class="text-xs text-gray-300 mt-1">When Syntaur's voice speaks, the gateway calls your music service's volume API directly — Spotify Connect, Home Assistant <code class="bg-gray-900 px-1">media_player.volume_set</code>. Music drops to 20%, restores when the voice ends. Works on phone, desktop, Sonos, anywhere your music plays. <strong class="text-white">No setup needed.</strong></p>
+          </div>
+        </div>
+      </div>
+      <div class="mt-3 flex flex-wrap gap-2">
+        <button onclick="testDuckShortcut()" class="text-xs bg-oc-700 hover:bg-oc-600 text-white px-3 py-1.5 rounded-lg">Test ducking now</button>
+        <button onclick="connectPhonePwa()" class="text-xs bg-gray-800 hover:bg-gray-700 text-gray-200 px-3 py-1.5 rounded-lg">Save phone connection</button>
+      </div>
+      <p id="shortcut-test-status" class="text-xs text-gray-500 mt-2"></p>
+      <details class="mt-4">
+        <summary class="text-xs text-gray-500 cursor-pointer hover:text-gray-300">Edge case: I use Apple Music app on iPhone with no HomePod (one-time setup)</summary>
+        <div class="mt-2 bg-gray-900 border border-gray-700 rounded-lg p-3">
+          <p class="text-xs text-gray-400 mb-2">Apple Music is the only major service with no remote-volume API, so for that specific case (Apple Music app on phone, no HA-connected speaker) you need a one-time iOS Shortcut install.</p>
+          <details>
+            <summary class="text-xs text-oc-500 cursor-pointer">Show 3-minute setup steps</summary>
+            <div id="shortcut-setup-steps" class="mt-2 text-xs text-gray-300">Loading…</div>
+          </details>
+        </div>
+      </details>`;
+    setTimeout(() => loadShortcutSetup(), 100);
+  } else if (p.flow === 'apple_music') {
+    flowHtml = `${renderInstructions(p.instructions)}
+      <div id="sync-am-container" class="mt-3">
+        <p class="text-xs text-gray-500 italic">Preparing bookmarklet…</p>
+      </div>`;
+    setTimeout(() => setupAppleMusic(), 100);
+  }
+  body.innerHTML = flowHtml;
+  document.getElementById('sync-modal').classList.remove('hidden');
+}
+
+function closeSyncModal() {
+  document.getElementById('sync-modal').classList.add('hidden');
+  if (syncPairPollTimer) { clearInterval(syncPairPollTimer); syncPairPollTimer = null; }
+  if (typeof plexPinPollTimer !== 'undefined' && plexPinPollTimer) { clearInterval(plexPinPollTimer); plexPinPollTimer = null; }
+}
+
+async function startOAuth(providerId) {
+  try {
+    const resp = await fetch('/api/oauth/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body: JSON.stringify({ token: token, provider: providerId, redirect_after: '/settings?tab=sync' })
+    });
+    if (!resp.ok) { alert('OAuth start failed'); return; }
+    const data = await resp.json();
+    if (data.auth_url) {
+      window.location.href = data.auth_url;
+    } else {
+      alert('No auth URL returned');
+    }
+  } catch(e) { alert('OAuth error: ' + e.message); }
+}
+
+async function submitUrl(providerId) {
+  const url = document.getElementById('sync-url-field').value.trim();
+  if (!url) { showSyncError('URL required'); return; }
+  const btn = document.getElementById('sync-submit-btn');
+  btn.textContent = 'Testing…'; btn.disabled = true;
+  try {
+    const resp = await fetch('/api/sync/connect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: token, provider: providerId, credential: { url: url } })
+    });
+    const data = await resp.json();
+    if (data.success) {
+      closeSyncModal();
+      await loadSyncProviders();
+    } else {
+      showSyncError(data.error || 'Failed');
+    }
+  } catch(e) { showSyncError(e.message); }
+  btn.textContent = 'Test & Save'; btn.disabled = false;
+}
+
+async function submitApiKey(providerId) {
+  const cred = {};
+  document.querySelectorAll('[id^=sync-field-]').forEach(el => {
+    const key = el.id.replace('sync-field-', '');
+    cred[key] = el.value.trim();
+  });
+  for (const k of Object.keys(cred)) {
+    if (!cred[k] && k !== 'base_url') { showSyncError(k + ' required'); return; }
+  }
+  const btn = document.getElementById('sync-submit-btn');
+  btn.textContent = 'Testing…'; btn.disabled = true;
+  try {
+    const resp = await fetch('/api/sync/connect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: token, provider: providerId, credential: cred })
+    });
+    const data = await resp.json();
+    if (data.success) {
+      closeSyncModal();
+      await loadSyncProviders();
+    } else {
+      showSyncError(data.error || 'Failed');
+    }
+  } catch(e) { showSyncError(e.message); }
+  btn.textContent = 'Test & Save'; btn.disabled = false;
+}
+
+async function startPairing(providerId) {
+  const container = document.getElementById('sync-qr-container');
+  try {
+    const resp = await fetch('/api/sync/telegram/pair', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: token })
+    });
+    if (!resp.ok) throw new Error('pair create failed');
+    const data = await resp.json();
+    container.innerHTML = `
+      <img src="${data.qr_url}" class="mx-auto rounded-lg bg-white p-2" width="200" height="200">
+      <p class="text-xs text-gray-500 mt-3">or <a href="${data.deep_link}" target="_blank" class="text-oc-500 underline">tap here on your phone</a></p>
+      <p class="text-[10px] text-gray-600 mt-1">Code: <code class="bg-gray-900 px-1">${data.code}</code> · expires 10min</p>
+      <p id="pair-status" class="text-xs text-gray-400 mt-3">Waiting for you to tap Start in Telegram…</p>
+    `;
+    syncPairPollTimer = setInterval(async () => {
+      try {
+        const s = await fetch(`/api/sync/telegram/status?token=${token}&code=${data.code}`).then(r => r.json());
+        if (s.paired || s.chat_count > 0) {
+          clearInterval(syncPairPollTimer);
+          syncPairPollTimer = null;
+          document.getElementById('pair-status').innerHTML = '<span class="text-green-400">Linked!</span>';
+          setTimeout(() => { closeSyncModal(); loadSyncProviders(); }, 1200);
+        }
+      } catch(e) {}
+    }, 2000);
+  } catch(e) {
+    container.innerHTML = '<p class="text-xs text-red-400">Failed to generate code: ' + e.message + '</p>';
+  }
+}
+
+async function discoverHA() {
+  const statusEl = document.getElementById('sync-ha-discover-status');
+  const urlField = document.getElementById('sync-field-url');
+  if (!statusEl || !urlField) return;
+  try {
+    const resp = await fetch(`/api/sync/homeassistant/discover?token=${token}`, { headers: { 'Authorization': 'Bearer ' + token } });
+    const data = await resp.json();
+    if (data.suggested_url) {
+      urlField.value = data.suggested_url;
+      statusEl.innerHTML = `<span class="text-green-400">✓ Found at <code>${escapeHtml(data.suggested_url)}</code></span> — just paste your token below`;
+    } else {
+      statusEl.innerHTML = `<span class="text-yellow-400">Couldn\'t auto-detect. Enter your HA URL manually.</span>`;
+      urlField.placeholder = 'http://homeassistant.local:8123';
+    }
+  } catch(e) {
+    statusEl.innerHTML = `<span class="text-gray-500">Auto-detect failed — enter URL manually.</span>`;
+  }
+}
+
+let plexPinPollTimer = null;
+async function startPlexPin() {
+  const container = document.getElementById('sync-plex-pin-container');
+  try {
+    const resp = await fetch('/api/sync/plex/pin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: token })
+    });
+    if (!resp.ok) throw new Error('PIN creation failed');
+    const data = await resp.json();
+    container.innerHTML = `
+      <div class="bg-gray-900 rounded-lg p-4 mb-3">
+        <p class="text-xs text-gray-500 mb-1">Your code:</p>
+        <p class="text-3xl font-mono tracking-widest text-oc-500">${data.code}</p>
+      </div>
+      <p class="text-sm text-gray-300">Go to <a href="${data.link_url}" target="_blank" class="text-oc-500 underline">plex.tv/link</a> on any device and enter this code.</p>
+      <p id="plex-pin-status" class="text-xs text-gray-400 mt-3">Waiting for you to sign in…</p>
+    `;
+    // Poll every 2 seconds
+    plexPinPollTimer = setInterval(async () => {
+      try {
+        const r = await fetch('/api/sync/plex/poll', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: token, pin_id: data.pin_id, client_id: data.client_id })
+        });
+        if (!r.ok) return;
+        const status = await r.json();
+        if (status.success) {
+          clearInterval(plexPinPollTimer);
+          plexPinPollTimer = null;
+          document.getElementById('plex-pin-status').innerHTML = `<span class="text-green-400">Signed in as ${escapeHtml(status.username)}</span>`;
+          setTimeout(() => { closeSyncModal(); loadSyncProviders(); }, 1200);
+        }
+      } catch(e) {}
+    }, 2000);
+  } catch(e) {
+    container.innerHTML = `<p class="text-xs text-red-400">Failed to generate PIN: ${e.message}</p>`;
+  }
+}
+
+async function submitFileUpload(providerId) {
+  const fileInput = document.getElementById('sync-upload-file');
+  const file = fileInput.files[0];
+  if (!file) { showSyncError('Choose a file first'); return; }
+  const btn = document.getElementById('sync-submit-btn');
+  btn.textContent = 'Uploading…'; btn.disabled = true;
+  try {
+    const resp = await fetch('/api/sync/health/upload?token=' + token, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: file,
+    });
+    if (resp.ok) {
+      closeSyncModal();
+      await loadSyncProviders();
+    } else {
+      showSyncError('Upload failed (' + resp.status + ')');
+    }
+  } catch(e) { showSyncError(e.message); }
+  btn.textContent = 'Upload'; btn.disabled = false;
+}
+
+async function loadStatusCard(providerId) {
+  const container = document.getElementById('sync-status-container');
+  let endpoint = '';
+  if (providerId === 'notebooklm_status') endpoint = '/api/sync/notebooklm/status';
+  else if (providerId === 'vault_health') endpoint = '/api/sync/vault/status';
+  else { container.innerHTML = '<p class="text-xs text-gray-500">No status endpoint for ' + providerId + '</p>'; return; }
+
+  try {
+    const resp = await fetch(endpoint + '?token=' + token, { headers: { 'Authorization': 'Bearer ' + token } });
+    const data = await resp.json();
+    let rows = '';
+    for (const [k, v] of Object.entries(data)) {
+      let display = v;
+      if (k === 'last_write_at' || k === 'last_login') {
+        display = v ? new Date(v * 1000).toLocaleString() : '—';
+      } else if (typeof v === 'boolean') {
+        display = v ? '✓' : '✗';
+      }
+      rows += '<div class="flex justify-between py-1 border-b border-gray-800 text-xs"><span class="text-gray-500">' + escapeHtml(k) + '</span><span class="text-gray-200">' + escapeHtml(String(display)) + '</span></div>';
+    }
+    const statusColor = (data.status === 'healthy' || data.status === 'ok') ? 'text-green-400' :
+                        (data.status === 'warning' || data.status === 'degraded') ? 'text-yellow-400' :
+                        'text-red-400';
+    container.innerHTML = '<div class="bg-gray-900 rounded-lg p-3"><div class="text-sm mb-2"><span class="' + statusColor + ' font-medium">● ' + escapeHtml(data.status || 'unknown') + '</span></div>' + rows + (data.hint ? '<p class="text-xs text-gray-500 italic mt-2">' + escapeHtml(data.hint) + '</p>' : '') + '</div>';
+  } catch(e) {
+    container.innerHTML = '<p class="text-xs text-red-400">Failed to load: ' + e.message + '</p>';
+  }
+}
+
+async function discoverAirplay() {
+  const container = document.getElementById('sync-airplay-container');
+  const saveBtn = document.getElementById('sync-submit-btn');
+  try {
+    const resp = await fetch(`/api/sync/airplay/discover?token=${token}`, { headers: { 'Authorization': 'Bearer ' + token } });
+    const data = await resp.json();
+    const devices = data.devices || [];
+    if (devices.length === 0) {
+      container.innerHTML = '<p class="text-xs text-gray-500 italic">No AirPlay devices found on this network. Make sure they\'re powered on and on the same Wi-Fi.</p>';
+      return;
+    }
+    container.innerHTML = '<p class="text-xs text-gray-400 mb-2">Found ' + devices.length + ' device(s):</p>' +
+      devices.map(d => `<div class="bg-gray-900 rounded-lg p-2 mb-1 text-xs">
+        <div class="text-gray-200">${escapeHtml(d.name)}</div>
+        <div class="text-gray-500">${escapeHtml(d.hostname)} · port ${d.port}${d.model ? ' · ' + escapeHtml(d.model) : ''}</div>
+      </div>`).join('');
+    saveBtn.classList.remove('hidden');
+    window._airplay_devices = devices;
+  } catch(e) {
+    container.innerHTML = '<p class="text-xs text-red-400">Discovery failed: ' + e.message + '</p>';
+  }
+}
+
+async function confirmAirplay() {
+  const devices = window._airplay_devices || [];
+  try {
+    await fetch('/api/sync/connect', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        token: token, provider: 'airplay',
+        credential: { devices: devices },
+        display_name: devices.length + ' speaker(s)',
+      }),
+    });
+    closeSyncModal();
+    await loadSyncProviders();
+  } catch(e) { alert('Save failed: ' + e.message); }
+}
+
+async function probeMusicAssistant() {
+  const container = document.getElementById('sync-ma-container');
+  try {
+    const resp = await fetch(`/api/sync/music_assistant/probe?token=${token}`, { headers: { 'Authorization': 'Bearer ' + token } });
+    const data = await resp.json();
+    const color = data.connected ? 'text-green-400' : 'text-yellow-400';
+    let btn = '';
+    if (data.connected) {
+      btn = `<button onclick="saveMusicAssistant()" class="w-full mt-3 bg-oc-600 hover:bg-oc-700 text-white py-2 rounded-lg">Enable in Syntaur</button>`;
+    }
+    container.innerHTML = `<div class="bg-gray-900 rounded-lg p-3 text-xs">
+      <p class="${color} font-medium mb-2">● ${escapeHtml(data.status)}</p>
+      <p class="text-gray-400">${escapeHtml(data.hint || '')}</p>
+      ${btn}
+    </div>`;
+  } catch(e) {
+    container.innerHTML = '<p class="text-xs text-red-400">Probe failed: ' + e.message + '</p>';
+  }
+}
+
+async function saveMusicAssistant() {
+  try {
+    await fetch('/api/sync/connect', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        token: token, provider: 'music_assistant',
+        credential: { routed_via: 'home_assistant' },
+        display_name: 'via Home Assistant',
+      }),
+    });
+    closeSyncModal();
+    await loadSyncProviders();
+  } catch(e) { alert('Save failed: ' + e.message); }
+}
+
+async function submitShortcutUrl(providerId) {
+  const url = document.getElementById('sync-field-url').value.trim();
+  if (!url) { showSyncError('Shortcut URL required'); return; }
+  const btn = document.getElementById('sync-submit-btn');
+  btn.textContent = 'Saving…'; btn.disabled = true;
+  try {
+    const resp = await fetch('/api/sync/connect', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: token, provider: providerId, credential: { url: url } }),
+    });
+    const data = await resp.json();
+    if (data.success) { closeSyncModal(); await loadSyncProviders(); }
+    else { showSyncError(data.error || 'Failed'); }
+  } catch(e) { showSyncError(e.message); }
+  btn.textContent = 'Save'; btn.disabled = false;
+}
+
+async function loadShortcutSetup() {
+  const box = document.getElementById('shortcut-setup-steps');
+  if (!box) return;
+  try {
+    const r = await fetch('/api/music/shortcut_setup?token=' + token, { headers: { 'Authorization': 'Bearer ' + token } });
+    const d = await r.json();
+    let html = '<ol class="list-decimal list-inside space-y-1.5 leading-relaxed">';
+    for (const step of (d.manual_steps || [])) {
+      html += '<li>' + escapeHtml(step) + '</li>';
+    }
+    html += '</ol>';
+    if (d.duck_state_url) {
+      html += '<p class="mt-2 text-[11px] text-gray-500">Your duck-state URL: <code class="bg-gray-900 px-1">' + escapeHtml(d.duck_state_url) + '</code></p>';
+    }
+    if (d.note) html += '<p class="text-[11px] text-gray-500 italic mt-2">' + escapeHtml(d.note) + '</p>';
+    box.innerHTML = html;
+  } catch(e) {
+    box.innerHTML = '<p class="text-xs text-red-400">Could not load setup guide: ' + e.message + '</p>';
+  }
+}
+
+async function testDuckShortcut() {
+  const status = document.getElementById('shortcut-test-status');
+  status.textContent = 'Triggering duck for 5 seconds…';
+  try {
+    await fetch('/api/music/duck', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, state: 'on', duration_secs: 5 }),
+    });
+    status.textContent = 'Sent. If your iPhone PWA tab is open and the Shortcut named "Syntaur Music Volume" is installed, music volume should drop now and restore in 5s.';
+    setTimeout(async () => {
+      await fetch('/api/music/duck', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, state: 'off' }),
+      });
+      status.textContent += ' (restored)';
+    }, 5500);
+  } catch(e) {
+    status.textContent = 'Test failed: ' + e.message;
+  }
+}
+
+async function connectPhonePwa() {
+  try {
+    const resp = await fetch('/api/sync/connect', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, provider: 'phone_music_pwa', credential: {}, display_name: 'My Phone' }),
+    });
+    const d = await resp.json();
+    if (d.success) {
+      closeSyncModal();
+      showToast('Phone connected for music routing');
+      await loadSyncProviders();
+    } else {
+      showToast('Save failed: ' + (d.error || 'unknown'));
+    }
+  } catch(e) { showToast('Error: ' + e.message); }
+}
+
+function setupAppleMusic() {
+  const container = document.getElementById('sync-am-container');
+  const origin = window.location.origin;
+  const bookmarklet = `javascript:(function(){var m=MusicKit.getInstance();if(!m||!m.musicUserToken){alert('Sign into music.apple.com first, then click this again.');return;}var d={dev:m.developerToken,mut:m.musicUserToken};window.location.href='${origin}/apple_music_capture#'+encodeURIComponent(JSON.stringify(d));})()`;
+  // sessionStorage needs to carry the Syntaur token across the capture redirect
+  try { localStorage.setItem('syntaur_token', token); } catch(e) {}
+  container.innerHTML = `
+    <div class="space-y-3 text-sm text-gray-300">
+      <div class="flex items-start gap-2">
+        <span class="bg-oc-600 text-white rounded-full w-6 h-6 flex items-center justify-center flex-shrink-0 text-xs font-bold">1</span>
+        <div class="flex-1">
+          <p>Open Apple Music in a new tab.</p>
+          <a href="https://music.apple.com" target="_blank" class="inline-flex items-center gap-1.5 bg-gray-900 border border-gray-700 hover:border-oc-500 rounded-lg px-3 py-2 text-oc-500 text-xs mt-1">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3"/></svg>
+            music.apple.com
+          </a>
+        </div>
+      </div>
+      <div class="flex items-start gap-2">
+        <span class="bg-oc-600 text-white rounded-full w-6 h-6 flex items-center justify-center flex-shrink-0 text-xs font-bold">2</span>
+        <div class="flex-1">
+          <p>Sign in with your Apple ID (if you aren't already).</p>
+        </div>
+      </div>
+      <div class="flex items-start gap-2">
+        <span class="bg-oc-600 text-white rounded-full w-6 h-6 flex items-center justify-center flex-shrink-0 text-xs font-bold">3</span>
+        <div class="flex-1">
+          <p>Drag this button to your bookmarks bar:</p>
+          <a draggable="true" href="${bookmarklet}" onclick="event.preventDefault(); alert('Drag this button to your bookmarks bar instead of clicking.');" class="inline-block mt-1 bg-oc-600 hover:bg-oc-700 text-white px-3 py-1.5 rounded-lg text-xs cursor-grab">🎵 Connect Syntaur</a>
+          <p class="text-xs text-gray-500 mt-1">Your browser should let you drag this link to the bookmarks bar.</p>
+        </div>
+      </div>
+      <div class="flex items-start gap-2">
+        <span class="bg-oc-600 text-white rounded-full w-6 h-6 flex items-center justify-center flex-shrink-0 text-xs font-bold">4</span>
+        <div class="flex-1">
+          <p>On the music.apple.com tab, click the bookmark. You'll be redirected back here automatically.</p>
+        </div>
+      </div>
+    </div>`;
+}
+
+async function disconnectSync(providerId, name) {
+  if (!confirm(`Disconnect ${name}?`)) return;
+  try {
+    await fetch(`/api/sync/connections/${providerId}?token=${token}`, {
+      method: 'DELETE',
+      headers: { 'Authorization': 'Bearer ' + token }
+    });
+    await loadSyncProviders();
+  } catch(e) { alert('Disconnect failed: ' + e.message); }
+}
+
+function showSyncError(msg) {
+  const el = document.getElementById('sync-error');
+  if (!el) return;
+  // Map common API errors to friendlier hints
+  let friendly = msg;
+  if (/401|unauthorized/i.test(msg)) friendly = 'That token/key was rejected. Double-check you copied the whole thing.';
+  else if (/403|forbidden/i.test(msg)) friendly = 'The key works but doesn\'t have permission. Check the scopes.';
+  else if (/404/i.test(msg)) friendly = 'Endpoint not found. URL might be wrong.';
+  else if (/timeout|timed out/i.test(msg)) friendly = 'Connection timed out. Is the service reachable from this network?';
+  else if (/fetch failed|error sending request/i.test(msg)) friendly = 'Could not reach the service. Check the URL and that it\'s running.';
+  el.textContent = friendly;
+  el.classList.remove('hidden');
+}
+
+function escapeHtml(s) {
+  if (s === null || s === undefined) return '';
+  return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+
+// Load on tab-switch to sync
+const _origShowTab = showTab;
+showTab = function(name) {
+  _origShowTab(name);
+  if (name === 'sync' && !syncProviders.length) loadSyncProviders();
+};
+
+// Save LLM provider via API
+async function saveProvider(name, baseUrl, apiKey, apiType, modelId) {
+  const result = document.getElementById('setup-result');
+  result.className = 'text-sm mt-2 block text-gray-400';
+  result.textContent = 'Saving...';
+  try {
+    const resp = await fetch('/api/settings/provider', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ token, name, base_url: baseUrl, api_key: apiKey, api: apiType, model_id: modelId })
+    });
+    const data = await resp.json();
+    if (data.success) {
+      result.className = 'text-sm mt-2 block text-green-400';
+      result.textContent = data.message || 'Provider saved! Restart the gateway to apply changes.';
+      loadSettings();
+    } else {
+      result.className = 'text-sm mt-2 block text-red-400';
+      result.textContent = data.error || 'Failed to save provider.';
+    }
+  } catch(e) {
+    result.className = 'text-sm mt-2 block text-red-400';
+    result.textContent = 'Error: ' + e.message;
+  }
+}
+
+// GPU scanning and assignment
+async function scanGpus() {
+  const btn = document.getElementById('gpu-scan-btn');
+  const list = document.getElementById('gpu-list');
+  btn.textContent = 'Scanning...'; btn.disabled = true;
+  list.innerHTML = '<p class="text-xs text-gray-400">Scanning your network for GPUs... This takes ~30 seconds.</p>';
+  try {
+    const resp = await fetch('/api/setup/scan', { headers: { 'Authorization': 'Bearer ' + token } });
+    const data = await resp.json();
+    const gpus = [];
+    // Local GPU
+    if (data.gpu_name) gpus.push({ host: 'localhost', name: data.gpu_name, vram: data.gpu_vram_gb + ' GB', local: true });
+    // Network GPUs
+    if (data.network_gpus) data.network_gpus.forEach(g => gpus.push({ host: g.host, name: g.name, vram: g.vram_gb + ' GB', local: false }));
+    // Network LLMs (already running)
+    const llms = data.network_llms || [];
+
+    if (gpus.length === 0 && llms.length === 0) {
+      list.innerHTML = '<p class="text-xs text-gray-500">No GPUs or LLM services found on your network. You can still use cloud providers above.</p>';
+      btn.textContent = 'Scan Network'; btn.disabled = false;
+      return;
+    }
+
+    list.innerHTML = gpus.map(g => {
+      const vramNum = parseFloat(g.vram);
+      const recModel = vramNum >= 20 ? '70B+ (Qwen 72B, Llama 70B)' : vramNum >= 10 ? '27B-34B (Qwen 27B, Mistral)' : vramNum >= 6 ? '7B-8B (Qwen 7B, Llama 8B)' : '3B (Qwen 3B, Phi)';
+      return '<div class="p-3 rounded-lg bg-gray-900 border border-gray-700">' +
+        '<div class="flex items-center justify-between">' +
+        '<div><p class="text-sm text-white font-medium">' + g.name + '</p>' +
+        '<p class="text-[10px] text-gray-500">' + (g.local ? 'This machine' : g.host) + ' &middot; ' + g.vram + ' VRAM</p></div>' +
+        '<span class="badge badge-green text-[10px]">Available</span></div>' +
+        '<p class="text-[10px] text-gray-600 mt-1">Recommended model size: ' + recModel + '</p></div>';
+    }).join('') + llms.map(l => {
+      return '<div class="p-3 rounded-lg bg-gray-900 border border-oc-700">' +
+        '<div class="flex items-center justify-between">' +
+        '<div><p class="text-sm text-white font-medium">' + l.name + '</p>' +
+        '<p class="text-[10px] text-gray-500">' + l.host + ' &middot; ' + (l.models||[]).join(', ') + '</p></div>' +
+        '<span class="badge badge-blue text-[10px]">Running</span></div></div>';
+    }).join('');
+
+    // Populate assignment dropdowns
+    const assigns = document.getElementById('gpu-assignments');
+    assigns.classList.remove('hidden');
+    const options = gpus.map(g => '<option value="' + (g.local ? 'localhost' : g.host) + '">' + g.name + ' (' + (g.local ? 'local' : g.host) + ', ' + g.vram + ')</option>').join('');
+    const llmOpts = llms.map(l => '<option value="' + l.url + '">' + l.name + ' @ ' + l.host + '</option>').join('');
+    ['assign-chat','assign-vision','assign-voice','assign-fast'].forEach(id => {
+      const sel = document.getElementById(id);
+      const defaultOpt = sel.options[0].outerHTML;
+      sel.innerHTML = defaultOpt + options + llmOpts;
+    });
+  } catch(e) {
+    list.innerHTML = '<p class="text-xs text-red-400">Scan failed: ' + e.message + '</p>';
+  }
+  btn.textContent = 'Scan Network'; btn.disabled = false;
+}
+
+async function saveAssignment(role, value) {
+  const result = document.getElementById('assign-result');
+  try {
+    await fetch('/api/settings/provider', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, name: '__gpu_' + role + '__', base_url: value, api_key: '', api: 'openai-completions', model_id: role })
+    });
+    result.textContent = 'Saved ' + role + ' assignment'; result.className = 'text-xs mt-2 block text-green-400';
+    setTimeout(() => { result.textContent = ''; }, 2000);
+  } catch(e) {}
+}
+
+// Save vision model config
+async function saveVisionModel(visionUrl) {
+  const result = document.getElementById('setup-result');
+  if (!visionUrl) { result.textContent = 'Enter a vision model URL'; result.className = 'text-sm mt-2 block text-red-400'; return; }
+  result.className = 'text-sm mt-2 block text-gray-400';
+  result.textContent = 'Saving vision model...';
+  try {
+    // Save as a provider named "vision" and also set models.vision
+    await saveProvider('vision', visionUrl, '', 'openai-completions', 'qwen2.5-vl');
+    // Also update the models.vision field
+    const resp = await fetch('/api/settings/provider', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ token, name: '__vision_config__', base_url: visionUrl, api_key: '', api: 'openai-completions', model_id: 'qwen2.5-vl' })
+    });
+    result.className = 'text-sm mt-2 block text-green-400';
+    result.textContent = 'Vision model saved! Receipts will be scanned locally.';
+  } catch(e) {
+    result.className = 'text-sm mt-2 block text-red-400';
+    result.textContent = 'Error: ' + e.message;
+  }
+}
+
+// Auto-open Sync tab if redirected there (e.g., after OAuth callback)
+if (window.location.search.includes('tab=sync')) {
+  setTimeout(() => {
+    const btn = document.querySelector(`[onclick="showTab('sync')"]`);
+    if (btn) btn.click();
+  }, 100);
+}
+
+</script>
