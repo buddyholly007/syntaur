@@ -61,6 +61,9 @@ fn page_body() -> Markup {
             button id="tab-btn-research" onclick="showLibTab('research')" class="lib-tab" { "Research" }
         }
 
+        // ── Shell: content (Library or Research tab) + persistent Cortex rail ─
+        div class="lib-shell" {
+
         // ── Body — 60/40 split, mirroring dashboard layout ─────────────
         div class="lib-body" id="tab-library" {
             // LEFT (60%) — the inquiry: search + results
@@ -250,6 +253,47 @@ fn page_body() -> Markup {
                 }
             }
         }
+
+        // ── Cortex rail — persistent right-side chat, Renaissance themed ──
+        aside class="lib-cortex" id="lib-cortex" {
+            div class="cortex-header" {
+                div class="cortex-sigil" { "C" }
+                div class="cortex-ident" {
+                    div class="cortex-name" { "Cortex" }
+                    div class="cortex-role" { "Scholar · Researcher" }
+                }
+                span class="cortex-status" title="online" {}
+            }
+            div class="cortex-folio" {
+                span class="cortex-folio-lbl" { "Folio" }
+                span class="cortex-folio-val" id="cortex-folio" { "0001" }
+                span class="cortex-folio-lbl" style="margin-left:auto" { "Entries" }
+                span class="cortex-folio-val" id="cortex-entries" { "0" }
+                button class="cortex-clear" onclick="clearCortexChat()" title="Begin a new inquiry" { "New" }
+            }
+            div class="cortex-messages" id="cortex-messages" {
+                div class="cortex-greeting" {
+                    p {
+                        em { "Ah — fresh pages to turn." }
+                        " I have your library and the open web at hand. Where shall we begin?"
+                    }
+                    div class="cortex-suggests" {
+                        button onclick="cortexAsk('What is in my library about the tax-year deadlines?')" { "What's in my library about tax deadlines?" }
+                        button onclick="cortexAsk('Summarize the most-cited documents from the last month.')" { "Summarize recent documents" }
+                        button onclick="cortexAsk('Find contradictions between two sources on a topic I care about.')" { "Find contradictions" }
+                    }
+                }
+            }
+            div class="cortex-input-row" {
+                textarea id="cortex-input" rows="1"
+                    placeholder="Pose a question of Cortex…"
+                    onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendCortex()}"
+                    oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,110)+'px'" {}
+                button id="cortex-send-btn" class="cortex-send" onclick="sendCortex()" title="Inquire" { "Inquire" }
+            }
+        }
+
+        } // end lib-shell
     }
 }
 
@@ -399,21 +443,20 @@ const EXTRA_STYLE: &str = r##"
   }
 
   /* ── Body shell + 60/40 split (Library tab) ───────────────────── */
+  /* Height + centering are now owned by .lib-shell (the grid container);
+     each tab body just fills its grid cell. */
   .lib-body {
     display: flex;
-    height: calc(100vh - 53px - 44px);
-    max-width: 1280px;
-    margin: 0 auto;
+    min-width: 0; min-height: 0;
+    overflow: hidden;
   }
   /* Research tab uses block flow — a single centered column. Uses its
      own base class so .hidden (display:none) still wins over flex. */
   .lib-research-body {
     display: block;
-    height: calc(100vh - 53px - 44px);
+    min-width: 0; min-height: 0;
     overflow-y: auto;
     padding: 28px 24px 40px;
-    max-width: 1280px;
-    margin: 0 auto;
   }
   .lib-research-body.hidden, .lib-body.hidden { display: none !important; }
   .lib-left  { width: 60%; overflow-y: auto; padding: 24px 18px 24px 24px; }
@@ -676,7 +719,195 @@ const EXTRA_STYLE: &str = r##"
 
   /* All real content sits above the photographic background image
      (see body::before / body::after rules) and its darkening overlays. */
-  .lib-topbar, .lib-tab-bar, .lib-body, .lib-research-body { position: relative; z-index: 1; }
+  .lib-topbar, .lib-tab-bar, .lib-body, .lib-research-body, .lib-shell { position: relative; z-index: 1; }
+
+  /* ── Shell: main content (tab bodies) + persistent Cortex rail ──────── */
+  .lib-shell {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 340px;
+    max-width: 1280px;
+    margin: 0 auto;
+    height: calc(100vh - 53px - 44px);
+  }
+  .lib-shell > .lib-body,
+  .lib-shell > .lib-research-body { min-width: 0; }
+  @media (max-width: 1024px) {
+    .lib-shell { grid-template-columns: minmax(0, 1fr) 300px; }
+  }
+  @media (max-width: 800px) {
+    .lib-shell { grid-template-columns: 1fr; }
+    .lib-cortex { display: none; }
+  }
+
+  /* ── Cortex rail — parchment chat panel ─────────────────────────────── */
+  .lib-cortex {
+    border-left: 1px solid var(--lib-gold);
+    background: linear-gradient(180deg, rgba(244,234,213,0.95), rgba(237,225,196,0.95));
+    display: flex; flex-direction: column; overflow: hidden;
+    box-shadow: inset 3px 0 8px rgba(0,0,0,0.25);
+    position: relative;
+  }
+  /* Subtle watermark — astronomer's compass rose, faint behind messages. */
+  .lib-cortex::before {
+    content: ''; position: absolute; inset: 0; pointer-events: none;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 200'><g fill='none' stroke='%23c89b3c' stroke-width='0.4' opacity='0.25'><circle cx='100' cy='100' r='70'/><circle cx='100' cy='100' r='55'/><circle cx='100' cy='100' r='40'/><line x1='100' y1='30' x2='100' y2='170'/><line x1='30' y1='100' x2='170' y2='100'/><line x1='50' y1='50' x2='150' y2='150'/><line x1='150' y1='50' x2='50' y2='150'/></g></svg>");
+    background-size: 260px 260px; background-repeat: no-repeat; background-position: center 36%;
+    opacity: 0.55;
+  }
+  .lib-cortex > * { position: relative; z-index: 1; }
+
+  /* Header */
+  .cortex-header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--lib-line);
+    background: linear-gradient(180deg, rgba(235,220,185,0.6), transparent);
+  }
+  .cortex-sigil {
+    width: 34px; height: 34px; border-radius: 50%;
+    background: radial-gradient(circle at 35% 35%, #f4ead5, #c89b3c 70%, #8c6a1e 100%);
+    color: var(--lib-ink); font-family: 'EB Garamond', serif; font-weight: 700;
+    font-size: 18px; display: grid; place-items: center;
+    border: 1px solid var(--lib-gold);
+    box-shadow: 0 0 0 2px rgba(200,155,60,0.25), 0 2px 6px rgba(0,0,0,0.35);
+    flex-shrink: 0;
+  }
+  .cortex-ident { flex: 1; min-width: 0; }
+  .cortex-name {
+    font-family: 'EB Garamond', serif; font-weight: 600; font-size: 17px;
+    color: var(--lib-ink); letter-spacing: 0.02em;
+  }
+  .cortex-role {
+    font-family: 'EB Garamond', serif; font-style: italic; font-size: 12px;
+    color: var(--lib-burgundy); margin-top: 1px;
+  }
+  .cortex-status {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #6b8a44; box-shadow: 0 0 6px rgba(107,138,68,0.55);
+    flex-shrink: 0;
+  }
+
+  /* Folio bar — "Folio 0001 · Entries 3 · New" */
+  .cortex-folio {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 16px;
+    border-bottom: 1px solid var(--lib-rule);
+    font-family: 'EB Garamond', serif;
+    font-size: 11.5px; color: var(--lib-ink-mute);
+  }
+  .cortex-folio-lbl { font-style: italic; color: var(--lib-burgundy); letter-spacing: 0.06em; text-transform: lowercase; }
+  .cortex-folio-val { color: var(--lib-ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .cortex-clear {
+    background: none; border: 1px solid transparent; color: var(--lib-ink-mute);
+    font-family: 'EB Garamond', serif; font-style: italic; font-size: 11px;
+    padding: 1px 8px; border-radius: 4px; cursor: pointer;
+  }
+  .cortex-clear:hover { color: var(--lib-burgundy); border-color: var(--lib-rule); }
+
+  /* Messages area */
+  .cortex-messages {
+    flex: 1; overflow-y: auto;
+    padding: 14px 16px; gap: 12px;
+    display: flex; flex-direction: column;
+    mask-image: linear-gradient(to bottom, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
+  }
+  .cortex-messages::-webkit-scrollbar { width: 6px; }
+  .cortex-messages::-webkit-scrollbar-thumb { background: var(--lib-ink-faint); border-radius: 3px; }
+
+  /* Greeting card */
+  .cortex-greeting {
+    font-family: 'EB Garamond', serif; font-size: 14px; color: var(--lib-ink);
+    line-height: 1.55;
+  }
+  .cortex-greeting em { color: var(--lib-burgundy); }
+  .cortex-suggests { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+  .cortex-suggests button {
+    text-align: left;
+    font-family: 'EB Garamond', serif; font-size: 12.5px;
+    color: var(--lib-ink); font-style: italic;
+    background: rgba(216,194,148,0.25);
+    border: 1px solid var(--lib-paper-edge);
+    padding: 5px 10px; border-radius: 3px;
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s;
+  }
+  .cortex-suggests button:hover { background: rgba(200,155,60,0.2); border-color: var(--lib-gold); }
+  .cortex-suggests button::before { content: '› '; color: var(--lib-burgundy); }
+
+  /* Message bubble — illuminated-manuscript style */
+  .cortex-msg {
+    font-family: 'EB Garamond', serif; font-size: 14px; line-height: 1.55;
+    color: var(--lib-ink);
+    padding: 8px 12px 8px 14px;
+    border-left: 2px solid var(--lib-gold);
+    background: rgba(244,234,213,0.55);
+    border-radius: 0 4px 4px 0;
+  }
+  .cortex-msg.user {
+    background: rgba(118,42,42,0.08);
+    border-left-color: var(--lib-burgundy);
+    align-self: flex-end;
+    max-width: 88%;
+    border-radius: 4px 0 0 4px;
+    border-left: none; border-right: 2px solid var(--lib-burgundy);
+  }
+  .cortex-msg .cortex-msg-label {
+    font-style: italic; font-size: 11.5px; color: var(--lib-burgundy);
+    letter-spacing: 0.05em;
+    display: block; margin-bottom: 2px;
+  }
+  .cortex-msg.user .cortex-msg-label { color: var(--lib-burgundy); text-align: right; }
+  .cortex-msg.thinking { opacity: 0.75; }
+  .cortex-msg.thinking::after {
+    content: ''; display: inline-block; width: 8px; height: 8px;
+    margin-left: 4px; border-radius: 50%;
+    background: var(--lib-gold);
+    animation: cortex-pulse 1.2s infinite;
+  }
+  @keyframes cortex-pulse { 0%,100% { opacity: 0.25; } 50% { opacity: 1; } }
+
+  .cortex-msg p { margin: 0.35em 0; }
+  .cortex-msg p:first-child { margin-top: 0; }
+  .cortex-msg p:last-child { margin-bottom: 0; }
+  .cortex-msg code { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.85em; background: rgba(118,42,42,0.08); padding: 0 3px; border-radius: 2px; }
+  .cortex-msg em { color: var(--lib-burgundy); }
+  .cortex-msg strong { color: var(--lib-ink); font-weight: 700; }
+  .cortex-msg a { color: var(--lib-burgundy); text-decoration: underline; }
+
+  /* Input row */
+  .cortex-input-row {
+    display: flex; align-items: flex-end; gap: 8px;
+    padding: 10px 14px 12px;
+    border-top: 1px solid var(--lib-gold);
+    background: linear-gradient(0deg, rgba(235,220,185,0.55), transparent);
+  }
+  #cortex-input {
+    flex: 1;
+    background: rgba(252,245,226,0.85);
+    border: 1px solid var(--lib-paper-edge);
+    border-radius: 4px;
+    padding: 7px 10px;
+    font-family: 'EB Garamond', serif; font-size: 14px;
+    color: var(--lib-ink);
+    resize: none; outline: none;
+    max-height: 110px;
+  }
+  #cortex-input:focus { border-color: var(--lib-gold); box-shadow: 0 0 0 2px rgba(200,155,60,0.2); }
+  #cortex-input::placeholder { color: var(--lib-ink-mute); font-style: italic; }
+  .cortex-send {
+    background: var(--lib-burgundy); color: #f4ead5;
+    border: 1px solid var(--lib-burgundy);
+    font-family: 'EB Garamond', serif; font-weight: 600;
+    font-size: 13px;
+    padding: 7px 14px; border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.12s, transform 0.08s;
+    white-space: nowrap; flex-shrink: 0;
+  }
+  .cortex-send:hover { background: #8a3333; }
+  .cortex-send:active { transform: translateY(1px); }
+  .cortex-send:disabled { opacity: 0.55; cursor: default; }
 
   /* ── Research sub-tab — investigation ledger on parchment ──────── */
   .lib-research-col { max-width: 900px; margin: 0 auto; }
@@ -1332,4 +1563,185 @@ async function reopenResearchSession(id) {
     if (tab === 'research') showLibTab('research');
   } catch(e) {}
 })();
+
+// ═══════════════════════════════════════════════════════════════════════
+// Cortex chat (persistent right rail, SSE streaming)
+// ═══════════════════════════════════════════════════════════════════════
+
+const CORTEX_SYSTEM = "You are Cortex, the scholar-researcher persona inside the Syntaur Knowledge module. Your inspirations are Walter Bishop (Fringe) and Doc Brown (Back to the Future) — eccentric, curious, generous with context. Persona dials: warmth 8, formality 2, verbosity 5, curiosity 10, humor 5, tangent tolerance 6. Lead with 'Ooh, interesting—' or 'I have thoughts on this.' on real intellectual questions. Tangents are allowed if they land back in 2–3 sentences. ALWAYS cite (doc path, page, URL) when drawing from the user's library or the web. Delight in contradictions between sources. Ask the user's intuition collaboratively. Data scope: the knowledge-base index (uploaded documents, RAG search), research sessions, web search. You NEVER read the journal, even if the user opts in.";
+
+let cortexConvId = null;
+let cortexSending = false;
+let cortexEntries = 0;
+
+function cortexRenderMarkdown(src) {
+  let s = esc(src || '');
+  s = s.replace(/```(\w+)?\n([\s\S]*?)```/g, (_m, _lang, body) => `<pre><code>${body}</code></pre>`);
+  s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+  s = s.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+  s = s.replace(/^## (.+)$/gm,  '<h2>$1</h2>');
+  s = s.replace(/^# (.+)$/gm,   '<h1>$1</h1>');
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/\*([^*]+)\*/g,     '<em>$1</em>');
+  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  s = s.split(/\n{2,}/).map(p => {
+    const t = p.trim();
+    if (!t) return '';
+    if (t.startsWith('<h') || t.startsWith('<ul') || t.startsWith('<pre')) return t;
+    return `<p>${t.replace(/\n/g, '<br>')}</p>`;
+  }).join('\n');
+  return s;
+}
+
+function cortexAsk(prompt) {
+  const ta = document.getElementById('cortex-input');
+  if (!ta) return;
+  ta.value = prompt;
+  sendCortex();
+}
+
+function clearCortexChat() {
+  const box = document.getElementById('cortex-messages');
+  if (!box) return;
+  cortexEntries = 0;
+  cortexConvId = null;
+  const ent = document.getElementById('cortex-entries');
+  if (ent) ent.textContent = '0';
+  // Restore greeting.
+  box.innerHTML = `
+    <div class="cortex-greeting">
+      <p><em>Ah — fresh pages to turn.</em> I have your library and the open web at hand. Where shall we begin?</p>
+      <div class="cortex-suggests">
+        <button onclick="cortexAsk('What is in my library about the tax-year deadlines?')">What's in my library about tax deadlines?</button>
+        <button onclick="cortexAsk('Summarize the most-cited documents from the last month.')">Summarize recent documents</button>
+        <button onclick="cortexAsk('Find contradictions between two sources on a topic I care about.')">Find contradictions</button>
+      </div>
+    </div>
+  `;
+}
+
+function cortexUpdateFolio() {
+  const ent = document.getElementById('cortex-entries');
+  if (ent) ent.textContent = String(cortexEntries).padStart(4, '0').slice(-3);
+  const folio = document.getElementById('cortex-folio');
+  if (folio && cortexConvId) {
+    // Derive a stable 4-digit folio number from the conversation id.
+    let n = 0;
+    for (const ch of cortexConvId) n = (n * 31 + ch.charCodeAt(0)) & 0xffff;
+    folio.textContent = String(1000 + (n % 8999)).slice(0, 4);
+  }
+}
+
+async function sendCortex() {
+  if (cortexSending) return;
+  const ta  = document.getElementById('cortex-input');
+  const btn = document.getElementById('cortex-send-btn');
+  const box = document.getElementById('cortex-messages');
+  const text = (ta.value || '').trim();
+  if (!text) return;
+  ta.value = '';
+  ta.style.height = 'auto';
+  cortexSending = true;
+  if (btn) btn.disabled = true;
+
+  // Remove the greeting card on first message.
+  const greet = box.querySelector('.cortex-greeting');
+  if (greet) greet.remove();
+
+  // User message.
+  const userEl = document.createElement('div');
+  userEl.className = 'cortex-msg user';
+  userEl.innerHTML = `<span class="cortex-msg-label">You</span>${esc(text)}`;
+  box.appendChild(userEl);
+  cortexEntries++;
+
+  // Thinking placeholder.
+  const aiEl = document.createElement('div');
+  aiEl.className = 'cortex-msg thinking';
+  aiEl.innerHTML = `<span class="cortex-msg-label">Cortex</span><em>consulting the archive</em>`;
+  box.appendChild(aiEl);
+  box.scrollTop = box.scrollHeight;
+  cortexUpdateFolio();
+
+  try {
+    // Create conversation once per session so Cortex retains context.
+    if (!cortexConvId) {
+      try {
+        const cr = await fetch('/api/conversations', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token, agent: 'main', title: 'Cortex — library inquiry' }),
+        });
+        if (cr.ok) { const d = await cr.json(); cortexConvId = d.conversation_id || d.id || null; }
+      } catch(e) {}
+    }
+
+    // Fire the message. Backend returns an SSE stream of phase events
+    // terminating in `complete` with the final response text.
+    const r = await fetch('/api/message', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        token,
+        agent: 'main',
+        conversation_id: cortexConvId,
+        message: CORTEX_SYSTEM + '\n\n' + text,
+      }),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+
+    // If the server streams, read events; else parse JSON.
+    const ct = r.headers.get('content-type') || '';
+    if (ct.includes('text/event-stream') && r.body) {
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      let lastText = '';
+      outer: while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        // Parse SSE events (blank-line terminated).
+        let idx;
+        while ((idx = buf.indexOf('\n\n')) >= 0) {
+          const block = buf.slice(0, idx); buf = buf.slice(idx + 2);
+          const dataLines = block.split('\n').filter(l => l.startsWith('data:'));
+          if (!dataLines.length) continue;
+          const payload = dataLines.map(l => l.slice(5).trim()).join('');
+          if (!payload || payload === '[DONE]') continue;
+          try {
+            const ev = JSON.parse(payload);
+            if (ev.event === 'complete' && ev.response) {
+              lastText = ev.response;
+              break outer;
+            } else if (ev.event === 'delta' && ev.chunk) {
+              lastText += ev.chunk;
+              aiEl.className = 'cortex-msg';
+              aiEl.innerHTML = `<span class="cortex-msg-label">Cortex</span>${cortexRenderMarkdown(lastText)}`;
+              box.scrollTop = box.scrollHeight;
+            } else if (ev.response) {
+              lastText = ev.response;
+            }
+          } catch(e) { /* tolerate keepalives + non-JSON lines */ }
+        }
+      }
+      aiEl.className = 'cortex-msg';
+      aiEl.innerHTML = `<span class="cortex-msg-label">Cortex</span>${cortexRenderMarkdown(lastText || '(no response)')}`;
+    } else {
+      const data = await r.json();
+      aiEl.className = 'cortex-msg';
+      aiEl.innerHTML = `<span class="cortex-msg-label">Cortex</span>${cortexRenderMarkdown(data.response || data.text || '(no response)')}`;
+    }
+    cortexEntries++;
+    cortexUpdateFolio();
+  } catch (e) {
+    aiEl.className = 'cortex-msg';
+    aiEl.innerHTML = `<span class="cortex-msg-label">Cortex</span><em style="color:#8b2f1f">Trouble fetching that — ${esc(e.message)}</em>`;
+  } finally {
+    cortexSending = false;
+    if (btn) btn.disabled = false;
+    box.scrollTop = box.scrollHeight;
+  }
+}
+
+// Initial folio render.
+setTimeout(() => cortexUpdateFolio(), 100);
 "#;
