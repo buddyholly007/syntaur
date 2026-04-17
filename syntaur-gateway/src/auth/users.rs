@@ -55,6 +55,16 @@ pub struct UserAgent {
     pub enabled: bool,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Added in schema v40: agent is eligible for the main-thread picker and
+    /// gets Peter/Kyron-tier privileges (cross-module reads + handoff).
+    #[serde(default)]
+    pub is_main_thread: bool,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub avatar_color: Option<String>,
+    #[serde(default)]
+    pub imported_from: Option<String>,
 }
 
 /// An invite code record.
@@ -534,7 +544,8 @@ impl UserStore {
         let mut stmt = db
             .prepare(
                 "SELECT id, user_id, agent_id, display_name, base_agent, system_prompt, \
-                 workspace, tool_profile, enabled, created_at, updated_at \
+                 workspace, tool_profile, enabled, created_at, updated_at, \
+                 is_main_thread, description, avatar_color, imported_from \
                  FROM user_agents WHERE user_id = ? ORDER BY agent_id",
             )
             .map_err(|e| format!("list_user_agents: {}", e))?;
@@ -552,13 +563,58 @@ impl UserStore {
         let db = self.db.lock().await;
         db.query_row(
             "SELECT id, user_id, agent_id, display_name, base_agent, system_prompt, \
-             workspace, tool_profile, enabled, created_at, updated_at \
+             workspace, tool_profile, enabled, created_at, updated_at, \
+             is_main_thread, description, avatar_color, imported_from \
              FROM user_agents WHERE user_id = ? AND agent_id = ?",
             params![user_id, agent_id],
             map_user_agent,
         )
         .optional()
         .map_err(|e| format!("get_user_agent: {}", e))
+    }
+
+    /// Create a new user-owned agent with the full set of v40 fields. Used
+    /// by the Settings → Agents page (both manual create + file-import
+    /// flows). `agent_id` must be unique per user; the caller is responsible
+    /// for slugifying a user-provided name if needed.
+    pub async fn create_custom_agent(
+        &self,
+        user_id: i64,
+        agent_id: &str,
+        display_name: &str,
+        base_agent: &str,
+        description: Option<&str>,
+        system_prompt: Option<&str>,
+        is_main_thread: bool,
+        avatar_color: Option<&str>,
+        imported_from: Option<&str>,
+    ) -> Result<UserAgent, String> {
+        let now = Utc::now().timestamp();
+        let db = self.db.lock().await;
+        db.execute(
+            "INSERT INTO user_agents (user_id, agent_id, display_name, base_agent, \
+                                       system_prompt, description, avatar_color, \
+                                       imported_from, is_main_thread, \
+                                       created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                user_id, agent_id, display_name, base_agent,
+                system_prompt, description, avatar_color,
+                imported_from, is_main_thread as i64,
+                now, now,
+            ],
+        )
+        .map_err(|e| format!("create_custom_agent: {}", e))?;
+
+        db.query_row(
+            "SELECT id, user_id, agent_id, display_name, base_agent, system_prompt, \
+             workspace, tool_profile, enabled, created_at, updated_at, \
+             is_main_thread, description, avatar_color, imported_from \
+             FROM user_agents WHERE user_id = ? AND agent_id = ?",
+            params![user_id, agent_id],
+            map_user_agent,
+        )
+        .map_err(|e| format!("create_custom_agent load: {}", e))
     }
 
     pub async fn create_user_agent(
@@ -590,6 +646,10 @@ impl UserStore {
             enabled: true,
             created_at: now,
             updated_at: now,
+            is_main_thread: false,
+            description: None,
+            avatar_color: None,
+            imported_from: None,
         })
     }
 
@@ -983,6 +1043,13 @@ fn map_user_agent(r: &rusqlite::Row) -> rusqlite::Result<UserAgent> {
         enabled: r.get::<_, i64>(8)? != 0,
         created_at: r.get(9)?,
         updated_at: r.get(10)?,
+        // v40 columns — all optional; rows from older schemas will still
+        // round-trip through this mapper since the column list below is
+        // always in the new order where the query selects all 15 columns.
+        is_main_thread: r.get::<_, Option<i64>>(11).unwrap_or(None).unwrap_or(0) != 0,
+        description: r.get::<_, Option<String>>(12).unwrap_or(None),
+        avatar_color: r.get::<_, Option<String>>(13).unwrap_or(None),
+        imported_from: r.get::<_, Option<String>>(14).unwrap_or(None),
     })
 }
 

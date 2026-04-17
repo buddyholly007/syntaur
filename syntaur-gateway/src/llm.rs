@@ -72,31 +72,87 @@ pub struct ProviderSnapshot {
 
 // ── LLM Messages ────────────────────────────────────────────────────────────
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+/// Content part for multimodal LLM requests (text + images). Only emitted
+/// on the wire when `ChatMessage.content_parts` is set; otherwise the plain
+/// `content` string is serialized.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type")]
+pub enum ContentPart {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: ImageUrlDetail },
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ImageUrlDetail {
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    #[serde(skip)]
+    pub content_parts: Option<Vec<ContentPart>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
 }
 
+impl Default for ChatMessage {
+    fn default() -> Self {
+        Self { role: String::new(), content: String::new(), content_parts: None, tool_calls: None, tool_call_id: None }
+    }
+}
+
+impl serde::Serialize for ChatMessage {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("role", &self.role)?;
+        if let Some(ref parts) = self.content_parts {
+            map.serialize_entry("content", parts)?;
+        } else {
+            map.serialize_entry("content", &self.content)?;
+        }
+        if let Some(ref tc) = self.tool_calls {
+            map.serialize_entry("tool_calls", tc)?;
+        }
+        if let Some(ref id) = self.tool_call_id {
+            map.serialize_entry("tool_call_id", id)?;
+        }
+        map.end()
+    }
+}
+
 impl ChatMessage {
     pub fn system(content: &str) -> Self {
-        Self { role: "system".to_string(), content: content.to_string(), tool_calls: None, tool_call_id: None }
+        Self { role: "system".to_string(), content: content.to_string(), content_parts: None, tool_calls: None, tool_call_id: None }
     }
     pub fn user(content: &str) -> Self {
-        Self { role: "user".to_string(), content: content.to_string(), tool_calls: None, tool_call_id: None }
+        Self { role: "user".to_string(), content: content.to_string(), content_parts: None, tool_calls: None, tool_call_id: None }
+    }
+    pub fn user_with_images(text: &str, image_urls: &[String]) -> Self {
+        let mut parts = vec![ContentPart::Text { text: text.to_string() }];
+        for url in image_urls {
+            parts.push(ContentPart::ImageUrl {
+                image_url: ImageUrlDetail { url: url.clone(), detail: Some("auto".to_string()) },
+            });
+        }
+        Self { role: "user".to_string(), content: text.to_string(), content_parts: Some(parts), tool_calls: None, tool_call_id: None }
     }
     pub fn assistant(content: &str) -> Self {
-        Self { role: "assistant".to_string(), content: content.to_string(), tool_calls: None, tool_call_id: None }
+        Self { role: "assistant".to_string(), content: content.to_string(), content_parts: None, tool_calls: None, tool_call_id: None }
     }
     pub fn assistant_with_tools(content: &str, tool_calls: Vec<serde_json::Value>) -> Self {
-        Self { role: "assistant".to_string(), content: content.to_string(), tool_calls: Some(tool_calls), tool_call_id: None }
+        Self { role: "assistant".to_string(), content: content.to_string(), content_parts: None, tool_calls: Some(tool_calls), tool_call_id: None }
     }
     pub fn tool_result(tool_call_id: &str, content: &str) -> Self {
-        Self { role: "tool".to_string(), content: content.to_string(), tool_calls: None, tool_call_id: Some(tool_call_id.to_string()) }
+        Self { role: "tool".to_string(), content: content.to_string(), content_parts: None, tool_calls: None, tool_call_id: Some(tool_call_id.to_string()) }
     }
 }
 

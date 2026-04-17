@@ -443,6 +443,9 @@ struct ApiMessageRequest {
     message: String,
     /// Optional: append this turn to an existing conversation
     conversation_id: Option<String>,
+    /// Optional image URLs (base64 data URIs or https URLs) for vision.
+    #[serde(default)]
+    images: Vec<String>,
 }
 
 // ── Bug Reports ─────────────────────────────────────────────────────────────
@@ -1280,7 +1283,11 @@ async fn handle_api_message(
             }
         }
     }
-    messages.push(llm::ChatMessage::user(&req.message));
+    if req.images.is_empty() {
+        messages.push(llm::ChatMessage::user(&req.message));
+    } else {
+        messages.push(llm::ChatMessage::user_with_images(&req.message, &req.images));
+    }
     if let (Some(cid), Some(mgr)) = (req.conversation_id.as_deref(), &state.conversations) {
         let _ = mgr.append(cid, "user", &req.message).await;
         if let Some(lcm) = &state.lcm {
@@ -5078,6 +5085,7 @@ async fn main() {
         .route("/music", get(pages::music::render))
         .route("/voice-setup", get(pages::voice_setup::render))
         .route("/settings", get(pages::settings::render))
+        .route("/settings/agents", get(pages::settings_agents::render))
         .route("/tax", get(pages::tax::render))
         .route("/chat", get(pages::chat::render))
         .route("/history", get(pages::history::render))
@@ -5103,6 +5111,9 @@ async fn main() {
         .route("/api/agents/seed_defaults", axum::routing::post(handle_api_agent_seed_defaults))
         .route("/api/agents/rename", axum::routing::put(handle_api_agent_rename))
         .route("/api/agents/list", get(handle_api_agent_list))
+        .route("/api/agents/create", post(handle_api_agent_create))
+        .route("/api/agents/import", post(handle_api_agent_import))
+        .route("/api/agents/{agent_id}", axum::routing::delete(handle_api_agent_delete))
         .route("/api/agents/dismiss_escalation", axum::routing::post(handle_api_dismiss_escalation))
         .route("/api/agents/handoff", axum::routing::post(handle_api_agent_handoff))
         .route("/api/agents/reentry", axum::routing::post(handle_api_agent_reentry))
@@ -6340,11 +6351,192 @@ async fn handle_api_agent_list(
                 "base_agent": a.base_agent,
                 "enabled": a.enabled,
                 "has_custom_prompt": a.system_prompt.is_some(),
+                "is_main_thread": a.is_main_thread,
+                "description": a.description,
+                "avatar_color": a.avatar_color,
+                "imported_from": a.imported_from,
             })
         })
         .collect();
 
     Ok(Json(serde_json::json!({ "agents": list })))
+}
+
+/// Slugify a display name into a safe, unique agent_id: lowercase, replace
+/// non-alphanumerics with `_`, collapse runs, trim underscores. If the
+/// caller didn't send an explicit `agent_id` we derive one from `display_name`
+/// and append a suffix if it collides with an existing row.
+fn slugify_agent_id(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut last_under = false;
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            last_under = false;
+        } else if !last_under && !out.is_empty() {
+            out.push('_');
+            last_under = true;
+        }
+    }
+    if out.ends_with('_') { out.pop(); }
+    if out.is_empty() { out = "agent".to_string(); }
+    out
+}
+
+/// POST /api/agents/create — create a user-owned agent (either main-thread
+/// eligible or module-scoped). Returns the new row.
+/// Body: {token, display_name, description?, system_prompt?, is_main_thread?,
+///        base_agent?, avatar_color?, agent_id?}
+async fn handle_api_agent_create(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let token = body["token"].as_str()
+        .ok_or((axum::http::StatusCode::UNAUTHORIZED, "missing token".into()))?;
+    let display_name = body["display_name"].as_str().unwrap_or("").trim().to_string();
+    if display_name.is_empty() || display_name.len() > 60 {
+        return Err((axum::http::StatusCode::BAD_REQUEST, "display_name required (1-60 chars)".into()));
+    }
+    let description = body["description"].as_str().map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let system_prompt = body["system_prompt"].as_str().map(|s| s.to_string())
+        .filter(|s| !s.trim().is_empty());
+    let is_main_thread = body["is_main_thread"].as_bool().unwrap_or(false);
+    let base_agent = body["base_agent"].as_str().unwrap_or(
+        if is_main_thread { "main" } else { "custom" }
+    ).to_string();
+    let avatar_color = body["avatar_color"].as_str().map(|s| s.to_string());
+
+    let principal = resolve_principal(&state, token).await
+        .map_err(|c| (c, "auth failed".into()))?;
+    let uid = principal.user_id();
+
+    // Derive agent_id. If caller supplied one, respect it; otherwise slugify
+    // from display_name + disambiguate with a numeric suffix if needed.
+    let requested_id = body["agent_id"].as_str().map(|s| s.trim()).unwrap_or("").to_string();
+    let mut agent_id = if requested_id.is_empty() { slugify_agent_id(&display_name) } else { slugify_agent_id(&requested_id) };
+    let existing = state.users.list_user_agents(uid).await.unwrap_or_default();
+    let taken: std::collections::HashSet<String> = existing.iter().map(|a| a.agent_id.clone()).collect();
+    if taken.contains(&agent_id) {
+        for n in 2..1000 {
+            let try_id = format!("{}_{}", agent_id, n);
+            if !taken.contains(&try_id) { agent_id = try_id; break; }
+        }
+    }
+
+    let created = state.users.create_custom_agent(
+        uid,
+        &agent_id,
+        &display_name,
+        &base_agent,
+        description.as_deref(),
+        system_prompt.as_deref(),
+        is_main_thread,
+        avatar_color.as_deref(),
+        None,
+    )
+    .await
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "agent": created,
+    })))
+}
+
+/// POST /api/agents/import (multipart) — parse a prompt file (.md / .txt /
+/// .json) into an ImportedAgent and create the row. Multipart fields:
+///   `token`           — auth
+///   `file`            — the prompt file
+///   `is_main_thread`  — optional "1"/"true" to mark as main-thread eligible
+///   `avatar_color`    — optional hex color
+async fn handle_api_agent_import(
+    State(state): State<Arc<AppState>>,
+    mut multipart: axum::extract::Multipart,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let mut token: Option<String> = None;
+    let mut is_main_thread = false;
+    let mut avatar_color: Option<String> = None;
+    let mut file_bytes: Option<(String, Vec<u8>)> = None;
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "token" => { if let Ok(t) = field.text().await { token = Some(t); } }
+            "is_main_thread" => {
+                if let Ok(t) = field.text().await {
+                    is_main_thread = t == "1" || t.eq_ignore_ascii_case("true");
+                }
+            }
+            "avatar_color" => { if let Ok(t) = field.text().await { avatar_color = Some(t); } }
+            "file" => {
+                let filename = field.file_name().map(|s| s.to_string())
+                    .unwrap_or_else(|| "agent.md".to_string());
+                match field.bytes().await {
+                    Ok(b) => file_bytes = Some((filename, b.to_vec())),
+                    Err(e) => return Err((axum::http::StatusCode::BAD_REQUEST, format!("read upload: {}", e))),
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let token = token.ok_or((axum::http::StatusCode::UNAUTHORIZED, "missing token".into()))?;
+    let (filename, bytes) = file_bytes.ok_or((axum::http::StatusCode::BAD_REQUEST, "missing file".into()))?;
+
+    let parsed = crate::agents::import::parse_file(&filename, &bytes)
+        .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
+
+    let principal = resolve_principal(&state, &token).await
+        .map_err(|c| (c, "auth failed".to_string()))?;
+    let uid = principal.user_id();
+
+    // Derive agent_id + disambiguate.
+    let mut agent_id = slugify_agent_id(&parsed.name);
+    let existing = state.users.list_user_agents(uid).await.unwrap_or_default();
+    let taken: std::collections::HashSet<String> = existing.iter().map(|a| a.agent_id.clone()).collect();
+    if taken.contains(&agent_id) {
+        for n in 2..1000 {
+            let try_id = format!("{}_{}", agent_id, n);
+            if !taken.contains(&try_id) { agent_id = try_id; break; }
+        }
+    }
+
+    let base_agent = if is_main_thread { "main" } else { "custom" };
+
+    let created = state.users.create_custom_agent(
+        uid,
+        &agent_id,
+        &parsed.name,
+        base_agent,
+        parsed.description.as_deref(),
+        Some(&parsed.system_prompt),
+        is_main_thread,
+        avatar_color.as_deref(),
+        Some(parsed.source_format),
+    )
+    .await
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "agent": created,
+        "source_format": parsed.source_format,
+    })))
+}
+
+/// DELETE /api/agents/:agent_id — archive (remove) a user-owned agent.
+async fn handle_api_agent_delete(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(agent_id): axum::extract::Path<String>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").cloned().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let principal = resolve_principal(&state, &token).await?;
+    let uid = principal.user_id();
+    state.users.delete_user_agent(uid, &agent_id).await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({ "deleted": true, "agent_id": agent_id })))
 }
 
 /// When no custom_prompt or workspace files exist for an agent, try to resolve

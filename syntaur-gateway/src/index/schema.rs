@@ -1537,6 +1537,25 @@ const MIGRATIONS: &[&str] = &[
         VALUES ('delete', old.id, old.title, COALESCE(old.description,''), old.content, COALESCE(old.tags,''));
     END;
     "#,
+    // ── v40 ──────────────────────────────────────────────────────────────
+    // Multi main-agent support + descriptions / avatar color. Any agent with
+    // is_main_thread = 1 is eligible for the dashboard's main-thread picker
+    // and gets Peter/Kyron-tier privileges (cross-module reads, handoff
+    // targets). Existing user_agents rows stay single-main by default;
+    // users can promote / create additional main-thread agents via the
+    // Settings → Agents page.
+    r#"
+    ALTER TABLE user_agents ADD COLUMN is_main_thread INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE user_agents ADD COLUMN description TEXT;
+    ALTER TABLE user_agents ADD COLUMN avatar_color TEXT;
+    ALTER TABLE user_agents ADD COLUMN imported_from TEXT;
+
+    -- Seed: any row whose base_agent is 'main' (or whose agent_id = 'main')
+    -- gets main-thread privilege automatically so the existing Peter / Felix
+    -- / Kyron continues to work without a manual settings migration.
+    UPDATE user_agents SET is_main_thread = 1
+     WHERE base_agent = 'main' OR agent_id = 'main';
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
