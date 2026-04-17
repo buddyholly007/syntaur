@@ -114,9 +114,18 @@ impl CircuitBreaker {
 
         match self.state {
             CircuitState::Closed => {
-                if self.failure_count >= self.failure_threshold {
+                // A timeout is a strong signal — open immediately so the same
+                // provider isn't retried on the next tool-call round in the
+                // current conversation turn. recovery_timeout (60s) lets it
+                // come back for the next user message.
+                if was_timeout || self.failure_count >= self.failure_threshold {
                     self.state = CircuitState::Open;
-                    log::warn!("[circuit:{}] OPEN (after {} failures)", self.name, self.failure_count);
+                    let reason = if was_timeout {
+                        format!("timeout — will retry in {}s", self.recovery_timeout.as_secs())
+                    } else {
+                        format!("after {} failures", self.failure_count)
+                    };
+                    log::warn!("[circuit:{}] OPEN ({})", self.name, reason);
                 }
             }
             CircuitState::HalfOpen => {

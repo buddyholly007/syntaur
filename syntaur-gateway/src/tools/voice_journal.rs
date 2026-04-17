@@ -395,8 +395,10 @@ impl Tool for JournalSummaryTool {
     }
 
     fn description(&self) -> &str {
-        "Get the full voice journal transcript for a specific day. Returns all recorded \
-         conversations and notes with timestamps. Defaults to today if no date given."
+        "Read VOICE PENDANT recordings only — NOT a summary of work activity. Returns raw \
+         transcripts from the Limitless/satellite voice wearable for a specific date. \
+         Most days have no voice journal. For 'what did I do' or 'recent activity' queries \
+         use `memory_list`, `list_todos`, `execution_log`, or `search_memory` instead."
     }
 
     fn parameters(&self) -> Value {
@@ -433,16 +435,21 @@ impl Tool for JournalSummaryTool {
                     content, line_count
                 )))
             }
-            None => Ok(RichToolResult::text(format!(
-                "No journal entry for {}. Available dates: {}",
-                date,
-                list_journal_dates()
-                    .iter()
-                    .take(10)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ))),
+            None => {
+                let available = list_journal_dates();
+                let avail_str = if available.is_empty() {
+                    "none — no voice pendant recordings exist yet".to_string()
+                } else {
+                    available.iter().take(10).cloned().collect::<Vec<_>>().join(", ")
+                };
+                Ok(RichToolResult::text(format!(
+                    "No voice pendant recordings for {}. Available dates: {}.\n\n\
+                     Note: this tool only returns raw voice transcripts. For general \
+                     'recent activity' questions, call `memory_list` or `list_todos` instead — \
+                     do NOT fabricate a summary from this empty result.",
+                    date, avail_str
+                )))
+            }
         }
     }
 }

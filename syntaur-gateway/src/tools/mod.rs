@@ -391,10 +391,18 @@ impl ToolRegistry {
         // Approval gate: if this tool name requires approval (per the hardcoded
         // list OR per-agent custom additions, and not in the per-agent never list)
         // AND we have an approval context wired in, queue a pending action and wait.
+        //
+        // MCP tools default to approval-required for safety — but we exempt
+        // tools whose names identify them as strictly read-only (search,
+        // fetch, get_, list_, read_). These can't mutate state and blocking
+        // them when no approval channel is wired strands agents like Felix
+        // behind useless confirmations for plain web search.
+        let is_mcp = McpRegistry::is_mcp_tool(&call.name);
+        let is_read_only_mcp = is_mcp && is_read_only_tool_name(&call.name);
         let requires_approval =
             (approval::REQUIRES_APPROVAL.contains(&call.name.as_str())
                 || self.custom_requires_approval.iter().any(|s| s == &call.name)
-                || McpRegistry::is_mcp_tool(&call.name)) // MCP tools require approval by default
+                || (is_mcp && !is_read_only_mcp))
                 && !self.custom_never_approval.iter().any(|s| s == &call.name);
         if requires_approval {
             if let Some(ctx) = &self.approval {
@@ -759,6 +767,30 @@ impl ToolRegistry {
 }
 
 /// Parse tool calls from LLM response JSON
+/// Heuristic: is this MCP tool name clearly read-only?
+///
+/// MCP tools are auto-approval-gated for safety (filesystem writes, shell
+/// execs, etc). But read-only search/fetch/list operations can't mutate
+/// anything, so blocking them when no approval channel is wired just
+/// strands the agent. We match on the tool portion of `mcp__server__tool`.
+fn is_read_only_tool_name(full_name: &str) -> bool {
+    // Wire format is `mcp__<server>__<tool>`; take everything after the last `__`
+    let tool_part = full_name.rsplit("__").next().unwrap_or(full_name);
+    let t = tool_part.to_ascii_lowercase();
+    t.contains("search")
+        || t.starts_with("fetch")
+        || t.starts_with("get_")
+        || t.starts_with("list_")
+        || t.starts_with("read_")
+        || t.starts_with("find_")
+        || t.starts_with("query_")
+        || t == "get"
+        || t == "list"
+        || t == "read"
+        || t == "fetch"
+        || t == "search"
+}
+
 pub fn parse_tool_calls(response: &serde_json::Value) -> Vec<ToolCall> {
     let mut calls = Vec::new();
 

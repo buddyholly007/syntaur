@@ -1,5 +1,6 @@
 use crate::circuit_breaker::CircuitBreaker;
 use crate::config::{Config, ModelSelection, ProviderConfig};
+use futures_util::StreamExt;
 use log::{debug, error, info, warn};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -163,25 +164,24 @@ pub enum LlmResult {
     ToolCalls { content: String, tool_calls: Vec<serde_json::Value> },
 }
 
-#[derive(Deserialize, Debug)]
-struct LlmResponse {
-    choices: Option<Vec<LlmChoice>>,
-}
-
-#[derive(Deserialize, Debug)]
-struct LlmChoice {
-    message: Option<LlmMessage>,
-}
-
-#[derive(Deserialize, Debug)]
-struct LlmMessage {
-    content: Option<String>,
-    reasoning_content: Option<String>,
-    reasoning: Option<String>,
-    tool_calls: Option<Vec<serde_json::Value>>,
-}
-
 // ── Provider Chain ──────────────────────────────────────────────────────────
+
+/// Detect placeholder/empty API keys so we can skip the provider instead of
+/// wasting a request cycle on a guaranteed 401. Matches empty strings,
+/// common "REPLACE_ME"/"YOUR_KEY" patterns, and literal "None"/"null".
+fn is_placeholder_api_key(key: &str) -> bool {
+    let trimmed = key.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let upper = trimmed.to_uppercase();
+    upper.contains("REPLACE_ME")
+        || upper.contains("YOUR_KEY")
+        || upper.contains("YOUR-KEY")
+        || upper.contains("PLACEHOLDER")
+        || upper == "NONE"
+        || upper == "NULL"
+}
 
 /// Pick a sensible default HTTP timeout for a provider based on its name.
 ///
@@ -191,15 +191,23 @@ struct LlmMessage {
 ///   and caused fall-throughs to fallback providers mid-conversation.
 /// - `lmstudio` / `local`: 60s — fast local inference servers, anything
 ///   slower than this means they're stuck.
-/// - everything else: 120s — remote OpenAI-compatible providers (OpenRouter
-///   Nemotron, etc.).
+/// - `openrouter` / `groq` / `cerebras`: 30s — free-tier remote providers
+///   consistently return tool-calling rounds in 1-5s when healthy. A stall
+///   past 30s almost always means a broken stream; fail over fast instead
+///   of eating a full 120s per round.
+/// - everything else: 90s — remote OpenAI-compatible providers, paid tiers.
 fn provider_default_timeout(prov_name: &str) -> Duration {
     if prov_name.contains("claude-shim") || prov_name.contains("claude-cli") {
         Duration::from_secs(600)
     } else if prov_name.contains("lmstudio") || prov_name.contains("local") {
         Duration::from_secs(60)
+    } else if prov_name.contains("openrouter")
+        || prov_name.contains("groq")
+        || prov_name.contains("cerebras")
+    {
+        Duration::from_secs(30)
     } else {
-        Duration::from_secs(120)
+        Duration::from_secs(90)
     }
 }
 
@@ -254,16 +262,20 @@ impl LlmChain {
         // Primary
         if let Some((prov_name, model_id)) = config.resolve_model(&model_sel.primary) {
             if let Some(prov_config) = config.models.providers.get(&prov_name) {
-                let timeout = provider_default_timeout(&prov_name);
+                if !is_placeholder_api_key(&prov_config.api_key) {
+                    let timeout = provider_default_timeout(&prov_name);
 
-                providers.push(LlmProvider {
-                    name: prov_name.clone(),
-                    base_url: prov_config.base_url.clone(),
-                    api_key: prov_config.api_key.clone(),
-                    model_id,
-                    max_tokens: prov_config.models.first().map(|m| m.max_tokens).unwrap_or(4096),
-                    circuit: Mutex::new(CircuitBreaker::new(&prov_name, timeout)),
-                });
+                    providers.push(LlmProvider {
+                        name: prov_name.clone(),
+                        base_url: prov_config.base_url.clone(),
+                        api_key: prov_config.api_key.clone(),
+                        model_id,
+                        max_tokens: prov_config.models.first().map(|m| m.max_tokens).unwrap_or(4096),
+                        circuit: Mutex::new(CircuitBreaker::new(&prov_name, timeout)),
+                    });
+                } else {
+                    warn!("[llm] Skipping primary provider '{}' — API key is a placeholder, fill it in and restart", prov_name);
+                }
             }
         }
 
@@ -271,6 +283,10 @@ impl LlmChain {
         for fallback in &model_sel.fallbacks {
             if let Some((prov_name, model_id)) = config.resolve_model(fallback) {
                 if let Some(prov_config) = config.models.providers.get(&prov_name) {
+                    if is_placeholder_api_key(&prov_config.api_key) {
+                        debug!("[llm] Skipping fallback '{}' — API key is a placeholder", prov_name);
+                        continue;
+                    }
                     let timeout = provider_default_timeout(&prov_name);
                     providers.push(LlmProvider {
                         name: prov_name.clone(),
@@ -356,29 +372,47 @@ impl LlmChain {
     }
 
     /// Score all providers and return indices in best-first order.
-    /// Uses circuit breaker state, average latency, and in-flight count
-    /// to pick the best provider — not just the first in config order.
+    ///
+    /// Config order is the PRIMARY signal — the user put their primary model
+    /// first for quality/cost reasons, and a local "faster" fallback should
+    /// never silently replace it while the primary is healthy. Latency and
+    /// in-flight load only influence ordering when two providers are at the
+    /// same config position (which never happens in practice) or when the
+    /// configured primary is seriously degraded.
+    ///
+    /// Score layout (smaller = higher priority):
+    /// - Available provider at position `i`:  `i * 1_000_000 + avg_lat_ms + in_flight_penalty`
+    /// - Unavailable provider at position `i`: `1e11 + i * 1_000_000` (always loses to any
+    ///   available provider, but still prefers earlier unavailables over later ones so we
+    ///   retry in the right order once circuits recover).
+    ///
+    /// In realistic ranges (avg_lat ≤ 60_000, in_flight ≤ 4) the position term
+    /// dominates by 2+ orders of magnitude, so a 14.5s remote primary still
+    /// beats a 500ms local fallback — matching the user's configured intent.
     async fn ranked_order(&self) -> Vec<usize> {
+        const POSITION_MULT: f64 = 1_000_000.0;
+        const UNAVAILABLE_BIAS: f64 = 1.0e11;
+
         let mut scored: Vec<(usize, f64)> = Vec::with_capacity(self.providers.len());
 
         for (i, provider) in self.providers.iter().enumerate() {
             let circuit = provider.circuit.lock().await;
+            let position_score = (i as f64) * POSITION_MULT;
             let score;
 
             if !circuit.is_available() {
-                score = 100_000.0;
+                score = UNAVAILABLE_BIAS + position_score;
             } else {
                 let metrics = provider_metrics(&provider.name);
                 let global_avg = metrics.avg_latency_ms();
                 let circuit_avg = circuit.avg_latency_ms();
-                // Use whichever has data; prefer global (cross-chain)
                 let avg_lat = if global_avg > 0.0 { global_avg } else { circuit_avg };
                 let base = if avg_lat > 0.0 { avg_lat } else { 500.0 };
 
                 let active = metrics.in_flight.load(Ordering::Relaxed) as f64;
                 let penalty = active * base.max(500.0) * 0.5;
 
-                score = base + penalty;
+                score = position_score + base + penalty;
             }
 
             scored.push((i, score));
@@ -594,6 +628,201 @@ fn provider_dashboard_link(name: &str, base_url: &str) -> Option<&'static str> {
     }
 }
 
+/// Read an OpenAI-compatible SSE chat-completion stream and assemble the
+/// final result. Fails fast on a stalled stream (no chunk in 10s) instead
+/// of waiting for the full request timeout — this is the core fix for
+/// OpenRouter free-tier mid-stream stalls that used to burn 120s per round.
+async fn read_sse_response(
+    resp: reqwest::Response,
+    provider_name: &str,
+    link_hint: &str,
+) -> Result<LlmResult, String> {
+    #[derive(Default)]
+    struct ToolAcc {
+        id: String,
+        ty: String,
+        name: String,
+        arguments: String,
+    }
+
+    // Track `content` and `reasoning_content`/`reasoning` separately — some
+    // reasoning models (Nemotron, DeepSeek R1) stream their chain-of-thought
+    // in `reasoning` and the actual answer in `content`. We only fall back
+    // to reasoning if content is empty at end-of-stream, so the user never
+    // sees the thinking trace when a real answer was produced.
+    let mut content = String::new();
+    let mut reasoning = String::new();
+    let mut tool_accs: HashMap<u64, ToolAcc> = HashMap::new();
+    let mut line_buf = String::new();
+    let mut saw_done = false;
+    let mut byte_stream = resp.bytes_stream();
+    let chunk_timeout = Duration::from_secs(10);
+
+    loop {
+        match tokio::time::timeout(chunk_timeout, byte_stream.next()).await {
+            Err(_) => {
+                return Err(format!(
+                    "{} stream stalled — no chunk received in 10s, failing over.{}",
+                    provider_name, link_hint
+                ));
+            }
+            Ok(None) => break,
+            Ok(Some(Err(e))) => {
+                return Err(format!(
+                    "{} stream error: {}.{}",
+                    provider_name, e, link_hint
+                ));
+            }
+            Ok(Some(Ok(bytes))) => {
+                line_buf.push_str(&String::from_utf8_lossy(&bytes));
+                while let Some(idx) = line_buf.find('\n') {
+                    let raw_line: String = line_buf.drain(..=idx).collect();
+                    let line = raw_line.trim_end_matches(&['\n', '\r'][..]).trim();
+                    if line.is_empty() || line.starts_with(':') {
+                        continue; // blank separator or SSE comment (keepalive)
+                    }
+                    let data = match line.strip_prefix("data:") {
+                        Some(d) => d.trim_start(),
+                        None => continue,
+                    };
+                    if data == "[DONE]" {
+                        saw_done = true;
+                        break;
+                    }
+                    let v: serde_json::Value = match serde_json::from_str(data) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            debug!(
+                                "[llm:{}] skip malformed SSE chunk: {} -- data: {}",
+                                provider_name,
+                                e,
+                                data.chars().take(100).collect::<String>()
+                            );
+                            continue;
+                        }
+                    };
+                    // Some providers return an error object mid-stream instead of a delta.
+                    if let Some(err_obj) = v.get("error") {
+                        let err_msg = err_obj
+                            .get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("unknown stream error");
+                        return Err(format!(
+                            "{} stream error: {}.{}",
+                            provider_name, err_msg, link_hint
+                        ));
+                    }
+                    // Actual answer content
+                    if let Some(c) = v
+                        .pointer("/choices/0/delta/content")
+                        .and_then(|x| x.as_str())
+                    {
+                        content.push_str(c);
+                    }
+                    // Reasoning trace — kept separate, only surfaced if
+                    // content ends up empty. Some providers use `reasoning`,
+                    // others `reasoning_content`.
+                    for ptr in [
+                        "/choices/0/delta/reasoning_content",
+                        "/choices/0/delta/reasoning",
+                    ] {
+                        if let Some(c) = v.pointer(ptr).and_then(|x| x.as_str()) {
+                            reasoning.push_str(c);
+                        }
+                    }
+                    // Tool-call deltas, indexed and chunked per OpenAI schema
+                    if let Some(tcs) = v
+                        .pointer("/choices/0/delta/tool_calls")
+                        .and_then(|x| x.as_array())
+                    {
+                        for tc in tcs {
+                            let idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
+                            let entry = tool_accs.entry(idx).or_default();
+                            if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
+                                if entry.id.is_empty() {
+                                    entry.id = id.to_string();
+                                }
+                            }
+                            if let Some(ty) = tc.get("type").and_then(|i| i.as_str()) {
+                                if entry.ty.is_empty() {
+                                    entry.ty = ty.to_string();
+                                }
+                            }
+                            if let Some(fname) =
+                                tc.pointer("/function/name").and_then(|i| i.as_str())
+                            {
+                                entry.name.push_str(fname);
+                            }
+                            if let Some(fargs) =
+                                tc.pointer("/function/arguments").and_then(|i| i.as_str())
+                            {
+                                entry.arguments.push_str(fargs);
+                            }
+                        }
+                    }
+                }
+                if saw_done {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Assemble tool_calls in the same OpenAI JSON shape the downstream
+    // dispatcher expects, ordered by delta index.
+    let mut tool_calls: Vec<serde_json::Value> = Vec::new();
+    if !tool_accs.is_empty() {
+        let mut indices: Vec<u64> = tool_accs.keys().copied().collect();
+        indices.sort();
+        for idx in indices {
+            let acc = tool_accs.remove(&idx).unwrap();
+            if acc.name.is_empty() && acc.arguments.is_empty() {
+                continue;
+            }
+            tool_calls.push(serde_json::json!({
+                "id": acc.id,
+                "type": if acc.ty.is_empty() { "function".to_string() } else { acc.ty },
+                "function": {
+                    "name": acc.name,
+                    "arguments": acc.arguments,
+                }
+            }));
+        }
+    }
+
+    if !tool_calls.is_empty() {
+        info!(
+            "[llm:{}] {} tool call(s) returned (streamed)",
+            provider_name,
+            tool_calls.len()
+        );
+        // Don't leak the reasoning trace into a tool-call turn's content
+        return Ok(LlmResult::ToolCalls {
+            content,
+            tool_calls,
+        });
+    }
+
+    // Prefer actual content; fall back to reasoning only if content is empty
+    // (some reasoning models emit everything into `reasoning` with no `content`).
+    let final_text = if !content.is_empty() { content } else { reasoning };
+
+    if final_text.is_empty() {
+        return Err(format!(
+            "{} returned an empty response — the model may be overloaded or misconfigured.{}",
+            provider_name, link_hint
+        ));
+    }
+
+    let think_re = regex::Regex::new(r"(?s)<think>.*?</think>").unwrap();
+    let cleaned = think_re.replace_all(&final_text, "").trim().to_string();
+    Ok(LlmResult::Text(if cleaned.is_empty() {
+        final_text
+    } else {
+        cleaned
+    }))
+}
+
 async fn call_provider(
     client: &Client,
     provider: &LlmProvider,
@@ -608,6 +837,7 @@ async fn call_provider(
         "messages": messages,
         "max_tokens": provider.max_tokens.min(8192).max(2000),
         "temperature": 0.7,
+        "stream": true,
     });
 
     // Add tool definitions if provided
@@ -615,7 +845,7 @@ async fn call_provider(
         payload["tools"] = serde_json::json!(tools);
     }
 
-    debug!("[llm:{}] POST {} (model={}, messages={}, max_tokens={})",
+    debug!("[llm:{}] POST {} (model={}, messages={}, max_tokens={}, stream=true)",
         provider.name, url, provider.model_id, messages.len(), provider.max_tokens.min(8192).max(2000));
 
     let resp = client
@@ -659,69 +889,7 @@ async fn call_provider(
         return Err(format!("{} returned HTTP {} — {}{}", provider.name, status, body.chars().take(200).collect::<String>(), link_hint));
     }
 
-    let raw_body = resp.text().await
-        .map_err(|e| format!("{} response could not be read: {}", provider.name, e))?;
-
-    debug!("[llm:{}] Raw response: {}...", provider.name, &raw_body[..raw_body.len().min(500)]);
-
-    let body: LlmResponse = serde_json::from_str(&raw_body)
-        .map_err(|e| {
-            error!("[llm:{}] Response parse error: {} — raw: {}...", provider.name, e, &raw_body[..raw_body.len().min(200)]);
-            format!("{} returned an unexpected response format — the model endpoint may have changed or be misconfigured.{}", provider.name, link_hint)
-        })?;
-
-    let message = body.choices
-        .and_then(|c| c.into_iter().next())
-        .and_then(|c| c.message);
-
-    let content = match &message {
-        Some(m) => {
-            let c = m.content.clone()
-                .or_else(|| m.reasoning_content.clone())
-                .or_else(|| m.reasoning.clone())
-                .unwrap_or_default();
-            if c.is_empty() {
-                warn!("[llm:{}] All content fields empty. content={:?}, reasoning_content={:?}, reasoning={:?}",
-                    provider.name, m.content.is_some(), m.reasoning_content.is_some(), m.reasoning.is_some());
-            }
-            c
-        }
-        None => {
-            error!("[llm:{}] No message in response", provider.name);
-            String::new()
-        }
-    };
-
-    // Check for tool calls in the response
-    let raw_tool_calls: Option<Vec<serde_json::Value>> = {
-        let raw_val: serde_json::Value = serde_json::from_str(&raw_body).unwrap_or_default();
-        raw_val.get("choices")
-            .and_then(|c| c.get(0))
-            .and_then(|c| c.get("message"))
-            .and_then(|m| m.get("tool_calls"))
-            .and_then(|tc| tc.as_array())
-            .cloned()
-    };
-
-    if let Some(ref tc) = raw_tool_calls {
-        if !tc.is_empty() {
-            info!("[llm:{}] {} tool call(s) returned", provider.name, tc.len());
-            return Ok(LlmResult::ToolCalls {
-                content: content.clone(),
-                tool_calls: tc.clone(),
-            });
-        }
-    }
-
-    if content.is_empty() {
-        return Err(format!("{} returned an empty response — the model may be overloaded or misconfigured", provider.name));
-    }
-
-    // Strip <think> blocks
-    let think_re = regex::Regex::new(r"(?s)<think>.*?</think>").unwrap();
-    let cleaned = think_re.replace_all(&content, "").trim().to_string();
-
-    Ok(LlmResult::Text(if cleaned.is_empty() { content } else { cleaned }))
+    read_sse_response(resp, &provider.name, &link_hint).await
 }
 
 /// Same body as `call_provider` but overrides `max_tokens` at the request
@@ -742,13 +910,14 @@ async fn call_provider_capped(
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": 0.3,
+        "stream": true,
     });
     if let Some(tools) = tools {
         payload["tools"] = serde_json::json!(tools);
     }
 
     debug!(
-        "[llm:{}] POST {} (capped, max_tokens={}, messages={})",
+        "[llm:{}] POST {} (capped, max_tokens={}, messages={}, stream=true)",
         provider.name, url, max_tokens, messages.len()
     );
 
@@ -790,59 +959,5 @@ async fn call_provider_capped(
         return Err(format!("{} returned HTTP {} — {}{}", provider.name, status, body.chars().take(200).collect::<String>(), link_hint));
     }
 
-    let raw_body = resp
-        .text()
-        .await
-        .map_err(|e| format!("{} response could not be read: {}", provider.name, e))?;
-
-    let body: LlmResponse = serde_json::from_str(&raw_body)
-        .map_err(|e| format!("{} returned an unexpected response format — the model endpoint may have changed.{}", provider.name, link_hint))?;
-
-    let message = body
-        .choices
-        .and_then(|c| c.into_iter().next())
-        .and_then(|c| c.message);
-
-    let content = match &message {
-        Some(m) => m
-            .content
-            .clone()
-            .or_else(|| m.reasoning_content.clone())
-            .or_else(|| m.reasoning.clone())
-            .unwrap_or_default(),
-        None => String::new(),
-    };
-
-    // Parse tool calls if present
-    let raw_tool_calls: Option<Vec<serde_json::Value>> = {
-        let raw_val: serde_json::Value = serde_json::from_str(&raw_body).unwrap_or_default();
-        raw_val
-            .get("choices")
-            .and_then(|c| c.get(0))
-            .and_then(|c| c.get("message"))
-            .and_then(|m| m.get("tool_calls"))
-            .and_then(|tc| tc.as_array())
-            .cloned()
-    };
-    if let Some(ref tc) = raw_tool_calls {
-        if !tc.is_empty() {
-            return Ok(LlmResult::ToolCalls {
-                content: content.clone(),
-                tool_calls: tc.clone(),
-            });
-        }
-    }
-
-    if content.is_empty() {
-        return Err("empty response from LLM".to_string());
-    }
-
-    let think_re = regex::Regex::new(r"(?s)<think>.*?</think>").unwrap();
-    let cleaned = think_re.replace_all(&content, "").trim().to_string();
-
-    Ok(LlmResult::Text(if cleaned.is_empty() {
-        content
-    } else {
-        cleaned
-    }))
+    read_sse_response(resp, &provider.name, &link_hint).await
 }
