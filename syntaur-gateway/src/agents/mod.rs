@@ -12,4 +12,5 @@ pub mod defaults;
 pub mod escalation;
 pub mod handoff;
 pub mod tasks;
+pub mod context_budget;
 pub mod templates;

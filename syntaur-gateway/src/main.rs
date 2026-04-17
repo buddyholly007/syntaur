@@ -1205,15 +1205,26 @@ async fn handle_api_message(
         (context_parts.join("\n\n---\n\n"), false)
     };
     // Inject per-user personality docs (skip if persona template already includes them)
+    // Compute context budget for this model's context window
+    let ctx_budget = crate::agents::context_budget::ContextBudget::for_context_window(
+        state.config.agents.defaults.context_tokens,
+        state.config.agents.defaults.context_tokens / 8,
+    );
+    if ctx_budget.persona_tier != crate::agents::context_budget::PersonaTier::Full {
+        system_prompt = crate::agents::context_budget::ContextBudget::truncate_to_budget(
+            &system_prompt, ctx_budget.persona_tokens
+        );
+    }
     if !used_persona_template {
-        let personality = state.users.personality_prompt(principal.user_id(), &agent_id, 4000).await;
+        let personality_budget = ctx_budget.personality_tokens;
+        let personality = state.users.personality_prompt(principal.user_id(), &agent_id, personality_budget).await;
         if !personality.is_empty() {
             system_prompt.push_str("\n\n---\n\n");
             system_prompt.push_str(&personality);
         }
     }
-    // Inject tax context so the agent has full financial awareness
-    {
+    // Inject tax context (skipped on small context models to save budget)
+    if ctx_budget.include_tax_context {
         let db = state.db_path.clone();
         let uid = principal.user_id();
         let year: i64 = chrono::Utc::now().format("%Y").to_string().parse().unwrap_or(2025);
@@ -1229,13 +1240,12 @@ async fn handle_api_message(
         }
     }
 
-    // Inject relevant agent memories into system prompt
+    // Inject relevant agent memories into system prompt (count from budget)
     {
         let mem_db = state.db_path.clone();
         let mem_uid = principal.user_id();
         let mem_aid = agent_id.clone();
-        let ctx_window = state.config.agents.defaults.context_tokens;
-        let mem_count = crate::agents::templates::context_budget_memories(ctx_window);
+        let mem_count = ctx_budget.memory_count;
         if let Ok(Some(mem_index)) = tokio::task::spawn_blocking(move || {
             let conn = rusqlite::Connection::open(&mem_db).ok()?;
             let idx = crate::agents::templates::build_memory_injection(&conn, mem_uid, &mem_aid, mem_count);
