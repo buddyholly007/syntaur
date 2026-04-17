@@ -303,7 +303,7 @@ const BODY_HTML: &str = r##"<!-- Login overlay -->
         <a href="/knowledge" class="flex items-center gap-2 p-2 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors text-sm">
           <span class="text-amber-500">&#128218;</span> Knowledge
         </a>
-        <a href="/research" class="flex items-center gap-2 p-2 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors text-sm">
+        <a href="/knowledge?tab=research" class="flex items-center gap-2 p-2 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors text-sm">
           <span class="text-sky-500">&#128269;</span> Research
         </a>
         <a href="/coders" class="flex items-center gap-2 p-2 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors text-sm">

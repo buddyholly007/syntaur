@@ -54,8 +54,15 @@ fn page_body() -> Markup {
             }
         }
 
+        // ── Sub-tab bar — Library | Research ───────────────────────────
+        div class="lib-tab-bar" {
+            button id="tab-btn-library"  onclick="showLibTab('library')"  class="lib-tab active" { "Library" }
+            span class="lib-tab-fleuron" aria-hidden="true" { "❦" }
+            button id="tab-btn-research" onclick="showLibTab('research')" class="lib-tab" { "Research" }
+        }
+
         // ── Body — 60/40 split, mirroring dashboard layout ─────────────
-        div class="lib-body" {
+        div class="lib-body" id="tab-library" {
             // LEFT (60%) — the inquiry: search + results
             div class="lib-left" {
                 section class="lib-card" {
@@ -152,6 +159,94 @@ fn page_body() -> Markup {
                     }
                     div class="lib-divider" aria-hidden="true" {}
                     div id="docs-list" class="space-y-2" {}
+                }
+            }
+        }
+
+        // ── Research tab — investigation workflow ──────────────────────
+        div class="lib-body lib-body-research hidden" id="tab-research" {
+            div class="lib-research-col" {
+                // Investigation prompt card
+                section class="lib-card" id="research-query-card" {
+                    div class="lib-card-eyebrow" { "Investigation" }
+                    h2 class="lib-card-title" { "What shall we investigate?" }
+                    div class="lib-divider" aria-hidden="true" {}
+                    p class="lib-prose lib-prose-mute" {
+                        "Plan, investigate, and synthesize. A research agent drafts a plan, runs "
+                        "the sub-tasks against your library and the open web, then composes a "
+                        "report with citations."
+                    }
+                    textarea id="research-q" rows="3" class="lib-textarea mt-3"
+                        placeholder="e.g. How did our crypto bot perform in Q1 vs the leveraged bot, and what drove the difference?" {}
+                    div class="flex items-center justify-between mt-3 gap-3 flex-wrap" {
+                        div class="flex items-center gap-3 text-xs" style="color: var(--lib-ink-mute)" {
+                            label { "Agent " select id="research-agent-select" class="lib-select" {
+                                option value="main" { "main" }
+                            } }
+                            label { "Time " select id="research-time-budget" class="lib-select" {
+                                option value="60" { "1 minute" }
+                                option value="180" selected { "3 minutes" }
+                                option value="300" { "5 minutes" }
+                                option value="600" { "10 minutes" }
+                            } }
+                        }
+                        button id="research-start-btn" onclick="startResearchFlow()" class="lib-btn-primary" {
+                            "Commence inquiry"
+                        }
+                    }
+                }
+
+                // Clarifying questions card (hidden until needed)
+                section class="lib-card hidden" id="research-clarify-card" {
+                    div class="lib-card-eyebrow" { "Preliminary" }
+                    h2 class="lib-card-title" { "A few questions before we begin" }
+                    div class="lib-divider" aria-hidden="true" {}
+                    p class="lib-prose lib-prose-mute mb-3" {
+                        "The planner suggests these to scope the inquiry. Answer briefly or skip."
+                    }
+                    div id="research-clarify-questions" class="space-y-3" {}
+                    div class="flex justify-end gap-2 mt-4" {
+                        button onclick="skipResearchClarify()" class="lib-btn-ghost" { "Skip" }
+                        button onclick="submitResearchClarify()" class="lib-btn-primary" { "Continue" }
+                    }
+                }
+
+                // Run + Report cards (hidden until running)
+                div class="hidden" id="research-run-card" {
+                    section class="lib-card" {
+                        div class="flex items-center justify-between" {
+                            div {
+                                div class="lib-card-eyebrow" { "In progress" }
+                                h2 class="lib-card-title" { "Progress of the inquiry" }
+                            }
+                            span id="research-run-status" class="lib-status-pill running" { "running…" }
+                        }
+                        div class="lib-divider" aria-hidden="true" {}
+                        ul class="lib-timeline" id="research-timeline" {}
+                    }
+
+                    section class="lib-card hidden" id="research-report-card" {
+                        div class="lib-card-eyebrow" { "Report" }
+                        h2 class="lib-card-title" { "Findings" }
+                        div class="lib-divider" aria-hidden="true" {}
+                        div id="research-report-body" class="lib-prose-report" {}
+                        div class="lib-divider" aria-hidden="true" {}
+                        div class="lib-card-eyebrow" { "Citations" }
+                        div id="research-citations-list" class="mt-2" {}
+                    }
+                }
+
+                // Recent investigations
+                section class="lib-card" {
+                    div class="flex items-center justify-between" {
+                        div {
+                            div class="lib-card-eyebrow" { "Archive" }
+                            h2 class="lib-card-title" { "Past investigations" }
+                        }
+                        button onclick="loadResearchRecent()" class="lib-btn-ghost" { "Refresh" }
+                    }
+                    div class="lib-divider" aria-hidden="true" {}
+                    div id="research-recent-list" {}
                 }
             }
         }
@@ -262,12 +357,58 @@ const EXTRA_STYLE: &str = r##"
   }
   .lib-link:hover { color: var(--lib-gold); }
 
+  /* ── Sub-tabs — Library | Research ─────────────────────────────── */
+  .lib-tab-bar {
+    max-width: 1280px;
+    margin: 0 auto;
+    padding: 0 24px;
+    display: flex;
+    gap: 4px;
+    border-bottom: 1px solid var(--lib-rule);
+    position: sticky; top: 53px; z-index: 35;
+    background: linear-gradient(180deg, rgba(29,20,8,0.85), rgba(17,10,4,0.85));
+    backdrop-filter: blur(3px);
+    -webkit-backdrop-filter: blur(3px);
+  }
+  .lib-tab {
+    padding: 10px 22px 11px;
+    font-family: 'EB Garamond', serif;
+    font-size: 16px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--lib-paper-edge);
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .lib-tab:hover { color: var(--lib-gold); }
+  .lib-tab.active {
+    color: var(--lib-gold);
+    border-bottom-color: var(--lib-gold);
+    text-shadow: 0 0 10px rgba(200,155,60,0.35);
+  }
+  .lib-tab-fleuron {
+    align-self: center;
+    color: var(--lib-gold);
+    opacity: 0.5;
+    margin: 0 2px;
+    font-size: 14px;
+  }
+
   /* ── Body shell + 60/40 split ─────────────────────────────────── */
   .lib-body {
     display: flex;
-    height: calc(100vh - 53px);
+    height: calc(100vh - 53px - 44px);
     max-width: 1280px;
     margin: 0 auto;
+  }
+  .lib-body.lib-body-research {
+    display: block;
+    padding: 24px;
+    overflow-y: auto;
   }
   .lib-left  { width: 60%; overflow-y: auto; padding: 24px 18px 24px 24px; }
   .lib-right { width: 40%; overflow-y: auto; padding: 24px 24px 24px 18px; display: flex; flex-direction: column; gap: 16px; }
@@ -529,7 +670,115 @@ const EXTRA_STYLE: &str = r##"
 
   /* All real content sits above the photographic background image
      (see body::before / body::after rules) and its darkening overlays. */
-  .lib-topbar, .lib-body { position: relative; z-index: 1; }
+  .lib-topbar, .lib-tab-bar, .lib-body { position: relative; z-index: 1; }
+
+  /* ── Research sub-tab — investigation ledger on parchment ──────── */
+  .lib-research-col { max-width: 900px; margin: 0 auto; }
+  .lib-research-col > .lib-card + .lib-card { margin-top: 16px; }
+  .lib-textarea {
+    width: 100%;
+    background: var(--lib-paper-2);
+    border: 1px solid var(--lib-paper-edge);
+    color: var(--lib-ink);
+    font-family: 'EB Garamond', serif;
+    font-size: 15px;
+    padding: 10px 14px;
+    border-radius: 2px;
+    line-height: 1.55;
+    resize: vertical;
+    outline: none;
+  }
+  .lib-textarea:focus { border-color: var(--lib-gold); box-shadow: 0 0 0 2px rgba(200,155,60,0.25); }
+
+  /* Investigation timeline — illuminated manuscript entries */
+  .lib-timeline { margin: 0; padding: 0; list-style: none; }
+  .lib-tl-row {
+    display: flex; align-items: flex-start; gap: 10px;
+    padding: 6px 0;
+    font-family: 'EB Garamond', serif;
+    font-size: 14px;
+    color: var(--lib-ink);
+    border-bottom: 1px dotted var(--lib-rule);
+  }
+  .lib-tl-row.muted { font-size: 12px; color: var(--lib-ink-mute); padding-left: 28px; font-style: italic; }
+  .lib-tl-icon {
+    width: 22px; height: 22px; flex-shrink: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 12px; border-radius: 50%;
+    background: var(--lib-gold-soft);
+    color: var(--lib-burgundy);
+    border: 1px solid var(--lib-gold);
+  }
+  .lib-tl-icon.ok { background: rgba(90,130,60,0.25); color: #4f6a2e; border-color: rgba(90,130,60,0.6); }
+  .lib-tl-icon.err { background: rgba(118,42,42,0.25); color: var(--lib-burgundy); border-color: var(--lib-burgundy); }
+
+  /* Research report prose — parchment body type */
+  .lib-prose-report h1, .lib-prose-report h2, .lib-prose-report h3 {
+    font-family: 'EB Garamond', serif; color: var(--lib-ink); font-weight: 600;
+    margin-top: 1.2em; margin-bottom: 0.4em;
+    border-bottom: 1px solid var(--lib-rule); padding-bottom: 4px;
+  }
+  .lib-prose-report h1 { font-size: 22px; }
+  .lib-prose-report h2 { font-size: 19px; }
+  .lib-prose-report h3 { font-size: 17px; }
+  .lib-prose-report p  { font-family: 'EB Garamond', serif; margin: 0.6em 0; color: var(--lib-ink); font-size: 15px; line-height: 1.6; }
+  .lib-prose-report ul, .lib-prose-report ol { margin: 0.6em 0 0.6em 1.5em; color: var(--lib-ink); font-family: 'EB Garamond', serif; }
+  .lib-prose-report li { margin: 0.25em 0; font-size: 15px; }
+  .lib-prose-report code {
+    background: var(--lib-paper-2);
+    border: 1px solid var(--lib-paper-edge);
+    padding: 0.05em 0.35em; border-radius: 2px;
+    font-family: 'IBM Plex Mono', monospace; font-size: 0.85em;
+    color: var(--lib-ink);
+  }
+  .lib-prose-report pre {
+    background: var(--lib-paper-2);
+    border: 1px solid var(--lib-paper-edge);
+    padding: 10px 14px; border-radius: 2px; overflow-x: auto;
+    font-family: 'IBM Plex Mono', monospace; font-size: 13px;
+  }
+  .lib-prose-report pre code { border: none; padding: 0; background: transparent; }
+  .lib-prose-report a { color: var(--lib-burgundy); text-decoration: underline; }
+  .lib-prose-report strong { color: var(--lib-ink); font-weight: 700; }
+  .lib-prose-report em { color: var(--lib-ink); font-style: italic; }
+  .lib-prose-report mark { background: rgba(200,155,60,0.35); color: var(--lib-ink); padding: 0 2px; }
+
+  /* Status pills on the investigation card — ink-and-gold, not neon */
+  .lib-status-pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 2px 10px;
+    font-family: 'EB Garamond', serif; font-style: italic; font-size: 12px;
+    border-radius: 999px;
+    background: var(--lib-paper-2);
+    border: 1px solid var(--lib-paper-edge);
+    color: var(--lib-ink-mute);
+  }
+  .lib-status-pill.running { color: var(--lib-burgundy); }
+  .lib-status-pill.done { color: #4f6a2e; border-color: rgba(90,130,60,0.6); }
+  .lib-status-pill.err { color: var(--lib-burgundy); border-color: rgba(118,42,42,0.6); }
+
+  /* Citations list — numbered footnotes */
+  .lib-citation {
+    display: flex; gap: 10px; padding: 6px 0;
+    border-bottom: 1px dotted var(--lib-rule);
+    font-family: 'EB Garamond', serif; font-size: 13px;
+  }
+  .lib-citation .cite-num { color: var(--lib-burgundy); font-weight: 600; flex-shrink: 0; }
+  .lib-citation .cite-body { color: var(--lib-ink); min-width: 0; }
+  .lib-citation .cite-src { color: var(--lib-ink-mute); font-style: italic; font-size: 12px; }
+
+  /* Recent investigations — row cards on parchment */
+  .lib-recent-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 14px;
+    background: var(--lib-paper-2);
+    border: 1px solid var(--lib-paper-edge);
+    border-radius: 2px;
+    margin-bottom: 6px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .lib-recent-row:hover { border-color: var(--lib-gold); box-shadow: 0 2px 6px rgba(0,0,0,0.35); }
 "##;
 
 const PAGE_JS: &str = r#"
@@ -556,8 +805,12 @@ function getAgent() { return q('#agent-filter').value; }
 
 async function apiGet(path) {
   let url = path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(token);
-  const agent = getAgent();
-  if (agent) url += '&agent=' + encodeURIComponent(agent);
+  // Agent filter only applies to /api/knowledge/* endpoints — research endpoints
+  // ignore or don't accept an agent query parameter.
+  if (path.startsWith('/api/knowledge/')) {
+    const agent = getAgent();
+    if (agent) url += '&agent=' + encodeURIComponent(agent);
+  }
   const r = await fetch(url);
   if (r.status === 401) { sessionStorage.removeItem('syntaur_token'); window.location.href = '/'; return null; }
   return r.json();
@@ -757,18 +1010,320 @@ async function handleFiles(files) {
   try {
     const h = await (await fetch('/health')).json();
     const agents = (h.agents || []).map(a => a.id);
-    for (const selId of ['#agent-filter', '#upload-agent']) {
+    for (const selId of ['#agent-filter', '#upload-agent', '#research-agent-select']) {
       const sel = q(selId);
+      if (!sel) continue;
       const isUpload = selId === '#upload-agent';
       const base = isUpload
         ? '<option value="shared">Shared (all agents)</option>'
         : '<option value="">All agents</option>';
-      sel.innerHTML = base + agents.map(a =>
-        `<option value="${esc(a)}">${esc(a)}</option>`
-      ).join('');
+      const bulk = agents.map(a => `<option value="${esc(a)}">${esc(a)}</option>`).join('');
+      if (selId === '#research-agent-select') {
+        // Research has a 'main' default — keep first agent selected, no "all".
+        sel.innerHTML = bulk;
+      } else {
+        sel.innerHTML = base + bulk;
+      }
     }
   } catch {}
   loadStats();
   loadDocs();
+})();
+
+// ═══════════════════════════════════════════════════════════════════════
+// Sub-tab switching: Library ↔ Research
+// ═══════════════════════════════════════════════════════════════════════
+function showLibTab(name) {
+  for (const t of ['library', 'research']) {
+    const pane = document.getElementById('tab-' + t);
+    const btn  = document.getElementById('tab-btn-' + t);
+    if (pane) pane.classList.toggle('hidden', t !== name);
+    if (btn) btn.classList.toggle('active', t === name);
+  }
+  if (name === 'research') {
+    // Update the section label in the topbar
+    const label = document.querySelector('.lib-section-label');
+    if (label) label.textContent = 'Codex Research';
+    loadResearchRecent();
+  } else {
+    const label = document.querySelector('.lib-section-label');
+    if (label) label.textContent = 'Codex Knowledge';
+  }
+  // Persist in URL so a reload / deep link lands on the right tab.
+  const url = new URL(window.location);
+  url.searchParams.set('tab', name);
+  history.replaceState(null, '', url.toString());
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Research workflow (merged from pages/research.rs)
+// ═══════════════════════════════════════════════════════════════════════
+let researchPendingQuery = '';
+let researchPendingAgent = 'main';
+let researchPendingTimeBudget = 180;
+let researchClarifyQuestions = [];
+let researchActiveStream = null;
+
+async function startResearchFlow() {
+  const text = q('#research-q').value.trim();
+  if (!text) { q('#research-q').focus(); return; }
+  researchPendingQuery = text;
+  researchPendingAgent = q('#research-agent-select').value || 'main';
+  researchPendingTimeBudget = parseInt(q('#research-time-budget').value || '180', 10);
+  const btn = q('#research-start-btn');
+  btn.disabled = true;
+  btn.textContent = 'Consulting…';
+  q('#research-clarify-card').classList.add('hidden');
+  q('#research-run-card').classList.add('hidden');
+  q('#research-report-card').classList.add('hidden');
+  q('#research-timeline').innerHTML = '';
+
+  try {
+    const clar = await apiPost('/api/research/clarify', {
+      agent: researchPendingAgent,
+      query: researchPendingQuery,
+    });
+    if (clar && clar.status === 'needs_clarification' && clar.questions && clar.questions.length > 0) {
+      researchClarifyQuestions = clar.questions;
+      renderResearchClarify(clar.questions);
+      btn.disabled = false;
+      btn.textContent = 'Commence inquiry';
+      return;
+    }
+  } catch(e) { console.error('clarify:', e); }
+  btn.disabled = false;
+  btn.textContent = 'Commence inquiry';
+  launchResearch('');
+}
+
+function renderResearchClarify(questions) {
+  const box = q('#research-clarify-questions');
+  box.innerHTML = questions.map((qq, i) => `
+    <div>
+      <label class="block text-xs mb-1" style="color: var(--lib-burgundy); font-style: italic">
+        ${i + 1}. ${esc(qq)}
+      </label>
+      <input type="text" data-idx="${i}" class="lib-input" placeholder="Your answer…" />
+    </div>
+  `).join('');
+  q('#research-clarify-card').classList.remove('hidden');
+  box.querySelector('input')?.focus();
+}
+
+function skipResearchClarify() {
+  q('#research-clarify-card').classList.add('hidden');
+  launchResearch('');
+}
+
+function submitResearchClarify() {
+  const inputs = q('#research-clarify-questions').querySelectorAll('input[data-idx]');
+  const answers = [];
+  inputs.forEach(inp => {
+    const i = parseInt(inp.dataset.idx, 10);
+    const v = inp.value.trim();
+    if (v) answers.push(`${researchClarifyQuestions[i]}\n  ${v}`);
+  });
+  q('#research-clarify-card').classList.add('hidden');
+  launchResearch(answers.join('\n\n'));
+}
+
+async function launchResearch(clarification_answers) {
+  const runCard = q('#research-run-card');
+  runCard.classList.remove('hidden');
+  const statusPill = q('#research-run-status');
+  statusPill.textContent = 'starting…';
+  statusPill.className = 'lib-status-pill running';
+  q('#research-timeline').innerHTML = '';
+  addResearchTimelineRow('started', 'Session beginning…');
+
+  const r = await apiPost('/api/research/start', {
+    agent: researchPendingAgent,
+    query: researchPendingQuery,
+    time_budget_secs: researchPendingTimeBudget,
+    clarification_answers: clarification_answers || null,
+  });
+  if (r.error || !r.session_id) {
+    addResearchTimelineRow('error', r.error || 'could not start session');
+    statusPill.textContent = 'error';
+    statusPill.className = 'lib-status-pill err';
+    return;
+  }
+  streamResearchSession(r.session_id);
+  loadResearchRecent();
+}
+
+function streamResearchSession(sessionId) {
+  if (researchActiveStream) { try { researchActiveStream.close(); } catch(e) {} }
+  const url = `/api/research/${encodeURIComponent(sessionId)}/stream?token=${encodeURIComponent(token)}`;
+  const es = new EventSource(url);
+  researchActiveStream = es;
+  es.onmessage = (ev) => {
+    try {
+      const data = JSON.parse(ev.data);
+      handleResearchEvent(data, sessionId);
+    } catch(e) { console.error('parse event:', e, ev.data); }
+  };
+  es.onerror = () => { try { es.close(); } catch(e) {} researchActiveStream = null; };
+}
+
+function handleResearchEvent(ev, sessionId) {
+  const statusPill = q('#research-run-status');
+  switch (ev.event) {
+    case 'started':
+      addResearchTimelineRow('started', `Session ${sessionId.slice(0, 8)} underway.`);
+      break;
+    case 'cache_hit':
+      addResearchTimelineRow('cache', `From the archive (${ev.cached_age_secs}s ago) — loading report…`);
+      loadResearchReport(sessionId);
+      break;
+    case 'plan_generated':
+      addResearchTimelineRow('plan', `Plan drafted — ${ev.steps} step${ev.steps === 1 ? '' : 's'}`);
+      (ev.plan_titles || []).forEach((t, i) => addResearchTimelineRow('plan-step', `${i + 1}. ${t}`, true));
+      break;
+    case 'subtask_started':
+      addResearchTimelineRow('subtask', `Step ${ev.step_index + 1}: ${ev.task}`);
+      break;
+    case 'subtask_completed':
+      const note = ev.error
+        ? `Step ${ev.step_index + 1} halted: ${ev.error}`
+        : `Step ${ev.step_index + 1} complete — ${ev.citations} citation${ev.citations === 1 ? '' : 's'}, ${(ev.duration_ms / 1000).toFixed(1)}s`;
+      addResearchTimelineRow(ev.error ? 'err' : 'ok', note);
+      break;
+    case 'report_started':
+      addResearchTimelineRow('report', 'Composing the report…');
+      break;
+    case 'complete':
+      addResearchTimelineRow('ok', `Complete (${(ev.duration_ms / 1000).toFixed(1)}s)`);
+      statusPill.textContent = 'complete';
+      statusPill.className = 'lib-status-pill done';
+      loadResearchReport(sessionId);
+      break;
+    case 'error':
+      addResearchTimelineRow('err', ev.message || 'error');
+      statusPill.textContent = 'error';
+      statusPill.className = 'lib-status-pill err';
+      break;
+    default:
+      addResearchTimelineRow('info', JSON.stringify(ev));
+  }
+}
+
+function addResearchTimelineRow(kind, text, muted) {
+  // Glyphs and CSS classes for the illuminated-timeline icons.
+  const glyph = {
+    started: ['▸', ''], cache: ['☼', ''], plan: ['✎', ''], 'plan-step': ['·', ''],
+    subtask: ['▸', ''], ok: ['✓', 'ok'], err: ['✕', 'err'], report: ['✎', ''], info: ['·', ''],
+  }[kind] || ['·', ''];
+  const row = document.createElement('li');
+  row.className = 'lib-tl-row' + (muted ? ' muted' : '');
+  row.innerHTML = `<span class="lib-tl-icon ${glyph[1]}">${glyph[0]}</span><span>${esc(text)}</span>`;
+  q('#research-timeline').appendChild(row);
+}
+
+async function loadResearchReport(sessionId) {
+  const data = await apiGet('/api/research/' + encodeURIComponent(sessionId));
+  if (!data || data.error) return;
+  const body = data.report_text || data.summary || '(no report text)';
+  q('#research-report-body').innerHTML = renderResearchMarkdown(body);
+  const cites = data.evidence?.flatMap(e => e.citations || []) || data.citations || [];
+  renderResearchCitations(cites);
+  q('#research-report-card').classList.remove('hidden');
+}
+
+function renderResearchCitations(cites) {
+  const box = q('#research-citations-list');
+  if (!cites || cites.length === 0) {
+    box.innerHTML = '<p class="lib-prose lib-prose-mute">No citations recorded.</p>';
+    return;
+  }
+  const seen = new Set();
+  const deduped = [];
+  for (const c of cites) {
+    const key = `${c.source || ''}::${c.external_id || c.url || c.title || ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(c);
+  }
+  box.innerHTML = deduped.map((c, i) => `
+    <div class="lib-citation">
+      <span class="cite-num">[${i + 1}]</span>
+      <div class="cite-body">
+        <div>${esc(c.title || c.external_id || c.url || 'source')}</div>
+        ${c.source ? `<div class="cite-src">${esc(c.source)}${c.external_id ? ' · ' + esc(c.external_id) : ''}</div>` : ''}
+        ${c.snippet ? `<div class="cite-src">${esc(c.snippet.slice(0, 200))}${c.snippet.length > 200 ? '…' : ''}</div>` : ''}
+      </div>
+    </div>
+  `).join('');
+}
+
+// Tiny markdown renderer for research reports (headings, bold, italic, code, lists, links).
+function renderResearchMarkdown(src) {
+  let s = esc(src);
+  s = s.replace(/```(\w+)?\n([\s\S]*?)```/g, (_m, _lang, body) => `<pre><code>${body}</code></pre>`);
+  s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+  s = s.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+  s = s.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+  s = s.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  s = s.replace(/(^|\n)((?:- .+\n?)+)/g, (_m, pre, block) => {
+    const items = block.trim().split(/\n/).map(l => `<li>${l.replace(/^- /, '')}</li>`).join('');
+    return `${pre}<ul>${items}</ul>`;
+  });
+  s = s.split(/\n{2,}/).map(p => {
+    const t = p.trim();
+    if (!t) return '';
+    if (t.startsWith('<h') || t.startsWith('<ul') || t.startsWith('<pre')) return t;
+    return `<p>${t.replace(/\n/g, '<br>')}</p>`;
+  }).join('\n');
+  return s;
+}
+
+async function loadResearchRecent() {
+  try {
+    const data = await apiGet('/api/research/recent');
+    if (!data) return;
+    const rows = data.sessions || [];
+    const box = q('#research-recent-list');
+    if (rows.length === 0) {
+      box.innerHTML = '<p class="lib-prose lib-prose-mute">No prior investigations yet.</p>';
+      return;
+    }
+    box.innerHTML = rows.map(r => {
+      const st = r.status === 'complete' ? 'done' : (r.status === 'error' ? 'err' : '');
+      return `
+      <div class="lib-recent-row" onclick="reopenResearchSession('${esc(r.id)}')">
+        <div class="min-w-0 flex-1">
+          <div class="lib-prose" style="margin: 0">${esc(r.query)}</div>
+          <div class="cite-src" style="margin-top: 2px">
+            <span class="lib-status-pill ${st}">${esc(r.status)}</span>
+            · ${esc(r.agent)} · ${esc(r.created_at || '')}
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+  } catch(e) { console.error('recent research:', e); }
+}
+
+async function reopenResearchSession(id) {
+  q('#research-run-card').classList.remove('hidden');
+  q('#research-timeline').innerHTML = '';
+  addResearchTimelineRow('info', 'Loading prior session…');
+  const statusPill = q('#research-run-status');
+  statusPill.textContent = 'loading';
+  statusPill.className = 'lib-status-pill';
+  await loadResearchReport(id);
+  statusPill.textContent = 'complete';
+  statusPill.className = 'lib-status-pill done';
+}
+
+// On page load, honor ?tab=research deep link.
+(function() {
+  try {
+    const url = new URL(window.location);
+    const tab = url.searchParams.get('tab');
+    if (tab === 'research') showLibTab('research');
+  } catch(e) {}
 })();
 "#;
