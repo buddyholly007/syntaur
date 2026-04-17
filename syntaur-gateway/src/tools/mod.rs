@@ -1,6 +1,7 @@
 pub mod account;
 pub mod browser;
 pub mod agent_memory;
+pub mod image_gen;
 pub mod built_in_tools;
 pub mod captcha;
 pub mod captcha_bridge;

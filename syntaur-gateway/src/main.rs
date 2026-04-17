@@ -37,6 +37,7 @@ mod music;
 pub mod crypto;
 pub mod terminal;
 mod agents;
+mod background_tasks;
 
 /// Brand name constant — used in user-facing messages.
 pub const BRAND: &str = "Syntaur";
@@ -117,6 +118,7 @@ pub struct AppState {
     /// in connectors.home_assistant.voice_secret. None = open.
     pub ha_voice_secret: Option<String>,
     pub escalation: std::sync::Arc<crate::agents::escalation::EscalationTracker>,
+    pub bg_tasks: std::sync::Arc<crate::background_tasks::BackgroundTaskManager>,
     /// Phase 0 voice skill router. Embedding-based dispatcher that lets
     /// the voice path expose ~6 base tools to Qwen while routing the
     /// long tail (~30+ skills) through a single `find_tool(intent)` call.
@@ -1309,7 +1311,14 @@ async fn handle_api_message(
                 Arc::new(state.config.clone()),
                 state.client.clone(),
             ));
-        tool_registry.add_extension_tools(&[run_skill, delegate]);
+        let image_gen: Arc<dyn crate::tools::extension::Tool> =
+            Arc::new(crate::tools::image_gen::GenerateImageTool {
+                task_manager: Arc::clone(&state.bg_tasks),
+                config: Arc::new(state.config.clone()),
+                http: state.client.clone(),
+                conversations: state.conversations.clone(),
+            });
+        tool_registry.add_extension_tools(&[run_skill, delegate, image_gen]);
     }
     tool_registry.apply_module_filter(&state.disabled_tools);
     let tools = tool_registry.tool_definitions();
@@ -1443,7 +1452,14 @@ async fn handle_research(
                 Arc::new(state.config.clone()),
                 state.client.clone(),
             ));
-        tr.add_extension_tools(&[run_skill, delegate]);
+        let image_gen: Arc<dyn crate::tools::extension::Tool> =
+            Arc::new(crate::tools::image_gen::GenerateImageTool {
+                task_manager: Arc::clone(&state.bg_tasks),
+                config: Arc::new(state.config.clone()),
+                http: state.client.clone(),
+                conversations: state.conversations.clone(),
+            });
+        tr.add_extension_tools(&[run_skill, delegate, image_gen]);
     }
     let tool_registry = std::sync::Arc::new(tr);
 
@@ -1684,7 +1700,14 @@ async fn handle_message_start(
                     Arc::new(state_clone.config.clone()),
                     state_clone.client.clone(),
                 ));
-            tr.add_extension_tools(&[run_skill, delegate]);
+            let image_gen: Arc<dyn crate::tools::extension::Tool> =
+            Arc::new(crate::tools::image_gen::GenerateImageTool {
+                task_manager: Arc::clone(&state.bg_tasks),
+                config: Arc::new(state.config.clone()),
+                http: state.client.clone(),
+                conversations: state.conversations.clone(),
+            });
+        tr.add_extension_tools(&[run_skill, delegate, image_gen]);
         }
         tr.apply_module_filter(&state.disabled_tools);
         let tool_registry = std::sync::Arc::new(tr);
@@ -1879,7 +1902,14 @@ async fn handle_research_start(
                     Arc::new(state.config.clone()),
                     state.client.clone(),
                 ));
-            tr.add_extension_tools(&[run_skill, delegate]);
+            let image_gen: Arc<dyn crate::tools::extension::Tool> =
+            Arc::new(crate::tools::image_gen::GenerateImageTool {
+                task_manager: Arc::clone(&state.bg_tasks),
+                config: Arc::new(state.config.clone()),
+                http: state.client.clone(),
+                conversations: state.conversations.clone(),
+            });
+        tr.add_extension_tools(&[run_skill, delegate, image_gen]);
         }
         std::sync::Arc::new(tr)
     };
@@ -3682,7 +3712,14 @@ pub(crate) fn spawn_plan_executor(state: Arc<AppState>, plan_id: i64) {
                                     Arc::new(state.config.clone()),
                                     state.client.clone(),
                                 ));
-                            tr.add_extension_tools(&[run_skill, delegate]);
+                            let image_gen: Arc<dyn crate::tools::extension::Tool> =
+            Arc::new(crate::tools::image_gen::GenerateImageTool {
+                task_manager: Arc::clone(&state.bg_tasks),
+                config: Arc::new(state.config.clone()),
+                http: state.client.clone(),
+                conversations: state.conversations.clone(),
+            });
+        tr.add_extension_tools(&[run_skill, delegate, image_gen]);
                         }
                         let call = crate::tools::ToolCall {
                             id: format!("plan-{}-step", plan_id),
@@ -4803,6 +4840,7 @@ async fn main() {
             .and_then(|h| h.voice_secret.clone())
             .filter(|s| !s.is_empty()),
         escalation: std::sync::Arc::new(crate::agents::escalation::EscalationTracker::new()),
+        bg_tasks: std::sync::Arc::new(crate::background_tasks::BackgroundTaskManager::new()),
         sharing_mode: Arc::new(tokio::sync::RwLock::new(
             users.get_sharing_mode().await.unwrap_or_else(|_| "shared".to_string()),
         )),
@@ -5080,6 +5118,7 @@ async fn main() {
         .route("/api/memory/prune", axum::routing::post(handle_api_memory_prune))
         .route("/api/memory/all", get(handle_api_memory_all))
         .route("/api/memory/delete", axum::routing::post(handle_api_memory_delete))
+        .route("/api/tasks/{id}", get(handle_api_task_poll))
         .route("/api/modules/toggle", post(setup::handle_module_toggle))
         .route("/api/license/status", get(setup::handle_license_status))
         .route("/api/license/activate", post(setup::handle_license_activate))
@@ -6191,6 +6230,30 @@ async fn handle_api_memory_delete(
     }).await.ok().flatten().unwrap_or(0);
     if deleted == 0 { return Err(axum::http::StatusCode::NOT_FOUND); }
     Ok(Json(serde_json::json!({"deleted": true, "id": memory_id})))
+}
+
+
+/// GET /api/tasks/{id} — poll a background task's status.
+/// Returns status + result when complete.
+async fn handle_api_task_poll(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").cloned().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let principal = resolve_principal(&state, &token).await?;
+
+    match state.bg_tasks.get(&task_id, principal.user_id()).await {
+        Some(task) => Ok(Json(serde_json::json!({
+            "id": task.id,
+            "status": task.status,
+            "type": task.task_type,
+            "result": task.result,
+            "created_at": task.created_at,
+            "completed_at": task.completed_at,
+        }))),
+        None => Err(axum::http::StatusCode::NOT_FOUND),
+    }
 }
 
 /// POST /api/agents/seed_defaults — clone all product-default personas into
