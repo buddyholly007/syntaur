@@ -3428,6 +3428,8 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   }
   #positron-brain {
     position: absolute; inset: 0; pointer-events: none; z-index: 0;
+    width: 100%; height: 100%;
+    display: block;
     opacity: 0.8;
   }
   .positron-panel > * { position: relative; z-index: 1; }
@@ -3465,8 +3467,12 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
 
   .positron-logbar {
     padding: 0.35rem 0.85rem;
-    background: rgba(255,156,61,0.08);
-    border-bottom: 1px solid rgba(255,156,61,0.2);
+    /* Semi-transparent + blur so the matrix stays visible but scrolled
+       chat content underneath is fully hidden when it passes under. */
+    background: rgba(14,10,5,0.55);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    border-bottom: 1px solid rgba(255,156,61,0.25);
     font-family: 'IBM Plex Mono', monospace; font-size: 0.62rem;
     color: var(--lcars-peach);
     display: flex; justify-content: space-between; gap: 0.5rem;
@@ -3507,7 +3513,9 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   .positron-input-row {
     padding: 0.55rem 0.75rem;
     border-top: 1px solid rgba(255,156,61,0.25);
-    background: rgba(14,10,5,0.6);
+    background: rgba(14,10,5,0.55);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
   }
   #tax-chat-input {
     background: rgba(255,184,137,0.05) !important;
@@ -6548,13 +6556,17 @@ function initPositronicBrain() {
   if (!canvas) return;
   const ctx = canvas.getContext('2d', { alpha: true });
   let w = 0, h = 0;
-  const NODE_COUNT = 68;  // denser neural-net; canvas is the full chat panel background
+  const NODE_DENSITY = 4200;  // one neuron per ~4200 sq px of panel area
   const nodes = [];   // {x,y,r,phase}
   const edges = [];   // {a,b,len}
   const pulses = [];  // {edge, t, dir}
 
   function resize() {
-    const rect = canvas.getBoundingClientRect();
+    // Use the panel parent's rect — canvas has intrinsic 300x150 that
+    // getBoundingClientRect returns if CSS inset:0 hasn't kicked in yet.
+    const parent = canvas.parentElement || canvas;
+    const rect = parent.getBoundingClientRect();
+    if (rect.width < 20 || rect.height < 20) return; // skip while hidden/laying out
     const dpr = window.devicePixelRatio || 1;
     w = canvas.width = Math.floor(rect.width * dpr);
     h = canvas.height = Math.floor(rect.height * dpr);
@@ -6565,8 +6577,9 @@ function initPositronicBrain() {
   }
 
   function buildGraph(vw, vh) {
-    nodes.length = 0; edges.length = 0;
-    for (let i = 0; i < NODE_COUNT; i++) {
+    nodes.length = 0; edges.length = 0; pulses.length = 0;
+    const count = Math.max(24, Math.min(140, Math.round((vw * vh) / NODE_DENSITY)));
+    for (let i = 0; i < count; i++) {
       nodes.push({
         x: Math.random() * vw,
         y: Math.random() * vh,
@@ -6590,7 +6603,15 @@ function initPositronicBrain() {
   }
 
   window.addEventListener('resize', resize);
+  // Size the canvas now + after layout settles + via ResizeObserver on the
+  // panel so the graph always matches the actual rendered size.
   setTimeout(resize, 50);
+  setTimeout(resize, 400);
+  setTimeout(resize, 1200);
+  const parent = canvas.parentElement;
+  if (parent && window.ResizeObserver) {
+    new ResizeObserver(resize).observe(parent);
+  }
 
   let t0 = performance.now();
   function tick(now) {
