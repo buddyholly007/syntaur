@@ -34,7 +34,407 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   #chat-container.open { display: flex; }
   .chat-md pre { white-space: pre-wrap; word-break: break-word; }
   .chat-md p + p { margin-top: 0.5rem; }
-  @keyframes bounce { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-4px)} }"##;
+  @keyframes bounce { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-4px)} }
+
+  /* ═══════════════════════════════════════════════════════════════════
+     Command-center dashboard — three-pane layout, calm-neutral aesthetic
+     Left rail: agent + threads + modules | Main: chat | Right: today
+     ═══════════════════════════════════════════════════════════════════ */
+  :root {
+    --dash-bg:        #0a0d12;    /* deepest — outside rails */
+    --dash-rail:      #0f1319;    /* rail background */
+    --dash-rail-2:    #141922;    /* rail hover / accent */
+    --dash-line:      #1d232d;    /* subtle dividers */
+    --dash-line-2:    #2a323e;    /* stronger divider */
+    --dash-ink:       #e8eaed;    /* primary text */
+    --dash-ink-dim:   #9aa3af;    /* secondary text */
+    --dash-ink-mute:  #5d6673;    /* labels, metadata */
+    --dash-ink-faint: #3b424d;    /* disabled */
+    --dash-accent:    #7aa2ff;    /* calm blue accent (not neon sky) */
+    --dash-accent-2:  #4d6fd0;
+    --dash-success:   #7fbf8a;
+    --dash-warn:      #f0b470;
+    --dash-danger:    #d97a7a;
+  }
+  body.bg-gray-950 { background: var(--dash-bg) !important; color: var(--dash-ink); }
+
+  /* Top-bar refinement — thinner, more neutral. */
+  .border-b.border-gray-800.bg-gray-900\/50 {
+    background: rgba(10,13,18,0.85) !important;
+    border-color: var(--dash-line) !important;
+    backdrop-filter: blur(8px);
+  }
+
+  /* Three-pane shell */
+  .cc-shell {
+    display: grid;
+    grid-template-columns: 260px minmax(0, 1fr) 320px;
+    height: calc(100vh - 45px);
+    background: var(--dash-bg);
+  }
+  .cc-shell.focus-mode { grid-template-columns: 0 1fr 0; }
+  .cc-shell.focus-mode .cc-left, .cc-shell.focus-mode .cc-right { opacity: 0; pointer-events: none; overflow: hidden; }
+  @media (max-width: 1100px) {
+    .cc-shell { grid-template-columns: 220px 1fr 280px; }
+  }
+  @media (max-width: 900px) {
+    .cc-shell { grid-template-columns: 1fr; }
+    .cc-left, .cc-right { display: none; }
+  }
+
+  /* ── LEFT RAIL ────────────────────────────────────────────────────── */
+  .cc-left {
+    background: var(--dash-rail);
+    border-right: 1px solid var(--dash-line);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+    transition: opacity 0.2s, grid-template-columns 0.2s;
+  }
+  .cc-left-scroll { flex: 1; overflow-y: auto; padding: 12px 10px 8px; }
+  .cc-left-scroll::-webkit-scrollbar { width: 5px; }
+  .cc-left-scroll::-webkit-scrollbar-thumb { background: var(--dash-line-2); border-radius: 3px; }
+
+  .cc-section-title {
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--dash-ink-mute);
+    padding: 14px 8px 6px;
+  }
+
+  /* Agent selector at the top of the left rail */
+  .cc-agent-picker {
+    margin: 8px 6px 6px;
+    padding: 10px 12px;
+    background: var(--dash-rail-2);
+    border: 1px solid var(--dash-line);
+    border-radius: 10px;
+    display: flex; align-items: center; gap: 10px;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+    position: relative;
+  }
+  .cc-agent-picker:hover { border-color: var(--dash-line-2); }
+  .cc-agent-avatar {
+    width: 34px; height: 34px; border-radius: 9px;
+    flex-shrink: 0; background: linear-gradient(135deg, var(--dash-accent), var(--dash-accent-2));
+    display: grid; place-items: center;
+    color: #0a0d12; font-weight: 700; font-size: 14px;
+  }
+  .cc-agent-identity { flex: 1; min-width: 0; }
+  .cc-agent-name { font-size: 14px; font-weight: 600; color: var(--dash-ink); line-height: 1.2; }
+  .cc-agent-status { font-size: 11px; color: var(--dash-ink-mute); margin-top: 2px; }
+  .cc-agent-status .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--dash-success); margin-right: 4px; }
+
+  /* Left-rail rows — recent threads + modules */
+  .cc-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 7px 8px;
+    font-size: 13px;
+    color: var(--dash-ink-dim);
+    border-radius: 7px;
+    cursor: pointer;
+    text-decoration: none;
+    line-height: 1.3;
+    transition: background 0.12s, color 0.12s;
+  }
+  .cc-row:hover { background: var(--dash-rail-2); color: var(--dash-ink); }
+  .cc-row.active { background: var(--dash-rail-2); color: var(--dash-ink); }
+  .cc-row-icon {
+    flex-shrink: 0; width: 18px; height: 18px;
+    display: grid; place-items: center;
+    font-size: 13px;
+  }
+  .cc-row-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cc-row-badge {
+    flex-shrink: 0; font-size: 10px; padding: 1px 7px;
+    background: var(--dash-line-2); color: var(--dash-ink-dim);
+    border-radius: 999px; font-weight: 500;
+  }
+  .cc-row-badge.active { background: rgba(122,162,255,0.2); color: var(--dash-accent); }
+  .cc-row-sub { font-size: 11px; color: var(--dash-ink-mute); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cc-row-thread { flex-direction: column; align-items: stretch; gap: 0; }
+  .cc-row-thread .cc-row-label { font-size: 12.5px; color: var(--dash-ink-dim); }
+
+  /* Footer pinned to bottom of left rail */
+  .cc-left-footer {
+    padding: 10px 12px;
+    border-top: 1px solid var(--dash-line);
+    font-size: 11px;
+    color: var(--dash-ink-mute);
+    display: flex; flex-direction: column; gap: 4px;
+    background: rgba(10,13,18,0.6);
+  }
+  .cc-left-footer .footer-row { display: flex; align-items: center; gap: 6px; }
+  .cc-left-footer .footer-row .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--dash-success); flex-shrink: 0; }
+  .cc-focus-toggle {
+    margin-top: 2px;
+    font-size: 10.5px; color: var(--dash-ink-mute);
+    background: none; border: none; padding: 0; cursor: pointer;
+    text-align: left;
+  }
+  .cc-focus-toggle:hover { color: var(--dash-ink-dim); }
+  .cc-focus-toggle kbd {
+    font-family: 'SF Mono', ui-monospace, monospace; font-size: 9px;
+    background: var(--dash-line-2); color: var(--dash-ink-dim);
+    padding: 1px 5px; border-radius: 3px; margin-left: 4px;
+  }
+
+  /* ── MAIN CANVAS ──────────────────────────────────────────────────── */
+  .cc-main {
+    display: flex; flex-direction: column;
+    min-width: 0;
+    background: var(--dash-bg);
+    overflow: hidden;
+  }
+  .cc-persona-strip {
+    padding: 10px 18px;
+    border-bottom: 1px solid var(--dash-line);
+    display: flex; align-items: center; gap: 10px;
+    flex-shrink: 0;
+  }
+  .cc-persona-strip .cc-agent-avatar { width: 28px; height: 28px; border-radius: 7px; font-size: 12px; }
+  .cc-persona-strip .name { font-size: 13.5px; font-weight: 600; color: var(--dash-ink); }
+  .cc-persona-strip .whisper { font-size: 12px; color: var(--dash-ink-mute); margin-left: 6px; }
+  .cc-persona-actions { margin-left: auto; display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--dash-ink-mute); }
+  .cc-persona-actions button { background: none; border: none; cursor: pointer; color: var(--dash-ink-mute); padding: 4px 6px; border-radius: 5px; transition: all 0.12s; }
+  .cc-persona-actions button:hover { color: var(--dash-ink); background: var(--dash-rail-2); }
+
+  /* Hero empty-state: shown in chat area before any messages */
+  .cc-hero {
+    padding: 44px 28px 18px;
+    max-width: 640px;
+    margin: 0 auto;
+    width: 100%;
+  }
+  .cc-hero-greeting {
+    font-size: 26px;
+    font-weight: 500;
+    color: var(--dash-ink);
+    letter-spacing: -0.01em;
+    margin-bottom: 4px;
+  }
+  .cc-hero-greeting .accent { color: var(--dash-accent); }
+  .cc-hero-subtitle {
+    font-size: 14px;
+    color: var(--dash-ink-mute);
+    margin-bottom: 22px;
+  }
+  .cc-hero-prompts {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  @media (max-width: 700px) { .cc-hero-prompts { grid-template-columns: 1fr; } }
+  .cc-hero-prompt {
+    text-align: left;
+    padding: 12px 14px;
+    background: var(--dash-rail);
+    border: 1px solid var(--dash-line);
+    border-radius: 10px;
+    font-size: 13px;
+    color: var(--dash-ink-dim);
+    cursor: pointer;
+    line-height: 1.35;
+    transition: all 0.12s;
+  }
+  .cc-hero-prompt:hover { border-color: var(--dash-line-2); color: var(--dash-ink); background: var(--dash-rail-2); }
+  .cc-hero-prompt .ico { font-size: 14px; margin-right: 8px; opacity: 0.85; }
+
+  /* Chat message area takes over once thread starts */
+  .cc-chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px 28px;
+    max-width: 760px;
+    width: 100%;
+    margin: 0 auto;
+  }
+  .cc-chat-messages.hidden-when-hero { display: none; }
+
+  .cc-input-bar {
+    padding: 12px 20px 16px;
+    border-top: 1px solid var(--dash-line);
+    background: var(--dash-bg);
+    flex-shrink: 0;
+  }
+  .cc-input-inner {
+    max-width: 760px;
+    margin: 0 auto;
+    display: flex; align-items: flex-end; gap: 8px;
+    background: var(--dash-rail);
+    border: 1px solid var(--dash-line-2);
+    border-radius: 14px;
+    padding: 8px 10px;
+    transition: border-color 0.15s;
+  }
+  .cc-input-inner:focus-within { border-color: var(--dash-accent); }
+  .cc-input-inner textarea {
+    flex: 1;
+    background: transparent !important;
+    border: none !important;
+    color: var(--dash-ink) !important;
+    font-size: 14px;
+    padding: 6px 4px;
+    outline: none !important;
+    resize: none;
+    max-height: 180px;
+  }
+  .cc-input-inner textarea::placeholder { color: var(--dash-ink-mute); }
+  .cc-input-btn {
+    flex-shrink: 0;
+    background: none; border: none;
+    color: var(--dash-ink-mute);
+    padding: 6px;
+    cursor: pointer;
+    border-radius: 7px;
+    transition: all 0.12s;
+  }
+  .cc-input-btn:hover { color: var(--dash-ink); background: var(--dash-rail-2); }
+  .cc-input-send {
+    background: var(--dash-accent) !important;
+    color: #0a0d12 !important;
+  }
+  .cc-input-send:hover { background: #9bbcff !important; }
+
+  /* ── RIGHT RAIL ───────────────────────────────────────────────────── */
+  .cc-right {
+    background: var(--dash-rail);
+    border-left: 1px solid var(--dash-line);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+    transition: opacity 0.2s;
+  }
+  .cc-right-scroll { flex: 1; overflow-y: auto; padding: 16px 14px 12px; }
+  .cc-right-scroll::-webkit-scrollbar { width: 5px; }
+  .cc-right-scroll::-webkit-scrollbar-thumb { background: var(--dash-line-2); border-radius: 3px; }
+  .cc-block {
+    background: var(--dash-bg);
+    border: 1px solid var(--dash-line);
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin-bottom: 10px;
+  }
+  .cc-block-title {
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--dash-ink-mute);
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 8px;
+  }
+  .cc-block-title .count { color: var(--dash-ink-faint); font-weight: 500; }
+
+  /* NEXT up */
+  .cc-next { padding: 14px; }
+  .cc-next.has-event { border-color: rgba(122,162,255,0.3); background: linear-gradient(135deg, rgba(122,162,255,0.06), transparent); }
+  .cc-next-headline { font-size: 14px; font-weight: 500; color: var(--dash-ink); line-height: 1.3; }
+  .cc-next-countdown { font-size: 22px; font-weight: 600; color: var(--dash-accent); margin-top: 4px; letter-spacing: -0.02em; }
+  .cc-next-countdown.warn { color: var(--dash-warn); }
+  .cc-next-countdown.danger { color: var(--dash-danger); }
+  .cc-next-meta { font-size: 11px; color: var(--dash-ink-mute); margin-top: 2px; }
+  .cc-next.empty .cc-next-headline { color: var(--dash-ink-mute); font-weight: 400; font-size: 13px; }
+
+  /* Today tasks */
+  .cc-todo-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 5px 0;
+    font-size: 13px;
+    color: var(--dash-ink);
+  }
+  .cc-todo-row input[type="checkbox"] {
+    width: 15px; height: 15px;
+    accent-color: var(--dash-accent);
+    cursor: pointer;
+  }
+  .cc-todo-row.done { color: var(--dash-ink-mute); text-decoration: line-through; }
+  .cc-todo-input-row {
+    margin-top: 8px;
+    display: flex; gap: 6px;
+  }
+  .cc-todo-input-row input {
+    flex: 1;
+    background: var(--dash-rail-2) !important;
+    border: 1px solid var(--dash-line) !important;
+    color: var(--dash-ink) !important;
+    font-size: 12.5px;
+    padding: 5px 9px;
+    border-radius: 6px;
+    outline: none;
+  }
+  .cc-todo-input-row input:focus { border-color: var(--dash-accent) !important; }
+  .cc-todo-input-row button {
+    background: var(--dash-rail-2); color: var(--dash-ink-dim);
+    border: 1px solid var(--dash-line);
+    padding: 4px 10px; font-size: 12px; border-radius: 6px; cursor: pointer;
+  }
+  .cc-todo-input-row button:hover { color: var(--dash-ink); border-color: var(--dash-line-2); }
+
+  /* Week strip calendar — Mon-Sun with dots */
+  .cc-week {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 2px;
+    margin-top: 4px;
+  }
+  .cc-week-day {
+    position: relative;
+    padding: 5px 0 7px;
+    border-radius: 7px;
+    text-align: center;
+    cursor: pointer;
+    transition: background 0.12s;
+  }
+  .cc-week-day:hover { background: var(--dash-rail-2); }
+  .cc-week-day.today { background: rgba(122,162,255,0.12); }
+  .cc-week-day.today .cc-week-num { color: var(--dash-accent); font-weight: 600; }
+  .cc-week-day.has-event::after {
+    content: ''; position: absolute; bottom: 3px; left: 50%; transform: translateX(-50%);
+    width: 4px; height: 4px; border-radius: 50%;
+    background: var(--dash-accent);
+  }
+  .cc-week-day.today.has-event::after { background: var(--dash-warn); }
+  .cc-week-dow { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--dash-ink-mute); font-weight: 500; }
+  .cc-week-num { font-size: 13.5px; color: var(--dash-ink-dim); margin-top: 1px; font-weight: 500; }
+  .cc-week-nav {
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 12px; color: var(--dash-ink-dim); margin-bottom: 4px;
+  }
+  .cc-week-nav button { background: none; border: none; color: var(--dash-ink-mute); cursor: pointer; padding: 2px 6px; border-radius: 4px; }
+  .cc-week-nav button:hover { color: var(--dash-ink); background: var(--dash-rail-2); }
+
+  /* Day detail panel (reused from old calendar) — reposition inside block */
+  #cal-day-panel {
+    background: var(--dash-rail-2);
+    border-radius: 7px;
+    padding: 9px 10px !important;
+    margin-top: 9px !important;
+    border: 1px solid var(--dash-line) !important;
+  }
+  #cal-add-form {
+    background: var(--dash-rail-2);
+    border-radius: 7px;
+    padding: 9px 10px !important;
+    margin-top: 9px !important;
+    border: 1px solid var(--dash-line) !important;
+  }
+
+  /* Ambient footer */
+  .cc-ambient {
+    padding: 10px 14px;
+    border-top: 1px solid var(--dash-line);
+    font-size: 11.5px;
+    color: var(--dash-ink-mute);
+    display: flex; flex-direction: column; gap: 5px;
+    background: rgba(10,13,18,0.4);
+    flex-shrink: 0;
+  }
+  .cc-ambient .line { display: flex; align-items: center; gap: 7px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cc-ambient .line .ico { flex-shrink: 0; font-size: 11px; opacity: 0.7; }
+  .cc-ambient .line .val { color: var(--dash-ink-dim); }"##;
 
 const BODY_HTML: &str = r##"<!-- Login overlay -->
 <div id="login-overlay" class="fixed inset-0 z-50 bg-gray-950 flex items-center justify-center">
@@ -115,218 +515,265 @@ const BODY_HTML: &str = r##"<!-- Login overlay -->
   </div>
 </div>
 
-<!-- Main panel: Chat + Widgets -->
-<div class="flex h-[calc(100vh-45px)]" id="panel-main">
+<!-- Main panel: Command-center three-pane dashboard -->
+<div class="cc-shell" id="panel-main">
 
-  <!-- LEFT: Chat (60%) -->
-  <div class="w-[60%] border-r border-gray-800 flex flex-col">
-    <!-- Chat header -->
-    <div class="flex items-center justify-between px-4 py-2.5 border-b border-gray-800">
-      <div class="flex items-center gap-2">
-        <img src="/agent-avatar/main" class="w-7 h-7 rounded-lg" alt="">
-        <div class="relative" id="dash-agent-switcher">
-          <button onclick="toggleDashAgentMenu()" class="flex items-center gap-1 font-medium text-sm text-gray-300 hover:text-white transition-colors">
-            <span id="chat-agent-name">Chat</span>
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="text-gray-500"><path d="M6 9l6 6 6-6"/></svg>
-          </button>
-          <div id="dash-agent-menu" class="hidden absolute left-0 top-full mt-1 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1 min-w-[160px] z-50"></div>
+  <!-- ────── LEFT RAIL: agent + threads + modules + status ────── -->
+  <aside class="cc-left" id="cc-left">
+    <div class="cc-left-scroll">
+      <!-- Active agent picker -->
+      <div class="cc-agent-picker" id="dash-agent-switcher" onclick="toggleDashAgentMenu()">
+        <div class="cc-agent-avatar" id="cc-agent-initial">P</div>
+        <div class="cc-agent-identity">
+          <div class="cc-agent-name"><span id="chat-agent-name">Peter</span></div>
+          <div class="cc-agent-status"><span class="dot"></span>online · ready</div>
+        </div>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--dash-ink-mute);flex-shrink:0"><path d="M6 9l6 6 6-6"/></svg>
+        <div id="dash-agent-menu" class="hidden absolute left-2 right-2 top-full mt-1 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1 z-50"></div>
+      </div>
+
+      <!-- Recent threads -->
+      <div class="cc-section-title">Recent threads</div>
+      <div id="recent-threads-list">
+        <div class="cc-row cc-row-thread" style="color:var(--dash-ink-faint);padding:7px 8px">
+          <div class="cc-row-label">No prior conversations yet</div>
         </div>
       </div>
-      <div class="flex items-center gap-2">
-        <div class="flex bg-gray-800 rounded-lg text-xs">
-          <button onclick="showChatTab('chat')" id="tab-chat" class="px-2.5 py-1 rounded-lg bg-gray-700 text-gray-200 transition-colors">Chat</button>
-          <button onclick="showChatTab('telegram')" id="tab-telegram" class="px-2.5 py-1 rounded-lg text-gray-500 hover:text-gray-300 transition-colors">Telegram</button>
+
+      <!-- Modules navigation -->
+      <div class="cc-section-title">Modules</div>
+      <div id="module-nav-list">
+        <a href="/tax" class="cc-row">
+          <span class="cc-row-icon" style="color:#4ade80">&#128176;</span>
+          <span class="cc-row-label">Tax</span>
+          <span class="cc-row-badge hidden" id="mod-badge-tax"></span>
+        </a>
+        <a href="/knowledge" class="cc-row">
+          <span class="cc-row-icon" style="color:#fbbf24">&#128218;</span>
+          <span class="cc-row-label">Knowledge</span>
+          <span class="cc-row-badge hidden" id="mod-badge-knowledge"></span>
+        </a>
+        <a href="/music" class="cc-row">
+          <span class="cc-row-icon" style="color:#ec4899">&#127925;</span>
+          <span class="cc-row-label">Music</span>
+          <span class="cc-row-badge hidden" id="mod-badge-music"></span>
+        </a>
+        <a href="/coders" class="cc-row">
+          <span class="cc-row-icon" style="color:#34d399">&#9000;</span>
+          <span class="cc-row-label">Terminal</span>
+        </a>
+        <a href="/journal" class="cc-row">
+          <span class="cc-row-icon" style="color:#60a5fa">&#128214;</span>
+          <span class="cc-row-label">Journal</span>
+        </a>
+        <a href="/chat" class="cc-row">
+          <span class="cc-row-icon" style="color:#a78bfa">&#127908;</span>
+          <span class="cc-row-label">Voice chat</span>
+        </a>
+        <a href="/modules" class="cc-row" style="color:var(--dash-ink-mute)">
+          <span class="cc-row-icon">&#9881;</span>
+          <span class="cc-row-label">All modules &amp; settings</span>
+        </a>
+      </div>
+
+      <!-- Quick actions -->
+      <div class="cc-section-title">Quick actions</div>
+      <a href="/history" class="cc-row">
+        <span class="cc-row-icon" style="color:var(--dash-ink-mute)">&#128340;</span>
+        <span class="cc-row-label">Conversation history</span>
+      </a>
+      <button onclick="showPhoneAccess()" class="cc-row" style="width:100%;background:none;border:none;font:inherit;text-align:left">
+        <span class="cc-row-icon" style="color:var(--dash-ink-mute)">&#128241;</span>
+        <span class="cc-row-label">Open on phone</span>
+      </button>
+    </div>
+
+    <!-- Footer: system status + focus toggle -->
+    <div class="cc-left-footer">
+      <div class="footer-row"><span class="dot"></span><span><span id="stat-modules">--</span> modules · <span id="stat-tools">-- tools</span></span></div>
+      <div class="footer-row" style="color:var(--dash-ink-faint)"><span id="stat-uptime">--</span> uptime · <span id="stat-agents">--</span></div>
+      <button class="cc-focus-toggle" onclick="toggleFocusMode()">Focus mode <kbd>⌘ .</kbd></button>
+    </div>
+  </aside>
+
+  <!-- ────── MAIN CANVAS: persona strip + hero/chat + input ────── -->
+  <main class="cc-main">
+    <!-- Persona presence strip -->
+    <div class="cc-persona-strip">
+      <div class="cc-agent-avatar" style="width:26px;height:26px;font-size:11px;border-radius:7px" id="cc-persona-initial">P</div>
+      <span class="name" id="cc-persona-name">Peter</span>
+      <span class="whisper" id="cc-persona-whisper">here &amp; ready</span>
+      <div class="cc-persona-actions">
+        <div class="flex bg-gray-800 rounded-lg text-xs" style="background:var(--dash-rail);border:1px solid var(--dash-line)">
+          <button onclick="showChatTab('chat')" id="tab-chat" class="px-2.5 py-1 rounded-lg" style="background:var(--dash-rail-2);color:var(--dash-ink)">Chat</button>
+          <button onclick="showChatTab('telegram')" id="tab-telegram" class="px-2.5 py-1 rounded-lg" style="color:var(--dash-ink-mute)">Telegram</button>
         </div>
-        <button onclick="clearChat()" class="text-xs text-gray-500 hover:text-gray-300">New</button>
-        <button onclick="openFullChat()" class="text-xs text-gray-500 hover:text-gray-300">Expand</button>
+        <button onclick="clearChat()" title="New thread">New</button>
+        <button onclick="openFullChat()" title="Expand to full-screen chat">Expand</button>
       </div>
     </div>
-    <!-- Chat Messages -->
-    <div class="flex-1 overflow-y-auto p-4 space-y-4" id="chat-messages">
+
+    <!-- Empty-state hero — hidden once a conversation starts -->
+    <div class="cc-hero" id="cc-hero">
+      <div class="cc-hero-greeting"><span id="greeting-hello">Good evening</span>, <span class="accent" id="greeting-name">Sean</span>.</div>
+      <div class="cc-hero-subtitle" id="greeting-subtitle">Ready when you are.</div>
+      <div class="cc-hero-prompts" id="cc-hero-prompts">
+        <button class="cc-hero-prompt" onclick="quickChat('What is on my calendar today?')">
+          <span class="ico">📅</span> What's on my calendar today?
+        </button>
+        <button class="cc-hero-prompt" onclick="quickChat('Summarize any new activity I should know about.')">
+          <span class="ico">✨</span> What should I know about today?
+        </button>
+        <button class="cc-hero-prompt" onclick="quickChat('What can you do?')">
+          <span class="ico">💡</span> What can you do?
+        </button>
+        <button class="cc-hero-prompt" onclick="quickChat('Pick up where we left off yesterday.')">
+          <span class="ico">↺</span> Resume yesterday's thread
+        </button>
+      </div>
+    </div>
+
+    <!-- Chat messages (populated by existing JS) — hidden while hero is shown -->
+    <div class="cc-chat-messages hidden-when-hero" id="chat-messages">
       <div class="flex gap-3">
         <img src="/agent-avatar/main" class="w-7 h-7 rounded-full flex-shrink-0 mt-0.5" alt="">
         <div class="flex-1 text-sm text-gray-300" id="chat-greeting">
           <p id="welcome-sub">Hey! How can I help you?</p>
-          <div class="flex flex-wrap gap-2 mt-3">
-            <button onclick="quickChat('What can you do?')" class="text-xs bg-gray-800 hover:bg-gray-700 border border-gray-600 rounded-full px-3 py-1 transition-colors">What can you do?</button>
-            <button onclick="quickChat('Search the web for today\\'s top news')" class="text-xs bg-gray-800 hover:bg-gray-700 border border-gray-600 rounded-full px-3 py-1 transition-colors">Today's news</button>
-          </div>
         </div>
       </div>
     </div>
-    <!-- Telegram Messages (hidden by default) -->
+
+    <!-- Telegram messages (alternative view when Telegram tab active) -->
     <div class="flex-1 overflow-y-auto p-4 space-y-3 hidden" id="telegram-messages">
       <p class="text-xs text-gray-600 text-center py-4">Loading Telegram messages...</p>
     </div>
-    <!-- Input (hidden when viewing Telegram) -->
-    <div class="p-3 border-t border-gray-800" id="chat-input-area">
-      <div id="chat-attachments" class="hidden mb-2 space-y-1"></div>
-      <div class="flex gap-2 items-end">
-        <button onclick="document.getElementById('chat-file-input').click()" class="text-gray-400 hover:text-gray-200 p-2.5 flex-shrink-0 transition-colors" title="Attach file">
+
+    <!-- Input bar -->
+    <div class="cc-input-bar" id="chat-input-area">
+      <div id="chat-attachments" class="hidden mb-2 space-y-1" style="max-width:760px;margin:0 auto"></div>
+      <div class="cc-input-inner">
+        <button class="cc-input-btn" onclick="document.getElementById('chat-file-input').click()" title="Attach file">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
         </button>
         <input type="file" id="chat-file-input" multiple class="hidden" onchange="attachFiles(this.files)">
-        <textarea id="chat-input" rows="1" class="flex-1 bg-gray-800 border border-gray-700 rounded-xl px-4 py-2.5 text-white placeholder-gray-400 focus:border-oc-500 focus:ring-1 focus:ring-oc-500 outline-none resize-none text-sm" placeholder="Message..." onkeydown="chatKeydown(event)" oninput="autoResize(this)" style="max-height:120px"></textarea>
-        <button onclick="sendMessage()" class="bg-oc-600 hover:bg-oc-700 text-white rounded-xl p-2.5 transition-colors flex-shrink-0" id="send-btn">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13"/><path d="M22 2L15 22L11 13L2 9L22 2Z"/></svg>
+        <textarea id="chat-input" rows="1" placeholder="Message Peter…" onkeydown="chatKeydown(event)" oninput="autoResize(this)"></textarea>
+        <button class="cc-input-btn" title="Voice input (coming)" onclick="alert('Voice input from dashboard — TODO')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+        </button>
+        <button onclick="sendMessage()" class="cc-input-btn cc-input-send" id="send-btn" title="Send">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 2L11 13"/><path d="M22 2L15 22L11 13L2 9L22 2Z"/></svg>
         </button>
       </div>
     </div>
-  </div>
+  </main>
 
-  <!-- RIGHT: Widgets (40%) -->
-  <div class="w-[40%] overflow-y-auto p-4 space-y-4">
+  <!-- ────── RIGHT RAIL: Today ────── -->
+  <aside class="cc-right" id="cc-right">
+    <div class="cc-right-scroll">
+      <!-- NEXT up -->
+      <div class="cc-block cc-next empty" id="cc-next-block">
+        <div class="cc-block-title"><span>Next up</span></div>
+        <div class="cc-next-headline" id="next-up-text">Nothing imminent — a clear window.</div>
+        <div class="cc-next-countdown hidden" id="next-up-countdown"></div>
+        <div class="cc-next-meta hidden" id="next-up-meta"></div>
+      </div>
 
-    <!-- To Do List -->
-    <div class="card">
-      <div class="flex items-center justify-between mb-3">
-        <h3 class="font-medium text-sm text-gray-400">To Do</h3>
-        <span class="text-xs text-gray-500" id="todo-count">0 items</span>
-      </div>
-      <div id="todo-list" class="space-y-1.5 mb-3">
-        <!-- Populated by JS -->
-      </div>
-      <div class="flex gap-2">
-        <input type="text" id="todo-input" class="flex-1 bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-white placeholder-gray-500 outline-none focus:border-oc-500" placeholder="Add a task..." onkeydown="if(event.key==='Enter')addTodo()">
-        <button onclick="addTodo()" class="text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded-lg transition-colors">Add</button>
-      </div>
-    </div>
-
-    <!-- Mini Calendar -->
-    <div class="card">
-      <div class="flex items-center justify-between mb-3">
-        <div class="flex items-center gap-2">
-          <button onclick="calPrev()" class="text-gray-500 hover:text-gray-300 text-sm">&larr;</button>
-          <h3 class="font-medium text-sm text-gray-300" id="cal-title">April 2026</h3>
-          <button onclick="calNext()" class="text-gray-500 hover:text-gray-300 text-sm">&rarr;</button>
-        </div>
-        <div class="flex items-center gap-1">
-          <div class="inline-flex rounded-md overflow-hidden border border-gray-700">
-            <button onclick="setCalView('month')" id="view-month-btn" class="text-[10px] px-2 py-1 bg-oc-700 text-white">Month</button>
-            <button onclick="setCalView('agenda')" id="view-agenda-btn" class="text-[10px] px-2 py-1 text-gray-400 hover:bg-gray-700">Agenda</button>
-          </div>
-          <label class="text-gray-500 hover:text-oc-500 text-xs px-1 cursor-pointer" title="Import .ics file">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
-            <input type="file" accept=".ics,text/calendar" class="hidden" onchange="importIcs(event)">
-          </label>
+      <!-- Today — tasks -->
+      <div class="cc-block">
+        <div class="cc-block-title"><span>Today</span><span class="count" id="todo-count">0</span></div>
+        <div id="todo-list"></div>
+        <div class="cc-todo-input-row">
+          <input type="text" id="todo-input" placeholder="Add a task…" onkeydown="if(event.key==='Enter')addTodo()">
+          <button onclick="addTodo()">Add</button>
         </div>
       </div>
 
-      <!-- Month grid (hidden when in agenda view) -->
-      <div id="view-month">
-        <div class="grid grid-cols-7 gap-0.5 text-center text-xs">
-          <span class="text-gray-600 py-1">Su</span><span class="text-gray-600 py-1">Mo</span><span class="text-gray-600 py-1">Tu</span><span class="text-gray-600 py-1">We</span><span class="text-gray-600 py-1">Th</span><span class="text-gray-600 py-1">Fr</span><span class="text-gray-600 py-1">Sa</span>
+      <!-- Week strip calendar (+ Month/Agenda toggle) -->
+      <div class="cc-block">
+        <div class="cc-block-title">
+          <span>This week</span>
+          <span class="flex items-center gap-1" style="background:var(--dash-rail-2);border:1px solid var(--dash-line);border-radius:5px;padding:1px">
+            <button onclick="setCalView('week')" id="view-week-btn" style="font-size:9.5px;padding:2px 7px;background:var(--dash-rail);color:var(--dash-ink);border:none;border-radius:3px;cursor:pointer">Week</button>
+            <button onclick="setCalView('month')" id="view-month-btn" style="font-size:9.5px;padding:2px 7px;background:none;color:var(--dash-ink-mute);border:none;border-radius:3px;cursor:pointer">Month</button>
+            <button onclick="setCalView('agenda')" id="view-agenda-btn" style="font-size:9.5px;padding:2px 7px;background:none;color:var(--dash-ink-mute);border:none;border-radius:3px;cursor:pointer">Agenda</button>
+            <label title="Import .ics" style="font-size:10px;padding:2px 5px;color:var(--dash-ink-mute);cursor:pointer">
+              &#8615;<input type="file" accept=".ics,text/calendar" class="hidden" onchange="importIcs(event)">
+            </label>
+          </span>
         </div>
-        <div class="grid grid-cols-7 gap-0.5 text-center text-xs" id="cal-grid">
-          <!-- Populated by JS -->
+        <div class="cc-week-nav">
+          <button onclick="calPrev()">&larr;</button>
+          <span id="cal-title">This week</span>
+          <button onclick="calNext()">&rarr;</button>
         </div>
-      </div>
-
-      <!-- Agenda list (hidden unless in agenda view) -->
-      <div id="view-agenda" class="hidden max-h-80 overflow-y-auto space-y-1.5">
-        <!-- Populated by JS -->
-      </div>
-
-      <!-- Day detail panel (shown when a date is clicked) -->
-      <div id="cal-day-panel" class="hidden mt-3 border-t border-gray-700 pt-3">
-        <div class="flex items-center justify-between mb-2">
-          <h4 class="text-sm font-medium text-gray-300" id="cal-day-title">April 13</h4>
-          <div class="flex gap-1">
-            <button onclick="showAddEvent()" class="text-xs bg-oc-600 hover:bg-oc-700 px-2 py-1 rounded transition-colors text-white">+ Add</button>
-            <button onclick="closeDayPanel()" class="text-xs text-gray-500 hover:text-gray-300 px-1">&times;</button>
+        <!-- Week strip (default view) -->
+        <div id="view-week">
+          <div class="cc-week" id="cal-week-strip">
+            <!-- Populated by JS -->
           </div>
         </div>
-        <div id="cal-day-events" class="space-y-1.5 max-h-40 overflow-y-auto">
-          <p class="text-xs text-gray-500 italic">No events</p>
+        <!-- Month view (hidden by default) -->
+        <div id="view-month" class="hidden">
+          <div class="grid grid-cols-7 gap-0.5 text-center" style="font-size:9.5px;color:var(--dash-ink-mute);margin-top:2px">
+            <span class="py-1">Su</span><span class="py-1">Mo</span><span class="py-1">Tu</span><span class="py-1">We</span><span class="py-1">Th</span><span class="py-1">Fr</span><span class="py-1">Sa</span>
+          </div>
+          <div class="grid grid-cols-7 gap-0.5 text-center text-xs" id="cal-grid"></div>
         </div>
-      </div>
+        <!-- Agenda -->
+        <div id="view-agenda" class="hidden max-h-80 overflow-y-auto" style="margin-top:6px"></div>
 
-      <!-- Add/edit event form -->
-      <div id="cal-add-form" class="hidden mt-3 border-t border-gray-700 pt-3 space-y-2">
-        <h4 class="text-sm font-medium text-gray-300" id="cal-form-title">New Event</h4>
-        <input type="text" id="cal-ev-title" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-white placeholder-gray-500 outline-none focus:border-oc-500" placeholder="Event title">
-        <div class="flex gap-2">
-          <input type="date" id="cal-ev-date" class="flex-1 bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-white outline-none focus:border-oc-500">
-          <input type="time" id="cal-ev-time" class="w-24 bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-white outline-none focus:border-oc-500">
+        <!-- Day detail panel (shown when a date is clicked) -->
+        <div id="cal-day-panel" class="hidden">
+          <div class="flex items-center justify-between mb-2">
+            <h4 class="text-sm font-medium" style="color:var(--dash-ink)" id="cal-day-title">Date</h4>
+            <div class="flex gap-1">
+              <button onclick="showAddEvent()" style="font-size:10.5px;background:var(--dash-accent);color:#0a0d12;padding:2px 8px;border-radius:4px;border:none;cursor:pointer">+ Add</button>
+              <button onclick="closeDayPanel()" style="font-size:12px;color:var(--dash-ink-mute);background:none;border:none;cursor:pointer;padding:0 4px">&times;</button>
+            </div>
+          </div>
+          <div id="cal-day-events" class="space-y-1" style="max-height:160px;overflow-y:auto">
+            <p style="font-size:11.5px;color:var(--dash-ink-mute);font-style:italic">No events</p>
+          </div>
         </div>
-        <div class="flex gap-2 items-center flex-wrap">
-          <label class="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer">
-            <input type="checkbox" id="cal-ev-allday" class="accent-oc-500" onchange="document.getElementById('cal-ev-time').disabled=this.checked"> All day
-          </label>
-          <select id="cal-ev-recur" class="bg-gray-900 border border-gray-700 rounded-lg text-xs text-gray-300 py-1 px-1 outline-none" title="Recurrence">
-            <option value="">Doesn't repeat</option>
-            <option value="daily">Daily</option>
-            <option value="weekly">Weekly</option>
-            <option value="monthly">Monthly</option>
-            <option value="yearly">Yearly</option>
-          </select>
-          <input type="number" id="cal-ev-remind" min="0" max="10080" class="w-20 bg-gray-900 border border-gray-700 rounded-lg text-xs text-white py-1 px-1 outline-none focus:border-oc-500" placeholder="Remind (min)" title="Remind me N minutes before (0 = off)">
-        </div>
-        <input type="date" id="cal-ev-recur-end" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-xs text-gray-400 outline-none focus:border-oc-500 hidden" placeholder="Repeat until">
-        <textarea id="cal-ev-desc" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-white placeholder-gray-500 outline-none focus:border-oc-500 resize-none" rows="2" placeholder="Description (optional)"></textarea>
-        <div class="flex gap-2 justify-end">
-          <button onclick="cancelAddEvent()" class="text-xs text-gray-500 hover:text-gray-300 px-3 py-1.5">Cancel</button>
-          <button onclick="saveEvent()" id="cal-save-btn" class="text-xs bg-oc-600 hover:bg-oc-700 px-3 py-1.5 rounded-lg transition-colors text-white">Save</button>
+
+        <!-- Add/edit event form -->
+        <div id="cal-add-form" class="hidden space-y-2">
+          <h4 class="text-sm font-medium" style="color:var(--dash-ink)" id="cal-form-title">New Event</h4>
+          <input type="text" id="cal-ev-title" class="w-full" placeholder="Event title" style="background:var(--dash-rail);border:1px solid var(--dash-line);color:var(--dash-ink);font-size:12.5px;padding:5px 8px;border-radius:5px;outline:none">
+          <div class="flex gap-2">
+            <input type="date" id="cal-ev-date" class="flex-1" style="background:var(--dash-rail);border:1px solid var(--dash-line);color:var(--dash-ink);font-size:12px;padding:5px 8px;border-radius:5px;outline:none">
+            <input type="time" id="cal-ev-time" style="width:90px;background:var(--dash-rail);border:1px solid var(--dash-line);color:var(--dash-ink);font-size:12px;padding:5px 8px;border-radius:5px;outline:none">
+          </div>
+          <div class="flex gap-2 items-center flex-wrap">
+            <label class="flex items-center gap-1.5 text-xs cursor-pointer" style="color:var(--dash-ink-mute)">
+              <input type="checkbox" id="cal-ev-allday" onchange="document.getElementById('cal-ev-time').disabled=this.checked"> All day
+            </label>
+            <select id="cal-ev-recur" title="Recurrence" style="background:var(--dash-rail);border:1px solid var(--dash-line);color:var(--dash-ink-dim);font-size:11px;padding:3px 4px;border-radius:5px;outline:none">
+              <option value="">Doesn't repeat</option>
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+              <option value="monthly">Monthly</option>
+              <option value="yearly">Yearly</option>
+            </select>
+            <input type="number" id="cal-ev-remind" min="0" max="10080" placeholder="Remind (min)" title="Minutes before (0 = off)" style="width:88px;background:var(--dash-rail);border:1px solid var(--dash-line);color:var(--dash-ink);font-size:11px;padding:3px 6px;border-radius:5px;outline:none">
+          </div>
+          <input type="date" id="cal-ev-recur-end" class="w-full hidden" placeholder="Repeat until" style="background:var(--dash-rail);border:1px solid var(--dash-line);color:var(--dash-ink-dim);font-size:11px;padding:5px 8px;border-radius:5px;outline:none">
+          <textarea id="cal-ev-desc" class="w-full resize-none" rows="2" placeholder="Description (optional)" style="background:var(--dash-rail);border:1px solid var(--dash-line);color:var(--dash-ink);font-size:12px;padding:5px 8px;border-radius:5px;outline:none"></textarea>
+          <div class="flex gap-2 justify-end">
+            <button onclick="cancelAddEvent()" style="font-size:11px;color:var(--dash-ink-mute);background:none;border:none;padding:4px 8px;cursor:pointer">Cancel</button>
+            <button onclick="saveEvent()" id="cal-save-btn" style="font-size:11px;background:var(--dash-accent);color:#0a0d12;padding:4px 10px;border:none;border-radius:5px;cursor:pointer">Save</button>
+          </div>
         </div>
       </div>
     </div>
 
-    <!-- Quick Actions + Modules -->
-    <div class="card">
-      <h3 class="font-medium text-sm text-gray-400 mb-3">Quick Actions</h3>
-      <div class="space-y-1.5">
-        <a href="/history" class="flex items-center gap-2 p-2 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors text-sm">
-          <span class="text-gray-500">&#128340;</span> Conversation History
-        </a>
-        <button onclick="showPhoneAccess()" class="w-full flex items-center gap-2 p-2 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors text-sm text-left">
-          <span class="text-gray-500">&#128241;</span> Open on Phone
-        </button>
-      </div>
-
-      <h3 class="font-medium text-sm text-gray-400 mb-2 mt-4">Modules</h3>
-      <div class="space-y-1.5">
-        <a href="/tax" class="flex items-center gap-2 p-2 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors text-sm">
-          <span class="text-green-500">&#128176;</span> Tax & Expenses
-        </a>
-        <a href="/chat" class="flex items-center gap-2 p-2 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors text-sm">
-          <span class="text-purple-500">&#127908;</span> Voice Chat
-        </a>
-        <a href="/journal" class="flex items-center gap-2 p-2 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors text-sm">
-          <span class="text-blue-500">&#128214;</span> Voice Journal
-        </a>
-        <a href="/voice-setup" class="flex items-center gap-2 p-2 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors text-sm">
-          <span class="text-cyan-500">&#127899;</span> Voice Setup
-        </a>
-        <a href="/music" class="flex items-center gap-2 p-2 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors text-sm">
-          <span class="text-pink-500">&#127925;</span> Music
-        </a>
-        <a href="/knowledge" class="flex items-center gap-2 p-2 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors text-sm">
-          <span class="text-amber-500">&#128218;</span> Knowledge
-        </a>
-        <a href="/knowledge?tab=research" class="flex items-center gap-2 p-2 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors text-sm">
-          <span class="text-sky-500">&#128269;</span> Research
-        </a>
-        <a href="/coders" class="flex items-center gap-2 p-2 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors text-sm">
-          <span class="text-emerald-500">&#9000;</span> Terminal
-        </a>
-        <a href="/modules" class="flex items-center gap-2 p-2 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors text-sm">
-          <span class="text-gray-500">&#9881;</span> All Modules
-        </a>
-      </div>
+    <!-- Ambient footer -->
+    <div class="cc-ambient">
+      <div class="line"><span class="ico">♪</span><span class="val" id="ambient-music">—</span></div>
+      <div class="line"><span class="ico">🎙</span><span class="val" id="ambient-voice">Satellites quiet</span></div>
     </div>
+  </aside>
 
-    <!-- Status bar -->
-    <div class="flex items-center gap-3 text-xs text-gray-600 px-1">
-      <span id="stat-uptime">--</span> uptime
-      <span>&middot;</span>
-      <span id="stat-modules">--</span> modules
-      <span>&middot;</span>
-      <span id="stat-tools">-- tools</span>
-      <span>&middot;</span>
-      <span id="stat-agents">--</span>
-    </div>
-
-  </div>
 </div>
 
 <!-- Modules & System panel (hidden by default, shown on nav click) -->
@@ -1575,6 +2022,331 @@ async function mpControl(action) {
       if (typeof authToken !== 'undefined' && authToken) { clearInterval(w); tick(); setInterval(tick, 5000); }
     }, 1000);
   }
+})();
+
+// ═══════════════════════════════════════════════════════════════════════
+// Command-center dashboard — additions for 3-pane layout
+// ═══════════════════════════════════════════════════════════════════════
+
+// Time-of-day greeting — "Good morning / afternoon / evening / night".
+function ccGreeting() {
+  const h = new Date().getHours();
+  if (h < 5)  return 'Up late';
+  if (h < 12) return 'Good morning';
+  if (h < 17) return 'Good afternoon';
+  if (h < 22) return 'Good evening';
+  return 'Winding down';
+}
+
+function ccTitleCase(s) {
+  return (s || '').split(/\s+/).map(w => w ? w[0].toUpperCase() + w.slice(1) : w).join(' ');
+}
+function ccUpdateGreeting() {
+  const greetEl = document.getElementById('greeting-hello');
+  if (greetEl) greetEl.textContent = ccGreeting();
+  // Pull user first-name if we can derive it from the user-label.
+  const userLabel = document.getElementById('user-label');
+  const nameEl = document.getElementById('greeting-name');
+  if (nameEl && userLabel && userLabel.textContent.trim()) {
+    const full = userLabel.textContent.trim();
+    nameEl.textContent = ccTitleCase(full.split(' ')[0]);
+  }
+}
+
+// Hero ↔ chat swap. When the chat has more than the greeting block, hide hero.
+function ccSyncHero() {
+  const hero = document.getElementById('cc-hero');
+  const msgs = document.getElementById('chat-messages');
+  if (!hero || !msgs) return;
+  // Chat has "real" messages if there's more than one child (greeting + replies).
+  const hasRealMessages = msgs.querySelectorAll(':scope > div').length > 1;
+  hero.classList.toggle('hidden', hasRealMessages);
+  msgs.classList.toggle('hidden-when-hero', !hasRealMessages);
+}
+// Observe chat-messages for additions so the hero hides automatically when a
+// conversation starts + reappears on clearChat().
+(function() {
+  const msgs = document.getElementById('chat-messages');
+  if (!msgs) return;
+  new MutationObserver(ccSyncHero).observe(msgs, { childList: true });
+  ccSyncHero();
+})();
+
+// Update the persona strip + agent-picker when agent selection changes.
+function ccUpdatePersona() {
+  const name = document.getElementById('chat-agent-name');
+  const stripName = document.getElementById('cc-persona-name');
+  const initial = document.getElementById('cc-agent-initial');
+  const stripInit = document.getElementById('cc-persona-initial');
+  const input = document.getElementById('chat-input');
+  if (!name) return;
+  const raw = name.textContent.trim() || 'Peter';
+  // If the switcher still shows the literal "Chat" label, default to agent "P" for Peter.
+  const n = raw === 'Chat' ? 'Peter' : raw;
+  if (stripName) stripName.textContent = n;
+  const letter = n.charAt(0).toUpperCase() || 'P';
+  if (initial) initial.textContent = letter;
+  if (stripInit) stripInit.textContent = letter;
+  if (input) input.placeholder = 'Message ' + n + '…';
+}
+// Re-run on interval (catches agent-switcher mutations without wiring into
+// every callsite).
+setInterval(ccUpdatePersona, 1500);
+
+// ── Week-strip calendar view ─────────────────────────────────────────
+let ccWeekAnchor = null;   // ISO date (Monday) of the week being viewed
+function ccIsoDate(d) { return d.toISOString().slice(0, 10); }
+function ccMondayOf(d) {
+  const x = new Date(d);
+  const dow = (x.getDay() + 6) % 7;  // 0 = Mon
+  x.setDate(x.getDate() - dow);
+  return x;
+}
+function ccRenderWeek() {
+  const grid = document.getElementById('cal-week-strip');
+  const titleEl = document.getElementById('cal-title');
+  if (!grid) return;
+  if (!ccWeekAnchor) ccWeekAnchor = ccIsoDate(ccMondayOf(new Date()));
+  const mon = new Date(ccWeekAnchor + 'T00:00');
+  const today = new Date(); today.setHours(0,0,0,0);
+  const days = [];
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(mon); d.setDate(mon.getDate() + i);
+    days.push(d);
+  }
+  // Title
+  const mFmt = { month: 'short' };
+  if (titleEl) {
+    const first = days[0], last = days[6];
+    if (first.getMonth() === last.getMonth()) {
+      titleEl.textContent = first.toLocaleDateString([], mFmt) + ' ' + first.getDate() + '–' + last.getDate();
+    } else {
+      titleEl.textContent = first.toLocaleDateString([], mFmt) + ' ' + first.getDate() + ' – ' + last.toLocaleDateString([], mFmt) + ' ' + last.getDate();
+    }
+  }
+  // Events lookup — uses calEvents from the legacy calendar code if present.
+  const dows = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  grid.innerHTML = days.map((d, i) => {
+    const iso = ccIsoDate(d);
+    const isToday = d.getTime() === today.getTime();
+    const hasEvent = typeof calEvents !== 'undefined'
+      && Array.isArray(calEvents)
+      && calEvents.some(e => (e.date || '').slice(0,10) === iso);
+    const cls = ['cc-week-day'];
+    if (isToday) cls.push('today');
+    if (hasEvent) cls.push('has-event');
+    return `<div class="${cls.join(' ')}" onclick="ccWeekDayClick('${iso}')">
+      <div class="cc-week-dow">${dows[i]}</div>
+      <div class="cc-week-num">${d.getDate()}</div>
+    </div>`;
+  }).join('');
+}
+function ccWeekDayClick(iso) {
+  // Reuse the existing day-panel rendering from the legacy calendar code.
+  if (typeof selectDate === 'function') selectDate(iso);
+  else if (typeof showDayEvents === 'function') showDayEvents(iso);
+}
+// Override setCalView to support 'week' in addition to month / agenda.
+(function() {
+  const orig = typeof setCalView === 'function' ? setCalView : null;
+  window.setCalView = function(view) {
+    const week = document.getElementById('view-week');
+    const month = document.getElementById('view-month');
+    const agenda = document.getElementById('view-agenda');
+    const wb = document.getElementById('view-week-btn');
+    const mb = document.getElementById('view-month-btn');
+    const ab = document.getElementById('view-agenda-btn');
+    if (week) week.classList.toggle('hidden', view !== 'week');
+    if (month) month.classList.toggle('hidden', view !== 'month');
+    if (agenda) agenda.classList.toggle('hidden', view !== 'agenda');
+    const sel = { background: 'var(--dash-rail)', color: 'var(--dash-ink)' };
+    const unsel = { background: 'none', color: 'var(--dash-ink-mute)' };
+    [[wb,'week'],[mb,'month'],[ab,'agenda']].forEach(([btn, k]) => {
+      if (!btn) return;
+      const s = (view === k) ? sel : unsel;
+      btn.style.background = s.background;
+      btn.style.color = s.color;
+    });
+    if (view === 'week') ccRenderWeek();
+    else if (orig && view !== 'week') orig(view);
+  };
+})();
+// Override calPrev / calNext to step by week when week view is active.
+(function() {
+  const origPrev = typeof calPrev === 'function' ? calPrev : null;
+  const origNext = typeof calNext === 'function' ? calNext : null;
+  window.calPrev = function() {
+    const weekVisible = !document.getElementById('view-week')?.classList.contains('hidden');
+    if (weekVisible) {
+      const d = new Date(ccWeekAnchor + 'T00:00'); d.setDate(d.getDate() - 7);
+      ccWeekAnchor = ccIsoDate(d); ccRenderWeek(); return;
+    }
+    if (origPrev) origPrev();
+  };
+  window.calNext = function() {
+    const weekVisible = !document.getElementById('view-week')?.classList.contains('hidden');
+    if (weekVisible) {
+      const d = new Date(ccWeekAnchor + 'T00:00'); d.setDate(d.getDate() + 7);
+      ccWeekAnchor = ccIsoDate(d); ccRenderWeek(); return;
+    }
+    if (origNext) origNext();
+  };
+})();
+
+// ── NEXT up — countdown to the most imminent event/task ─────────────
+function ccRefreshNextUp() {
+  const block = document.getElementById('cc-next-block');
+  const text  = document.getElementById('next-up-text');
+  const count = document.getElementById('next-up-countdown');
+  const meta  = document.getElementById('next-up-meta');
+  if (!block || !text) return;
+  const now = new Date();
+  let best = null;
+  if (typeof calEvents !== 'undefined' && Array.isArray(calEvents)) {
+    for (const e of calEvents) {
+      if (!e.date) continue;
+      const iso = e.allday ? e.date + 'T08:00' : (e.date + 'T' + (e.time || '09:00'));
+      const when = new Date(iso);
+      if (isNaN(when) || when < now) continue;
+      if (!best || when < best.when) best = { ev: e, when };
+    }
+  }
+  if (!best) {
+    block.classList.remove('has-event'); block.classList.add('empty');
+    text.textContent = 'Nothing imminent — a clear window.';
+    count.classList.add('hidden'); meta.classList.add('hidden');
+    return;
+  }
+  block.classList.add('has-event'); block.classList.remove('empty');
+  text.textContent = best.ev.title || 'Event';
+  const diff = best.when - now;
+  const mins = Math.floor(diff / 60000);
+  let str;
+  if (mins < 60) str = mins + (mins === 1 ? ' minute' : ' minutes');
+  else if (mins < 1440) {
+    const h = Math.floor(mins / 60); const m = mins % 60;
+    str = h + 'h' + (m ? ' ' + m + 'm' : '');
+  } else {
+    const days = Math.floor(mins / 1440);
+    str = days + (days === 1 ? ' day' : ' days');
+  }
+  count.textContent = 'in ' + str;
+  count.classList.remove('hidden');
+  count.classList.remove('warn', 'danger');
+  if (mins <= 30) count.classList.add('warn');
+  if (mins <= 10) count.classList.add('danger');
+  meta.textContent = best.when.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  meta.classList.remove('hidden');
+}
+setInterval(ccRefreshNextUp, 30000);
+
+// ── Recent threads in left rail ──────────────────────────────────────
+async function ccLoadRecentThreads() {
+  const box = document.getElementById('recent-threads-list');
+  if (!box) return;
+  try {
+    const r = await authFetch('/api/conversations/recent?token=' + encodeURIComponent(authToken) + '&limit=6');
+    if (!r.ok) return;
+    const data = await r.json();
+    const rows = data.conversations || data.items || data || [];
+    if (!rows.length) {
+      box.innerHTML = '<div class="cc-row cc-row-thread" style="color:var(--dash-ink-faint);padding:7px 8px"><div class="cc-row-label">No prior conversations yet</div></div>';
+      return;
+    }
+    box.innerHTML = rows.slice(0, 6).map(c => {
+      const title = c.title || c.preview || c.first_message || 'Untitled';
+      const when = c.updated_at || c.created_at;
+      const relative = ccRelativeTime(when);
+      return `<a href="/chat?c=${encodeURIComponent(c.id)}" class="cc-row cc-row-thread">
+        <div class="cc-row-label" title="${ccEsc(title)}">${ccEsc(title.slice(0, 48))}</div>
+        <div class="cc-row-sub">${ccEsc(relative)}</div>
+      </a>`;
+    }).join('');
+  } catch (e) { /* silent */ }
+}
+function ccRelativeTime(when) {
+  if (!when) return '';
+  const then = typeof when === 'number' ? new Date(when * 1000) : new Date(when);
+  const diff = (Date.now() - then.getTime()) / 1000;
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+  return Math.floor(diff / 86400) + 'd ago';
+}
+function ccEsc(s) {
+  return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// ── Module activity badges (tax receipts pending, music playing) ─────
+async function ccRefreshModuleBadges() {
+  // Music badge from the mini-player (already polling via mpPoll).
+  const song = document.getElementById('mp-song');
+  const musicBadge = document.getElementById('mod-badge-music');
+  if (musicBadge && song) {
+    const playing = song.textContent && song.textContent !== '—';
+    musicBadge.classList.toggle('hidden', !playing);
+    musicBadge.classList.toggle('active', playing);
+    musicBadge.textContent = playing ? 'playing' : '';
+  }
+  // Tax badge — try to fetch pending-count; silent if endpoint missing.
+  try {
+    const r = await authFetch('/api/tax/deductions/pending/count?token=' + encodeURIComponent(authToken));
+    if (r.ok) {
+      const d = await r.json();
+      const b = document.getElementById('mod-badge-tax');
+      if (b) {
+        const n = d.count || d.pending || 0;
+        if (n > 0) { b.textContent = n; b.classList.remove('hidden'); b.classList.add('active'); }
+        else b.classList.add('hidden');
+      }
+    }
+  } catch(e) {}
+}
+setInterval(ccRefreshModuleBadges, 30000);
+
+// ── Ambient footer state ─────────────────────────────────────────────
+function ccRefreshAmbient() {
+  const amEl = document.getElementById('ambient-music');
+  const song = document.getElementById('mp-song');
+  const artist = document.getElementById('mp-artist');
+  if (amEl && song) {
+    const s = (song.textContent || '').trim();
+    const a = (artist?.textContent || '').trim();
+    if (s && s !== '—') amEl.textContent = s + (a && a !== '—' ? ' · ' + a : '');
+    else amEl.textContent = 'Nothing playing';
+  }
+}
+setInterval(ccRefreshAmbient, 5000);
+
+// ── Focus mode — Cmd/Ctrl + . to collapse the two rails ──────────────
+function toggleFocusMode() {
+  const shell = document.getElementById('panel-main');
+  if (!shell) return;
+  shell.classList.toggle('focus-mode');
+}
+document.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === '.') {
+    e.preventDefault();
+    toggleFocusMode();
+  }
+});
+
+// ── Init sequence ────────────────────────────────────────────────────
+(function() {
+  const wait = setInterval(() => {
+    if (typeof authToken !== 'undefined' && authToken) {
+      clearInterval(wait);
+      ccUpdateGreeting();
+      setInterval(ccUpdateGreeting, 60000);
+      ccRenderWeek();
+      ccRefreshNextUp();
+      ccLoadRecentThreads();
+      setInterval(ccLoadRecentThreads, 120000);
+      ccRefreshModuleBadges();
+      ccRefreshAmbient();
+      ccUpdatePersona();
+    }
+  }, 500);
 })();
 
 </script>"##;
