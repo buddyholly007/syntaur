@@ -127,6 +127,169 @@ Generated image from prompt: {}",
     }
 }
 
+
+pub struct EditImageTool {
+    pub task_manager: Arc<crate::background_tasks::BackgroundTaskManager>,
+    pub config: Arc<crate::config::Config>,
+    pub http: reqwest::Client,
+    pub conversations: Option<Arc<crate::conversations::ConversationManager>>,
+}
+
+#[async_trait]
+impl Tool for EditImageTool {
+    fn name(&self) -> &str { "edit_image" }
+
+    fn description(&self) -> &str {
+        "Edit an existing image based on a modification instruction. Provide the \
+         original image URL and describe what to change. The system will analyze \
+         the original and generate a refined version. For best results, be specific \
+         about what to keep and what to change."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "original_url": {"type": "string", "description": "URL of the image to edit"},
+                "edit_instruction": {"type": "string", "description": "What to change (e.g., 'make the sky darker', 'add clouds', 'change background to forest')"},
+                "preserve": {"type": "string", "description": "What to keep from the original (e.g., 'keep the mountains and foreground')"},
+                "size": {"type": "string", "enum": ["1024x1024", "1024x1536", "1536x1024"]}
+            },
+            "required": ["original_url", "edit_instruction"]
+        })
+    }
+
+    fn capabilities(&self) -> ToolCapabilities {
+        ToolCapabilities { network: true, ..ToolCapabilities::default() }
+    }
+
+    async fn execute(&self, args: Value, ctx: &ToolContext<'_>) -> Result<RichToolResult, String> {
+        let original_url = args.get("original_url").and_then(|v| v.as_str())
+            .ok_or("original_url required")?.to_string();
+        let edit_instruction = args.get("edit_instruction").and_then(|v| v.as_str())
+            .ok_or("edit_instruction required")?.to_string();
+        let preserve = args.get("preserve").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let size = args.get("size").and_then(|v| v.as_str()).unwrap_or("1024x1024").to_string();
+
+        // Step 1: Use vision to describe the original image
+        let chain = crate::llm::LlmChain::from_config_fast(&self.config, "main", self.http.clone());
+        let vision_messages = vec![
+            crate::llm::ChatMessage::system(
+                "Describe this image in detail: composition, colors, subjects, style, lighting.                  Be specific enough that someone could recreate it from your description.                  Respond with ONLY the description, no preamble."
+            ),
+            crate::llm::ChatMessage::user_with_images("Describe this image.", &[original_url.clone()]),
+        ];
+
+        let description = match tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            chain.call(&vision_messages)
+        ).await {
+            Ok(Ok(desc)) => desc,
+            _ => "original image".to_string(), // fallback if vision fails
+        };
+
+        // Step 2: Build refined prompt combining description + edit
+        let refined_prompt = if preserve.is_empty() {
+            format!(
+                "Based on this image: {}. Apply this edit: {}.                  Keep the overall composition and style consistent.",
+                description.trim(), edit_instruction
+            )
+        } else {
+            format!(
+                "Based on this image: {}. Apply this edit: {}.                  Preserve: {}. Keep style consistent.",
+                description.trim(), edit_instruction, preserve
+            )
+        };
+
+        // Step 3: Generate new image with refined prompt (async)
+        let conv_id = ctx.conversation_id.clone();
+        let task_id = self.task_manager.create(
+            ctx.user_id, conv_id.clone(), ctx.agent_id,
+            "image_edit", &format!("Edit: {}", &edit_instruction[..edit_instruction.len().min(50)]),
+        ).await;
+
+        let tm = Arc::clone(&self.task_manager);
+        let http = self.http.clone();
+        let api_key = self.config.models.providers.values()
+            .find(|p| p.base_url.contains("openrouter"))
+            .map(|p| p.api_key.clone()).unwrap_or_default();
+        let tid = task_id.clone();
+        let convs = self.conversations.clone();
+        let edit_desc = edit_instruction.to_string();
+        let size_owned = size.to_string();
+
+        tokio::spawn(async move {
+            match call_image_api(&http, &api_key, &refined_prompt, &size_owned).await {
+                Ok(url) => {
+                    info!("[image-edit] task {} completed", tid);
+                    tm.complete(&tid, json!({
+                        "url": url,
+                        "edit": edit_desc,
+                        "based_on": original_url.clone(),
+                    })).await;
+                    if let (Some(ref cid), Some(ref cm)) = (&conv_id, &convs) {
+                        let msg = format!("![Edited image]({})
+
+Edited: {}", url, edit_desc);
+                        let _ = cm.append(cid, "assistant", &msg).await;
+                    }
+                }
+                Err(e) => { error!("[image-edit] task {} failed: {}", tid, e); tm.fail(&tid, &e).await; }
+            }
+        });
+
+        Ok(RichToolResult::text(format!(
+            "Image edit started (task: {}). Analyzing the original and generating an edited version              with: '{}'. Continue talking — the result will appear shortly.",
+            task_id, edit_instruction
+        )))
+    }
+}
+
+pub struct SaveImageTool;
+
+#[async_trait]
+impl Tool for SaveImageTool {
+    fn name(&self) -> &str { "save_image" }
+
+    fn description(&self) -> &str {
+        "Save a generated image to your memory so you can reference it later.          Use when the user likes an image and might want to come back to it."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "The image URL to save"},
+                "title": {"type": "string", "description": "A memorable title for the image"},
+                "description": {"type": "string", "description": "What the image shows"},
+                "tags": {"type": "string", "description": "Comma-separated tags"}
+            },
+            "required": ["url", "title"]
+        })
+    }
+
+    fn capabilities(&self) -> ToolCapabilities { ToolCapabilities::default() }
+
+    async fn execute(&self, args: Value, ctx: &ToolContext<'_>) -> Result<RichToolResult, String> {
+        let url = args.get("url").and_then(|v| v.as_str()).ok_or("url required")?;
+        let title = args.get("title").and_then(|v| v.as_str()).ok_or("title required")?;
+        let description = args.get("description").and_then(|v| v.as_str()).unwrap_or("");
+        let tags = args.get("tags").and_then(|v| v.as_str()).unwrap_or("image");
+
+        let db = ctx.db_path.ok_or("No database")?;
+        let conn = rusqlite::Connection::open(db).map_err(|e| e.to_string())?;
+        let now = chrono::Utc::now().timestamp();
+        let key = format!("img_{}", &title.to_lowercase().replace(' ', "_")[..title.len().min(30)]);
+
+        conn.execute(
+            "INSERT INTO agent_memories              (user_id, agent_id, memory_type, key, title, description, content, tags,               importance, shared, source, created_at, updated_at)              VALUES (?1, ?2, 'reference', ?3, ?4, ?5, ?6, ?7, 6, 1, 'agent_learned', ?8, ?8)              ON CONFLICT(user_id, agent_id, key) DO UPDATE SET                content = excluded.content, updated_at = excluded.updated_at",
+            rusqlite::params![ctx.user_id, ctx.agent_id, key, title, description, url, tags, now],
+        ).map_err(|e| format!("save image: {}", e))?;
+
+        Ok(RichToolResult::text(format!("Image saved to memory: '{}'. You can recall it later with memory_recall.", title)))
+    }
+}
+
 /// Call OpenRouter's image generation API (Seedream 4.5 or similar).
 async fn call_image_api(
     http: &reqwest::Client,

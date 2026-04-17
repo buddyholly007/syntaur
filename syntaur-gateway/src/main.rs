@@ -1325,7 +1325,16 @@ async fn handle_api_message(
                 http: state.client.clone(),
                 conversations: state.conversations.clone(),
             });
-        tool_registry.add_extension_tools(&[run_skill, delegate, image_gen]);
+        let edit_image: Arc<dyn crate::tools::extension::Tool> =
+            Arc::new(crate::tools::image_gen::EditImageTool {
+                task_manager: Arc::clone(&state.bg_tasks),
+                config: Arc::new(state.config.clone()),
+                http: state.client.clone(),
+                conversations: state.conversations.clone(),
+            });
+        let save_image: Arc<dyn crate::tools::extension::Tool> =
+            Arc::new(crate::tools::image_gen::SaveImageTool);
+        tool_registry.add_extension_tools(&[run_skill, delegate, image_gen, edit_image, save_image]);
     }
     tool_registry.apply_module_filter(&state.disabled_tools);
     let tools = tool_registry.tool_definitions();
@@ -1466,7 +1475,16 @@ async fn handle_research(
                 http: state.client.clone(),
                 conversations: state.conversations.clone(),
             });
-        tr.add_extension_tools(&[run_skill, delegate, image_gen]);
+        let edit_image: Arc<dyn crate::tools::extension::Tool> =
+            Arc::new(crate::tools::image_gen::EditImageTool {
+                task_manager: Arc::clone(&state.bg_tasks),
+                config: Arc::new(state.config.clone()),
+                http: state.client.clone(),
+                conversations: state.conversations.clone(),
+            });
+        let save_image: Arc<dyn crate::tools::extension::Tool> =
+            Arc::new(crate::tools::image_gen::SaveImageTool);
+        tr.add_extension_tools(&[run_skill, delegate, image_gen, edit_image, save_image]);
     }
     let tool_registry = std::sync::Arc::new(tr);
 
@@ -1736,7 +1754,16 @@ async fn handle_message_start(
                 http: state.client.clone(),
                 conversations: state.conversations.clone(),
             });
-        tr.add_extension_tools(&[run_skill, delegate, image_gen]);
+        let edit_image: Arc<dyn crate::tools::extension::Tool> =
+            Arc::new(crate::tools::image_gen::EditImageTool {
+                task_manager: Arc::clone(&state.bg_tasks),
+                config: Arc::new(state.config.clone()),
+                http: state.client.clone(),
+                conversations: state.conversations.clone(),
+            });
+        let save_image: Arc<dyn crate::tools::extension::Tool> =
+            Arc::new(crate::tools::image_gen::SaveImageTool);
+        tr.add_extension_tools(&[run_skill, delegate, image_gen, edit_image, save_image]);
         }
         tr.apply_module_filter(&state.disabled_tools);
         let tool_registry = std::sync::Arc::new(tr);
@@ -1938,7 +1965,16 @@ async fn handle_research_start(
                 http: state.client.clone(),
                 conversations: state.conversations.clone(),
             });
-        tr.add_extension_tools(&[run_skill, delegate, image_gen]);
+        let edit_image: Arc<dyn crate::tools::extension::Tool> =
+            Arc::new(crate::tools::image_gen::EditImageTool {
+                task_manager: Arc::clone(&state.bg_tasks),
+                config: Arc::new(state.config.clone()),
+                http: state.client.clone(),
+                conversations: state.conversations.clone(),
+            });
+        let save_image: Arc<dyn crate::tools::extension::Tool> =
+            Arc::new(crate::tools::image_gen::SaveImageTool);
+        tr.add_extension_tools(&[run_skill, delegate, image_gen, edit_image, save_image]);
         }
         std::sync::Arc::new(tr)
     };
@@ -3748,7 +3784,16 @@ pub(crate) fn spawn_plan_executor(state: Arc<AppState>, plan_id: i64) {
                 http: state.client.clone(),
                 conversations: state.conversations.clone(),
             });
-        tr.add_extension_tools(&[run_skill, delegate, image_gen]);
+        let edit_image: Arc<dyn crate::tools::extension::Tool> =
+            Arc::new(crate::tools::image_gen::EditImageTool {
+                task_manager: Arc::clone(&state.bg_tasks),
+                config: Arc::new(state.config.clone()),
+                http: state.client.clone(),
+                conversations: state.conversations.clone(),
+            });
+        let save_image: Arc<dyn crate::tools::extension::Tool> =
+            Arc::new(crate::tools::image_gen::SaveImageTool);
+        tr.add_extension_tools(&[run_skill, delegate, image_gen, edit_image, save_image]);
                         }
                         let call = crate::tools::ToolCall {
                             id: format!("plan-{}-step", plan_id),
