@@ -1486,6 +1486,57 @@ const MIGRATIONS: &[&str] = &[
         ('default_tts_voice', 'system', 0),
         ('default_wake_word', 'Hey Kyron', 0);
     "#,
+
+    // Migration 39: Agent memories — persistent, typed, cross-session knowledge
+    // that agents accumulate and recall. Topic-organized, FTS5-searchable,
+    // per-user + per-agent scoped with controlled sharing.
+    // See vault/research/agent_memory_architecture.md for full design.
+    r#"
+    CREATE TABLE IF NOT EXISTS agent_memories (
+        id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id                 INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        agent_id                TEXT NOT NULL,
+        memory_type             TEXT NOT NULL,
+        key                     TEXT NOT NULL,
+        title                   TEXT NOT NULL,
+        description             TEXT,
+        content                 TEXT NOT NULL,
+        tags                    TEXT,
+        source                  TEXT NOT NULL DEFAULT 'agent_learned',
+        source_conversation_id  TEXT,
+        confidence              REAL NOT NULL DEFAULT 1.0,
+        importance              INTEGER NOT NULL DEFAULT 5,
+        access_count            INTEGER NOT NULL DEFAULT 0,
+        last_accessed_at        INTEGER,
+        shared                  INTEGER NOT NULL DEFAULT 0,
+        created_at              INTEGER NOT NULL,
+        updated_at              INTEGER NOT NULL,
+        expires_at              INTEGER,
+        UNIQUE(user_id, agent_id, key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_mem_user_agent ON agent_memories(user_id, agent_id);
+    CREATE INDEX IF NOT EXISTS idx_mem_type ON agent_memories(memory_type);
+    CREATE INDEX IF NOT EXISTS idx_mem_shared ON agent_memories(shared);
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS agent_memories_fts USING fts5(
+        title, description, content, tags,
+        content=agent_memories, content_rowid=id
+    );
+    CREATE TRIGGER IF NOT EXISTS agent_memories_ai AFTER INSERT ON agent_memories BEGIN
+        INSERT INTO agent_memories_fts(rowid, title, description, content, tags)
+        VALUES (new.id, new.title, COALESCE(new.description,''), new.content, COALESCE(new.tags,''));
+    END;
+    CREATE TRIGGER IF NOT EXISTS agent_memories_au AFTER UPDATE ON agent_memories BEGIN
+        INSERT INTO agent_memories_fts(agent_memories_fts, rowid, title, description, content, tags)
+        VALUES ('delete', old.id, old.title, COALESCE(old.description,''), old.content, COALESCE(old.tags,''));
+        INSERT INTO agent_memories_fts(rowid, title, description, content, tags)
+        VALUES (new.id, new.title, COALESCE(new.description,''), new.content, COALESCE(new.tags,''));
+    END;
+    CREATE TRIGGER IF NOT EXISTS agent_memories_ad AFTER DELETE ON agent_memories BEGIN
+        INSERT INTO agent_memories_fts(agent_memories_fts, rowid, title, description, content, tags)
+        VALUES ('delete', old.id, old.title, COALESCE(old.description,''), old.content, COALESCE(old.tags,''));
+    END;
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

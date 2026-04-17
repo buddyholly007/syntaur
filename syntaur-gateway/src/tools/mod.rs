@@ -1,5 +1,6 @@
 pub mod account;
 pub mod browser;
+pub mod agent_memory;
 pub mod built_in_tools;
 pub mod captcha;
 pub mod captcha_bridge;
@@ -274,6 +275,11 @@ impl ToolRegistry {
                 $(extensions.insert($alias.to_string(), Arc::clone(&arc));)+
             }};
         }
+        reg!(agent_memory::MemorySaveTool);
+        reg!(agent_memory::MemoryRecallTool);
+        reg!(agent_memory::MemoryListTool);
+        reg!(agent_memory::MemoryUpdateTool);
+        reg!(agent_memory::MemoryForgetTool);
         reg!(built_in_tools::MemoryReadTool);
         reg!(built_in_tools::MemoryWriteTool);
         reg!(built_in_tools::ReadFileTool, "file_read");
