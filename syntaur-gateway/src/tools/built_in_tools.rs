@@ -60,6 +60,69 @@ impl Tool for MemoryReadTool {
     }
 }
 
+
+
+pub struct PlanProposeTool;
+
+#[async_trait]
+impl Tool for PlanProposeTool {
+    fn name(&self) -> &str { "plan_propose" }
+    fn description(&self) -> &str {
+        "Create a multi-step plan for user approval. Each step is either a tool call, \
+         a skill invocation, or a note. The plan is sent to the user for approval \
+         before execution begins. Steps execute sequentially after approval."
+    }
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Plan title (e.g., 'Q3 Tax Filing Plan')"},
+                "rationale": {"type": "string", "description": "Why this plan is needed"},
+                "steps": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "kind": {"type": "string", "enum": ["tool", "skill", "note"], "description": "Step type"},
+                            "target": {"type": "string", "description": "Tool/skill name, or note text"},
+                            "args": {"type": "object", "description": "Arguments for tool/skill steps"}
+                        },
+                        "required": ["kind", "target"]
+                    },
+                    "description": "Ordered list of steps to execute"
+                }
+            },
+            "required": ["title", "steps"]
+        })
+    }
+    fn capabilities(&self) -> ToolCapabilities { ToolCapabilities::default() }
+    async fn execute(&self, args: Value, ctx: &ToolContext<'_>) -> Result<RichToolResult, String> {
+        let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("Untitled Plan");
+        let rationale = args.get("rationale").and_then(|v| v.as_str()).unwrap_or("");
+        let steps = args.get("steps").and_then(|v| v.as_array()).ok_or("steps array required")?;
+
+        if steps.is_empty() { return Err("Plan must have at least one step".to_string()); }
+        if steps.len() > 20 { return Err("Plan limited to 20 steps".to_string()); }
+
+        // Format steps for display
+        let step_lines: Vec<String> = steps.iter().enumerate().map(|(i, s)| {
+            let kind = s.get("kind").and_then(|v| v.as_str()).unwrap_or("note");
+            let target = s.get("target").and_then(|v| v.as_str()).unwrap_or("?");
+            format!("{}. [{}] {}", i + 1, kind, target)
+        }).collect();
+
+        // Note: actual plan creation requires the PlanStore which isn't in ToolContext.
+        // We return the plan summary for the LLM to present to the user, and the
+        // frontend/handler creates the actual plan via /api/plans.
+        Ok(RichToolResult::text(format!(
+            "Plan proposed: {}\n\nRationale: {}\n\nSteps:\n{}\n\n\
+             To execute this plan, it needs user approval. The plan will be \
+             sent for review.",
+            title, rationale, step_lines.join("\n")
+        )))
+    }
+}
+
 pub struct MemoryWriteTool;
 
 #[async_trait]

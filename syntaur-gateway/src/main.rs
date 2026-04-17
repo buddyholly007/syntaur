@@ -5066,6 +5066,8 @@ async fn main() {
         .route("/api/memory/stats", get(handle_api_memory_stats))
         .route("/api/memory/export", axum::routing::post(handle_api_memory_export))
         .route("/api/memory/prune", axum::routing::post(handle_api_memory_prune))
+        .route("/api/memory/all", get(handle_api_memory_all))
+        .route("/api/memory/delete", axum::routing::post(handle_api_memory_delete))
         .route("/api/modules/toggle", post(setup::handle_module_toggle))
         .route("/api/license/status", get(setup::handle_license_status))
         .route("/api/license/activate", post(setup::handle_license_activate))
@@ -6113,6 +6115,70 @@ async fn handle_api_memory_prune(
         Some(crate::agents::defaults::prune_expired(&conn))
     }).await.ok().flatten().unwrap_or(0);
     Ok(Json(serde_json::json!({"pruned": pruned})))
+}
+
+
+/// GET /api/memory/all — full audit of all user's memories across agents.
+/// For the settings UI to render a browsable/searchable/deletable memory grid.
+async fn handle_api_memory_all(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").cloned().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let principal = resolve_principal(&state, &token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let memories = tokio::task::spawn_blocking(move || -> Vec<serde_json::Value> {
+        let conn = match rusqlite::Connection::open(&db) { Ok(c) => c, Err(_) => return vec![] };
+        let mut stmt = match conn.prepare(
+            "SELECT id, agent_id, memory_type, key, title, description, content, \
+                    tags, confidence, importance, access_count, shared, \
+                    created_at, updated_at, expires_at, source \
+             FROM agent_memories WHERE user_id = ? ORDER BY agent_id, memory_type, key"
+        ) { Ok(s) => s, Err(_) => return vec![] };
+        stmt.query_map(rusqlite::params![uid], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_,i64>(0)?,
+                "agent": r.get::<_,String>(1)?,
+                "type": r.get::<_,String>(2)?,
+                "key": r.get::<_,String>(3)?,
+                "title": r.get::<_,String>(4)?,
+                "description": r.get::<_,Option<String>>(5)?,
+                "content": r.get::<_,String>(6)?,
+                "tags": r.get::<_,Option<String>>(7)?,
+                "confidence": r.get::<_,f64>(8)?,
+                "importance": r.get::<_,i64>(9)?,
+                "access_count": r.get::<_,i64>(10)?,
+                "shared": r.get::<_,bool>(11)?,
+                "created_at": r.get::<_,i64>(12)?,
+                "updated_at": r.get::<_,i64>(13)?,
+                "expires_at": r.get::<_,Option<i64>>(14)?,
+                "source": r.get::<_,String>(15)?,
+            }))
+        }).ok().map(|iter| iter.filter_map(Result::ok).collect()).unwrap_or_default()
+    }).await.unwrap_or_default();
+    Ok(Json(serde_json::json!({"memories": memories, "count": memories.len()})))
+}
+
+/// POST /api/memory/delete — delete a specific memory by id (user must own it).
+async fn handle_api_memory_delete(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let memory_id = body["id"].as_i64().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let deleted = tokio::task::spawn_blocking(move || {
+        let conn = rusqlite::Connection::open(&db).ok()?;
+        Some(conn.execute(
+            "DELETE FROM agent_memories WHERE id = ? AND user_id = ?",
+            rusqlite::params![memory_id, uid],
+        ).unwrap_or(0))
+    }).await.ok().flatten().unwrap_or(0);
+    if deleted == 0 { return Err(axum::http::StatusCode::NOT_FOUND); }
+    Ok(Json(serde_json::json!({"deleted": true, "id": memory_id})))
 }
 
 /// POST /api/agents/seed_defaults — clone all product-default personas into

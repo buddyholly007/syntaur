@@ -282,6 +282,7 @@ impl ToolRegistry {
         reg!(agent_memory::MemoryForgetTool);
         reg!(built_in_tools::MemoryReadTool);
         reg!(built_in_tools::MemoryWriteTool);
+        reg!(built_in_tools::PlanProposeTool);
         reg!(built_in_tools::ReadFileTool, "file_read");
         reg!(built_in_tools::WriteFileTool, "file_write");
         reg!(built_in_tools::EditFileTool, "file_edit");
