@@ -1123,33 +1123,47 @@ async function runScan() {
     // RAM
     document.getElementById('hw-ram-val').textContent = `${scan.ram_total_gb} GB (${scan.ram_available_gb} GB free)`;
 
-    // GPU — check local first, then network
+    // Compute — render local (including Apple / AMD / CPU) then LAN.
+    // Kind → badge color mapping keeps the icons meaningful at a glance.
+    const kindBadge = (k) => ({
+      'nvidia':     '<span class="badge badge-green">NVIDIA</span>',
+      'apple':      '<span class="badge badge-blue">Apple Silicon</span>',
+      'amd':        '<span class="badge badge-red">AMD</span>',
+      'intel-gpu':  '<span class="badge badge-blue">Intel</span>',
+      'cpu':        '<span class="badge badge-gray">CPU</span>',
+    })[k] || '<span class="badge badge-gray">Unknown</span>';
+    const memUnit = (k) => ({ 'VRAM': 'GB VRAM', 'unified': 'GB unified', 'RAM': 'GB RAM' })[k] || 'GB';
+
+    // Local box
     if (scan.gpu_name) {
-      document.getElementById('hw-gpu-val').innerHTML = `${scan.gpu_name} <span class="text-oc-500">(${scan.gpu_vram_gb} GB VRAM)</span>`;
+      document.getElementById('hw-gpu-val').innerHTML =
+        `${scan.gpu_name} <span class="text-oc-500">(${scan.gpu_vram_gb} ${memUnit(scan.compute_memory_kind)})</span> ${kindBadge(scan.compute_kind)}`
+        + (scan.compute_runtime ? ` <span class="text-xs text-gray-500">via ${scan.compute_runtime}</span>` : '');
       selectLlm('local');
       document.getElementById('llm-local-desc').textContent = `Run a model on your ${scan.gpu_name}`;
-    } else if (scan.network_gpus && scan.network_gpus.length > 0) {
-      // Show ALL network GPUs
-      const gpuLines = scan.network_gpus.map(g =>
-        `${g.name} <span class="text-oc-500">(${g.vram_gb} GB VRAM)</span> <span class="badge badge-blue ml-1">on ${g.host}</span>`
+    } else if (scan.network_compute && scan.network_compute.length > 0) {
+      // Show ALL network compute, sorted so richer-memory hosts float up.
+      const sorted = [...scan.network_compute].sort((a, b) =>
+        parseFloat(b.memory_gb) - parseFloat(a.memory_gb));
+      const lines = sorted.map(c =>
+        `${c.name} <span class="text-oc-500">(${c.memory_gb} ${memUnit(c.memory_kind)})</span> ${kindBadge(c.kind)} <span class="badge badge-blue ml-1">on ${c.host}</span>`
       );
-      document.getElementById('hw-gpu-val').innerHTML = gpuLines.join('<br>');
-      if (scan.network_gpus.length > 1) {
-        const total = scan.network_gpus.reduce((s, g) => s + parseFloat(g.vram_gb), 0).toFixed(1);
-        document.getElementById('hw-gpu-val').innerHTML += `<br><span class="text-xs text-gray-500 mt-1">${scan.network_gpus.length} GPUs, ${total} GB total VRAM</span>`;
-        // Show role assignment for multi-GPU
+      document.getElementById('hw-gpu-val').innerHTML = lines.join('<br>');
+      if (sorted.length > 1) {
+        document.getElementById('hw-gpu-val').innerHTML +=
+          `<br><span class="text-xs text-gray-500 mt-1">${sorted.length} compute node(s) found</span>`;
         document.getElementById('gpu-roles').classList.remove('hidden');
-        renderGpuRoles(scan.network_gpus);
-      } else if (scan.gpu_name) {
-        // Single local GPU — still show roles if it's big enough for split use
-        if (parseFloat(scan.gpu_vram_gb) >= 16) {
-          document.getElementById('gpu-roles').classList.remove('hidden');
-          renderGpuRoles([{ name: scan.gpu_name, vram_gb: scan.gpu_vram_gb, host: 'this machine' }]);
-        }
+        renderGpuRoles(sorted.map(c => ({ name: c.name, vram_gb: c.memory_gb, host: c.host, kind: c.kind })));
       }
       selectLlm('network');
-      const best = scan.network_gpus[0];
+      const best = sorted[0];
       document.getElementById('llm-network-desc').textContent = `Use ${best.name} on ${best.host}`;
+    } else if (scan.compute_kind === 'cpu' && parseFloat(scan.ram_total_gb) >= 8) {
+      // Local CPU-only but enough RAM for tiny-model inference.
+      document.getElementById('hw-gpu-val').innerHTML =
+        `<span class="text-gray-400">No GPU — using CPU inference</span> ${kindBadge('cpu')}`
+        + ` <span class="text-xs text-gray-500">${scan.ram_total_gb} GB RAM available</span>`;
+      selectLlm('cloud');
     } else {
       document.getElementById('hw-gpu-val').innerHTML = '<span class="text-gray-500">None detected locally</span>';
       if (scan.gpu_scan_blocked) {
@@ -1273,6 +1287,9 @@ function renderGpuRoles(gpus) {
   // Auto-assign roles based on VRAM
   const sorted = [...gpus].sort((a, b) => parseFloat(b.vram_gb) - parseFloat(a.vram_gb));
 
+  const memLabel = (g) => ({
+    'apple': 'GB unified', 'cpu': 'GB RAM', 'intel-gpu': 'GB VRAM',
+  })[g.kind] || 'GB VRAM';
   list.innerHTML = gpus.map((gpu, i) => {
     const vram = parseFloat(gpu.vram_gb);
     const eligible = GPU_ROLES.filter(r => vram >= r.minVram);
@@ -1281,7 +1298,7 @@ function renderGpuRoles(gpus) {
         <div class="flex items-center justify-between mb-2">
           <div>
             <p class="text-sm font-medium text-gray-300">${gpu.name}</p>
-            <p class="text-xs text-gray-500">${gpu.vram_gb} GB VRAM${gpu.host ? ' · ' + gpu.host : ''}</p>
+            <p class="text-xs text-gray-500">${gpu.vram_gb} ${memLabel(gpu)}${gpu.host ? ' · ' + gpu.host : ''}</p>
           </div>
         </div>
         <div class="flex flex-wrap gap-1">

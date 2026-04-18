@@ -1154,44 +1154,77 @@ pub async fn handle_hardware_scan(
     headers: axum::http::HeaderMap,
 ) -> Result<Json<HardwareScanResponse>, StatusCode> {
     require_setup_auth(&state, &extract_token_from_headers(&headers)).await?;
-    let cpu_model = read_cpu_model();
     let (ram_total, ram_avail) = read_ram();
-    let gpu = detect_gpu();
+    let local = detect_local_compute(ram_total);
     let disk_free = read_disk_free();
-    let tier = classify_hw_tier(&gpu.1, ram_total);
+    let tier = classify_compute_tier(&local, ram_total);
 
-    // Scan network for GPUs and LLM services
-    let (network_gpus, gpu_scan_blocked) = scan_network_gpus().await;
+    // Scan network for compute (NVIDIA / Apple / AMD / CPU-only) + LLM services.
+    let (network_compute, gpu_scan_blocked) = scan_network_compute().await;
     let network_llms = scan_network_llms().await;
 
-    // Upgrade tier if we found network GPUs or LLMs
-    let effective_tier = if !network_gpus.is_empty() {
-        let best_vram: f64 = network_gpus.iter()
-            .filter_map(|g| g.vram_gb.parse::<f64>().ok())
-            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .unwrap_or(0.0);
-        if best_vram >= 16.0 { "Powerful (network GPU)".to_string() }
-        else if best_vram >= 8.0 { "Capable (network GPU)".to_string() }
-        else { "Limited (network GPU)".to_string() }
-    } else if !network_llms.is_empty() {
-        "Network LLM available".to_string()
-    } else {
-        tier
+    // Upgrade tier if any LAN node outranks the local box.
+    let effective_tier = {
+        let local_score = tier_score(&tier);
+        let best_network = network_compute.iter()
+            .map(|c| tier_score(&classify_compute_tier(
+                &LocalCompute {
+                    kind: c.kind.clone(),
+                    name: Some(c.name.clone()),
+                    memory_gb: c.memory_gb.parse::<f64>().ok(),
+                    memory_kind: c.memory_kind.clone(),
+                    runtime_hint: c.runtime_hint.clone(),
+                },
+                (c.memory_gb.parse::<f64>().unwrap_or(0.0) * 1024.0) as u64,
+            )))
+            .max()
+            .unwrap_or(0);
+        if best_network > local_score && !network_compute.is_empty() {
+            format!("{} (network)", tier_label(best_network))
+        } else if !network_llms.is_empty() && local_score < 3 {
+            "Network LLM available".to_string()
+        } else {
+            tier
+        }
     };
 
     Ok(Json(HardwareScanResponse {
-        cpu: cpu_model,
+        cpu: local.name.clone().unwrap_or_else(|| read_cpu_model()),
         ram_total_gb: format!("{:.1}", ram_total as f64 / 1024.0),
         ram_available_gb: format!("{:.1}", ram_avail as f64 / 1024.0),
-        gpu_name: gpu.0,
-        gpu_vram_gb: gpu.1,
+        gpu_name: if local.kind != "cpu" { local.name.clone() } else { None },
+        gpu_vram_gb: if local.kind != "cpu" { local.memory_gb.map(|v| format!("{:.1}", v)) } else { None },
+        compute_kind: local.kind.clone(),
+        compute_memory_kind: local.memory_kind.clone(),
+        compute_runtime: local.runtime_hint.clone(),
         disk_free_gb: disk_free,
         tier: effective_tier,
         network_llms,
-        network_gpus,
+        network_compute,
         gpu_scan_blocked,
         local_ip: detect_local_ip(),
     }))
+}
+
+/// Numeric scoring used to compare local vs network compute so the wizard
+/// can pick the best AI host regardless of whether it's NVIDIA/Apple/CPU.
+fn tier_score(tier: &str) -> u8 {
+    // Strip optional "(network ...)" suffix before matching.
+    let base = tier.split_whitespace().next().unwrap_or(tier);
+    match base {
+        "Powerful" => 4,
+        "Capable" => 3,
+        "Limited" => 2,
+        "CPU-only" => 1,
+        "Minimal" => 0,
+        _ => 0,
+    }
+}
+fn tier_label(score: u8) -> &'static str {
+    match score {
+        4 => "Powerful", 3 => "Capable", 2 => "Limited",
+        1 => "CPU-only", _ => "Minimal",
+    }
 }
 
 #[derive(Serialize)]
@@ -1201,10 +1234,16 @@ pub struct HardwareScanResponse {
     pub ram_available_gb: String,
     pub gpu_name: Option<String>,
     pub gpu_vram_gb: Option<String>,
+    /// "nvidia" | "apple" | "amd" | "intel-gpu" | "cpu"
+    pub compute_kind: String,
+    /// "VRAM" | "unified" | "RAM"
+    pub compute_memory_kind: String,
+    /// Suggested inference runtime: "CUDA" | "Metal" | "ROCm" | "llama.cpp-CPU"
+    pub compute_runtime: Option<String>,
     pub disk_free_gb: String,
     pub tier: String,
     pub network_llms: Vec<NetworkLlmInfo>,
-    pub network_gpus: Vec<NetworkGpuInfo>,
+    pub network_compute: Vec<NetworkComputeInfo>,
     pub gpu_scan_blocked: bool,
     pub local_ip: Option<String>,
 }
@@ -1219,11 +1258,21 @@ fn detect_local_ip() -> Option<String> {
         .map(|addr| addr.ip().to_string())
 }
 
-#[derive(Serialize)]
-pub struct NetworkGpuInfo {
+/// A compute node found on the LAN — could be an NVIDIA GPU host, an
+/// Apple Silicon Mac with unified memory, an AMD/Intel GPU host, or just
+/// a CPU-only box with enough RAM to run small models via llama.cpp.
+#[derive(Serialize, Clone)]
+pub struct NetworkComputeInfo {
     pub host: String,
+    /// "nvidia" | "apple" | "amd" | "intel-gpu" | "cpu"
+    pub kind: String,
     pub name: String,
-    pub vram_gb: String,
+    /// Numeric GB as a string (VRAM, unified, or RAM depending on kind).
+    pub memory_gb: String,
+    /// "VRAM" | "unified" | "RAM"
+    pub memory_kind: String,
+    /// Suggested inference runtime for this node.
+    pub runtime_hint: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1234,6 +1283,120 @@ pub struct NetworkLlmInfo {
     pub host: String,
     pub gpu_name: Option<String>,
     pub gpu_vram_gb: Option<String>,
+}
+
+/// Locally-detected compute description. Keep `pub(crate)` visibility
+/// for reuse in `detect_remote_gpu` fallback + scan pipeline.
+#[derive(Clone)]
+pub(crate) struct LocalCompute {
+    pub kind: String,
+    pub name: Option<String>,
+    pub memory_gb: Option<f64>,
+    pub memory_kind: String,
+    pub runtime_hint: Option<String>,
+}
+
+/// Shell script run over SSH (or locally). Emits tagged key=value lines so
+/// we can parse regardless of OS. Tries NVIDIA → Apple → AMD in that order,
+/// then always emits CPU + RAM so a CPU-only host still surfaces as usable.
+///
+/// POSIX sh only — no bashisms. Runs on macOS and Linux.
+const PROBE_SCRIPT: &str = r#"
+OS=$(uname -s 2>/dev/null); ARCH=$(uname -m 2>/dev/null)
+echo "os=$OS"; echo "arch=$ARCH"
+if command -v nvidia-smi >/dev/null 2>&1; then
+  nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | awk -F, '{n=$1;m=$2;sub(/^ +/,"",n);sub(/ +$/,"",n);sub(/^ +/,"",m);printf "nvidia=%s|%s\n",n,m}'
+elif [ "$OS" = "Darwin" ]; then
+  C=$(sysctl -n machdep.cpu.brand_string 2>/dev/null)
+  M=$(sysctl -n hw.memsize 2>/dev/null)
+  echo "apple=$C|$M"
+elif command -v rocm-smi >/dev/null 2>&1; then
+  N=$(rocm-smi --showproductname 2>/dev/null | grep -i 'card series' | head -1 | sed 's/.*: *//')
+  V=$(rocm-smi --showmeminfo vram --csv 2>/dev/null | tail -1 | awk -F, '{print $2}')
+  [ -n "$N" ] && echo "amd=$N|$V"
+elif command -v lspci >/dev/null 2>&1; then
+  I=$(lspci 2>/dev/null | grep -iE 'vga|3d|display' | grep -iE 'intel.*(arc|xe)' | head -1 | sed 's/.*: *//')
+  [ -n "$I" ] && echo "intel-gpu=$I|0"
+fi
+if [ "$OS" = "Darwin" ]; then
+  CPU=$(sysctl -n machdep.cpu.brand_string 2>/dev/null)
+  R=$(sysctl -n hw.memsize 2>/dev/null); RAM_KB=$(( R / 1024 ))
+else
+  CPU=$(grep -m1 '^model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | sed 's/^ *//')
+  RAM_KB=$(grep -m1 '^MemTotal' /proc/meminfo 2>/dev/null | awk '{print $2}')
+fi
+echo "cpu=$CPU"
+echo "ram_kb=$RAM_KB"
+"#;
+
+/// Parse the PROBE_SCRIPT output into a LocalCompute. Called on both the
+/// local host (stdout of `sh -c PROBE_SCRIPT`) and remote hosts (stdout of
+/// SSH'd probe).
+pub(crate) fn parse_probe_output(stdout: &str) -> LocalCompute {
+    let mut kv = std::collections::HashMap::new();
+    for line in stdout.lines() {
+        if let Some((k, v)) = line.split_once('=') {
+            kv.insert(k.trim().to_string(), v.trim().to_string());
+        }
+    }
+    let split_name_mem = |s: &str| -> (String, Option<f64>) {
+        let mut it = s.splitn(2, '|');
+        let name = it.next().unwrap_or("").trim().to_string();
+        let mem_raw = it.next().unwrap_or("0").trim().to_string();
+        let mem_gb = mem_raw.parse::<f64>().ok();
+        (name, mem_gb)
+    };
+
+    if let Some(v) = kv.get("nvidia") {
+        let (name, mb) = split_name_mem(v);
+        return LocalCompute {
+            kind: "nvidia".into(),
+            name: Some(name),
+            memory_gb: mb.map(|m| m / 1024.0),  // MB → GB
+            memory_kind: "VRAM".into(),
+            runtime_hint: Some("CUDA".into()),
+        };
+    }
+    if let Some(v) = kv.get("apple") {
+        let (name, bytes) = split_name_mem(v);
+        return LocalCompute {
+            kind: "apple".into(),
+            name: Some(name),
+            memory_gb: bytes.map(|b| b / 1024.0 / 1024.0 / 1024.0),  // bytes → GB
+            memory_kind: "unified".into(),
+            runtime_hint: Some("Metal".into()),
+        };
+    }
+    if let Some(v) = kv.get("amd") {
+        let (name, mb) = split_name_mem(v);
+        return LocalCompute {
+            kind: "amd".into(),
+            name: Some(name),
+            memory_gb: mb.map(|m| m / 1024.0),
+            memory_kind: "VRAM".into(),
+            runtime_hint: Some("ROCm".into()),
+        };
+    }
+    if let Some(v) = kv.get("intel-gpu") {
+        let (name, _) = split_name_mem(v);
+        return LocalCompute {
+            kind: "intel-gpu".into(),
+            name: Some(name),
+            memory_gb: None,
+            memory_kind: "VRAM".into(),
+            runtime_hint: Some("OpenVINO".into()),
+        };
+    }
+    // CPU fallback
+    let cpu_name = kv.get("cpu").cloned().filter(|s| !s.is_empty());
+    let ram_kb: u64 = kv.get("ram_kb").and_then(|s| s.parse().ok()).unwrap_or(0);
+    LocalCompute {
+        kind: "cpu".into(),
+        name: cpu_name,
+        memory_gb: if ram_kb > 0 { Some(ram_kb as f64 / 1024.0 / 1024.0) } else { None },
+        memory_kind: "RAM".into(),
+        runtime_hint: if ram_kb > 0 { Some("llama.cpp-CPU".into()) } else { None },
+    }
 }
 
 fn read_cpu_model() -> String {
@@ -1273,26 +1436,30 @@ fn read_ram() -> (u64, u64) {
     (0, 0)
 }
 
-fn detect_gpu() -> (Option<String>, Option<String>) {
-    if let Ok(out) = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=name,memory.total", "--format=csv,noheader,nounits"])
-        .output()
-    {
-        if out.status.success() {
-            let s = String::from_utf8_lossy(&out.stdout);
-            if let Some(line) = s.lines().next() {
-                let parts: Vec<&str> = line.splitn(2, ',').map(|s| s.trim()).collect();
-                if parts.len() == 2 {
-                    let vram_mb: f64 = parts[1].parse().unwrap_or(0.0);
-                    return (
-                        Some(parts[0].to_string()),
-                        Some(format!("{:.1}", vram_mb / 1024.0)),
-                    );
-                }
+/// Run the unified compute probe locally.
+fn detect_local_compute(ram_total_mb: u64) -> LocalCompute {
+    let out = std::process::Command::new("sh")
+        .args(["-c", PROBE_SCRIPT])
+        .output();
+    if let Ok(o) = out {
+        if o.status.success() {
+            let mut lc = parse_probe_output(&String::from_utf8_lossy(&o.stdout));
+            // Ensure CPU-only nodes at least report our computed RAM if the
+            // probe couldn't read it.
+            if lc.kind == "cpu" && lc.memory_gb.is_none() && ram_total_mb > 0 {
+                lc.memory_gb = Some(ram_total_mb as f64 / 1024.0);
             }
+            return lc;
         }
     }
-    (None, None)
+    // Shell probe failed — degrade to minimal CPU report.
+    LocalCompute {
+        kind: "cpu".into(),
+        name: Some(read_cpu_model()),
+        memory_gb: Some(ram_total_mb as f64 / 1024.0),
+        memory_kind: "RAM".into(),
+        runtime_hint: None,
+    }
 }
 
 fn read_disk_free() -> String {
@@ -1307,15 +1474,43 @@ fn read_disk_free() -> String {
     "?".to_string()
 }
 
-fn classify_hw_tier(gpu_vram: &Option<String>, ram_mb: u64) -> String {
-    if let Some(vram) = gpu_vram {
-        let gb: f64 = vram.parse().unwrap_or(0.0);
-        if gb >= 16.0 { return "Powerful".to_string(); }
-        if gb >= 8.0 { return "Capable".to_string(); }
-        if gb >= 4.0 { return "Limited".to_string(); }
+/// Classify a compute node's AI usefulness. Thresholds reflect what each
+/// memory regime can actually run today (q4 quantization, llama.cpp-tier
+/// tooling): NVIDIA VRAM is tightest, Apple unified is mid (you can trade
+/// RAM for VRAM), CPU-only is generous because 70B-q4 in 64GB RAM is very
+/// slow but possible.
+fn classify_compute_tier(lc: &LocalCompute, fallback_ram_mb: u64) -> String {
+    let mem = lc.memory_gb.unwrap_or(0.0);
+    let ram_gb = fallback_ram_mb as f64 / 1024.0;
+    match lc.kind.as_str() {
+        "nvidia" | "amd" => {
+            if mem >= 16.0 { "Powerful".into() }
+            else if mem >= 8.0 { "Capable".into() }
+            else if mem >= 4.0 { "Limited".into() }
+            else if ram_gb >= 16.0 { "CPU-only".into() }
+            else { "Minimal".into() }
+        }
+        "apple" => {
+            // Unified memory — a Mac with 32GB can run a 30B-q4 model
+            // comfortably; 16GB runs 13B; 8GB is 7B territory.
+            if mem >= 32.0 { "Powerful".into() }
+            else if mem >= 16.0 { "Capable".into() }
+            else if mem >= 8.0 { "Limited".into() }
+            else { "CPU-only".into() }
+        }
+        "intel-gpu" => {
+            // Intel Arc/Xe — limited ML tooling today; treat as CPU-assist.
+            if ram_gb >= 16.0 { "Limited".into() } else { "CPU-only".into() }
+        }
+        _ => {
+            // CPU-only node. 32GB+ RAM can do small-model serving; 16GB
+            // is small-model inference only; below that, assistant-only.
+            if mem >= 32.0 { "Limited".into() }
+            else if mem >= 16.0 { "CPU-only".into() }
+            else if mem >= 8.0 { "CPU-only".into() }
+            else { "Minimal".into() }
+        }
     }
-    if ram_mb >= 8000 { return "CPU-only".to_string(); }
-    "Minimal".to_string()
 }
 
 
@@ -1400,110 +1595,106 @@ fn get_subnet_prefix() -> String {
 }
 
 
-/// Try to detect GPU on a remote host by checking if it responds to
-/// nvidia-smi style info. We check a known endpoint pattern or fall back
-/// to inferring from the model being served.
-async fn detect_remote_gpu(client: &reqwest::Client, host: &str) -> (Option<String>, Option<String>) {
-    // Try llama.cpp /props endpoint which sometimes has system info
-    // For now, use a simpler heuristic: if the host is serving a large model
-    // (e.g., 27B+), it likely has a beefy GPU
-    
-    // Try nvidia-smi via a simple HTTP wrapper if available
-    // This would be a custom endpoint; for now check nvidia-smi locally
-    // if the service is on localhost
-    if host == "127.0.0.1" || host == "localhost" {
-        return detect_gpu(); // Use the existing local detection
+/// Probe a remote host's compute over SSH. Runs [PROBE_SCRIPT] and parses
+/// the tagged-line output. Returns `Some(NetworkComputeInfo)` if SSH
+/// connected and produced usable output, `None` if unreachable/denied.
+async fn probe_remote_compute(host: &str) -> Option<NetworkComputeInfo> {
+    let out = tokio::process::Command::new("ssh")
+        .args([
+            "-o", "ConnectTimeout=1",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "BatchMode=yes",
+            &format!("sean@{}", host),
+            PROBE_SCRIPT,
+        ])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() { return None; }
+    let lc = parse_probe_output(&String::from_utf8_lossy(&out.stdout));
+    // Skip hosts where we couldn't identify anything useful.
+    if lc.name.as_deref().unwrap_or("").is_empty() && lc.kind == "cpu" && lc.memory_gb.unwrap_or(0.0) < 4.0 {
+        return None;
     }
-
-    // For remote hosts, try to query GPU info via a lightweight endpoint
-    // Many LLM servers expose /v1/system or similar
-    if let Ok(resp) = client.get(&format!("http://{}:3000/api/gpu", host)).send().await {
-        if let Ok(body) = resp.json::<serde_json::Value>().await {
-            let name = body.get("name").and_then(|v| v.as_str()).map(String::from);
-            let vram = body.get("vram_gb").and_then(|v| v.as_str()).map(String::from);
-            if name.is_some() { return (name, vram); }
-        }
-    }
-
-    // Heuristic: if serving a 27B+ model, likely has 24GB+ GPU
-    // We already have model info from the caller, but we don't pass it here
-    // So just return None and let the UI show the model info instead
-    (None, None)
+    let mem = lc.memory_gb.unwrap_or(0.0);
+    Some(NetworkComputeInfo {
+        host: host.to_string(),
+        kind: lc.kind,
+        name: lc.name.unwrap_or_else(|| "(unknown)".to_string()),
+        memory_gb: format!("{:.1}", mem),
+        memory_kind: lc.memory_kind,
+        runtime_hint: lc.runtime_hint,
+    })
 }
 
+/// Decorator used by scan_network_llms to annotate an LLM-serving host
+/// with its compute profile. Wraps probe_remote_compute for back-compat
+/// with the (name, memory_gb_string) shape the callsite still expects.
+async fn detect_remote_gpu(_client: &reqwest::Client, host: &str) -> (Option<String>, Option<String>) {
+    if host == "127.0.0.1" || host == "localhost" {
+        let (ram, _) = read_ram();
+        let lc = detect_local_compute(ram);
+        if lc.kind != "cpu" {
+            return (lc.name, lc.memory_gb.map(|m| format!("{:.1}", m)));
+        }
+        return (None, None);
+    }
+    match probe_remote_compute(host).await {
+        Some(c) if c.kind != "cpu" => (Some(c.name), Some(c.memory_gb)),
+        _ => (None, None),
+    }
+}
 
-/// Scan the local network for NVIDIA GPUs by trying to SSH or probe known ports.
-/// Returns (gpus_found, was_blocked).
-async fn scan_network_gpus() -> (Vec<NetworkGpuInfo>, bool) {
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(1500))
-        .build() {
-        Ok(c) => c,
-        Err(_) => return (Vec::new(), false),
-    };
-
+/// Scan every IP on the local subnet via SSH + PROBE_SCRIPT, collecting
+/// all AI-usable compute: NVIDIA, Apple Silicon, AMD, Intel, and CPU-only
+/// hosts with enough RAM for small-model inference. Returns (found, blocked).
+async fn scan_network_compute() -> (Vec<NetworkComputeInfo>, bool) {
     let subnet = get_subnet_prefix();
-    let mut found = Vec::new();
-    let mut blocked = false;
     let mut handles = Vec::new();
 
-    // Scan for NVIDIA GPU management on common discovery methods:
-    // 1. NVIDIA DCGM exporter (port 9400) - common in GPU servers
-    // 2. node_exporter with GPU metrics (port 9100)
-    // 3. Try SSH with key auth to run nvidia-smi
     for i in 1..=254u8 {
         let ip = format!("{}.{}", subnet, i);
-        let client_c = client.clone();
         handles.push(tokio::spawn(async move {
-            // Method 1: Try SSH nvidia-smi (most reliable)
-            if let Ok(output) = tokio::process::Command::new("ssh")
-                .args([
-                    "-o", "ConnectTimeout=1",
-                    "-o", "StrictHostKeyChecking=no",
-                    "-o", "BatchMode=yes",
-                    &format!("sean@{}", ip),
-                    "nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits"
-                ])
-                .output()
-                .await
-            {
-                if output.status.success() {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    let mut gpus = Vec::new();
-                    for line in stdout.lines() {
-                        let parts: Vec<&str> = line.splitn(2, ',').map(|s| s.trim()).collect();
-                        if parts.len() == 2 {
-                            let vram_mb: f64 = parts[1].parse().unwrap_or(0.0);
-                            gpus.push(NetworkGpuInfo {
-                                host: ip.clone(),
-                                name: parts[0].to_string(),
-                                vram_gb: format!("{:.1}", vram_mb / 1024.0),
-                            });
-                        }
-                    }
-                    if !gpus.is_empty() {
-                        return (gpus, false);
-                    }
+            // Try the unified probe script. If SSH fails entirely, mark as
+            // potentially blocked. If SSH succeeds but the host has nothing
+            // useful (< 4 GB RAM, no GPU), probe_remote_compute returns None.
+            let probed = probe_remote_compute(&ip).await;
+            match probed {
+                Some(c) => (Some(c), false),
+                None => {
+                    // Distinguish "SSH unreachable" from "reachable but nothing".
+                    // Re-try with just `echo ok` to see if ssh works at all.
+                    let reachable = tokio::process::Command::new("ssh")
+                        .args([
+                            "-o", "ConnectTimeout=1",
+                            "-o", "StrictHostKeyChecking=no",
+                            "-o", "BatchMode=yes",
+                            &format!("sean@{}", ip),
+                            "true",
+                        ])
+                        .output()
+                        .await
+                        .map(|o| o.status.success())
+                        .unwrap_or(false);
+                    (None, !reachable)
                 }
-                // SSH connected but nvidia-smi not found = no GPU on that host
-                return (Vec::new(), false);
             }
-            // SSH failed = might be blocked
-            (Vec::new(), true)
         }));
     }
 
+    let mut found = Vec::new();
     let mut any_blocked = false;
     for handle in handles {
-        if let Ok((gpus, was_blocked)) = handle.await {
-            found.extend(gpus);
+        if let Ok((compute, was_blocked)) = handle.await {
+            if let Some(c) = compute { found.push(c); }
             if was_blocked { any_blocked = true; }
         }
     }
 
-    // Only report blocked if we found NO gpus at all and some hosts were unreachable
-    blocked = found.is_empty() && any_blocked;
-
+    // Only report blocked when we found nothing useful AND some hosts
+    // refused the SSH probe — avoids shouting "firewall!" when the LAN is
+    // just quiet.
+    let blocked = found.is_empty() && any_blocked;
     (found, blocked)
 }
 
@@ -1696,7 +1887,8 @@ pub async fn handle_ssh_pubkey(
     Ok(Json(serde_json::json!({ "error": "Could not find or generate an SSH key. You may need to run: ssh-keygen -t ed25519" })))
 }
 
-/// POST /api/setup/test-gpu — test SSH connection to a remote host and scan for GPUs.
+/// POST /api/setup/test-gpu — test SSH connection to a remote host and
+/// detect whatever compute it has (NVIDIA / Apple / AMD / CPU-only).
 pub async fn handle_test_gpu(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
@@ -1709,53 +1901,44 @@ pub async fn handle_test_gpu(
             "-o", "StrictHostKeyChecking=no",
             "-o", "BatchMode=yes",
             &format!("{}@{}", req.username, req.host),
-            "nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits"
+            PROBE_SCRIPT,
         ])
         .output()
         .await;
 
     match output {
         Ok(out) if out.status.success() => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let gpus: Vec<GpuResult> = stdout.lines().filter_map(|line| {
-                let parts: Vec<&str> = line.splitn(2, ',').map(|s| s.trim()).collect();
-                if parts.len() == 2 {
-                    let vram_mb: f64 = parts[1].parse().unwrap_or(0.0);
-                    Some(GpuResult {
-                        name: parts[0].to_string(),
-                        vram_gb: format!("{:.1}", vram_mb / 1024.0),
-                    })
-                } else {
-                    None
-                }
-            }).collect();
-
-            Ok(Json(TestGpuResponse {
-                connected: true,
-                gpus,
-                error: None,
-            }))
+            let lc = parse_probe_output(&String::from_utf8_lossy(&out.stdout));
+            let mem = lc.memory_gb.unwrap_or(0.0);
+            let name = lc.name.clone().unwrap_or_else(|| "(unknown host)".to_string());
+            let gpus = vec![GpuResult {
+                name: format!(
+                    "{}{}",
+                    name,
+                    lc.runtime_hint.as_ref().map(|r| format!(" — {}", r)).unwrap_or_default(),
+                ),
+                vram_gb: format!("{:.1}", mem),
+            }];
+            let error = if lc.kind == "cpu" && mem < 8.0 {
+                Some("Connected, but this host has no GPU and not enough RAM for local AI.".to_string())
+            } else {
+                None
+            };
+            Ok(Json(TestGpuResponse { connected: true, gpus, error }))
         }
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
             let connected = !stderr.contains("Permission denied") && !stderr.contains("Connection refused");
             let error = if stderr.contains("Permission denied") {
-                "SSH key not accepted. Make sure you completed Step 1 (copy the key) and Step 2 (paste it on the GPU computer).".to_string()
+                "SSH key not accepted. Make sure you completed Step 1 (copy the key) and Step 2 (paste it on the target computer).".to_string()
             } else if stderr.contains("Connection refused") {
                 "SSH is not running on that computer. See the 'Don\'t have SSH set up?' section above.".to_string()
             } else if stderr.contains("No route") || stderr.contains("timed out") {
                 "Could not reach that IP address. Make sure both computers are on the same network.".to_string()
-            } else if stderr.contains("command not found") || stderr.contains("not found") {
-                // Connected but no nvidia-smi
-                "Connected successfully but nvidia-smi was not found — no NVIDIA GPU on that computer.".to_string()
             } else {
                 format!("Connection issue: {}", stderr.chars().take(200).collect::<String>())
             };
-            Ok(Json(TestGpuResponse {
-                connected,
-                gpus: Vec::new(),
-                error: Some(error),
-            }))
+            Ok(Json(TestGpuResponse { connected, gpus: Vec::new(), error: Some(error) }))
         }
         Err(e) => {
             Ok(Json(TestGpuResponse {
