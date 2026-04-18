@@ -640,16 +640,56 @@ const BODY_HTML: &str = r##"<!-- Top bar — matches the dashboard so the music 
       </div>
     </div>
 
-    <!-- No provider connected banner — only when relevant -->
-    <div id="no-provider-banner" class="hidden card border-yellow-700/50 bg-yellow-900/20">
-      <div class="flex items-start gap-3">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-yellow-400 flex-shrink-0 mt-0.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-        <div class="flex-1">
-          <p class="text-sm font-medium text-yellow-300">No music provider connected</p>
-          <p class="text-xs text-gray-400 mt-1">Pick a service in Sync settings — Apple Music, Spotify, YouTube Music, or Tidal — and the DJ, queue, and search all light up.</p>
-          <a href="/settings?tab=sync" class="inline-block mt-2 text-xs text-yellow-300 hover:text-yellow-200 underline">Open Sync settings</a>
-        </div>
+    <!-- No provider connected banner — small, informational.
+         Smaller footprint than before; local library is now a first-class
+         alternative, so "no provider" isn't a dead-end state anymore. -->
+    <div id="no-provider-banner" class="hidden card border-gray-700 bg-gray-900 py-2.5">
+      <div class="flex items-start gap-2">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-gray-500 flex-shrink-0 mt-0.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        <p class="text-xs text-gray-400 flex-1">
+          No streaming provider connected.
+          <a href="/settings?tab=sync" class="text-oc-500 hover:text-oc-400 underline">Connect one</a>
+          or use your local library below.
+        </p>
       </div>
+    </div>
+
+    <!-- Local library — add folders on the gateway host, scan for audio,
+         play tracks through the browser's <audio> element. Works without
+         any streaming provider. -->
+    <div class="card" id="local-library-card">
+      <div class="flex items-center justify-between">
+        <div>
+          <h3 class="font-medium text-gray-200 text-sm">Local library</h3>
+          <p id="local-lib-summary" class="text-xs text-gray-500 mt-0.5">Point at a folder of audio files on this host.</p>
+        </div>
+        <button id="local-lib-scan" onclick="scanLocalLibrary()" class="text-[10px] text-gray-500 hover:text-oc-400 font-mono uppercase tracking-wider hidden">Rescan</button>
+      </div>
+
+      <!-- Folder list -->
+      <div id="local-lib-folders" class="mt-3 space-y-1"></div>
+
+      <!-- Add folder row -->
+      <div class="flex gap-2 mt-3">
+        <input type="text" id="local-lib-path" placeholder="/home/sean/Music  or  ~/Music"
+          class="flex-1 min-w-0 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-500 outline-none focus:border-oc-500"
+          onkeydown="if(event.key==='Enter')addLocalFolder()">
+        <button onclick="addLocalFolder()" class="bg-oc-600 hover:bg-oc-700 text-white px-3 rounded-lg text-sm font-medium flex-shrink-0">Add</button>
+      </div>
+      <p id="local-lib-error" class="text-xs text-red-400 mt-2 hidden"></p>
+
+      <!-- Search -->
+      <div class="mt-3 flex gap-2">
+        <input type="text" id="local-lib-search" placeholder="filter: artist, album, or title…"
+          class="flex-1 min-w-0 bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-gray-200 placeholder-gray-500 outline-none focus:border-oc-500"
+          oninput="debouncedLocalSearch()">
+      </div>
+
+      <!-- Track list -->
+      <div id="local-lib-tracks" class="mt-3 max-h-80 overflow-y-auto border-t border-gray-800 pt-2 text-xs"></div>
+
+      <!-- Hidden <audio> used for playback of local files -->
+      <audio id="local-audio" style="display:none" preload="none"></audio>
     </div>
 
     <!-- AI DJ — chat-style transcript above input. Each turn = your prompt
@@ -1705,8 +1745,163 @@ function startLocalEventStream() {
 // Start listening immediately so the gateway sees this tab as "this_computer" available
 startLocalEventStream();
 
-// Preload YouTube IFrame API eagerly too (small, cached) so playback is instant
-loadYtIframeApi();
+// NOTE: YouTube IFrame API is loaded lazily on first YouTube Music play.
+// Eager loading was triggering a full-page "Before you continue to YouTube"
+// consent overlay on fresh browser profiles + WebKitGTK viewers. If the
+// user never asks for YouTube Music playback, that script never runs.
+
+// ── Local library (user-added folders, file-based playback) ──────────
+let localSearchTimer = null;
+function debouncedLocalSearch() {
+  clearTimeout(localSearchTimer);
+  localSearchTimer = setTimeout(loadLocalTracks, 250);
+}
+
+async function loadLocalFolders() {
+  try {
+    const r = await fetch('/api/music/local/folders?token=' + encodeURIComponent(token));
+    if (!r.ok) return;
+    const d = await r.json();
+    const folders = d.folders || [];
+    const el = document.getElementById('local-lib-folders');
+    if (!folders.length) {
+      el.innerHTML = '<p class="text-xs text-gray-500 italic">No folders added yet.</p>';
+      document.getElementById('local-lib-scan').classList.add('hidden');
+      document.getElementById('local-lib-summary').textContent = 'Point at a folder of audio files on this host.';
+    } else {
+      const total = folders.reduce((s, f) => s + (f.track_count || 0), 0);
+      document.getElementById('local-lib-summary').textContent =
+        folders.length + ' folder(s) · ' + total + ' track(s) indexed';
+      document.getElementById('local-lib-scan').classList.remove('hidden');
+      el.innerHTML = folders.map(f => {
+        const lastScan = f.last_scan_at
+          ? new Date(f.last_scan_at * 1000).toLocaleDateString()
+          : '<span class="text-yellow-500">never scanned</span>';
+        return '<div class="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-gray-900">'
+          + '<div class="min-w-0 flex-1">'
+          + '<p class="text-xs text-gray-300 truncate" title="' + escapeHtml(f.path) + '">'
+          + escapeHtml(f.label || f.path) + '</p>'
+          + '<p class="text-[10px] text-gray-500">' + f.track_count + ' track(s) · ' + lastScan + '</p>'
+          + '</div>'
+          + '<button onclick="rescanFolder(' + f.id + ')" class="text-[10px] text-gray-500 hover:text-oc-400">rescan</button>'
+          + '<button onclick="removeFolder(' + f.id + ')" class="text-[10px] text-gray-500 hover:text-red-400">remove</button>'
+          + '</div>';
+      }).join('');
+    }
+    // If we have any folders with tracks, load the track list too.
+    if (folders.some(f => f.track_count > 0)) loadLocalTracks();
+    else document.getElementById('local-lib-tracks').innerHTML = '';
+  } catch(e) { console.warn('[local-lib] load folders failed', e); }
+}
+
+async function addLocalFolder() {
+  const inp = document.getElementById('local-lib-path');
+  const err = document.getElementById('local-lib-error');
+  const path = inp.value.trim();
+  err.classList.add('hidden');
+  if (!path) { err.textContent = 'Enter a folder path.'; err.classList.remove('hidden'); return; }
+  try {
+    const r = await fetch('/api/music/local/folders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, path }),
+    });
+    if (!r.ok) {
+      const txt = await r.text();
+      err.textContent = txt || ('Add failed (HTTP ' + r.status + ')');
+      err.classList.remove('hidden');
+      return;
+    }
+    const d = await r.json();
+    inp.value = '';
+    await loadLocalFolders();
+    // Auto-scan the newly added folder so tracks appear immediately.
+    if (d.id) scanLocalLibrary(d.id);
+  } catch(e) {
+    err.textContent = 'Network error: ' + e.message;
+    err.classList.remove('hidden');
+  }
+}
+
+async function removeFolder(id) {
+  if (!confirm('Remove this folder from the library? (Your files stay on disk.)')) return;
+  try {
+    await fetch('/api/music/local/folders/' + id + '?token=' + encodeURIComponent(token),
+      { method: 'DELETE' });
+    loadLocalFolders();
+  } catch(e) { console.warn('[local-lib] remove failed', e); }
+}
+
+async function scanLocalLibrary(folderId) {
+  const btn = document.getElementById('local-lib-scan');
+  if (btn) { btn.disabled = true; btn.textContent = 'Scanning…'; }
+  try {
+    const body = { token };
+    if (folderId) body.folder_id = folderId;
+    const r = await fetch('/api/music/local/scan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    await r.json();
+  } catch(e) { console.warn('[local-lib] scan failed', e); }
+  if (btn) { btn.disabled = false; btn.textContent = 'Rescan'; }
+  await loadLocalFolders();
+}
+
+function rescanFolder(id) { scanLocalLibrary(id); }
+
+async function loadLocalTracks() {
+  const el = document.getElementById('local-lib-tracks');
+  const q = document.getElementById('local-lib-search').value.trim();
+  const qs = 'token=' + encodeURIComponent(token) + '&limit=200'
+    + (q ? '&q=' + encodeURIComponent(q) : '');
+  try {
+    const r = await fetch('/api/music/local/tracks?' + qs);
+    if (!r.ok) { el.innerHTML = ''; return; }
+    const d = await r.json();
+    const tracks = d.tracks || [];
+    if (!tracks.length) {
+      el.innerHTML = q
+        ? '<p class="text-xs text-gray-500 italic p-2">No matches for "' + escapeHtml(q) + '".</p>'
+        : '';
+      return;
+    }
+    const minutes = (ms) => {
+      if (!ms) return '';
+      const s = Math.round(ms / 1000);
+      return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+    };
+    el.innerHTML = '<p class="text-[10px] text-gray-600 px-1 pb-1">' + d.total + ' track(s)</p>'
+      + tracks.map(t => {
+        const title = escapeHtml(t.title || '(untitled)');
+        const artist = escapeHtml(t.artist || '');
+        const album = escapeHtml(t.album || '');
+        return '<div class="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-gray-900 group">'
+          + '<button onclick="playLocalTrack(' + t.id + ', \''
+            + (t.title || '').replace(/'/g, "\\'") + '\', \''
+            + (t.artist || '').replace(/'/g, "\\'") + '\')"'
+            + ' class="flex-1 min-w-0 text-left">'
+          + '<p class="text-xs text-gray-200 truncate">' + title + '</p>'
+          + (artist || album
+            ? '<p class="text-[10px] text-gray-500 truncate">' + [artist, album].filter(Boolean).join(' · ') + '</p>'
+            : '')
+          + '</button>'
+          + '<span class="text-[10px] text-gray-600 font-mono flex-shrink-0">' + minutes(t.duration_ms) + '</span>'
+          + '</div>';
+      }).join('');
+  } catch(e) { console.warn('[local-lib] load tracks failed', e); el.innerHTML = ''; }
+}
+
+function playLocalTrack(trackId, title, artist) {
+  const a = document.getElementById('local-audio');
+  a.src = '/api/music/local/file/' + trackId + '?token=' + encodeURIComponent(token);
+  a.play().catch(e => console.warn('[local-play]', e));
+  showMusicNotice('▶ ' + (title || 'Track ' + trackId) + (artist ? ' — ' + artist : ''), false);
+}
+
+// Load on page ready
+loadLocalFolders();
 
 
 

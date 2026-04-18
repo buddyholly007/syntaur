@@ -34,6 +34,7 @@ mod financial;
 mod calendar_reminder;
 mod sync;
 mod music;
+mod music_local;
 pub mod crypto;
 pub mod terminal;
 mod agents;
@@ -5109,6 +5110,12 @@ async fn main() {
         .route("/api/journal/training/delete", post(voice_api::delete_training))
         .route("/api/journal/settings", get(voice_api::get_settings))
         .route("/api/tts", post(voice_api::synthesize_speech))
+        // Local music library
+        .route("/api/music/local/folders", get(music_local::list_folders).post(music_local::add_folder))
+        .route("/api/music/local/folders/{id}", axum::routing::delete(music_local::remove_folder))
+        .route("/api/music/local/scan", post(music_local::scan))
+        .route("/api/music/local/tracks", get(music_local::list_tracks))
+        .route("/api/music/local/file/{id}", get(music_local::stream_file))
         // Terminal / Coders module routes
         .route("/coders", get(pages::coders::render))
         .route("/ws/terminal/{session_id}", get(terminal::ws::ws_terminal_handler))

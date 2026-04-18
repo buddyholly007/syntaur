@@ -1589,6 +1589,41 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX IF NOT EXISTS idx_journal_moments_user ON journal_moments(user_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_journal_moments_date ON journal_moments(user_id, date);
     "#,
+    // ── v43 ──────────────────────────────────────────────────────────────
+    // Local music library — folders the user has added as sources, and the
+    // tracks indexed from inside them. `path` in local_music_tracks is an
+    // absolute path on the gateway host; the user_id owner gates file
+    // access so a user can't stream another user's folders.
+    r#"
+    CREATE TABLE IF NOT EXISTS local_music_folders (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        path       TEXT NOT NULL,
+        label      TEXT,
+        added_at   INTEGER NOT NULL,
+        last_scan_at INTEGER,
+        track_count INTEGER NOT NULL DEFAULT 0,
+        UNIQUE (user_id, path)
+    );
+    CREATE INDEX IF NOT EXISTS idx_local_folders_user ON local_music_folders(user_id);
+
+    CREATE TABLE IF NOT EXISTS local_music_tracks (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        folder_id   INTEGER NOT NULL REFERENCES local_music_folders(id) ON DELETE CASCADE,
+        path        TEXT NOT NULL,
+        title       TEXT,
+        artist      TEXT,
+        album       TEXT,
+        duration_ms INTEGER,
+        track_no    INTEGER,
+        year        INTEGER,
+        indexed_at  INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_local_tracks_user   ON local_music_tracks(user_id, artist, album, track_no);
+    CREATE INDEX IF NOT EXISTS idx_local_tracks_folder ON local_music_tracks(folder_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS uniq_local_tracks_user_path ON local_music_tracks(user_id, path);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
