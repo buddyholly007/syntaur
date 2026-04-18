@@ -136,8 +136,15 @@ Generated image from prompt: {}",
 }
 
 /// Build a human-readable error message that explains what failed and
-/// what the user can try next. Suggestions are tailored to the failure
-/// type so the user sees a concrete action, not a stack trace.
+/// offers 2-3 NUMBERED fix options the user can approve by reply. The
+/// agent reading this on its next turn sees the same structure — we
+/// include explicit action hints so the agent knows what to do when
+/// the user picks.
+///
+/// Pattern: the message is both for the user (decide what to do) and
+/// for the agent (execute the chosen path). The agent's STYLE.md
+/// teaches it to recognize this structure and act on the user's
+/// numbered reply.
 fn format_image_failure(err: &str, prompt: &str) -> String {
     let lower = err.to_lowercase();
     let short_prompt = if prompt.len() > 80 {
@@ -146,22 +153,42 @@ fn format_image_failure(err: &str, prompt: &str) -> String {
         prompt.to_string()
     };
 
-    let suggestion = if lower.contains("pollinations unreachable")
+    // Pick the option set based on failure type. Each option is numbered
+    // and has a clear action verb so the user can reply "1" or "2" and
+    // the agent knows what to execute.
+    let options = if lower.contains("pollinations unreachable")
         || lower.contains("connection")
         || lower.contains("timed out")
         || lower.contains("dns")
     {
-        "**What to try:** Check your internet connection. Pollinations.ai may also be overloaded — retry in a minute. If Pollinations keeps failing, you can enable a local Stable Diffusion server (Settings → Image generation → Local SD) or switch to a paid OpenRouter model."
+        // Network / reachability failure. Retry is cheap; provider swap
+        // costs the user nothing if they already have ComfyUI running.
+        "**Fix options — reply with a number:**\n\
+         1. **Try again** — Pollinations may have been briefly overloaded\n\
+         2. **Switch to Local SD** — requires ComfyUI/Automatic1111 on your GPU (Settings → Image generation → Local SD URL)\n\
+         3. **Switch to paid OpenRouter** — ~$0.001/image via your existing OpenRouter account (Settings → Image generation → OpenRouter paid)"
     } else if lower.contains("local sd unreachable") || lower.contains("sdapi/v1/txt2img") {
-        "**What to try:** Your configured local SD server isn't responding. Check that ComfyUI / Automatic1111 / SD.Next is running at the URL you set in Settings → Image generation. You can temporarily fall back to the free Pollinations provider by clearing the local SD URL in Settings."
+        "**Fix options — reply with a number:**\n\
+         1. **Check that your SD server is running** — ComfyUI/Automatic1111/SD.Next at the configured URL\n\
+         2. **Fall back to free Pollinations** — I can clear your Local SD URL in Settings so images keep working\n\
+         3. **Try again** — in case the server just briefly restarted"
     } else if lower.contains("http 429") || lower.contains("rate limit") {
-        "**What to try:** The image provider rate-limited the request. Wait 30-60 seconds and try again, or switch to a different provider in Settings."
+        "**Fix options — reply with a number:**\n\
+         1. **Wait 30-60s and retry** — rate limits usually clear quickly\n\
+         2. **Switch to a different provider** — Local SD (free, your GPU) or paid OpenRouter avoid this limit"
     } else if lower.contains("http 401") || lower.contains("http 403") || lower.contains("unauthoriz") || lower.contains("billing") {
-        "**What to try:** Authentication with the image provider failed — likely an expired or missing API key. Check Settings → Image generation, or fall back to the free Pollinations provider (no key needed)."
+        "**Fix options — reply with a number:**\n\
+         1. **Fall back to free Pollinations** — no key needed, I'll switch the default\n\
+         2. **Fix the API key** — go to Settings → Image generation and update your credentials"
     } else if lower.contains("declined") || lower.contains("refus") || lower.contains("content policy") {
-        "**What to try:** The model declined to generate that prompt (content policy). Try rephrasing or describing the same scene in different terms."
+        "**Fix options — reply with a number:**\n\
+         1. **Rephrase the prompt** — tell me how you'd rather describe it and I'll try again\n\
+         2. **Switch to Local SD** — your own model has no content policy (Settings → Image generation → Local SD URL)"
     } else {
-        "**What to try:** Try again in a moment. If it keeps failing, you can switch image providers in Settings → Image generation (Pollinations is free and needs no signup; Local SD runs on your own GPU)."
+        "**Fix options — reply with a number:**\n\
+         1. **Try again** — may be a transient hiccup\n\
+         2. **Switch to Local SD** — requires ComfyUI/Automatic1111 on your GPU\n\
+         3. **Switch to paid OpenRouter** — ~$0.001/image"
     };
 
     format!(
@@ -169,7 +196,7 @@ fn format_image_failure(err: &str, prompt: &str) -> String {
          **Prompt:** _{}_\n\n\
          **Error:** {}\n\n\
          {}",
-        short_prompt, err, suggestion
+        short_prompt, err, options
     )
 }
 
