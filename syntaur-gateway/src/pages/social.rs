@@ -146,32 +146,83 @@ pub async fn render() -> Html<String> {
                 section id="pane-settings" class="soc-pane" {
                     div class="soc-pane-head" {
                         h1 class="soc-h1" { "Settings" }
-                        p class="soc-subhead" { "Voice, schedule, engagement strategy, notifications, privacy." }
+                        p class="soc-subhead" { "Voice, schedule, engagement strategy, notifications." }
                     }
                     div class="soc-settings-stack" {
+                        // Brand voice
                         div class="soc-setting-card" {
                             h3 class="soc-setting-h" { "Brand voice" }
-                            p class="soc-setting-p" { "One paragraph describing how you want to sound. Nyota seeds every LLM draft with this." }
-                            p class="soc-setting-hint" { "Not set yet — you'll configure this in a later phase." }
+                            p class="soc-setting-p" { "One paragraph describing how you want to sound. Nyota seeds every LLM draft with this text, so make it specific — your values, your aesthetic, what you avoid." }
+                            textarea id="soc-set-brand-voice" class="soc-field-input soc-set-textarea" rows="5" placeholder="e.g. Crimson Lantern is an indie singer-songwriter. Warm and grounded. First person. Never uses AI language (delve, tapestry, resonate). Talks like a person who actually made the thing." oninput="socMarkDirty()" {}
                         }
+                        // Posting schedule
                         div class="soc-setting-card" {
                             h3 class="soc-setting-h" { "Posting schedule" }
-                            p class="soc-setting-p" { "When daily auto-drafts land in your queue. Default: 9am local." }
-                            p class="soc-setting-hint" { "Not set yet." }
+                            p class="soc-setting-p" { "When daily auto-drafts land in your queue so you can approve them with your morning coffee." }
+                            label class="soc-set-check" {
+                                input type="checkbox" id="soc-set-schedule-enabled" onchange="socMarkDirty()";
+                                span { "Draft a daily post for me" }
+                            }
+                            div class="soc-set-row" {
+                                label class="soc-set-label" for="soc-set-schedule-time" { "Time of day (local)" }
+                                input type="time" id="soc-set-schedule-time" class="soc-field-input soc-set-time" value="09:00" oninput="socMarkDirty()";
+                            }
                         }
+                        // Engagement strategy
                         div class="soc-setting-card" {
                             h3 class="soc-setting-h" { "Engagement strategy" }
-                            p class="soc-setting-p" { "Presets — artist, small business, creator, podcaster — or custom rules. Turn off entirely if you don't want auto-engagement." }
-                            p class="soc-setting-hint" { "Not set yet." }
+                            p class="soc-setting-p" { "How actively Nyota likes, follows, and unfollows on your behalf. Pick a preset or turn it off." }
+                            div class="soc-set-row" {
+                                label class="soc-set-label" for="soc-set-engage-preset" { "Preset" }
+                                select id="soc-set-engage-preset" class="soc-field-input soc-set-select" onchange="socEngagePresetChanged(); socMarkDirty();" {
+                                    option value="off" { "Off — no auto-engagement" }
+                                    option value="artist" { "Artist — music + creator community" }
+                                    option value="small_business" { "Small business — local community" }
+                                    option value="creator" { "Creator — general audience" }
+                                    option value="podcaster" { "Podcaster — podcast community" }
+                                    option value="custom" { "Custom — you pick the numbers" }
+                                }
+                            }
+                            div id="soc-engage-custom" class="soc-set-custom" {
+                                div class="soc-set-row" {
+                                    label class="soc-set-label" for="soc-set-engage-likes" { "Likes per day" }
+                                    input type="number" id="soc-set-engage-likes" class="soc-field-input soc-set-num" min="0" max="200" value="20" oninput="socMarkDirty()";
+                                }
+                                div class="soc-set-row" {
+                                    label class="soc-set-label" for="soc-set-engage-follows" { "Follows per day" }
+                                    input type="number" id="soc-set-engage-follows" class="soc-field-input soc-set-num" min="0" max="100" value="15" oninput="socMarkDirty()";
+                                }
+                                div class="soc-set-row" {
+                                    label class="soc-set-label" for="soc-set-engage-unfollow" { "Unfollow after (days)" }
+                                    input type="number" id="soc-set-engage-unfollow" class="soc-field-input soc-set-num" min="0" max="365" value="7" oninput="socMarkDirty()";
+                                }
+                            }
                         }
+                        // Notifications
                         div class="soc-setting-card" {
                             h3 class="soc-setting-h" { "Notifications" }
-                            p class="soc-setting-p" { "Where drafts, replies, and alerts reach you. Web dashboard + Telegram mirror are both supported." }
-                            p class="soc-setting-hint" { "Not set yet." }
+                            p class="soc-setting-p" { "Where drafts, replies, and alerts reach you. Web dashboard is always on. Telegram mirror is handy on your phone." }
+                            label class="soc-set-check" {
+                                input type="checkbox" id="soc-set-notify-telegram" onchange="socMarkDirty()";
+                                span { "Send approval requests to Telegram" }
+                            }
+                            label class="soc-set-check" {
+                                input type="checkbox" id="soc-set-notify-stats" onchange="socMarkDirty()";
+                                span { "Weekly stats summary" }
+                            }
                         }
+                    }
+                    // Sticky save bar — only visible when dirty.
+                    div id="soc-settings-savebar" class="soc-savebar soc-savebar-hidden" {
+                        span class="soc-savebar-msg" { "You have unsaved changes." }
+                        button class="soc-btn-ghost soc-savebar-btn" onclick="socRevertSettings()" { "Revert" }
+                        button class="soc-btn soc-savebar-btn" onclick="socSaveSettings()" { "Save" }
                     }
                 }
             }
+
+            // ── Toast (for settings save confirmation) ────────────────────
+            div id="soc-toast" { "" }
 
             // ── Reconnect modal (hidden by default) ───────────────────────
             div id="soc-modal" {
@@ -408,11 +459,46 @@ body { background: var(--soc-bg); color: var(--soc-ink); }
 }
 
 /* Settings */
-.soc-settings-stack { display: flex; flex-direction: column; gap: 12px; max-width: 640px; }
+.soc-settings-stack { display: flex; flex-direction: column; gap: 12px; max-width: 640px; padding-bottom: 80px; }
 .soc-setting-card { border: 1px solid var(--soc-rule); border-radius: 10px; padding: 16px 18px; background: #fffdf6; }
-.soc-setting-h { font-family: 'Playfair Display', Georgia, serif; font-size: 15px; font-weight: 600; margin: 0 0 4px; color: var(--soc-ink); }
-.soc-setting-p { font-size: 13px; color: var(--soc-ink-mute); margin: 0 0 4px; }
+.soc-setting-h { font-family: 'Playfair Display', Georgia, serif; font-size: 15px; font-weight: 600; margin: 0 0 6px; color: var(--soc-ink); }
+.soc-setting-p { font-size: 13px; color: var(--soc-ink-mute); margin: 0 0 12px; }
 .soc-setting-hint { font-size: 12px; color: var(--soc-ink-soft); margin: 0; font-style: italic; }
+
+/* Setting form controls */
+.soc-set-textarea { width: 100%; font-family: 'Inter', sans-serif; font-size: 13px; resize: vertical; min-height: 96px; }
+.soc-set-row { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
+.soc-set-label { font-size: 12px; font-weight: 600; color: var(--soc-ink); min-width: 160px; }
+.soc-set-time, .soc-set-num { width: 120px; font-family: 'JetBrains Mono', ui-monospace, monospace; }
+.soc-set-select { flex: 1; max-width: 320px; background: #fffdf6; }
+.soc-set-check { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 13px; color: var(--soc-ink-mute); cursor: pointer; }
+.soc-set-check input[type="checkbox"] { accent-color: var(--soc-amber); }
+.soc-set-custom { margin-top: 10px; padding: 12px; border-left: 2px solid var(--soc-amber); background: #fdf7e9; border-radius: 0 6px 6px 0; display: none; }
+.soc-set-custom.soc-set-custom-open { display: block; }
+
+/* Sticky save bar */
+.soc-savebar {
+  position: sticky; bottom: 0; margin-top: 16px; max-width: 640px;
+  background: #fffdf6; border: 1px solid var(--soc-amber);
+  border-radius: 8px; padding: 10px 14px;
+  display: flex; align-items: center; gap: 10px;
+  box-shadow: 0 4px 18px -8px rgba(73,49,12,0.3);
+  transition: opacity .18s ease, transform .18s ease;
+}
+.soc-savebar-hidden { opacity: 0; pointer-events: none; transform: translateY(8px); }
+.soc-savebar-msg { flex: 1; font-size: 13px; color: var(--soc-amber-deep); font-style: italic; }
+.soc-savebar-btn { width: auto; padding: 6px 14px; font-size: 12px; cursor: pointer; }
+
+/* Toast */
+#soc-toast {
+  position: fixed; bottom: 24px; right: 24px; z-index: 120;
+  background: #1f3820; color: #e8f1e4; padding: 10px 16px; border-radius: 8px;
+  font-size: 13px; box-shadow: 0 8px 32px -8px rgba(0,0,0,.4);
+  opacity: 0; transform: translateY(10px); pointer-events: none;
+  transition: opacity .2s ease, transform .2s ease;
+  font-family: 'Inter', sans-serif;
+}
+#soc-toast.soc-toast-open { opacity: 1; transform: translateY(0); }
 
 /* Chat rail */
 .soc-chat-rail {
@@ -917,6 +1003,167 @@ window.addEventListener('keydown', (e) => {
   }
 });
 
+// ── Settings load / save ────────────────────────────────────────────────────
+//
+// Backed by the existing /api/settings/preferences endpoint (user_preferences
+// table per framework §7). Keys are namespaced 'social.*' so they don't
+// clash with other modules. Values are strings (JSON.stringify for bools +
+// numbers so the round-trip is lossless).
+
+const SOC_PREF_KEYS = [
+  'social.brand_voice',
+  'social.schedule.enabled',
+  'social.schedule.time',
+  'social.engage.preset',
+  'social.engage.likes_per_day',
+  'social.engage.follows_per_day',
+  'social.engage.unfollow_after_days',
+  'social.notify.telegram',
+  'social.notify.stats',
+];
+
+let SOC_SETTINGS_BASELINE = {};  // last-loaded values, for dirty + revert
+let SOC_SETTINGS_LOADED = false;
+
+function socPrefGet(map, key, fallback) {
+  const v = map[key];
+  return (v === null || v === undefined) ? fallback : v;
+}
+
+function socApplySettingsToUI(map) {
+  document.getElementById('soc-set-brand-voice').value =
+    socPrefGet(map, 'social.brand_voice', '');
+  document.getElementById('soc-set-schedule-enabled').checked =
+    socPrefGet(map, 'social.schedule.enabled', 'false') === 'true';
+  document.getElementById('soc-set-schedule-time').value =
+    socPrefGet(map, 'social.schedule.time', '09:00');
+  document.getElementById('soc-set-engage-preset').value =
+    socPrefGet(map, 'social.engage.preset', 'off');
+  document.getElementById('soc-set-engage-likes').value =
+    socPrefGet(map, 'social.engage.likes_per_day', '20');
+  document.getElementById('soc-set-engage-follows').value =
+    socPrefGet(map, 'social.engage.follows_per_day', '15');
+  document.getElementById('soc-set-engage-unfollow').value =
+    socPrefGet(map, 'social.engage.unfollow_after_days', '7');
+  document.getElementById('soc-set-notify-telegram').checked =
+    socPrefGet(map, 'social.notify.telegram', 'true') === 'true';
+  document.getElementById('soc-set-notify-stats').checked =
+    socPrefGet(map, 'social.notify.stats', 'false') === 'true';
+  socEngagePresetChanged();
+}
+
+function socCollectSettingsFromUI() {
+  return {
+    'social.brand_voice':            document.getElementById('soc-set-brand-voice').value,
+    'social.schedule.enabled':       String(document.getElementById('soc-set-schedule-enabled').checked),
+    'social.schedule.time':          document.getElementById('soc-set-schedule-time').value || '09:00',
+    'social.engage.preset':          document.getElementById('soc-set-engage-preset').value,
+    'social.engage.likes_per_day':   String(document.getElementById('soc-set-engage-likes').value || '20'),
+    'social.engage.follows_per_day': String(document.getElementById('soc-set-engage-follows').value || '15'),
+    'social.engage.unfollow_after_days': String(document.getElementById('soc-set-engage-unfollow').value || '7'),
+    'social.notify.telegram':        String(document.getElementById('soc-set-notify-telegram').checked),
+    'social.notify.stats':           String(document.getElementById('soc-set-notify-stats').checked),
+  };
+}
+
+function socEngagePresetChanged() {
+  const preset = document.getElementById('soc-set-engage-preset').value;
+  const box = document.getElementById('soc-engage-custom');
+  if (!box) return;
+  if (preset === 'custom') box.classList.add('soc-set-custom-open');
+  else box.classList.remove('soc-set-custom-open');
+}
+
+function socMarkDirty() {
+  if (!SOC_SETTINGS_LOADED) return;  // don't flag dirty during initial populate
+  const now = socCollectSettingsFromUI();
+  const dirty = SOC_PREF_KEYS.some(k => (now[k] || '') !== (SOC_SETTINGS_BASELINE[k] || ''));
+  const bar = document.getElementById('soc-settings-savebar');
+  if (!bar) return;
+  if (dirty) bar.classList.remove('soc-savebar-hidden');
+  else bar.classList.add('soc-savebar-hidden');
+}
+
+async function socLoadSettings() {
+  try {
+    const tok = socAuthToken();
+    const r = await socAuthFetch(`/api/settings/preferences?token=${encodeURIComponent(tok)}`);
+    if (!r.ok) return;
+    const prefs = await r.json();
+    SOC_SETTINGS_BASELINE = {};
+    for (const k of SOC_PREF_KEYS) SOC_SETTINGS_BASELINE[k] = prefs[k] || '';
+    SOC_SETTINGS_LOADED = false;
+    socApplySettingsToUI(prefs);
+    SOC_SETTINGS_LOADED = true;
+    document.getElementById('soc-settings-savebar').classList.add('soc-savebar-hidden');
+  } catch (_) {}
+}
+
+function socRevertSettings() {
+  SOC_SETTINGS_LOADED = false;
+  socApplySettingsToUI(SOC_SETTINGS_BASELINE);
+  SOC_SETTINGS_LOADED = true;
+  document.getElementById('soc-settings-savebar').classList.add('soc-savebar-hidden');
+  socToast('Reverted unsaved changes.');
+}
+
+async function socSaveSettings() {
+  const now = socCollectSettingsFromUI();
+  const changed = SOC_PREF_KEYS.filter(k => (now[k] || '') !== (SOC_SETTINGS_BASELINE[k] || ''));
+  if (changed.length === 0) {
+    document.getElementById('soc-settings-savebar').classList.add('soc-savebar-hidden');
+    return;
+  }
+  const tok = socAuthToken();
+  let ok = true;
+  for (const key of changed) {
+    try {
+      const r = await socAuthFetch('/api/settings/preferences', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: tok, key: key, value: now[key] }),
+      });
+      if (!r.ok) { ok = false; break; }
+    } catch (_) { ok = false; break; }
+  }
+  if (ok) {
+    SOC_SETTINGS_BASELINE = { ...now };
+    document.getElementById('soc-settings-savebar').classList.add('soc-savebar-hidden');
+    socToast('Settings saved.');
+  } else {
+    socToast('Couldn\'t save — try again in a moment.');
+  }
+}
+
+function socToast(msg) {
+  const t = document.getElementById('soc-toast');
+  if (!t) return;
+  t.textContent = msg;
+  t.classList.add('soc-toast-open');
+  setTimeout(() => t.classList.remove('soc-toast-open'), 2500);
+}
+
+// Browser-level guard against losing unsaved changes on navigation.
+window.addEventListener('beforeunload', (e) => {
+  const bar = document.getElementById('soc-settings-savebar');
+  if (bar && !bar.classList.contains('soc-savebar-hidden')) {
+    e.preventDefault();
+    e.returnValue = '';
+  }
+});
+
+// Load settings on first entry to the pane + whenever the user returns to it.
+let SOC_SETTINGS_LOADED_ONCE = false;
+function socOnSectionChange(section) {
+  if (section === 'settings' && !SOC_SETTINGS_LOADED_ONCE) {
+    SOC_SETTINGS_LOADED_ONCE = true;
+    socLoadSettings();
+  }
+}
+window.addEventListener('focus', () => {
+  if (SOC_SETTINGS_LOADED_ONCE) socLoadSettings();
+});
+
 // Deep-linkable section switching via hash.
 function socActivate(section) {
   document.querySelectorAll('.soc-nav-row').forEach(el => {
@@ -925,6 +1172,7 @@ function socActivate(section) {
   document.querySelectorAll('.soc-pane').forEach(el => {
     el.classList.toggle('soc-pane-active', el.id === 'pane-' + section);
   });
+  socOnSectionChange(section);
 }
 function socGoto(section) {
   location.hash = section;

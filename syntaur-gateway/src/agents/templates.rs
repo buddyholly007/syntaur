@@ -111,9 +111,46 @@ pub fn module_context(
         "module_music" => populate_music(&mut ctx, conn, user_id),
         "module_scheduler" => populate_scheduler(&mut ctx, conn, user_id),
         "module_coders" => populate_coders(&mut ctx, conn),
+        "module_social" => populate_social(&mut ctx, conn, user_id),
         _ => {}
     }
     ctx
+}
+
+/// Seed Nyota's prompt with the user's saved brand voice + a short
+/// summary of which platforms are connected. Falls back to sensible
+/// empty-strings so the template's `default:` clauses kick in.
+fn populate_social(ctx: &mut HashMap<&'static str, String>, conn: &rusqlite::Connection, user_id: i64) {
+    // brand_voice — the textarea the user fills in /social → Settings.
+    // Stored as user_preferences key 'social.brand_voice'.
+    let brand: Option<String> = conn
+        .query_row(
+            "SELECT value FROM user_preferences WHERE user_id = ? AND key = 'social.brand_voice'",
+            rusqlite::params![user_id],
+            |r| r.get(0),
+        )
+        .ok();
+    if let Some(b) = brand {
+        if !b.trim().is_empty() {
+            ctx.insert("brand_voice", b);
+        }
+    }
+    // connected_platforms — comma-separated short list Nyota uses as
+    // quick context ("these are the only platforms I can speak for").
+    let mut stmt = match conn.prepare(
+        "SELECT platform FROM social_connections \
+         WHERE user_id = ? AND status IN ('connected','degraded') ORDER BY platform"
+    ) { Ok(s) => s, Err(_) => return };
+    let names: Vec<String> = stmt.query_map([user_id], |r| r.get::<_, String>(0))
+        .ok()
+        .map(|iter| iter.filter_map(Result::ok).collect())
+        .unwrap_or_default();
+    if !names.is_empty() {
+        ctx.insert("connected_platforms", names.join(", "));
+    }
+    // social_context_summary — recent draft / reply counts when the tables
+    // exist (they don't yet; empty is fine, default clause covers it).
+    // Leave blank for now; phase 2+ fills this in.
 }
 
 fn populate_tax(ctx: &mut HashMap<&'static str, String>, conn: &rusqlite::Connection, user_id: i64) {
