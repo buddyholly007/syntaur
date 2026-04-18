@@ -5424,6 +5424,7 @@ async fn main() {
         .route("/voice-setup", get(pages::voice_setup::render))
         .route("/settings", get(pages::settings::render))
         .route("/settings/agents", get(pages::settings_agents::render))
+        .route("/social", get(pages::social::render))
         .route("/tax", get(pages::tax::render))
         .route("/chat", get(pages::chat::render))
         .route("/history", get(pages::history::render))

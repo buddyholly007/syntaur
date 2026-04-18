@@ -43,5 +43,6 @@ pub mod shared;
 pub mod onboarding;
 pub mod profile;
 pub mod register;
+pub mod social;
 pub mod tax;
 pub mod voice_setup;

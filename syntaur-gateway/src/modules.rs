@@ -124,6 +124,16 @@ pub static CORE_MODULES: &[CoreModule] = &[
         tools: &["search_journal", "journal_summary", "list_recordings"],
         default_enabled: false,
     },
+    CoreModule {
+        id: "mod-social",
+        name: "Social",
+        description: "Post, reply, schedule, and engage across Bluesky, Threads, YouTube, and more. \
+                      Nyota drafts with your brand voice, routes approvals through the web dashboard \
+                      or Telegram, and keeps platform connections healthy. Craftsmanship over clicks.",
+        // Tools land in later phases — each platform adapter is self-contained.
+        tools: &[],
+        default_enabled: true,
+    },
 ];
 
 /// Module configuration from syntaur.json.

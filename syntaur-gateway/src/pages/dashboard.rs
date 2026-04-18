@@ -566,6 +566,11 @@ const BODY_HTML: &str = r##"<!-- Login overlay -->
           <span class="cc-row-icon" style="color:#60a5fa">&#128214;</span>
           <span class="cc-row-label">Journal</span>
         </a>
+        <a href="/social" class="cc-row">
+          <span class="cc-row-icon" style="color:#d49a3a">&#9733;</span>
+          <span class="cc-row-label">Social</span>
+          <span class="cc-row-badge hidden" id="mod-badge-social"></span>
+        </a>
         <a href="/chat" class="cc-row">
           <span class="cc-row-icon" style="color:#a78bfa">&#127908;</span>
           <span class="cc-row-label">Voice chat</span>
