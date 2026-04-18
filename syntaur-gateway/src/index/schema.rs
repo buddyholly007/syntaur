@@ -1651,6 +1651,102 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX IF NOT EXISTS idx_social_conn_user     ON social_connections(user_id);
     CREATE INDEX IF NOT EXISTS idx_social_conn_platform ON social_connections(user_id, platform);
     "#,
+    // ── v45 ──────────────────────────────────────────────────────────────
+    // Social module runtime: drafts, replies, engagement log, stats
+    // snapshots. Each per-user with cascade-on-delete. Source = 'auto'
+    // (from cron/Nyota) or 'manual' (Compose pane). Status progresses
+    // pending → posted (or rejected/failed). Telegram columns let us
+    // mirror draft cards to the phone + update them on state change.
+    r#"
+    CREATE TABLE IF NOT EXISTS social_drafts (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        platform         TEXT    NOT NULL,
+        agent_id         TEXT,
+        connection_id    INTEGER REFERENCES social_connections(id) ON DELETE SET NULL,
+        text             TEXT    NOT NULL,
+        pillar           TEXT,
+        source           TEXT    NOT NULL DEFAULT 'auto',
+        status           TEXT    NOT NULL DEFAULT 'pending',
+        scheduled_for    INTEGER,
+        posted_uri       TEXT,
+        posted_at        INTEGER,
+        error_detail     TEXT,
+        telegram_message_id INTEGER,
+        telegram_chat_id    INTEGER,
+        created_at       INTEGER NOT NULL,
+        updated_at       INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_social_drafts_user_status ON social_drafts(user_id, status);
+    CREATE INDEX IF NOT EXISTS idx_social_drafts_sched       ON social_drafts(status, scheduled_for);
+
+    CREATE TABLE IF NOT EXISTS social_replies (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        platform         TEXT    NOT NULL,
+        agent_id         TEXT,
+        parent_uri       TEXT    NOT NULL,
+        parent_author    TEXT,
+        parent_text      TEXT,
+        draft_text       TEXT,
+        status           TEXT    NOT NULL DEFAULT 'pending',
+        posted_uri       TEXT,
+        posted_at        INTEGER,
+        telegram_message_id INTEGER,
+        telegram_chat_id    INTEGER,
+        created_at       INTEGER NOT NULL,
+        updated_at       INTEGER NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uniq_social_replies_parent ON social_replies(user_id, platform, parent_uri);
+
+    CREATE TABLE IF NOT EXISTS social_engagement_log (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        platform    TEXT    NOT NULL,
+        action      TEXT    NOT NULL,
+        target_uri  TEXT    NOT NULL,
+        target_info TEXT,
+        created_at  INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_social_engagement_user_plat ON social_engagement_log(user_id, platform);
+    CREATE INDEX IF NOT EXISTS idx_social_engagement_target    ON social_engagement_log(user_id, platform, target_uri);
+
+    CREATE TABLE IF NOT EXISTS social_stats_snapshots (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        platform         TEXT    NOT NULL,
+        as_of            INTEGER NOT NULL,
+        followers        INTEGER,
+        following        INTEGER,
+        posts_count      INTEGER,
+        likes_received   INTEGER,
+        reposts_received INTEGER,
+        replies_received INTEGER,
+        extra_json       TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_social_stats ON social_stats_snapshots(user_id, platform, as_of);
+
+    CREATE TABLE IF NOT EXISTS social_pillar_cursor (
+        user_id    INTEGER NOT NULL,
+        platform   TEXT    NOT NULL,
+        agent_id   TEXT    NOT NULL DEFAULT '',
+        last_idx   INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (user_id, platform, agent_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS social_alerts (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        platform     TEXT    NOT NULL,
+        alert_type   TEXT    NOT NULL,
+        target_uri   TEXT,
+        detail       TEXT    NOT NULL,
+        acknowledged INTEGER NOT NULL DEFAULT 0,
+        created_at   INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_social_alerts_open ON social_alerts(user_id, acknowledged);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

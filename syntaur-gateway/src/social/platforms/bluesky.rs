@@ -22,13 +22,109 @@ use serde::Deserialize;
 use std::time::Duration;
 
 use super::{
-    AuthFlow, ConnectInput, PlatformDescriptor, RefreshedCredentials, SocialError,
-    SocialPlatform, StoredCredentials, VerifiedIdentity, WizardStep,
+    AuthFlow, ConnectInput, Notification, PlatformDescriptor, PlatformStats, PostRef,
+    RecentPost, RefreshedCredentials, SocialError, SocialPlatform, StoredCredentials,
+    VerifiedIdentity, WizardStep,
 };
 
 const BSKY_API: &str = "https://bsky.social/xrpc";
 
 pub struct Bluesky;
+
+// ── Internal helpers ────────────────────────────────────────────────────────
+
+fn require_access(creds: &serde_json::Value) -> Result<String, SocialError> {
+    let a = creds.get("access_jwt").and_then(|v| v.as_str()).unwrap_or("");
+    if a.is_empty() {
+        return Err(SocialError::AuthExpired { hint: "No active session. Reconnect or refresh first." });
+    }
+    Ok(a.to_string())
+}
+
+/// Shape returned by `com.atproto.repo.getRecord` (or pieces we care about).
+struct BskyPost {
+    uri: String,
+    cid: String,
+    root: Option<(String, String)>,
+}
+
+async fn bsky_get_post(
+    http: &reqwest::Client,
+    access: &str,
+    at_uri: &str,
+) -> Result<BskyPost, SocialError> {
+    // at_uri shape: at://<did>/<collection>/<rkey>
+    let stripped = at_uri.strip_prefix("at://").ok_or_else(|| SocialError::InvalidInput {
+        field: "parent_uri", reason: "expected at://... URI".to_string(),
+    })?;
+    let parts: Vec<&str> = stripped.splitn(3, '/').collect();
+    if parts.len() != 3 {
+        return Err(SocialError::InvalidInput { field: "parent_uri", reason: "malformed AT URI".to_string() });
+    }
+    let url = format!("{}/com.atproto.repo.getRecord", BSKY_API);
+    let resp = http.get(&url)
+        .bearer_auth(access)
+        .query(&[("repo", parts[0]), ("collection", parts[1]), ("rkey", parts[2])])
+        .timeout(Duration::from_secs(10))
+        .send().await
+        .map_err(|e| SocialError::Network(e.to_string()))?;
+    if resp.status().as_u16() != 200 {
+        return Err(SocialError::Unknown(format!("getRecord HTTP {}", resp.status().as_u16())));
+    }
+    #[derive(Deserialize)]
+    struct GetRec {
+        uri: String,
+        cid: String,
+        value: serde_json::Value,
+    }
+    let body: GetRec = resp.json().await.map_err(|e| SocialError::Unknown(format!("getRecord JSON: {}", e)))?;
+    // If the parent is itself a reply, pull its thread root so our reply lives in the same thread.
+    let root = body.value.get("reply")
+        .and_then(|r| r.get("root"))
+        .and_then(|r| {
+            let uri = r.get("uri").and_then(|v| v.as_str())?;
+            let cid = r.get("cid").and_then(|v| v.as_str())?;
+            Some((uri.to_string(), cid.to_string()))
+        });
+    Ok(BskyPost { uri: body.uri, cid: body.cid, root })
+}
+
+async fn bsky_create_record(
+    http: &reqwest::Client,
+    creds: &serde_json::Value,
+    collection: &str,
+    record: serde_json::Value,
+) -> Result<PostRef, SocialError> {
+    let access = require_access(creds)?;
+    let repo = creds.get("did").and_then(|v| v.as_str()).unwrap_or("");
+    if repo.is_empty() {
+        return Err(SocialError::AuthInvalid { detail: "Credential blob missing DID — reconnect.".to_string() });
+    }
+    let url = format!("{}/com.atproto.repo.createRecord", BSKY_API);
+    let resp = http.post(&url)
+        .bearer_auth(&access)
+        .json(&serde_json::json!({
+            "repo": repo,
+            "collection": collection,
+            "record": record,
+        }))
+        .timeout(Duration::from_secs(15))
+        .send().await
+        .map_err(|e| SocialError::Network(e.to_string()))?;
+    match resp.status().as_u16() {
+        200 => {
+            #[derive(Deserialize)]
+            struct CreatedRef { uri: String, cid: Option<String> }
+            let parsed: CreatedRef = resp.json().await
+                .map_err(|e| SocialError::Unknown(format!("createRecord JSON: {}", e)))?;
+            Ok(PostRef { uri: parsed.uri, cid: parsed.cid, posted_at: chrono::Utc::now().timestamp() })
+        }
+        401 | 400 => Err(SocialError::AuthExpired { hint: "Session expired. Refresh Bluesky first." }),
+        429       => Err(SocialError::RateLimit { retry_after_secs: None }),
+        500..=599 => Err(SocialError::PlatformDown { status_url: "https://status.bsky.app/" }),
+        code      => Err(SocialError::Unknown(format!("createRecord HTTP {}", code))),
+    }
+}
 
 #[derive(Deserialize)]
 struct CreateSessionResponse {
@@ -225,6 +321,261 @@ impl SocialPlatform for Bluesky {
             }),
             code => Err(SocialError::Unknown(format!("createSession returned HTTP {}", code))),
         }
+    }
+
+    async fn post(
+        &self,
+        http: &reqwest::Client,
+        creds: &serde_json::Value,
+        text: &str,
+    ) -> Result<PostRef, SocialError> {
+        bsky_create_record(http, creds, "app.bsky.feed.post", serde_json::json!({
+            "$type": "app.bsky.feed.post",
+            "text": text,
+            "createdAt": chrono::Utc::now().to_rfc3339(),
+        })).await
+    }
+
+    async fn reply(
+        &self,
+        http: &reqwest::Client,
+        creds: &serde_json::Value,
+        parent_uri: &str,
+        text: &str,
+    ) -> Result<PostRef, SocialError> {
+        // Need the parent's CID to reply. Fetch it.
+        let access = require_access(creds)?;
+        let parent = bsky_get_post(http, &access, parent_uri).await?;
+        // Find the root of the thread — for a top-level reply the root == parent.
+        let (root_uri, root_cid) = parent.root.clone().unwrap_or_else(|| (parent.uri.clone(), parent.cid.clone()));
+        bsky_create_record(http, creds, "app.bsky.feed.post", serde_json::json!({
+            "$type": "app.bsky.feed.post",
+            "text": text,
+            "createdAt": chrono::Utc::now().to_rfc3339(),
+            "reply": {
+                "root":   { "uri": root_uri, "cid": root_cid },
+                "parent": { "uri": parent.uri, "cid": parent.cid },
+            },
+        })).await
+    }
+
+    async fn like(
+        &self,
+        http: &reqwest::Client,
+        creds: &serde_json::Value,
+        target_uri: &str,
+    ) -> Result<(), SocialError> {
+        let access = require_access(creds)?;
+        let target = bsky_get_post(http, &access, target_uri).await?;
+        let _ = bsky_create_record(http, creds, "app.bsky.feed.like", serde_json::json!({
+            "$type": "app.bsky.feed.like",
+            "subject": { "uri": target.uri, "cid": target.cid },
+            "createdAt": chrono::Utc::now().to_rfc3339(),
+        })).await?;
+        Ok(())
+    }
+
+    async fn follow(
+        &self,
+        http: &reqwest::Client,
+        creds: &serde_json::Value,
+        target_did: &str,
+    ) -> Result<String, SocialError> {
+        let r = bsky_create_record(http, creds, "app.bsky.graph.follow", serde_json::json!({
+            "$type": "app.bsky.graph.follow",
+            "subject": target_did,
+            "createdAt": chrono::Utc::now().to_rfc3339(),
+        })).await?;
+        Ok(r.uri)
+    }
+
+    async fn unfollow(
+        &self,
+        http: &reqwest::Client,
+        creds: &serde_json::Value,
+        follow_uri: &str,
+    ) -> Result<(), SocialError> {
+        let access = require_access(creds)?;
+        // follow_uri shape: at://did:plc:xxx/app.bsky.graph.follow/<rkey>
+        let parts: Vec<&str> = follow_uri.strip_prefix("at://").unwrap_or("").splitn(3, '/').collect();
+        if parts.len() != 3 {
+            return Err(SocialError::InvalidInput { field: "follow_uri", reason: "expected at://did/collection/rkey".to_string() });
+        }
+        let (repo, collection, rkey) = (parts[0], parts[1], parts[2]);
+        let url = format!("{}/com.atproto.repo.deleteRecord", BSKY_API);
+        let resp = http.post(&url)
+            .bearer_auth(&access)
+            .json(&serde_json::json!({ "repo": repo, "collection": collection, "rkey": rkey }))
+            .timeout(Duration::from_secs(10))
+            .send().await
+            .map_err(|e| SocialError::Network(e.to_string()))?;
+        match resp.status().as_u16() {
+            200 => Ok(()),
+            401 | 400 => Err(SocialError::AuthExpired { hint: "Session expired during unfollow. Try again after a refresh." }),
+            code => Err(SocialError::Unknown(format!("deleteRecord returned HTTP {}", code))),
+        }
+    }
+
+    async fn notifications(
+        &self,
+        http: &reqwest::Client,
+        creds: &serde_json::Value,
+        since: Option<i64>,
+    ) -> Result<Vec<Notification>, SocialError> {
+        let access = require_access(creds)?;
+        let url = format!("{}/app.bsky.notification.listNotifications?limit=50", BSKY_API);
+        let resp = http.get(&url)
+            .bearer_auth(&access)
+            .timeout(Duration::from_secs(10))
+            .send().await
+            .map_err(|e| SocialError::Network(e.to_string()))?;
+        if resp.status().as_u16() != 200 {
+            return Err(SocialError::Unknown(format!("listNotifications HTTP {}", resp.status().as_u16())));
+        }
+        #[derive(Deserialize)]
+        struct NotifList { notifications: Vec<NotifItem> }
+        #[derive(Deserialize)]
+        struct NotifItem {
+            uri: String,
+            #[serde(rename = "cid")] _cid: Option<String>,
+            author: NotifAuthor,
+            reason: String,
+            #[serde(rename = "reasonSubject")] reason_subject: Option<String>,
+            record: Option<serde_json::Value>,
+            #[serde(rename = "indexedAt")] indexed_at: String,
+        }
+        #[derive(Deserialize)]
+        struct NotifAuthor { handle: String, #[serde(rename = "displayName")] _display: Option<String> }
+
+        let body: NotifList = resp.json().await
+            .map_err(|e| SocialError::Unknown(format!("notifications JSON: {}", e)))?;
+        let mut out = Vec::new();
+        for n in body.notifications {
+            let at = chrono::DateTime::parse_from_rfc3339(&n.indexed_at)
+                .map(|d| d.timestamp()).unwrap_or(0);
+            if let Some(s) = since { if at <= s { continue; } }
+            // We care about reasons that warrant a drafted reply — reply/mention primarily.
+            let include = matches!(n.reason.as_str(), "reply" | "mention" | "quote");
+            if !include { continue; }
+            let parent_text = n.record.as_ref()
+                .and_then(|r| r.get("text"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("").to_string();
+            out.push(Notification {
+                id: n.uri.clone(),
+                parent_uri: n.uri,
+                parent_author: n.author.handle,
+                parent_text,
+                kind: n.reason,
+                at,
+            });
+            let _ = n.reason_subject;
+        }
+        Ok(out)
+    }
+
+    async fn stats(
+        &self,
+        http: &reqwest::Client,
+        creds: &serde_json::Value,
+    ) -> Result<PlatformStats, SocialError> {
+        let handle = creds.get("handle").and_then(|v| v.as_str()).unwrap_or("");
+        if handle.is_empty() {
+            return Ok(PlatformStats::default());
+        }
+        let url = format!("{}/app.bsky.actor.getProfile", BSKY_API);
+        let access = require_access(creds)?;
+        let resp = http.get(&url)
+            .bearer_auth(&access)
+            .query(&[("actor", handle)])
+            .timeout(Duration::from_secs(10))
+            .send().await
+            .map_err(|e| SocialError::Network(e.to_string()))?;
+        if resp.status().as_u16() != 200 {
+            return Err(SocialError::Unknown(format!("getProfile HTTP {}", resp.status().as_u16())));
+        }
+        #[derive(Deserialize)]
+        struct Profile {
+            #[serde(rename = "followersCount")] followers: Option<i64>,
+            #[serde(rename = "followsCount")]   follows: Option<i64>,
+            #[serde(rename = "postsCount")]     posts: Option<i64>,
+        }
+        let p: Profile = resp.json().await.map_err(|e| SocialError::Unknown(format!("profile JSON: {}", e)))?;
+        Ok(PlatformStats {
+            followers: p.followers,
+            following: p.follows,
+            posts_count: p.posts,
+            ..Default::default()
+        })
+    }
+
+    async fn recent_posts(
+        &self,
+        http: &reqwest::Client,
+        creds: &serde_json::Value,
+        limit: u32,
+    ) -> Result<Vec<RecentPost>, SocialError> {
+        let handle = creds.get("handle").and_then(|v| v.as_str()).unwrap_or("");
+        if handle.is_empty() { return Ok(vec![]); }
+        let access = require_access(creds)?;
+        let url = format!("{}/app.bsky.feed.getAuthorFeed", BSKY_API);
+        let lim = limit.clamp(1, 100).to_string();
+        let resp = http.get(&url).bearer_auth(&access)
+            .query(&[("actor", handle), ("limit", lim.as_str())])
+            .timeout(Duration::from_secs(10))
+            .send().await.map_err(|e| SocialError::Network(e.to_string()))?;
+        if resp.status().as_u16() != 200 {
+            return Err(SocialError::Unknown(format!("getAuthorFeed HTTP {}", resp.status().as_u16())));
+        }
+        let body: serde_json::Value = resp.json().await
+            .map_err(|e| SocialError::Unknown(format!("feed JSON: {}", e)))?;
+        let feed = body.get("feed").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let mut out = Vec::new();
+        for item in feed {
+            if let Some(post) = item.get("post") {
+                let uri = post.get("uri").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let text = post.get("record").and_then(|r| r.get("text")).and_then(|t| t.as_str()).unwrap_or("").to_string();
+                let created_at = post.get("record")
+                    .and_then(|r| r.get("createdAt"))
+                    .and_then(|c| c.as_str())
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .map(|d| d.timestamp()).unwrap_or(0);
+                if !uri.is_empty() { out.push(RecentPost { uri, text, created_at }); }
+            }
+        }
+        Ok(out)
+    }
+
+    async fn search_hashtag(
+        &self,
+        http: &reqwest::Client,
+        creds: &serde_json::Value,
+        hashtag: &str,
+        limit: u32,
+    ) -> Result<Vec<(String, String)>, SocialError> {
+        let access = require_access(creds)?;
+        let q = hashtag.trim_start_matches('#').to_string();
+        let url = format!("{}/app.bsky.feed.searchPosts", BSKY_API);
+        let lim = limit.clamp(1, 100).to_string();
+        let resp = http.get(&url).bearer_auth(&access)
+            .query(&[("q", q.as_str()), ("limit", lim.as_str())])
+            .timeout(Duration::from_secs(10))
+            .send().await.map_err(|e| SocialError::Network(e.to_string()))?;
+        if resp.status().as_u16() != 200 {
+            return Err(SocialError::Unknown(format!("searchPosts HTTP {}", resp.status().as_u16())));
+        }
+        let body: serde_json::Value = resp.json().await
+            .map_err(|e| SocialError::Unknown(format!("search JSON: {}", e)))?;
+        let posts = body.get("posts").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let mut out = Vec::new();
+        for post in posts {
+            let uri = post.get("uri").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let did = post.get("author").and_then(|a| a.get("did")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if !uri.is_empty() && !did.is_empty() {
+                out.push((uri, did));
+            }
+        }
+        Ok(out)
     }
 
     async fn refresh(

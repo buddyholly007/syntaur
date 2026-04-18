@@ -18,6 +18,7 @@ use std::sync::Arc;
 use crate::AppState;
 
 pub mod platforms;
+pub mod engine;
 
 // ── Wire types ──────────────────────────────────────────────────────────────
 

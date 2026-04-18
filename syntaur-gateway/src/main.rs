@@ -5276,6 +5276,8 @@ async fn main() {
         .route("/api/knowledge/resync/{source}", post(handle_knowledge_resync))
         .route("/api/message/start", post(handle_message_start))
         .route("/api/message/{id}/stream", get(handle_message_stream))
+        .route("/api/llm/complete", post(handle_api_llm_complete))
+        .route("/api/conversations/{id}/append", post(handle_api_conversation_append))
         .route("/api/conversations", post(handle_conv_create))
         .route("/api/conversations", get(handle_conv_list))
         .route("/api/conversations/{id}", get(handle_conv_get))
@@ -5431,7 +5433,6 @@ async fn main() {
         .route("/api/social/connections/{id}", axum::routing::delete(social::handle_delete))
         .route("/api/social/connections/reconnect/{platform}", post(social::handle_reconnect))
         .route("/api/social/platforms", get(social::handle_platforms))
-        .route("/api/social/nyota/assist", post(social::handle_nyota_assist))
         .route("/tax", get(pages::tax::render))
         .route("/chat", get(pages::chat::render))
         .route("/history", get(pages::history::render))
@@ -6156,6 +6157,111 @@ async fn resolve_agent_display_name(state: &AppState, uid: i64, agent_id: &str) 
         return name;
     }
     crate::agents::handoff::agent_display_for_module(agent_id).to_string()
+}
+
+/// POST /api/llm/complete — thin LLM passthrough for out-of-band clients.
+///
+/// Resolves the caller's agent (persona system prompt from STYLE/SOUL/IDENTITY)
+/// and then calls the shared LLM chain with the supplied messages + tools.
+/// No server-side tool execution, no conversation history injection, no
+/// memory retrieval — the caller owns the tool loop and the message state.
+/// Used by MACE (the /coders CLI) which runs tools on its own host rather
+/// than on the gateway, so tools that touch the filesystem hit the right
+/// machine.
+async fn handle_api_llm_complete(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let principal = resolve_principal(&state, token).await?;
+    let agent_id = body["agent"].as_str().unwrap_or("main").to_string();
+
+    // Persona system prompt — the same files /api/message loads, minus the
+    // heavier budget / tax / memory injection. Callers can pass extra system
+    // context in `messages[0]` themselves.
+    let resolved = resolve_agent(&state, &agent_id, principal.user_id()).await;
+    let workspace = resolved.workspace;
+    let mut context_parts = Vec::new();
+    if let Some(custom) = &resolved.custom_prompt {
+        context_parts.push(custom.clone());
+    }
+    for file in &["STYLE.md", "SOUL.md", "IDENTITY.md", "TOOLS.md"] {
+        if let Ok(content) = std::fs::read_to_string(workspace.join(file)) {
+            if !content.trim().is_empty() {
+                context_parts.push(content);
+            }
+        }
+    }
+    let system_prompt = if context_parts.is_empty() {
+        format!("You are agent {agent_id}.")
+    } else {
+        context_parts.join("\n\n---\n\n")
+    };
+
+    let chain = llm::LlmChain::from_config(&state.config, &agent_id, state.client.clone());
+
+    let mut messages: Vec<llm::ChatMessage> = Vec::new();
+    messages.push(llm::ChatMessage::system(&system_prompt));
+    if let Some(arr) = body["messages"].as_array() {
+        for m in arr {
+            let role = m["role"].as_str().unwrap_or("user").to_string();
+            let content = m["content"].as_str().unwrap_or("").to_string();
+            let tool_calls = m.get("tool_calls").and_then(|v| v.as_array()).cloned();
+            let tool_call_id = m.get("tool_call_id").and_then(|v| v.as_str()).map(String::from);
+            messages.push(llm::ChatMessage {
+                role,
+                content,
+                content_parts: None,
+                tool_calls,
+                tool_call_id,
+            });
+        }
+    }
+
+    let tools_vec = body["tools"].as_array().cloned();
+    let tools_ref = tools_vec.as_ref();
+
+    let result = chain.call_raw(&messages, tools_ref).await.map_err(|e| {
+        log::error!("[llm/complete] chain failed: {e}");
+        axum::http::StatusCode::BAD_GATEWAY
+    })?;
+
+    let (content, tool_calls, finish_reason) = match result {
+        llm::LlmResult::Text(t) => (t, serde_json::Value::Array(vec![]), "stop"),
+        llm::LlmResult::ToolCalls { content, tool_calls } => {
+            (content, serde_json::Value::Array(tool_calls), "tool_calls")
+        }
+    };
+
+    Ok(Json(serde_json::json!({
+        "content": content,
+        "tool_calls": tool_calls,
+        "finish_reason": finish_reason,
+    })))
+}
+
+/// POST /api/conversations/{id}/append — append a message to a conversation.
+///
+/// Lets out-of-band clients (MACE) persist their own turns into a conversation
+/// without going through the full `/api/message` tool-loop path. Accepts
+/// `{role, content}` and an optional topic update.
+async fn handle_api_conversation_append(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(conv_id): axum::extract::Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let _principal = resolve_principal(&state, token).await?;
+    let role = body["role"].as_str().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
+    let content = body["content"].as_str().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
+    let mgr = state
+        .conversations
+        .as_ref()
+        .ok_or(axum::http::StatusCode::SERVICE_UNAVAILABLE)?;
+    mgr.append(&conv_id, role, content)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({"ok": true, "conversation_id": conv_id})))
 }
 
 /// POST /api/agents/handoff — carry context from main agent to a specialist.

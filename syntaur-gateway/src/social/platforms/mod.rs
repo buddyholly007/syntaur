@@ -150,6 +150,40 @@ pub struct RefreshedCredentials {
     pub expires_at: Option<i64>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct PostRef {
+    pub uri: String,
+    pub cid: Option<String>,
+    pub posted_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Notification {
+    pub id: String,            // unique within platform (URI / notification id)
+    pub parent_uri: String,    // post being replied to
+    pub parent_author: String,
+    pub parent_text: String,
+    pub kind: String,          // "reply" | "mention" | "like" | "repost" | ...
+    pub at: i64,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PlatformStats {
+    pub followers: Option<i64>,
+    pub following: Option<i64>,
+    pub posts_count: Option<i64>,
+    pub likes_received: Option<i64>,
+    pub reposts_received: Option<i64>,
+    pub replies_received: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RecentPost {
+    pub uri: String,
+    pub text: String,
+    pub created_at: i64,
+}
+
 // ── Adapter trait ───────────────────────────────────────────────────────────
 
 #[async_trait]
@@ -183,6 +217,91 @@ pub trait SocialPlatform: Send + Sync {
     ) -> Result<RefreshedCredentials, SocialError> {
         let _ = self.verify(http, creds).await?;
         Ok(RefreshedCredentials { credentials: creds.clone(), expires_at: None })
+    }
+
+    // ── Action surface — default unimplemented so adapters opt in ──────────
+
+    async fn post(
+        &self,
+        _http: &reqwest::Client,
+        _creds: &serde_json::Value,
+        _text: &str,
+    ) -> Result<PostRef, SocialError> {
+        Err(SocialError::Unknown("Posting not implemented for this platform yet.".to_string()))
+    }
+
+    async fn reply(
+        &self,
+        _http: &reqwest::Client,
+        _creds: &serde_json::Value,
+        _parent_uri: &str,
+        _text: &str,
+    ) -> Result<PostRef, SocialError> {
+        Err(SocialError::Unknown("Replies not implemented for this platform yet.".to_string()))
+    }
+
+    async fn like(
+        &self,
+        _http: &reqwest::Client,
+        _creds: &serde_json::Value,
+        _target_uri: &str,
+    ) -> Result<(), SocialError> {
+        Err(SocialError::Unknown("Likes not implemented for this platform yet.".to_string()))
+    }
+
+    async fn follow(
+        &self,
+        _http: &reqwest::Client,
+        _creds: &serde_json::Value,
+        _target_did: &str,
+    ) -> Result<String, SocialError> {
+        Err(SocialError::Unknown("Follow not implemented for this platform yet.".to_string()))
+    }
+
+    async fn unfollow(
+        &self,
+        _http: &reqwest::Client,
+        _creds: &serde_json::Value,
+        _follow_uri: &str,
+    ) -> Result<(), SocialError> {
+        Err(SocialError::Unknown("Unfollow not implemented for this platform yet.".to_string()))
+    }
+
+    async fn notifications(
+        &self,
+        _http: &reqwest::Client,
+        _creds: &serde_json::Value,
+        _since: Option<i64>,
+    ) -> Result<Vec<Notification>, SocialError> {
+        Ok(vec![])
+    }
+
+    async fn stats(
+        &self,
+        _http: &reqwest::Client,
+        _creds: &serde_json::Value,
+    ) -> Result<PlatformStats, SocialError> {
+        Ok(PlatformStats::default())
+    }
+
+    async fn recent_posts(
+        &self,
+        _http: &reqwest::Client,
+        _creds: &serde_json::Value,
+        _limit: u32,
+    ) -> Result<Vec<RecentPost>, SocialError> {
+        Ok(vec![])
+    }
+
+    async fn search_hashtag(
+        &self,
+        _http: &reqwest::Client,
+        _creds: &serde_json::Value,
+        _hashtag: &str,
+        _limit: u32,
+    ) -> Result<Vec<(String, String)>, SocialError> {
+        // Returns (post_uri, author_did) pairs
+        Ok(vec![])
     }
 }
 

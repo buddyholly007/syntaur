@@ -72,14 +72,25 @@ pub async fn render() -> Html<String> {
                         h1 class="soc-h1" { "Compose" }
                         p class="soc-subhead" { "Write something. One thought, one draft. Nyota will help you land it cleanly." }
                     }
-                    div class="soc-empty" {
-                        div class="soc-empty-sigil" { "✎" }
-                        h2 class="soc-empty-h" { "Nothing drafted yet." }
-                        p class="soc-empty-p" {
-                            "Before you can compose, connect at least one platform so Nyota knows where things go."
+                    div class="soc-compose-form" {
+                        div class="soc-field-group" {
+                            label class="soc-field-label" { "Platform" }
+                            div id="soc-compose-platforms" class="soc-compose-platforms" {
+                                // rendered by JS from SOC_CONNECTIONS_MAP
+                            }
                         }
-                        a href="#connections" class="soc-cta" onclick="socGoto('connections')" {
-                            "Go to Connections →"
+                        div class="soc-field-group" {
+                            div class="soc-field-labelrow" {
+                                label class="soc-field-label" for="soc-compose-text" { "Your post" }
+                                button type="button" class="soc-assist-btn" onclick="socComposeGenerate()" { "✨ Have Nyota draft one" }
+                            }
+                            textarea id="soc-compose-text" class="soc-field-input soc-set-textarea" rows="5" placeholder="Write the thing you want to say. Or click 'Have Nyota draft one' to get a starting point from your brand voice and pillars." oninput="socComposeCharCount()" {}
+                            div class="soc-compose-counts" id="soc-compose-counts" { "" }
+                        }
+                        div class="soc-compose-actions" {
+                            span class="soc-compose-status" id="soc-compose-status" { "" }
+                            button class="soc-btn-ghost" onclick="socComposeSaveDraft()" { "Save as draft" }
+                            button class="soc-btn" onclick="socComposePostNow()" { "Post now" }
                         }
                     }
                 }
@@ -90,12 +101,8 @@ pub async fn render() -> Html<String> {
                         h1 class="soc-h1" { "Queue" }
                         p class="soc-subhead" { "Drafts waiting on your yes, and posts scheduled for later." }
                     }
-                    div class="soc-empty" {
-                        div class="soc-empty-sigil" { "⋯" }
-                        h2 class="soc-empty-h" { "Queue is quiet." }
-                        p class="soc-empty-p" {
-                            "Drafts show up here when Nyota writes one on a schedule, or when you save something for later."
-                        }
+                    div id="soc-queue-list" class="soc-queue-list" {
+                        // rendered from /api/social/drafts
                     }
                 }
 
@@ -105,12 +112,8 @@ pub async fn render() -> Html<String> {
                         h1 class="soc-h1" { "Inbox" }
                         p class="soc-subhead" { "Mentions, replies, and comments across your connected platforms." }
                     }
-                    div class="soc-empty" {
-                        div class="soc-empty-sigil" { "✉" }
-                        h2 class="soc-empty-h" { "Nothing waiting on a reply." }
-                        p class="soc-empty-p" {
-                            "Once a platform is connected, new mentions and comments land here. Nyota drafts replies; you approve or edit."
-                        }
+                    div id="soc-inbox-list" class="soc-queue-list" {
+                        // rendered from /api/social/replies
                     }
                 }
 
@@ -120,13 +123,8 @@ pub async fn render() -> Html<String> {
                         h1 class="soc-h1" { "Analytics" }
                         p class="soc-subhead" { "What landed, what didn't, what you've been posting about." }
                     }
-                    div class="soc-empty" {
-                        div class="soc-empty-sigil" { "◔" }
-                        h2 class="soc-empty-h" { "No posts yet, no story to tell." }
-                        p class="soc-empty-p" {
-                            "After you've posted a few things, this pane will show the posts that resonated, the topics you've leaned on, and how often you've been showing up. Not a growth chart — just a mirror."
-                        }
-                    }
+                    div id="soc-analytics-stats" class="soc-analytics-stats" {}
+                    div id="soc-alerts-list" class="soc-alerts" {}
                 }
 
                 // ─ Connections ─────────────────────────────────────────
@@ -738,6 +736,60 @@ body { background: var(--soc-bg); color: var(--soc-ink); }
 }
 .soc-btn { padding: 7px 14px; border-radius: 6px; background: var(--soc-amber); color: #1a1208; border: 0; font-weight: 500; font-size: 13px; cursor: pointer; }
 .soc-chat-note { margin-top: 10px; font-size: 11px; color: var(--soc-ink-soft); font-style: italic; }
+
+/* Compose pane */
+.soc-compose-form { max-width: 720px; display: flex; flex-direction: column; gap: 16px; background: #fffdf6; border: 1px solid var(--soc-rule); border-radius: 10px; padding: 20px 22px; }
+.soc-compose-platforms { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.soc-compose-plat {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 12px; border: 1px solid var(--soc-rule); border-radius: 999px;
+  background: #fffdf6; cursor: pointer; font-size: 12px; color: var(--soc-ink-mute);
+  transition: border-color .12s ease, background .12s ease, color .12s ease;
+}
+.soc-compose-plat:has(input:checked) { background: var(--soc-amber-soft); border-color: var(--soc-amber); color: var(--soc-amber-deep); font-weight: 600; }
+.soc-compose-plat input { accent-color: var(--soc-amber); margin: 0; }
+.soc-compose-counts { margin-top: 6px; font-size: 11px; color: var(--soc-ink-soft); font-family: 'JetBrains Mono', ui-monospace, monospace; }
+.soc-compose-count { margin-right: 10px; }
+.soc-compose-over { color: #953224; }
+.soc-compose-hint { font-style: italic; }
+.soc-compose-actions { display: flex; justify-content: flex-end; align-items: center; gap: 10px; margin-top: 4px; }
+.soc-compose-actions button { width: auto; padding: 7px 16px; font-size: 13px; }
+.soc-compose-status { flex: 1; font-size: 12px; color: var(--soc-ink-soft); font-style: italic; }
+.soc-compose-status-busy { color: var(--soc-amber-deep); }
+.soc-compose-status-error { color: #953224; background: #f3d1cb; padding: 6px 10px; border-radius: 4px; font-style: normal; }
+
+/* Queue + Inbox shared card look */
+.soc-queue-list { display: flex; flex-direction: column; gap: 12px; }
+.soc-q-card { background: #fffdf6; border: 1px solid var(--soc-rule); border-radius: 10px; padding: 14px 16px; }
+.soc-q-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; font-size: 12px; color: var(--soc-ink-soft); }
+.soc-q-platform { font-family: 'JetBrains Mono', ui-monospace, monospace; font-weight: 600; color: var(--soc-ink); text-transform: lowercase; }
+.soc-q-status-pending  { background: #eee4ce; color: #8a7558; }
+.soc-q-status-posted   { background: #d8ecd0; color: #3f6a2e; }
+.soc-q-status-rejected { background: #e5e0d4; color: var(--soc-ink-soft); }
+.soc-q-status-failed   { background: #f3d1cb; color: #953224; }
+.soc-q-pillar { background: var(--soc-amber-soft); color: var(--soc-amber-deep); padding: 2px 8px; border-radius: 999px; font-size: 10px; text-transform: uppercase; letter-spacing: .08em; font-weight: 600; }
+.soc-q-when { margin-left: auto; font-style: italic; }
+.soc-q-text { width: 100%; min-height: 64px; font-family: 'Inter', sans-serif; font-size: 13px; resize: vertical; }
+.soc-q-actions { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+.soc-q-actions button { width: auto; padding: 6px 14px; font-size: 12px; }
+.soc-q-posted-uri { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11px; color: var(--soc-ink-soft); word-break: break-all; }
+.soc-q-error { font-size: 12px; color: #953224; flex: 1; }
+.soc-inbox-parent { padding: 10px 12px; background: var(--soc-surface-2); border-left: 3px solid var(--soc-ink-soft); border-radius: 0 6px 6px 0; font-size: 13px; color: var(--soc-ink-mute); margin-bottom: 10px; font-style: italic; }
+
+/* Analytics */
+.soc-analytics-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+.soc-stats-card { background: #fffdf6; border: 1px solid var(--soc-rule); border-radius: 10px; padding: 16px 18px; }
+.soc-stats-plat { font-family: 'Playfair Display', Georgia, serif; font-size: 16px; font-weight: 600; color: var(--soc-ink); margin: 0 0 12px; text-transform: lowercase; }
+.soc-stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.soc-stats-grid > div { display: flex; flex-direction: column; }
+.soc-stats-label { font-size: 10px; color: var(--soc-ink-soft); text-transform: uppercase; letter-spacing: .08em; }
+.soc-stats-val { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 20px; color: var(--soc-ink); font-weight: 600; }
+.soc-stats-asof { margin-top: 10px; font-size: 11px; color: var(--soc-ink-soft); font-style: italic; }
+.soc-alerts { margin-top: 16px; }
+.soc-alerts-h { font-family: 'Playfair Display', Georgia, serif; font-size: 15px; font-weight: 600; color: var(--soc-ink); margin: 0 0 8px; }
+.soc-alert-card { background: #fdf5f2; border: 1px solid #e0c0b7; border-left: 3px solid #c94c3a; border-radius: 6px; padding: 10px 12px; margin-bottom: 8px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.soc-alert-plat { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11px; color: var(--soc-ink-mute); }
+.soc-alert-detail { margin: 0; flex: 1 1 100%; font-size: 13px; color: var(--soc-ink); }
 
 /* Modal.
  * Default is hidden — the .soc-modal-open class opts IN to flex display.
@@ -1497,6 +1549,351 @@ async function socLoadSettings() {
 // Load settings early (not just on Settings-pane entry) so the first-run
 // banner + pause badge reflect reality on any page load.
 window.addEventListener('DOMContentLoaded', () => { socLoadSettings(); });
+
+// ── Compose ────────────────────────────────────────────────────────────────
+
+const SOC_PLATFORM_LIMITS = {
+  bluesky: 300,
+  threads: 500,
+  youtube: 1200,
+  instagram: 2200,
+  facebook: 5000,
+  linkedin: 3000,
+  tiktok:  150,
+  twitter: 280,
+};
+
+function socComposeRenderPlatforms() {
+  const el = document.getElementById('soc-compose-platforms');
+  if (!el) return;
+  const connected = Object.values(SOC_CONNECTIONS_MAP || {}).filter(c => c && c.status === 'connected');
+  if (connected.length === 0) {
+    el.innerHTML = `<div class="soc-note">No connected platforms yet. <a href="#connections" onclick="socGoto('connections');return false;" class="soc-wizard-link">Connect one →</a></div>`;
+    return;
+  }
+  el.innerHTML = connected.map(c => {
+    const desc = SOC_DESCRIPTORS[c.platform];
+    const name = desc ? desc.display_name : c.platform;
+    return `
+      <label class="soc-compose-plat" data-platform="${socEscape(c.platform)}">
+        <input type="checkbox" value="${socEscape(c.platform)}" onchange="socComposeCharCount()">
+        <span>${socEscape(name)}</span>
+      </label>`;
+  }).join('');
+}
+
+function socComposeSelected() {
+  return Array.from(document.querySelectorAll('#soc-compose-platforms input:checked')).map(el => el.value);
+}
+
+function socComposeCharCount() {
+  const text = document.getElementById('soc-compose-text').value || '';
+  const chosen = socComposeSelected();
+  const el = document.getElementById('soc-compose-counts');
+  if (chosen.length === 0) { el.innerHTML = '<span class="soc-compose-hint">Pick a platform to see the character count.</span>'; return; }
+  el.innerHTML = chosen.map(p => {
+    const limit = SOC_PLATFORM_LIMITS[p] || 1000;
+    const over = text.length > limit;
+    return `<span class="soc-compose-count ${over ? 'soc-compose-over' : ''}">${p}: ${text.length}/${limit}</span>`;
+  }).join(' · ');
+}
+
+async function socComposeGenerate() {
+  const chosen = socComposeSelected();
+  if (chosen.length === 0) { socComposeStatus('error', 'Pick a platform first so Nyota knows the vibe.'); return; }
+  const platform = chosen[0];
+  socComposeStatus('busy', `Nyota is drafting for ${platform}…`);
+  try {
+    const r = await socAuthFetch('/api/social/drafts', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: socAuthToken(), platform: platform, generate: true, source: 'manual' }),
+    });
+    const data = await r.json();
+    if (!r.ok || !data.ok) { socComposeStatus('error', data.error || 'Draft failed.'); return; }
+    // Draft landed in Queue. Pull it into the composer for editing.
+    document.getElementById('soc-compose-text').value = data.text || '';
+    socComposeCharCount();
+    socComposeStatus('', `Drafted. Landed in Queue as id ${data.id} — edit here, or approve it from Queue.`);
+    socRefreshQueue();
+  } catch (e) {
+    socComposeStatus('error', 'Network error — try again.');
+  }
+}
+
+async function socComposeSaveDraft() {
+  const text = document.getElementById('soc-compose-text').value.trim();
+  const chosen = socComposeSelected();
+  if (!text) { socComposeStatus('error', 'Nothing to save — write something first.'); return; }
+  if (chosen.length === 0) { socComposeStatus('error', 'Pick at least one platform.'); return; }
+  socComposeStatus('busy', 'Saving…');
+  let savedCount = 0;
+  for (const platform of chosen) {
+    try {
+      const r = await socAuthFetch('/api/social/drafts', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: socAuthToken(), platform: platform, text: text, source: 'manual' }),
+      });
+      if (r.ok) savedCount++;
+    } catch (_) {}
+  }
+  socComposeStatus('', `Saved ${savedCount} draft(s). Queue has them waiting.`);
+  document.getElementById('soc-compose-text').value = '';
+  socComposeCharCount();
+  socRefreshQueue();
+}
+
+async function socComposePostNow() {
+  const text = document.getElementById('soc-compose-text').value.trim();
+  const chosen = socComposeSelected();
+  if (!text) { socComposeStatus('error', 'Nothing to post — write something first.'); return; }
+  if (chosen.length === 0) { socComposeStatus('error', 'Pick at least one platform.'); return; }
+  socComposeStatus('busy', `Posting to ${chosen.join(', ')}…`);
+  let posted = 0, failed = [];
+  for (const platform of chosen) {
+    try {
+      const r = await socAuthFetch('/api/social/drafts', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: socAuthToken(), platform: platform, text: text, source: 'manual' }),
+      });
+      const data = await r.json();
+      if (!r.ok || !data.ok) { failed.push(`${platform}: ${data.error || 'create failed'}`); continue; }
+      const r2 = await socAuthFetch(`/api/social/drafts/${data.id}/approve`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: socAuthToken() }),
+      });
+      const d2 = await r2.json();
+      if (r2.ok && d2.ok) posted++; else failed.push(`${platform}: ${d2.error || 'post failed'}`);
+    } catch (e) { failed.push(`${platform}: ${e.message}`); }
+  }
+  if (posted && !failed.length) {
+    socComposeStatus('', `Posted to ${posted} platform${posted>1?'s':''}. Check Queue for the published URIs.`);
+    document.getElementById('soc-compose-text').value = '';
+    socComposeCharCount();
+  } else if (posted) {
+    socComposeStatus('error', `Posted to ${posted}, but: ${failed.join(' | ')}`);
+  } else {
+    socComposeStatus('error', failed.join(' | ') || 'All posts failed.');
+  }
+  socRefreshQueue();
+}
+
+function socComposeStatus(kind, msg) {
+  const el = document.getElementById('soc-compose-status');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.className = 'soc-compose-status' + (kind ? ' soc-compose-status-' + kind : '');
+}
+
+// ── Queue ──────────────────────────────────────────────────────────────────
+
+async function socRefreshQueue() {
+  const el = document.getElementById('soc-queue-list');
+  if (!el) return;
+  try {
+    const r = await socAuthFetch(`/api/social/drafts?token=${encodeURIComponent(socAuthToken())}`);
+    if (!r.ok) return;
+    const drafts = await r.json();
+    if (!drafts.length) {
+      el.innerHTML = `<div class="soc-empty">
+        <div class="soc-empty-sigil">⋯</div>
+        <h2 class="soc-empty-h">Queue is quiet.</h2>
+        <p class="soc-empty-p">Drafts appear here when Nyota writes one on your schedule, or when you save one from Compose.</p>
+      </div>`;
+      return;
+    }
+    el.innerHTML = drafts.map(d => socQueueCardHtml(d)).join('');
+  } catch (_) {}
+}
+
+function socQueueCardHtml(d) {
+  const statusCls = {
+    pending:   'soc-q-status-pending',
+    posted:    'soc-q-status-posted',
+    rejected:  'soc-q-status-rejected',
+    failed:    'soc-q-status-failed',
+    approved:  'soc-q-status-posted',
+  }[d.status] || '';
+  const when = new Date(d.updated_at * 1000).toLocaleString();
+  let actions = '';
+  if (d.status === 'pending') {
+    actions = `
+      <button class="soc-btn" onclick="socQueueApprove(${d.id})">Approve &amp; post</button>
+      <button class="soc-btn-secondary" onclick="socQueueRedraft(${d.id})">Redraft</button>
+      <button class="soc-btn-ghost" onclick="socQueueReject(${d.id})">Reject</button>`;
+  } else if (d.status === 'posted' && d.posted_uri) {
+    actions = `<span class="soc-q-posted-uri">${socEscape(d.posted_uri)}</span>`;
+  } else if (d.status === 'failed' && d.error_detail) {
+    actions = `<span class="soc-q-error">${socEscape(d.error_detail)}</span> <button class="soc-btn-secondary" onclick="socQueueApprove(${d.id})">Retry</button>`;
+  }
+  const pillar = d.pillar ? `<span class="soc-q-pillar">${socEscape(d.pillar)}</span>` : '';
+  return `
+    <div class="soc-q-card" data-id="${d.id}">
+      <div class="soc-q-head">
+        <span class="soc-q-platform">${socEscape(d.platform)}</span>
+        <span class="soc-pill ${statusCls}">${d.status}</span>
+        ${pillar}
+        <span class="soc-q-when">${when}</span>
+      </div>
+      <textarea class="soc-field-input soc-q-text" rows="4" data-id="${d.id}">${socEscape(d.text)}</textarea>
+      <div class="soc-q-actions">${actions}</div>
+    </div>`;
+}
+
+async function socQueueApprove(id) {
+  const ta = document.querySelector(`.soc-q-text[data-id="${id}"]`);
+  const edited = ta ? ta.value : undefined;
+  const r = await socAuthFetch(`/api/social/drafts/${id}/approve`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token: socAuthToken(), edited_text: edited }),
+  });
+  const d = await r.json();
+  if (r.ok && d.ok) socToast(`Posted → ${d.uri || 'done'}`);
+  else socToast(`Publish failed: ${d.error || 'unknown'}`);
+  socRefreshQueue();
+}
+
+async function socQueueRedraft(id) {
+  const hint = prompt('Redraft hint (optional — what should Nyota try differently?):') || '';
+  const r = await socAuthFetch(`/api/social/drafts/${id}/redraft`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token: socAuthToken(), hint: hint }),
+  });
+  const d = await r.json();
+  if (r.ok && d.ok) socToast('Redrafted.');
+  else socToast(`Redraft failed: ${d.error || 'unknown'}`);
+  socRefreshQueue();
+}
+
+async function socQueueReject(id) {
+  if (!confirm('Reject this draft?')) return;
+  const r = await socAuthFetch(`/api/social/drafts/${id}`, {
+    method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token: socAuthToken() }),
+  });
+  if (r.ok) socToast('Rejected.');
+  socRefreshQueue();
+}
+
+// ── Inbox ──────────────────────────────────────────────────────────────────
+
+async function socRefreshInbox() {
+  const el = document.getElementById('soc-inbox-list');
+  if (!el) return;
+  try {
+    const r = await socAuthFetch(`/api/social/replies?token=${encodeURIComponent(socAuthToken())}`);
+    if (!r.ok) return;
+    const replies = await r.json();
+    if (!replies.length) {
+      el.innerHTML = `<div class="soc-empty">
+        <div class="soc-empty-sigil">✉</div>
+        <h2 class="soc-empty-h">Nothing waiting on a reply.</h2>
+        <p class="soc-empty-p">New mentions and comments land here as they come in. Nyota drafts replies; you approve or edit.</p>
+      </div>`;
+      return;
+    }
+    el.innerHTML = replies.map(r => socInboxCardHtml(r)).join('');
+  } catch (_) {}
+}
+
+function socInboxCardHtml(r) {
+  const when = new Date(r.created_at * 1000).toLocaleString();
+  const pending = r.status === 'pending';
+  const actions = pending ? `
+    <button class="soc-btn" onclick="socInboxApprove(${r.id})">Approve reply</button>
+    <button class="soc-btn-ghost" onclick="socInboxReject(${r.id})">Skip</button>
+  ` : `<span class="soc-pill soc-q-status-posted">${r.status}</span>`;
+  return `
+    <div class="soc-q-card" data-id="${r.id}">
+      <div class="soc-q-head">
+        <span class="soc-q-platform">${socEscape(r.platform)}</span>
+        <span class="soc-q-when">from ${socEscape(r.parent_author || '?')} · ${when}</span>
+      </div>
+      <div class="soc-inbox-parent">${socEscape(r.parent_text || '(no text)')}</div>
+      <textarea class="soc-field-input soc-q-text" rows="3" data-reply="${r.id}">${socEscape(r.draft_text || '')}</textarea>
+      <div class="soc-q-actions">${actions}</div>
+    </div>`;
+}
+
+async function socInboxApprove(id) {
+  const ta = document.querySelector(`.soc-q-text[data-reply="${id}"]`);
+  const edited = ta ? ta.value : undefined;
+  const r = await socAuthFetch(`/api/social/replies/${id}/approve`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token: socAuthToken(), edited_text: edited }),
+  });
+  const d = await r.json();
+  if (r.ok && d.ok) socToast('Reply posted.');
+  else socToast(`Failed: ${d.error || 'unknown'}`);
+  socRefreshInbox();
+}
+
+async function socInboxReject(id) {
+  const r = await socAuthFetch(`/api/social/replies/${id}`, {
+    method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token: socAuthToken() }),
+  });
+  if (r.ok) socToast('Skipped.');
+  socRefreshInbox();
+}
+
+// ── Analytics ──────────────────────────────────────────────────────────────
+
+async function socRefreshAnalytics() {
+  const stats = document.getElementById('soc-analytics-stats');
+  const alerts = document.getElementById('soc-alerts-list');
+  if (!stats) return;
+  try {
+    const r = await socAuthFetch(`/api/social/stats?token=${encodeURIComponent(socAuthToken())}`);
+    const data = r.ok ? await r.json() : { snapshots: [] };
+    const snaps = data.snapshots || [];
+    if (!snaps.length) {
+      stats.innerHTML = `<div class="soc-empty">
+        <div class="soc-empty-sigil">◔</div>
+        <h2 class="soc-empty-h">No snapshots yet.</h2>
+        <p class="soc-empty-p">Nyota takes a weekly stats snapshot per platform. First one lands after the next Monday 10am tick.</p>
+      </div>`;
+    } else {
+      // Group by platform, show latest snapshot per
+      const byPlat = {};
+      for (const s of snaps) { if (!byPlat[s.platform] || s.as_of > byPlat[s.platform].as_of) byPlat[s.platform] = s; }
+      stats.innerHTML = Object.values(byPlat).map(s => `
+        <div class="soc-stats-card">
+          <h3 class="soc-stats-plat">${socEscape(s.platform)}</h3>
+          <div class="soc-stats-grid">
+            <div><span class="soc-stats-label">Followers</span><span class="soc-stats-val">${s.followers ?? '—'}</span></div>
+            <div><span class="soc-stats-label">Following</span><span class="soc-stats-val">${s.following ?? '—'}</span></div>
+            <div><span class="soc-stats-label">Posts</span><span class="soc-stats-val">${s.posts_count ?? '—'}</span></div>
+          </div>
+          <div class="soc-stats-asof">snapshot ${new Date(s.as_of * 1000).toLocaleString()}</div>
+        </div>`).join('');
+    }
+  } catch (_) {}
+  // Alerts
+  try {
+    const r = await socAuthFetch(`/api/social/alerts?token=${encodeURIComponent(socAuthToken())}`);
+    const data = r.ok ? await r.json() : { alerts: [] };
+    const list = data.alerts || [];
+    if (!list.length) { alerts.innerHTML = ''; return; }
+    alerts.innerHTML = `<h3 class="soc-alerts-h">Open alerts</h3>` + list.map(a => `
+      <div class="soc-alert-card">
+        <span class="soc-pill soc-q-status-failed">${socEscape(a.alert_type)}</span>
+        <span class="soc-alert-plat">${socEscape(a.platform)}</span>
+        <p class="soc-alert-detail">${socEscape(a.detail)}</p>
+      </div>`).join('');
+  } catch (_) {}
+}
+
+// Refresh the right pane content when user navigates there
+const _socPrevActivate = socActivate;
+socActivate = function(section) {
+  _socPrevActivate(section);
+  if (section === 'compose')   { socComposeRenderPlatforms(); socComposeCharCount(); }
+  if (section === 'queue')     { socRefreshQueue(); }
+  if (section === 'inbox')     { socRefreshInbox(); }
+  if (section === 'analytics') { socRefreshAnalytics(); }
+};
+// Also kick the first pane's loader on initial render
+window.addEventListener('DOMContentLoaded', () => { socComposeRenderPlatforms(); socComposeCharCount(); });
 
 function socRevertSettings() {
   SOC_SETTINGS_LOADED = false;

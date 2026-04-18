@@ -541,6 +541,43 @@ pub async fn run_bot(
                     false // no colon → fall through to buffer
                 };
                 if !handled {
+                    // social-draft:<verb>:<id> — routed to the social engine.
+                    // We handle these in-band so the draft card can be approved
+                    // from Telegram without buffering to the external endpoint.
+                    if data.starts_with("social-draft:") {
+                        // Look up the draft's owner user_id.
+                        let parts: Vec<&str> = data.splitn(3, ':').collect();
+                        let draft_id: i64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(-1);
+                        let db = app_state.db_path.clone();
+                        let owner: Option<i64> = tokio::task::spawn_blocking(move || {
+                            let conn = rusqlite::Connection::open(&db).ok()?;
+                            conn.query_row(
+                                "SELECT user_id FROM social_drafts WHERE id = ?",
+                                rusqlite::params![draft_id],
+                                |r| r.get::<_, i64>(0),
+                            ).ok()
+                        }).await.ok().flatten();
+                        if let Some(uid) = owner {
+                            let result = crate::social::engine::telegram_callback_dispatch(
+                                Arc::clone(&app_state), uid, &data
+                            ).await;
+                            let ack_text = match &result {
+                                Ok(s) => s.chars().take(40).collect::<String>(),
+                                Err(e) => e.chars().take(40).collect::<String>(),
+                            };
+                            let answer_url = format!("{}/bot{}/answerCallbackQuery", TG_API, bot.token);
+                            let _ = client.post(&answer_url)
+                                .json(&serde_json::json!({
+                                    "callback_query_id": cb.id,
+                                    "text": ack_text,
+                                    "show_alert": false,
+                                }))
+                                .timeout(Duration::from_secs(5))
+                                .send().await;
+                            info!("[tg:{}] social-draft dispatch user={} draft={} result={:?}", bot.account_id, uid, draft_id, result);
+                            continue;
+                        }
+                    }
                     // Intentionally omit bot.token — the consumer already has its
                     // own token for the bot it cares about. Leaking bot_token on a
                     // LAN endpoint would surrender full bot control.
