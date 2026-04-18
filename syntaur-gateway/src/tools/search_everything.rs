@@ -14,8 +14,10 @@ use super::extension::{Citation, RichToolResult, Tool, ToolCapabilities, ToolCon
 pub struct SearchEverythingTool;
 
 const TOOL_NAME: &str = "search_everything";
-const DEFAULT_PER_SOURCE: usize = 8;
-const MAX_PER_SOURCE: usize = 20;
+const DEFAULT_PER_SOURCE: usize = 12;
+const MAX_PER_SOURCE: usize = 25;
+const SNIPPET_CHARS: usize = 600;
+const MEMORY_CONTENT_CHARS: usize = 500;
 const MAIN_AGENT_ID: &str = "main";
 
 #[async_trait]
@@ -112,7 +114,7 @@ impl Tool for SearchEverythingTool {
                     i + 1,
                     hit.title,
                     hit.source,
-                    truncate(&hit.snippet, 240)
+                    truncate(&hit.snippet, SNIPPET_CHARS)
                 ));
                 citations.push(Citation {
                     source: hit.source.clone(),
@@ -198,7 +200,7 @@ async fn search_memories(ctx: &ToolContext<'_>, query: &str, limit: usize) -> Re
                 mtype,
                 key,
                 title,
-                truncate(&content, 160)
+                truncate(&content, MEMORY_CONTENT_CHARS)
             ))
         })
         .map_err(|e| format!("query: {}", e))?

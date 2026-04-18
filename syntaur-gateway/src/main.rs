@@ -1196,7 +1196,10 @@ async fn handle_api_message(
     if let Some(custom) = &resolved.custom_prompt {
         context_parts.push(custom.clone());
     }
-    for file in &["SOUL.md", "IDENTITY.md", "TOOLS.md", "USER.md", "BRIEF.md", "PLAN.md", "MEMORY.md"] {
+    // STYLE.md loads FIRST so response-style rules (tool use, length,
+    // handoff) appear at the top of the system prompt where models
+    // weight them most. Identity follows so the agent still has voice.
+    for file in &["STYLE.md", "SOUL.md", "IDENTITY.md", "TOOLS.md", "USER.md", "BRIEF.md", "PLAN.md", "MEMORY.md"] {
         if let Ok(content) = std::fs::read_to_string(workspace.join(file)) {
             if !content.trim().is_empty() {
                 context_parts.push(content);
@@ -1661,7 +1664,10 @@ async fn handle_message_start(
         if let Some(custom) = &resolved.custom_prompt {
             context_parts.push(custom.clone());
         }
-        for file in &["SOUL.md", "IDENTITY.md", "TOOLS.md", "USER.md", "BRIEF.md", "PLAN.md", "MEMORY.md"] {
+        // STYLE.md loads FIRST so response-style rules (tool use, length,
+    // handoff) appear at the top of the system prompt where models
+    // weight them most. Identity follows so the agent still has voice.
+    for file in &["STYLE.md", "SOUL.md", "IDENTITY.md", "TOOLS.md", "USER.md", "BRIEF.md", "PLAN.md", "MEMORY.md"] {
             if let Ok(content) = std::fs::read_to_string(workspace.join(file)) {
                 if !content.trim().is_empty() {
                     context_parts.push(content);
