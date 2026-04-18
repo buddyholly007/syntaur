@@ -132,7 +132,19 @@ fn run_viewer(url: &str) -> Result<(), String> {
             });
         }
 
-        // Intercept external links — show in companion panel
+        // Intercept external links.
+        //
+        // Two decision types matter:
+        //   - NewWindowAction fires for target="_blank", window.open(),
+        //     middle-click, and Ctrl-click. These represent "the user
+        //     explicitly wants this in a real browser" — we launch the
+        //     system default (Firefox etc.) via xdg-open. This is what
+        //     OAuth flows need, since the user has their sessions +
+        //     password manager in the real browser.
+        //   - NavigationAction fires for main-frame navigations (user
+        //     typed a URL, or clicked a same-window link). For externals
+        //     we show them in the companion panel on the right so the
+        //     user doesn't lose their place in Syntaur.
         let origin = url_owned.clone();
         let companion_box_nav = companion_box.clone();
         let companion_wv_nav = companion_wv.clone();
@@ -140,6 +152,27 @@ fn run_viewer(url: &str) -> Result<(), String> {
         let paned_nav = paned.clone();
         let vis_nav = companion_visible.clone();
         webview.connect_decide_policy(move |_wv, decision, decision_type| {
+            if decision_type == PolicyDecisionType::NewWindowAction {
+                if let Some(nav) = decision.downcast_ref::<NavigationPolicyDecision>() {
+                    if let Some(mut action) = nav.navigation_action() {
+                        if let Some(request) = action.request() {
+                            if let Some(uri) = request.uri() {
+                                let uri_str = uri.to_string();
+                                let _ = std::process::Command::new("xdg-open")
+                                    .arg(&uri_str)
+                                    .stdin(std::process::Stdio::null())
+                                    .stdout(std::process::Stdio::null())
+                                    .stderr(std::process::Stdio::null())
+                                    .spawn();
+                                decision.ignore();
+                                return true;
+                            }
+                        }
+                    }
+                }
+                return false;
+            }
+
             if decision_type == PolicyDecisionType::NavigationAction {
                 if let Some(nav) = decision.downcast_ref::<NavigationPolicyDecision>() {
                     if let Some(mut action) = nav.navigation_action() {
