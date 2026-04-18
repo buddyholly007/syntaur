@@ -17,6 +17,8 @@ use std::sync::Arc;
 
 use crate::AppState;
 
+pub mod platforms;
+
 // ── Wire types ──────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -52,6 +54,14 @@ pub struct CreateConnectionRequest {
 #[derive(Deserialize)]
 pub struct DeleteConnectionRequest {
     pub token: String,
+}
+
+#[derive(Deserialize)]
+pub struct ReconnectRequest {
+    pub token: String,
+    pub fields: serde_json::Value,
+    #[serde(default)]
+    pub agent_id: Option<String>,
 }
 
 // ── Handlers ────────────────────────────────────────────────────────────────
@@ -210,4 +220,111 @@ pub async fn handle_delete(
     }
     log::warn!("[social] user={} deleted connection id={}", uid, id);
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// ── Descriptors ─────────────────────────────────────────────────────────────
+
+/// GET /api/social/platforms
+///
+/// Returns the full descriptor list the Connections pane renders — live
+/// adapters + stubbed platforms. UI uses this to drive wizard content
+/// and determine which Connect/Reconnect buttons are enabled.
+pub async fn handle_platforms(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let _principal = crate::resolve_principal(&state, token).await?;
+    let descriptors = platforms::all_descriptors();
+    Ok(Json(serde_json::json!({ "platforms": descriptors })))
+}
+
+// ── Reconnect ───────────────────────────────────────────────────────────────
+
+/// POST /api/social/connections/reconnect/:platform
+///
+/// Takes `{ token, fields, agent_id? }` and dispatches to the platform
+/// adapter's `reconnect()`. On success, upserts the row in
+/// `social_connections` with status=connected and the fresh credential
+/// blob. Error paths map to SocialError variants so the UI renders a
+/// consistent, human-readable message.
+pub async fn handle_reconnect(
+    State(state): State<Arc<AppState>>,
+    Path(platform): Path<String>,
+    Json(req): Json<ReconnectRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let err_json = |status: StatusCode, msg: String| {
+        (status, Json(serde_json::json!({ "ok": false, "error": msg })))
+    };
+
+    let principal = crate::resolve_principal(&state, &req.token).await
+        .map_err(|s| err_json(s, "Sign in again to reconnect a platform.".to_string()))?;
+    let uid = principal.user_id();
+
+    let adapters = platforms::registry();
+    let adapter = adapters.get(platform.as_str())
+        .ok_or_else(|| err_json(
+            StatusCode::BAD_REQUEST,
+            format!("No live adapter for '{}' yet. That platform will light up in a later phase.", platform),
+        ))?;
+
+    let input = platforms::ConnectInput { fields: req.fields.clone() };
+    let result = adapter.reconnect(&state.client, &input).await;
+    let stored = match result {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("[social] user={} platform={} reconnect failed: {:?}", uid, platform, e);
+            return Err(err_json(StatusCode::UNPROCESSABLE_ENTITY, e.user_message()));
+        }
+    };
+
+    let now = chrono::Utc::now().timestamp();
+    let db = state.db_path.clone();
+    let platform_s = platform.clone();
+    let agent_id = req.agent_id.clone();
+    let display_name = stored.display_name.clone();
+    let creds_str = stored.credentials.to_string();
+    let expires_at = stored.expires_at;
+
+    let row_id = tokio::task::spawn_blocking(move || -> Result<i64, String> {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let existing: Option<i64> = conn.query_row(
+            "SELECT id FROM social_connections \
+             WHERE user_id = ? AND platform = ? AND COALESCE(agent_id,'') = COALESCE(?,'')",
+            rusqlite::params![uid, platform_s, agent_id],
+            |r| r.get(0),
+        ).ok();
+        if let Some(id) = existing {
+            conn.execute(
+                "UPDATE social_connections SET \
+                   display_name = ?, credentials_json = ?, status = 'connected', \
+                   status_detail = NULL, expires_at = ?, last_verified_at = ?, updated_at = ? \
+                 WHERE id = ?",
+                rusqlite::params![display_name, creds_str, expires_at, now, now, id],
+            ).map_err(|e| e.to_string())?;
+            Ok(id)
+        } else {
+            conn.execute(
+                "INSERT INTO social_connections \
+                   (user_id, platform, display_name, credentials_json, status, \
+                    agent_id, connected_at, last_verified_at, expires_at, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, 'connected', ?, ?, ?, ?, ?, ?)",
+                rusqlite::params![
+                    uid, platform_s, display_name, creds_str, agent_id,
+                    now, now, expires_at, now, now
+                ],
+            ).map_err(|e| e.to_string())?;
+            Ok(conn.last_insert_rowid())
+        }
+    })
+    .await
+    .map_err(|_| err_json(StatusCode::INTERNAL_SERVER_ERROR, "Server error while saving the connection.".to_string()))?
+    .map_err(|e| err_json(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    log::info!("[social] user={} platform={} reconnected ok id={}", uid, platform, row_id);
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "id": row_id,
+        "display_name": stored.display_name,
+    })))
 }

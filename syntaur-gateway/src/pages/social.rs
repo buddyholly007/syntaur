@@ -173,6 +173,27 @@ pub async fn render() -> Html<String> {
                 }
             }
 
+            // ── Reconnect modal (hidden by default) ───────────────────────
+            div id="soc-modal" class="soc-modal-hidden" {
+                div class="soc-modal-backdrop" onclick="socCloseModal()" {}
+                div class="soc-modal-card" role="dialog" aria-modal="true" {
+                    div class="soc-modal-head" {
+                        div {
+                            h2 class="soc-modal-title" id="soc-modal-title" { "Reconnect" }
+                            p class="soc-modal-sub" id="soc-modal-sub" { "" }
+                        }
+                        button class="soc-modal-close" onclick="socCloseModal()" aria-label="Close" { "×" }
+                    }
+                    div class="soc-modal-body" id="soc-modal-body" {
+                        // wizard content + form render here from the descriptor
+                    }
+                    div class="soc-modal-foot" {
+                        button class="soc-btn-ghost" onclick="socCloseModal()" { "Cancel" }
+                        button class="soc-btn" id="soc-modal-submit" onclick="socModalSubmit()" { "Reconnect" }
+                    }
+                }
+            }
+
             // ── Nyota chat rail (collapsed by default) ────────────────────
             aside id="soc-chat-rail" class="soc-chat-rail soc-chat-collapsed" aria-label="Nyota chat" {
                 div class="soc-chat-head" {
@@ -414,6 +435,88 @@ body { background: var(--soc-bg); color: var(--soc-ink); }
 .soc-btn { padding: 7px 14px; border-radius: 6px; background: var(--soc-amber); color: #1a1208; border: 0; font-weight: 500; font-size: 13px; cursor: pointer; }
 .soc-chat-note { margin-top: 10px; font-size: 11px; color: var(--soc-ink-soft); font-style: italic; }
 
+/* Modal */
+.soc-modal-hidden { display: none; }
+#soc-modal {
+  position: fixed; inset: 0; z-index: 100;
+  display: flex; align-items: center; justify-content: center;
+}
+.soc-modal-backdrop {
+  position: absolute; inset: 0;
+  background: rgba(22, 18, 16, 0.72); backdrop-filter: blur(2px);
+}
+.soc-modal-card {
+  position: relative; z-index: 1;
+  width: min(520px, 92vw); max-height: 86vh; overflow-y: auto;
+  background: var(--soc-surface);
+  border-radius: 14px; box-shadow: 0 12px 60px -20px rgba(73, 49, 12, 0.6);
+  display: flex; flex-direction: column;
+}
+.soc-modal-head {
+  padding: 20px 24px 14px; border-bottom: 1px solid var(--soc-rule);
+  display: flex; align-items: flex-start; gap: 12px;
+}
+.soc-modal-title {
+  font-family: 'Playfair Display', Georgia, serif;
+  font-size: 22px; font-weight: 600; margin: 0; color: var(--soc-ink);
+}
+.soc-modal-sub { margin: 3px 0 0; font-size: 13px; color: var(--soc-ink-soft); font-style: italic; }
+.soc-modal-close {
+  margin-left: auto; background: transparent; border: 0;
+  color: var(--soc-ink-soft); font-size: 24px; cursor: pointer; padding: 0 4px;
+}
+.soc-modal-body { padding: 18px 24px; flex: 1; }
+.soc-modal-foot {
+  padding: 14px 24px; border-top: 1px solid var(--soc-rule);
+  display: flex; justify-content: flex-end; gap: 8px;
+  background: var(--soc-surface-2);
+  border-radius: 0 0 14px 14px;
+}
+.soc-wizard-step {
+  background: #fffdf6; border: 1px solid var(--soc-rule); border-radius: 8px;
+  padding: 12px 14px; margin-bottom: 10px;
+}
+.soc-wizard-step-title {
+  font-family: 'Playfair Display', Georgia, serif;
+  font-size: 14px; font-weight: 600; margin: 0 0 4px; color: var(--soc-ink);
+}
+.soc-wizard-step-body {
+  font-size: 13px; color: var(--soc-ink-mute); line-height: 1.5; margin: 0;
+}
+.soc-wizard-step-body strong { color: var(--soc-ink); }
+.soc-wizard-step-body code {
+  background: #efe3c9; color: var(--soc-amber-deep);
+  padding: 1px 5px; border-radius: 3px; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12px;
+}
+.soc-wizard-link {
+  display: inline-block; margin-top: 6px; font-size: 12px;
+  color: var(--soc-amber-deep); text-decoration: underline; text-underline-offset: 2px;
+}
+.soc-field-group { margin-top: 14px; }
+.soc-field-label {
+  display: block; font-size: 12px; font-weight: 600; color: var(--soc-ink);
+  margin-bottom: 4px; letter-spacing: .02em;
+}
+.soc-field-input {
+  width: 100%; padding: 8px 12px; border-radius: 6px;
+  border: 1px solid var(--soc-rule); background: #fffdf6;
+  color: var(--soc-ink); font-size: 14px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+}
+.soc-field-input:focus { outline: 2px solid var(--soc-amber); outline-offset: 0; border-color: var(--soc-amber); }
+.soc-field-help {
+  font-size: 11px; color: var(--soc-ink-soft); margin-top: 4px; font-style: italic;
+}
+.soc-modal-error {
+  margin-top: 14px; padding: 10px 12px;
+  background: #f3d1cb; color: #712a21; border-radius: 6px;
+  font-size: 13px; border-left: 3px solid #b33a2a;
+}
+.soc-modal-busy {
+  margin-top: 14px; padding: 10px 12px; font-style: italic;
+  color: var(--soc-ink-soft); font-size: 13px;
+}
+
 /* Tone accents on platform cards (subtle) */
 .soc-tone-skyblue  { border-top: 2px solid #7fb2d4; }
 .soc-tone-graphite { border-top: 2px solid #6b6760; }
@@ -467,16 +570,28 @@ function socEscape(s) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+// Descriptor cache — the auth_flow drives the wizard modal. Populated on
+// first load; refreshed when the user returns to the tab. A descriptor
+// with kind == "not_implemented" means the Connect button stays disabled.
+let SOC_DESCRIPTORS = {};
+
 function socRenderPlatforms(connMap) {
   const grid = document.getElementById('soc-platform-grid');
   if (!grid) return;
   grid.innerHTML = SOC_PLATFORMS.map(p => {
     const conn = connMap[p.id];
+    const desc = SOC_DESCRIPTORS[p.id];
     const statusKey = conn ? (conn.status || 'connected') : 'not_configured';
     const sLabel = (SOC_STATUS_LABELS[statusKey] || SOC_STATUS_LABELS.not_configured);
     const handle = conn && conn.display_name ? `<p class="soc-platform-handle">${socEscape(conn.display_name)}</p>` : '';
     const detail = conn && conn.status_detail ? `<p class="soc-platform-detail">${socEscape(conn.status_detail)}</p>` : '';
-    const btnLabel = conn ? (statusKey === 'connected' ? 'Connected' : 'Reconnect — next phase') : 'Connect — next phase';
+    const hasAdapter = desc && desc.auth_flow && desc.auth_flow.kind !== 'not_implemented';
+    const btnAttrs = hasAdapter
+      ? `onclick="socOpenModal('${p.id}')"`
+      : `disabled`;
+    const btnLabel = !hasAdapter
+      ? (conn ? 'Reconnect — next phase' : 'Connect — next phase')
+      : (conn ? 'Reconnect' : 'Connect');
     return `
       <div class="soc-platform-card soc-tone-${socEscape(p.tone)}">
         <div class="soc-platform-head">
@@ -486,12 +601,149 @@ function socRenderPlatforms(connMap) {
         ${handle}
         <p class="soc-platform-sub">${socEscape(p.sub)}</p>
         ${detail}
-        <button class="soc-btn-ghost" disabled>${btnLabel}</button>
+        <button class="${hasAdapter ? 'soc-btn' : 'soc-btn-ghost'}" ${btnAttrs}>${btnLabel}</button>
       </div>`;
   }).join('');
 }
 
+async function socLoadDescriptors() {
+  try {
+    const tok = socAuthToken();
+    const r = await socAuthFetch(`/api/social/platforms?token=${encodeURIComponent(tok)}`);
+    if (!r.ok) return;
+    const data = await r.json();
+    const map = {};
+    (data.platforms || []).forEach(d => { map[d.id] = d; });
+    SOC_DESCRIPTORS = map;
+  } catch (_) { /* descriptors optional for initial render */ }
+}
+
+// ── Modal / wizard ──────────────────────────────────────────────────────────
+
+let SOC_MODAL_PLATFORM = null;
+
+function socRenderMd(md) {
+  // Intentionally minimal: bold + code. Full markdown is overkill for
+  // wizard steps and safer to avoid arbitrary HTML injection.
+  return socEscape(md)
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>');
+}
+
+function socWizardHtml(desc) {
+  const flow = desc.auth_flow || {};
+  const steps = (flow.setup_steps || []).map((s, i) => {
+    const linkHtml = s.deep_link
+      ? `<a class="soc-wizard-link" href="${socEscape(s.deep_link)}" target="_blank" rel="noopener">${socEscape(s.deep_link)}</a>`
+      : '';
+    return `
+      <div class="soc-wizard-step">
+        <h3 class="soc-wizard-step-title">${i+1}. ${socEscape(s.title)}</h3>
+        <p class="soc-wizard-step-body">${socRenderMd(s.body_md || '')}</p>
+        ${linkHtml}
+      </div>`;
+  }).join('');
+
+  let formHtml = '';
+  if (flow.kind === 'app_password') {
+    const labels = flow.field_labels || ['Field 1', 'Field 2'];
+    const helps  = flow.field_helps  || ['', ''];
+    formHtml = `
+      <div class="soc-field-group">
+        <label class="soc-field-label" for="soc-field-handle">${socEscape(labels[0])}</label>
+        <input type="text" id="soc-field-handle" class="soc-field-input" autocomplete="off" spellcheck="false">
+        <div class="soc-field-help">${socEscape(helps[0])}</div>
+      </div>
+      <div class="soc-field-group">
+        <label class="soc-field-label" for="soc-field-password">${socEscape(labels[1])}</label>
+        <input type="password" id="soc-field-password" class="soc-field-input" autocomplete="new-password" spellcheck="false">
+        <div class="soc-field-help">${socEscape(helps[1])}</div>
+      </div>`;
+  } else if (flow.kind === 'oauth2') {
+    formHtml = `<div class="soc-modal-busy">OAuth connect flow lands in a later phase. For now, edit the credential row directly via /api/social/connections.</div>`;
+  } else if (flow.kind === 'paid') {
+    formHtml = `<div class="soc-modal-busy">This platform requires a paid API tier. Sign up first, then come back and paste your key.</div>`;
+  } else {
+    formHtml = `<div class="soc-modal-busy">Adapter for this platform isn't wired up yet.</div>`;
+  }
+  return steps + formHtml + '<div id="soc-modal-status"></div>';
+}
+
+function socOpenModal(platformId) {
+  const desc = SOC_DESCRIPTORS[platformId];
+  if (!desc) return;
+  SOC_MODAL_PLATFORM = platformId;
+  document.getElementById('soc-modal-title').textContent = `Reconnect ${desc.display_name}`;
+  document.getElementById('soc-modal-sub').textContent = desc.tagline || '';
+  document.getElementById('soc-modal-body').innerHTML = socWizardHtml(desc);
+  const submit = document.getElementById('soc-modal-submit');
+  const flow = desc.auth_flow || {};
+  submit.disabled = (flow.kind !== 'app_password');
+  submit.textContent = 'Reconnect';
+  document.getElementById('soc-modal').classList.remove('soc-modal-hidden');
+}
+
+function socCloseModal() {
+  document.getElementById('soc-modal').classList.add('soc-modal-hidden');
+  SOC_MODAL_PLATFORM = null;
+}
+
+function socSetStatus(kind, msg) {
+  const el = document.getElementById('soc-modal-status');
+  if (!el) return;
+  if (!msg) { el.innerHTML = ''; return; }
+  const cls = kind === 'error' ? 'soc-modal-error' : 'soc-modal-busy';
+  el.innerHTML = `<div class="${cls}">${socEscape(msg)}</div>`;
+}
+
+async function socModalSubmit() {
+  const platformId = SOC_MODAL_PLATFORM;
+  if (!platformId) return;
+  const desc = SOC_DESCRIPTORS[platformId];
+  const flow = (desc && desc.auth_flow) || {};
+  if (flow.kind !== 'app_password') return;
+
+  const submit = document.getElementById('soc-modal-submit');
+  submit.disabled = true;
+  submit.textContent = 'Reconnecting…';
+  socSetStatus('busy', 'Asking the platform to verify those credentials…');
+
+  const handle = (document.getElementById('soc-field-handle').value || '').trim();
+  const password = (document.getElementById('soc-field-password').value || '').trim();
+  if (!handle || !password) {
+    socSetStatus('error', 'Both fields are required.');
+    submit.disabled = false; submit.textContent = 'Reconnect';
+    return;
+  }
+
+  try {
+    const r = await socAuthFetch(`/api/social/connections/reconnect/${encodeURIComponent(platformId)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        token: socAuthToken(),
+        fields: { handle: handle, app_password: password },
+      }),
+    });
+    const data = await r.json();
+    if (!r.ok || !data.ok) {
+      socSetStatus('error', data.error || 'Reconnect failed.');
+      submit.disabled = false; submit.textContent = 'Try again';
+      return;
+    }
+    socSetStatus('busy', `Connected as ${data.display_name}. Refreshing…`);
+    await socRefreshConnections();
+    setTimeout(() => socCloseModal(), 600);
+  } catch (e) {
+    socSetStatus('error', 'Network error — ' + (e.message || 'try again in a moment.'));
+    submit.disabled = false; submit.textContent = 'Try again';
+  }
+}
+
 async function socRefreshConnections() {
+  if (Object.keys(SOC_DESCRIPTORS).length === 0) {
+    await socLoadDescriptors();
+  }
   socRenderPlatforms({});
   try {
     const r = await socAuthFetch(`/api/social/connections?token=${encodeURIComponent(socAuthToken())}`);
@@ -504,6 +756,12 @@ async function socRefreshConnections() {
 }
 window.addEventListener('DOMContentLoaded', socRefreshConnections);
 window.addEventListener('focus', socRefreshConnections);
+// Escape closes the modal — expected keyboard habit for dialogs.
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !document.getElementById('soc-modal').classList.contains('soc-modal-hidden')) {
+    socCloseModal();
+  }
+});
 
 // Deep-linkable section switching via hash.
 function socActivate(section) {

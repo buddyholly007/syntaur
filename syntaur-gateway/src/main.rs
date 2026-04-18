@@ -5429,6 +5429,8 @@ async fn main() {
         .route("/api/social/connections", get(social::handle_list))
         .route("/api/social/connections", post(social::handle_create))
         .route("/api/social/connections/{id}", axum::routing::delete(social::handle_delete))
+        .route("/api/social/connections/reconnect/{platform}", post(social::handle_reconnect))
+        .route("/api/social/platforms", get(social::handle_platforms))
         .route("/tax", get(pages::tax::render))
         .route("/chat", get(pages::chat::render))
         .route("/history", get(pages::history::render))
