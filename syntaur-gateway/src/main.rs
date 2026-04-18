@@ -1339,7 +1339,11 @@ async fn handle_api_message(
     }
     tool_registry.apply_module_filter(&state.disabled_tools);
     let tools = tool_registry.tool_definitions();
-    let max_rounds = 30;
+    // 15 rounds is enough for every realistic task and caps worst-case
+    // tool-call-loop latency at ~60-90s instead of ~3-5 min. Models that
+    // can't converge in 15 rounds are flailing — see round-budget warning
+    // below for the escalating bail-out nudges.
+    let max_rounds = 15;
 
     for round in 0..max_rounds {
         let result = match llm_chain.call_raw(&messages, Some(&tools)).await {
@@ -1397,10 +1401,28 @@ async fn handle_api_message(
                         output = format!("{}...\n[truncated — {} chars total]", &output[..1200], output.len());
                     }
 
-                    // Round budget warning
+                    // Escalating round-budget warnings, appended to the tool
+                    // result so the model sees them before its next turn.
+                    // Kicks in early (round 5+) because tool-call loops are
+                    // the most common cause of slow turns.
                     let remaining = max_rounds - round - 1;
-                    if remaining <= 8 && remaining > 0 {
-                        output.push_str(&format!("\n\n[Round {}/{} — {} remaining. Finish your task or report status.]", round + 1, max_rounds, remaining));
+                    if remaining == 0 {
+                        // last round — handled by the final-text fallback below
+                    } else if remaining <= 2 {
+                        output.push_str(&format!(
+                            "\n\n[Round {}/{} — STOP calling tools. Answer the user NOW with what you have, even if incomplete.]",
+                            round + 1, max_rounds
+                        ));
+                    } else if remaining <= 5 {
+                        output.push_str(&format!(
+                            "\n\n[Round {}/{} — {} rounds left. If you have enough to answer, do it now. Do NOT re-run searches with rephrased queries.]",
+                            round + 1, max_rounds, remaining
+                        ));
+                    } else if remaining <= 10 {
+                        output.push_str(&format!(
+                            "\n\n[Round {}/{} — consider wrapping up. Prefer `search_everything` over multiple narrower searches.]",
+                            round + 1, max_rounds
+                        ));
                     }
 
                     messages.push(llm::ChatMessage::tool_result(&id, &output));
@@ -1769,7 +1791,8 @@ async fn handle_message_start(
         tr.apply_module_filter(&state.disabled_tools);
         let tool_registry = std::sync::Arc::new(tr);
     let tools = tool_registry.tool_definitions();
-        let max_rounds = 30;
+        // See handle_api_message for rationale — 15 rounds caps flailing turns.
+        let max_rounds = 15;
 
         for round in 0..max_rounds {
             let _ = tx.send(AgentTurnEvent::LlmCallStarted {
@@ -1829,6 +1852,27 @@ async fn handle_message_start(
                         let mut output = result.output;
                         if output.len() > 1500 {
                             output = format!("{}...\n[truncated — {} chars total]", &output[..1200], output.len());
+                        }
+                        // Escalating round-budget warnings — keep in sync with
+                        // the non-streaming loop in handle_api_message.
+                        let remaining = max_rounds - round - 1;
+                        if remaining == 0 {
+                            // handled by max-rounds error below
+                        } else if remaining <= 2 {
+                            output.push_str(&format!(
+                                "\n\n[Round {}/{} — STOP calling tools. Answer the user NOW with what you have, even if incomplete.]",
+                                round + 1, max_rounds
+                            ));
+                        } else if remaining <= 5 {
+                            output.push_str(&format!(
+                                "\n\n[Round {}/{} — {} rounds left. If you have enough to answer, do it now. Do NOT re-run searches with rephrased queries.]",
+                                round + 1, max_rounds, remaining
+                            ));
+                        } else if remaining <= 10 {
+                            output.push_str(&format!(
+                                "\n\n[Round {}/{} — consider wrapping up. Prefer `search_everything` over multiple narrower searches.]",
+                                round + 1, max_rounds
+                            ));
                         }
                         messages.push(llm::ChatMessage::tool_result(&id, &output));
                     }

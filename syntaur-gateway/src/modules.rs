@@ -26,12 +26,22 @@ pub struct CoreModule {
 
 /// All core modules compiled into the gateway.
 pub static CORE_MODULES: &[CoreModule] = &[
+    // Split from the original `core-files` module so read-only lookups
+    // (what agents do 99% of the time) can stay enabled even when users
+    // want to block write/edit for safety. Existing configs that disable
+    // `core-files` keep blocking writes but no longer block reads.
+    CoreModule {
+        id: "core-files-read",
+        name: "File Reading (safe)",
+        description: "Read files and list directories in the workspace. Pure read-only — cannot modify anything.",
+        tools: &["memory_read", "read", "list_files", "file_read"],
+        default_enabled: true,
+    },
     CoreModule {
         id: "core-files",
-        name: "File Operations",
-        description: "Read, write, edit, and list files in the workspace",
-        tools: &["memory_read", "memory_write", "read", "write", "edit", "list_files",
-                  "file_read", "file_write", "file_edit"],
+        name: "File Write & Edit",
+        description: "Write, edit, and create files in the workspace. Disable to give agents read-only access.",
+        tools: &["memory_write", "write", "edit", "file_write", "file_edit"],
         default_enabled: true,
     },
     CoreModule {

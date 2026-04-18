@@ -13,6 +13,7 @@ pub mod memory;
 pub mod web;
 pub mod extension;
 pub mod internal_search;
+pub mod search_everything;
 pub mod code_execute;
 pub mod openapi;
 pub mod home_assistant;
@@ -252,6 +253,12 @@ impl ToolRegistry {
         if indexer.is_some() {
             let t: Arc<dyn Tool> = Arc::new(InternalSearchTool);
             extensions.insert(t.name().to_string(), t);
+
+            // search_everything unifies memory + indexer in one call so models
+            // stop cycling memory_recall → internal_search → memory_list.
+            // Requires the indexer for the content-search half.
+            let t: Arc<dyn Tool> = Arc::new(search_everything::SearchEverythingTool);
+            extensions.insert(t.name().to_string(), t);
         }
         if code_execute::bwrap_available() {
             let t: Arc<dyn Tool> = Arc::new(CodeExecuteTool);
@@ -486,13 +493,24 @@ impl ToolRegistry {
                     "Tool '{}' requires approval but no approval context is wired — BLOCKED",
                     call.name
                 );
+                // Give the model a concrete alternative when one exists, so it
+                // stops retrying the same blocked tool or hallucinating adjacent
+                // ones. `exec` in particular is the most common dead-end.
+                let alt = match call.name.as_str() {
+                    "exec" | "shell" | "run" => {
+                        " For read-only inspection, try `search_everything` (memory + workspace + execution log) \
+                          or `list_workspace` — those don't need approval."
+                    }
+                    _ => "",
+                };
                 return ToolResult {
                     tool_call_id: call.id.clone(),
                     success: false,
                     output: format!(
-                        "Error: tool '{}' requires approval but no approval channel is configured. \
-                         Set up Telegram integration to enable tool approvals.",
-                        call.name
+                        "Error: tool `{}` requires user approval but no approval channel is configured \
+                         in this session.{} Do NOT retry this tool — work with whatever information you \
+                         already have and answer the user, or explain what you cannot do.",
+                        call.name, alt
                     ),
                 };
             }
@@ -539,10 +557,17 @@ impl ToolRegistry {
         // (Stages 3a–3e of v5 Item 1). If we get here, the tool name is
         // unknown to BOTH MCP and the trait registry.
         warn!("Unknown tool: {}", call.name);
+        // Return a helpful error that teaches the model what IS available
+        // — otherwise it will just hallucinate a different invalid name and
+        // keep looping. See suggest_alternative() for the mapping.
+        let hint = suggest_alternative(&call.name);
         ToolResult {
             tool_call_id: call.id.clone(),
             success: false,
-            output: format!("Error: Unknown tool: {}", call.name),
+            output: format!(
+                "Error: tool `{}` is not available in this session.{}",
+                call.name, hint
+            ),
         }
     }
 
@@ -767,6 +792,34 @@ impl ToolRegistry {
 }
 
 /// Parse tool calls from LLM response JSON
+/// Map common hallucinated tool names (Claude/Anthropic-SDK naming
+/// conventions leaking from model training data) to Syntaur equivalents,
+/// or steer the model toward the unified `search_everything` tool when
+/// no direct equivalent exists. Returned as a leading-space hint.
+fn suggest_alternative(name: &str) -> &'static str {
+    match name {
+        // Search / retrieval family — one canonical answer here
+        "search" | "query" | "find" | "recall" | "lookup" | "retrieve" => {
+            " Use `search_everything` instead — it unifies memory + workspace + indexed docs in one call."
+        }
+        // Claude-style file ops (read/list) — core-files module may be disabled
+        "read" | "read_file" | "view" | "view_file" | "cat" | "open" | "open_file" => {
+            " File reading is gated behind the `core-files` module (disabled in this deployment). \
+              Use `search_everything` to find content by keyword instead."
+        }
+        "list_files" | "ls" | "dir" | "glob" | "find_files" => {
+            " File listing is gated behind the `core-files` module (disabled in this deployment). \
+              Use `search_everything` or `memory_list` instead."
+        }
+        // Write-family tools are intentionally absent — don't offer an alternative
+        "write" | "write_file" | "edit" | "edit_file" | "create_file" | "save_file" => {
+            " Write operations are not enabled for this agent. Explain the change to the user instead."
+        }
+        // Don't invent a hint for tools we don't recognize — the bare error is fine.
+        _ => "",
+    }
+}
+
 /// Heuristic: is this MCP tool name clearly read-only?
 ///
 /// MCP tools are auto-approval-gated for safety (filesystem writes, shell
