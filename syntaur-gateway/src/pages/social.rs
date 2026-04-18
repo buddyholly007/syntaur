@@ -621,15 +621,25 @@ function socRenderPlatforms(connMap) {
     const detail = conn && conn.status_detail ? `<p class="soc-platform-detail">${socEscape(conn.status_detail)}</p>` : '';
     const kind = desc && desc.auth_flow ? desc.auth_flow.kind : 'unknown';
     const hasAdapter = kind && kind !== 'not_implemented' && kind !== 'unknown';
-    // Button style tracks urgency. Healthy = muted (secondary); broken or
-    // unset = primary amber so the user's eye goes there first.
     const isHealthy = statusKey === 'connected';
-    const btnLabel = hasAdapter
-      ? (conn ? 'Reconnect' : 'Connect')
-      : "What's coming";
-    const btnCls = !hasAdapter
-      ? 'soc-btn-ghost'
-      : (isHealthy ? 'soc-btn-secondary' : 'soc-btn');
+
+    // A button should only exist when there's a meaningful action behind it:
+    //  - live adapter + broken connection → primary "Reconnect"
+    //  - live adapter + never connected   → primary "Connect"
+    //  - stubbed platform                 → ghost "What's coming" explainer
+    //  - live adapter + healthy           → NO button. The status pill is
+    //    the affordance; there's nothing to act on. If the connection
+    //    ever degrades, the status flips and the button reappears.
+    //    Deliberate disconnect / account-switch belongs to a future
+    //    Settings pane or card-level menu, not the primary affordance.
+    let buttonHtml = '';
+    if (!hasAdapter) {
+      buttonHtml = `<button class="soc-btn-ghost" onclick="socOpenModal('${p.id}')">What's coming</button>`;
+    } else if (!isHealthy) {
+      const lbl = conn ? 'Reconnect' : 'Connect';
+      buttonHtml = `<button class="soc-btn" onclick="socOpenModal('${p.id}')">${lbl}</button>`;
+    }
+
     return `
       <div class="soc-platform-card soc-tone-${socEscape(p.tone)}">
         <div class="soc-platform-head">
@@ -639,7 +649,7 @@ function socRenderPlatforms(connMap) {
         ${handle}
         <p class="soc-platform-sub">${socEscape(p.sub)}</p>
         ${detail}
-        <button class="${btnCls}" onclick="socOpenModal('${p.id}')">${btnLabel}</button>
+        ${buttonHtml}
       </div>`;
   }).join('');
 }
