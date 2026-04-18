@@ -568,9 +568,6 @@ async function send(msg) {
               <button onclick="copy(this)" class="text-xs text-gray-600 hover:text-gray-400" data-t="${escAttr(displayResp)}">Copy</button></div>`;
             scroll.scrollTop = scroll.scrollHeight;
             if (voiceInitiated) { playTts(ev.response); voiceInitiated = false; }
-            // Maurice ends his turn with [HANDBACK] when done — flip the
-            // agent selector back to whoever summoned him.
-            if (typeof checkForHandback === 'function') checkForHandback(ev.response);
             sending = false; btn.disabled = false;
             document.getElementById('input').focus();
             return;
@@ -741,57 +738,45 @@ function pickFixOption(num, btn) {
   if (typeof sendMessage === 'function') sendMessage();
 }
 
-// Switch the chat to Maurice and kick off his turn with the failure
-// context pulled from the preceding conversation. Maurice's SOUL/STYLE/
-// IDENTITY files teach him to read the prior messages, diagnose, and
-// post back with `[HANDBACK]` when he's done so we can auto-return
-// control to Peter (or whoever was the prior main agent).
+// Hand off to Maurice — navigate the user FROM /chat TO /coders, which is
+// Maurice's dedicated module (terminal, debug context panel, code view).
+// This is a full page transition, not a swap within the chat. When Maurice
+// is done he asks the user whether to return; on yes, /coders posts the
+// outcome back to the original conversation and navigates back here.
+//
+// URL params carried to /coders:
+//   ?handoff=1 — puts the module in "someone sent you here" mode
+//   &return_agent=<display_name> — who to hand back to
+//   &conv_id=<id> — conversation to post the outcome into on return
+//   &ctx=<base64 url-safe> — the failure message text so Maurice opens
+//                            with the right context already loaded
 function handoffToMaurice(btn) {
-  const priorAgent = currentAgent;
-  window._handoffReturnAgent = priorAgent; // remembered for [HANDBACK] later
-  // Grab the nearest ai-message's text so we can pass the failure summary
-  // to Maurice as context. We walk up from the button to the enclosing
-  // message container.
+  const priorAgent = currentAgent || 'Peter';
   let ctx = '';
   let el = btn ? btn.closest('.chat-md, [data-ai-msg]') : null;
   if (!el) {
-    // Fallback: take last assistant message's text
     const msgs = document.querySelectorAll('#messages .chat-md');
     if (msgs.length) el = msgs[msgs.length - 1];
   }
-  if (el) ctx = (el.innerText || '').trim().slice(0, 1500);
+  if (el) ctx = (el.innerText || '').trim().slice(0, 2000);
 
-  if (typeof switchAgent === 'function' && agents.includes('Maurice')) {
-    switchAgent('Maurice');
-  } else {
-    currentAgent = 'Maurice';
-    if (typeof updateAgentDisplay === 'function') updateAgentDisplay();
-  }
+  // base64url-encode the context so it survives URL transport cleanly
+  let ctxEnc = '';
+  try {
+    ctxEnc = btoa(unescape(encodeURIComponent(ctx)))
+      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  } catch(e) { ctxEnc = ''; }
 
-  // Seed the prompt; the agent's STYLE.md makes him acknowledge once and
-  // then investigate. The `[HANDOFF FROM <prior>]` tag helps him set his
-  // opening frame.
-  const priorLabel = priorAgent || 'Peter';
-  const seedMsg = `[HANDOFF FROM ${priorLabel}] A tool just failed for Sean. Can you take a look? Here's what happened:\n\n${ctx}\n\nPlease diagnose and either fix it or report what Sean needs to decide. End your final reply with [HANDBACK] so we can return control.`;
-  const input = document.getElementById('input');
-  if (!input) return;
-  input.value = seedMsg;
-  if (typeof sendMessage === 'function') sendMessage();
-}
+  const params = new URLSearchParams();
+  params.set('handoff', '1');
+  params.set('return_agent', priorAgent);
+  if (conversationId) params.set('conv_id', conversationId);
+  if (ctxEnc) params.set('ctx', ctxEnc);
+  // Preserve the auth token so the /coders page can authenticate immediately.
+  if (token) params.set('token', token);
 
-// Watch for Maurice's [HANDBACK] marker and auto-flip back to the prior
-// agent. Called from the SSE complete event handler.
-function checkForHandback(responseText) {
-  if (!responseText || !/\[HANDBACK\]/i.test(responseText)) return;
-  const returnTo = window._handoffReturnAgent || 'Peter';
-  window._handoffReturnAgent = null;
-  if (currentAgent === returnTo) return;
-  if (typeof switchAgent === 'function' && agents.includes(returnTo)) {
-    switchAgent(returnTo);
-  } else {
-    currentAgent = returnTo;
-    if (typeof updateAgentDisplay === 'function') updateAgentDisplay();
-  }
+  // Navigate — /coders takes over from here.
+  location.href = '/coders?' + params.toString();
 }
 
 // Drag and drop

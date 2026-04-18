@@ -1842,47 +1842,40 @@ function pickFixOptionDash(num, btn) {
   else if (typeof sendMessage === 'function') sendMessage();
 }
 
-// Dashboard variant of the Maurice handoff — flips the top-of-dash
-// agent selector (dashCurrentAgent) and seeds the chat input with the
-// failure context so Maurice opens with what went wrong.
+// Navigate from dashboard chat to the /coders module for a handoff.
+// Same URL-param protocol as chat.rs's handoffToMaurice — /coders reads
+// the params and shows a handoff banner with Maurice pre-seeded with the
+// failure context. On return, /coders posts the outcome report back into
+// the original conversation.
 function handoffToMauriceDash(btn) {
   const priorAgent = (typeof dashCurrentAgent !== 'undefined' && dashCurrentAgent) || 'Peter';
-  window._handoffReturnAgent = priorAgent;
   let ctx = '';
   let el = btn ? btn.closest('.chat-md, [data-ai-msg]') : null;
   if (!el) {
     const msgs = document.querySelectorAll('.chat-md');
     if (msgs.length) el = msgs[msgs.length - 1];
   }
-  if (el) ctx = (el.innerText || '').trim().slice(0, 1500);
+  if (el) ctx = (el.innerText || '').trim().slice(0, 2000);
 
-  // Flip selector
-  if (typeof dashAgents !== 'undefined' && dashAgents.includes('Maurice')) {
-    if (typeof switchDashAgent === 'function') switchDashAgent('Maurice');
-    else { dashCurrentAgent = 'Maurice'; if (typeof buildDashAgentMenu === 'function') buildDashAgentMenu(); }
-  }
+  let ctxEnc = '';
+  try {
+    ctxEnc = btoa(unescape(encodeURIComponent(ctx)))
+      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  } catch(e) { ctxEnc = ''; }
 
-  const priorLabel = priorAgent || 'Peter';
-  const seedMsg = `[HANDOFF FROM ${priorLabel}] A tool just failed for Sean. Can you take a look? Here's what happened:\n\n${ctx}\n\nPlease diagnose and either fix it or report what Sean needs to decide. End your final reply with [HANDBACK] so we can return control.`;
-  const input = document.getElementById('chat-input') || document.getElementById('input');
-  if (!input) return;
-  input.value = seedMsg;
-  if (typeof sendChat === 'function') sendChat();
-  else if (typeof sendMessage === 'function') sendMessage();
+  const params = new URLSearchParams();
+  params.set('handoff', '1');
+  params.set('return_agent', priorAgent);
+  if (typeof dashConversationId !== 'undefined' && dashConversationId) params.set('conv_id', dashConversationId);
+  if (typeof conversationId !== 'undefined' && conversationId) params.set('conv_id', conversationId);
+  if (ctxEnc) params.set('ctx', ctxEnc);
+  if (typeof authToken !== 'undefined' && authToken) params.set('token', authToken);
+
+  location.href = '/coders?' + params.toString();
 }
 
-// Dashboard equivalent of checkForHandback — flip the agent selector
-// back to the summoning persona when Maurice ends with [HANDBACK].
-function checkForHandbackDash(responseText) {
-  if (!responseText || !/\[HANDBACK\]/i.test(responseText)) return;
-  const returnTo = window._handoffReturnAgent || 'Peter';
-  window._handoffReturnAgent = null;
-  if (typeof dashCurrentAgent === 'undefined' || dashCurrentAgent === returnTo) return;
-  if (typeof dashAgents !== 'undefined' && dashAgents.includes(returnTo)) {
-    if (typeof switchDashAgent === 'function') switchDashAgent(returnTo);
-    else { dashCurrentAgent = returnTo; if (typeof buildDashAgentMenu === 'function') buildDashAgentMenu(); }
-  }
-}
+// Legacy — no-op now that handoff is a page navigation.
+function checkForHandbackDash(_responseText) { /* no-op */ }
 
 // Authenticated fetch helper
 function authFetch(url, opts = {}) {

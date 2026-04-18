@@ -255,8 +255,27 @@ body.bg-gray-950 { overflow: hidden; }
 
 const PAGE_JS: &str = r###"
 // ======== STATE ========
+// If landed via /coders?token=... (from a handoff button), prefer that token
+// so the user doesn't get bounced to the login page before Maurice can take
+// over. Also sync it into sessionStorage so subsequent page loads work.
+const _urlParams = new URLSearchParams(window.location.search);
+const _urlToken = _urlParams.get('token') || '';
+if (_urlToken && _urlToken !== sessionStorage.getItem('syntaur_token')) {
+    sessionStorage.setItem('syntaur_token', _urlToken);
+}
+
+// Decode base64url-encoded handoff context, if present.
+function _decodeHandoffCtx(s) {
+    if (!s) return '';
+    try {
+        const b64 = s.replace(/-/g, '+').replace(/_/g, '/');
+        const pad = b64.length % 4 ? '='.repeat(4 - b64.length % 4) : '';
+        return decodeURIComponent(escape(atob(b64 + pad)));
+    } catch(e) { return ''; }
+}
+
 const S = {
-    token: sessionStorage.getItem('syntaur_token') || '',
+    token: _urlToken || sessionStorage.getItem('syntaur_token') || '',
     tabs: [],
     activeTab: null,
     hosts: [],
@@ -265,6 +284,14 @@ const S = {
     contextPanel: 'hidden',
     sftpPath: '/home/sean',
     sftpEntries: [],
+    // Handoff from a main agent (e.g. Peter). When set, /coders shows a
+    // banner + "Return to <agent>" button. Cleared when the user either
+    // returns or explicitly opts to stay and free-roam.
+    handoff: _urlParams.get('handoff') === '1' ? {
+        returnAgent: _urlParams.get('return_agent') || 'Peter',
+        convId: _urlParams.get('conv_id') || null,
+        context: _decodeHandoffCtx(_urlParams.get('ctx')),
+    } : null,
 };
 
 // ======== INIT ========
@@ -285,7 +312,101 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (local) addTab(local.id, local.name);
         else addTab(S.hosts[0].id, S.hosts[0].name);
     }
+    // Handoff banner + pre-seeded Maurice opener when Peter (or any main
+    // agent) routed the user here. Renders only when ?handoff=1 was in the
+    // URL; otherwise /coders behaves as normal free-roam.
+    if (S.handoff) renderHandoffBanner();
 });
+
+// ======== HANDOFF ========
+function renderHandoffBanner() {
+    const banner = document.createElement('div');
+    banner.id = 'handoff-banner';
+    banner.style.cssText = 'position:relative;z-index:30;margin:8px 16px 0;padding:12px 14px;background:rgba(206,66,43,0.12);border:1px solid var(--rust);border-radius:8px;color:var(--ink);font-family:Share Tech Mono,monospace;font-size:13px;line-height:1.45;display:flex;align-items:flex-start;gap:10px;';
+    const returnAgent = S.handoff.returnAgent;
+    const ctxPreview = (S.handoff.context || '').slice(0, 380) + ((S.handoff.context || '').length > 380 ? '…' : '');
+    banner.innerHTML = `
+        <span style="font-size:18px;line-height:1">🔧</span>
+        <div style="flex:1;min-width:0">
+            <div style="color:var(--rust-hot);font-weight:600;margin-bottom:4px">${esc(returnAgent)} handed this off to Maurice</div>
+            <div style="color:var(--ink-dim);white-space:pre-wrap;margin-bottom:8px">${esc(ctxPreview)}</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+                <button onclick="returnToMainAgent()" style="background:var(--phos);color:#000;border:none;padding:6px 12px;border-radius:4px;font-family:inherit;font-size:12px;font-weight:600;cursor:pointer">
+                    Return to ${esc(returnAgent)} with outcome report
+                </button>
+                <button onclick="stayInCoders()" style="background:transparent;color:var(--ink-dim);border:1px solid var(--phos-deep);padding:6px 12px;border-radius:4px;font-family:inherit;font-size:12px;cursor:pointer">
+                    Stay here — I want to poke around
+                </button>
+            </div>
+        </div>
+        <button onclick="stayInCoders()" title="Dismiss" style="background:none;border:none;color:var(--ink-dim);font-size:18px;line-height:1;cursor:pointer;padding:0 4px">×</button>
+    `;
+    document.body.insertBefore(banner, document.body.firstChild);
+
+    // Seed Maurice's chat with the context so his opener is about the
+    // handoff, not a cold start.
+    const msgs = document.getElementById('ai-messages');
+    if (msgs) {
+        msgs.innerHTML = `
+            <div class="ai-msg assistant"><strong>Maurice:</strong> Got it — ${esc(returnAgent)} asked me to look at this. Reading the context now.</div>
+            <div class="ai-msg assistant" style="color:var(--ink-dim);font-style:italic;border-left:2px solid var(--rust);padding-left:10px">${esc(ctxPreview)}</div>
+        `;
+        msgs.scrollTop = msgs.scrollHeight;
+    }
+    // Pre-populate the chat input with a diagnosis prompt so one Enter
+    // kicks off Maurice's investigation.
+    const input = document.getElementById('ai-input');
+    if (input) {
+        input.value = 'Please investigate — what do you think is going on and what can we do about it?';
+        input.focus();
+    }
+}
+
+async function returnToMainAgent() {
+    if (!S.handoff) return;
+    const returnAgent = S.handoff.returnAgent;
+    const convId = S.handoff.convId;
+    // Compose an outcome report from Maurice's chat messages in this
+    // session. Drop control markers before posting.
+    const msgs = document.querySelectorAll('#ai-messages .ai-msg.assistant');
+    const lines = [];
+    msgs.forEach(m => {
+        const t = (m.innerText || '').replace(/^Maurice:\s*/, '').trim();
+        if (t && !t.startsWith('Maurice is thinking')) lines.push(t);
+    });
+    const outcome = lines.slice(-4).join('\n\n').slice(0, 2500) || 'Maurice did not produce a diagnosis.';
+
+    // Post the outcome into the original conversation as a user message
+    // addressed to the returning main agent. The agent reads it on the
+    // next turn and picks up where Peter left off.
+    try {
+        const body = {
+            token: S.token,
+            agent: returnAgent.toLowerCase() === 'peter' ? 'main' : returnAgent.toLowerCase(),
+            message: `[OUTCOME FROM MAURICE]\n\n${outcome}\n\nSean is heading back to you — ready to continue.`,
+        };
+        if (convId) body.conversation_id = convId;
+        await fetch('/api/message', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+    } catch(e) { console.warn('[handoff] outcome post failed', e); }
+    // Clear handoff state before navigating so a manual return to /coders
+    // doesn't re-trigger the banner.
+    S.handoff = null;
+    // Go back to chat. Preserve token so the chat page doesn't re-prompt.
+    const params = new URLSearchParams();
+    if (S.token) params.set('token', S.token);
+    if (convId) params.set('conv_id', convId);
+    window.location.href = '/chat' + (params.toString() ? '?' + params.toString() : '');
+}
+
+function stayInCoders() {
+    S.handoff = null;
+    const banner = document.getElementById('handoff-banner');
+    if (banner) banner.remove();
+}
 
 async function seedDefaultHosts() {
     // Detect which host the gateway is running on so we can mark it is_local
@@ -779,15 +900,27 @@ async function sendAiMsg() {
     msgs.innerHTML += `<div class="ai-msg assistant" id="${thinkId}"><em style="color:var(--ink-dim)">Maurice is thinking...</em></div>`;
     msgs.scrollTop = msgs.scrollHeight;
 
-    const mauriceSystem = `You are Maurice, the pair-programmer AI inside the Syntaur Coders module. You help with shell commands, debugging, system administration, networking, Rust, and general coding. Persona: earnest nerd — Maurice Moss from IT Crowd crossed with Jared Dunn from Silicon Valley. Speak literally. No sarcasm, no irony, no performative swagger. When a user breaks something say "Okay, let's see what happened" — never blame them, even gently. "Ooh, interesting—" is allowed on real tech problems. You prefer Rust for new code and will mention it, but you are pragmatic (JS for browser, Python for ML, shell for quick ops). When you suggest commands, format them as code blocks. For destructive commands (rm -rf, force-push, DROP, dd), stop and ask for explicit per-command consent before the user runs them. You can see the user's recent terminal output below for context.`;
+    // Maurice is now a first-class agent (agent_id=maurice) with his own
+    // workspace files (IDENTITY / SOUL / STYLE / AGENTS). Hit him directly
+    // rather than cramming a hand-rolled system prompt into the user message.
+    // Include terminal context so he can reference what just happened.
+    // If we're in a handoff from Peter, pass the handoff context too so he
+    // remembers why he's here across LLM calls.
+    const handoffCtx = S.handoff && S.handoff.context
+        ? `Peter handed this off to you. Original context:\n${S.handoff.context}\n\n`
+        : '';
+    const body = {
+        message: `${handoffCtx}Terminal context (most recent output):\n\`\`\`\n${termContext || '(no terminal output yet)'}\n\`\`\`\n\n${text}`,
+        agent: 'maurice',
+    };
+    // Thread on the originating conversation when we know it — keeps memory
+    // of this debugging session tied to the main-agent conversation.
+    if (S.handoff && S.handoff.convId) body.conversation_id = S.handoff.convId;
 
     try {
         const r = await apiFetch('/api/message', {
             method: 'POST',
-            body: JSON.stringify({
-                message: `${mauriceSystem}\n\nTerminal context (last output):\n\`\`\`\n${termContext}\n\`\`\`\n\nUser: ${text}`,
-                agent: 'main',
-            }),
+            body: JSON.stringify(body),
         });
         const resp = document.getElementById(thinkId);
         const answer = r.response || r.text || JSON.stringify(r);
