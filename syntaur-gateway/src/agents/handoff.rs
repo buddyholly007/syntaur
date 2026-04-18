@@ -147,6 +147,7 @@ pub fn agent_display_for_module(module: &str) -> &'static str {
         "music" => "Silvr",
         "scheduler" => "Thaddeus",
         "coders" => "Maurice",
+        "social" => "Nyota",
         "journal" => "Mushi",
         _ => "the assistant",
     }

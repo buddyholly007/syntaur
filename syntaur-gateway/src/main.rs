@@ -472,6 +472,14 @@ fn persona_thinking_bank(agent_id: &str) -> &'static [&'static str] {
             "Pulling file contents.",
             "Checking git state.",
         ],
+        "nyota" | "module_social" => &[
+            "Reading the draft.",
+            "One moment — checking the line.",
+            "Looking at recent posts.",
+            "Pulling the draft queue.",
+            "Checking what's scheduled.",
+            "Re-reading the tone.",
+        ],
         "mushi" | "module_journal" => &[
             "Reading back your notes.",
             "Looking through recent entries.",
@@ -514,17 +522,38 @@ pub struct GatewayStats {
 
 /// Drain buffered external callbacks (Telegram callback_query events that
 /// Syntaur doesn't handle internally). Used by rust-social-manager bsky-approve.
+///
+/// Auth model: this endpoint is NOT admin-gated. It uses an optional shared
+/// secret (`gateway.auth.callback_bridge_token`) dedicated to this consumer
+/// path. Admin tokens are deliberately not accepted here — a consumer that
+/// only needs to drain callback buttons shouldn't require (or risk leaking)
+/// admin credentials. The payload itself carries no bot tokens, only
+/// non-secret callback metadata.
 async fn handle_external_callbacks(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<Vec<serde_json::Value>>, axum::http::StatusCode> {
-    let raw = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or("");
-    let principal = resolve_principal(&state, raw).await?;
-    require_admin(&principal)?;
+    if let Some(expected) = state.config.gateway.auth.callback_bridge_token.as_deref() {
+        if !expected.is_empty() {
+            let given = headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))
+                .unwrap_or("");
+            let expected_b = expected.as_bytes();
+            let given_b = given.as_bytes();
+            let ok = expected_b.len() == given_b.len() && {
+                let mut diff: u8 = 0;
+                for (a, b) in expected_b.iter().zip(given_b.iter()) {
+                    diff |= a ^ b;
+                }
+                diff == 0
+            };
+            if !ok {
+                return Err(axum::http::StatusCode::UNAUTHORIZED);
+            }
+        }
+    }
     let mut buf = state.external_callbacks.lock().await;
     let drained: Vec<serde_json::Value> = buf.drain(..).collect();
     Ok(Json(drained))

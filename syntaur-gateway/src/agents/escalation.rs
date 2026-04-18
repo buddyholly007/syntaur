@@ -46,8 +46,19 @@ pub fn classify(message: &str) -> &'static str {
         "journal", "reflect", "feeling", "diary", "how i feel",
         "anxious", "grateful", "stressed", "emotion", "vent",
     ];
+    static SOCIAL_KEYWORDS: &[&str] = &[
+        "post ", "tweet", "thread", "bluesky", "bsky", "threads",
+        "instagram", "ig ", "tiktok", "linkedin", "facebook",
+        "youtube community", "community post", "caption", "draft a post",
+        "schedule a post", "reply to ", "comment reply", "dm reply",
+        "social media", "my followers", "engagement", "hashtag",
+        "brand voice", "publish",
+    ];
 
+    // Social checked before music so that "post about my new song" routes to
+    // Nyota (social), not Silvr (music playback).
     if TAX_KEYWORDS.iter().any(|k| lower.contains(k)) { return "tax"; }
+    if SOCIAL_KEYWORDS.iter().any(|k| lower.contains(k)) { return "social"; }
     if MUSIC_KEYWORDS.iter().any(|k| lower.contains(k)) { return "music"; }
     if RESEARCH_KEYWORDS.iter().any(|k| lower.contains(k)) { return "research"; }
     if SCHEDULER_KEYWORDS.iter().any(|k| lower.contains(k)) { return "scheduler"; }
@@ -70,9 +81,10 @@ pub async fn classify_with_llm(
     let messages = vec![
         crate::llm::ChatMessage::system(
             "Classify this user message into exactly one category. Reply with ONLY the category name, nothing else.
-             Categories: tax, music, research, scheduler, coders, journal, other
+             Categories: tax, social, music, research, scheduler, coders, journal, other
              Rules:
              - tax: money, expenses, receipts, deductions, IRS, filing, income
+             - social: posting, replying, scheduling, engaging on Bluesky/Threads/YouTube/Instagram/TikTok/LinkedIn/Facebook, captions, brand voice, drafting comments/DMs
              - music: songs, playlists, listening, artists, playing audio
              - research: documents, searching knowledge, citations, analysis
              - scheduler: calendar, meetings, appointments, deadlines, reminders, todos
@@ -90,6 +102,7 @@ pub async fn classify_with_llm(
 
     match result.as_str() {
         "tax" => "tax",
+        "social" => "social",
         "music" => "music",
         "research" => "research",
         "scheduler" => "scheduler",
@@ -107,6 +120,7 @@ fn agent_display_name(module: &str) -> &'static str {
         "music" => "Silvr",
         "scheduler" => "Thaddeus",
         "coders" => "Maurice",
+        "social" => "Nyota",
         "journal" => "Mushi",
         _ => "a specialist",
     }
@@ -120,6 +134,7 @@ fn module_pitch(module: &str) -> &'static str {
         "music" => "reads the vibe and controls your playback",
         "scheduler" => "sees your full calendar and manages your time",
         "coders" => "can pair-program and run commands on your hosts",
+        "social" => "drafts, reviews, and schedules posts across your connected platforms",
         "journal" => "offers a private, reflective space",
         _ => "specializes in this area",
     }
@@ -235,6 +250,19 @@ mod tests {
     fn classify_music_messages() {
         assert_eq!(classify("Play something chill"), "music");
         assert_eq!(classify("Add this song to my playlist"), "music");
+    }
+
+    #[test]
+    fn classify_social_messages() {
+        assert_eq!(classify("Draft a post about the new single"), "social");
+        assert_eq!(classify("Reply to the Bluesky comment from earlier"), "social");
+        assert_eq!(classify("Schedule a threads post for tomorrow"), "social");
+    }
+
+    #[test]
+    fn social_wins_over_music_for_promo_requests() {
+        // "post about my new song" should route to Nyota (social), not Silvr (music)
+        assert_eq!(classify("Write a post about my new song"), "social");
     }
 
     #[test]

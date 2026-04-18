@@ -34,6 +34,35 @@ pub struct Config {
     pub modules: crate::modules::ModulesConfig,
     #[serde(default)]
     pub security: SecurityConfig,
+    /// Image generation provider selection. Defaults to zero-config
+    /// Pollinations.ai (free, no key) when no `image_gen` block is present
+    /// in openclaw.json. Users can opt into local SD (Gaming PC / ComfyUI)
+    /// or a paid OpenRouter model via the wizard or settings.
+    #[serde(default)]
+    pub image_gen: ImageGenConfig,
+    #[serde(flatten)]
+    pub extra: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct ImageGenConfig {
+    /// URL of a locally-running Stable Diffusion server (Automatic1111 /
+    /// SD.Next / ComfyUI-with-A1111-compat). Example:
+    /// `http://192.168.1.69:7860`. When set, this is the primary provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_sd_url: Option<String>,
+    /// Optional model checkpoint name passed to the local SD server's
+    /// `override_settings.sd_model_checkpoint`. Let the server pick its
+    /// default when `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_sd_model: Option<String>,
+    /// OpenRouter model id for paid image generation, e.g.
+    /// `google/gemini-2.5-flash-image`. When set (and no `local_sd_url` is
+    /// configured), this is used INSTEAD of the free Pollinations default.
+    /// Requires billing on the existing openrouter provider entry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openrouter_paid_model: Option<String>,
     #[serde(flatten)]
     pub extra: HashMap<String, serde_json::Value>,
 }
@@ -386,6 +415,13 @@ impl Default for GatewayConfig {
 pub struct GatewayAuth {
     pub mode: String,
     pub token: String,
+    /// Optional shared secret for GET /external-callbacks.
+    /// When set, the endpoint requires `Authorization: Bearer <token>`.
+    /// When unset, the endpoint is open (LAN trust assumed).
+    /// Distinct from the admin `token` above so consumers like
+    /// rust-social-manager can drain the buffer without admin rights.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callback_bridge_token: Option<String>,
     #[serde(flatten)]
     pub extra: HashMap<String, serde_json::Value>,
 }

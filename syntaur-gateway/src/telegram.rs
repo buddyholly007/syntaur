@@ -541,10 +541,14 @@ pub async fn run_bot(
                     false // no colon → fall through to buffer
                 };
                 if !handled {
+                    // Intentionally omit bot.token — the consumer already has its
+                    // own token for the bot it cares about. Leaking bot_token on a
+                    // LAN endpoint would surrender full bot control.
                     let cb_record = serde_json::json!({
+                        "bot_id": bot.account_id,
                         "callback_id": cb.id,
                         "data": data,
-                        "bot_token": bot.token,
+                        "received_at": chrono::Utc::now().to_rfc3339(),
                     });
                     app_state.external_callbacks.lock().await.push(cb_record);
                     info!("[tg:{}] buffered external callback: {} (id={})", bot.account_id, data, cb.id);
