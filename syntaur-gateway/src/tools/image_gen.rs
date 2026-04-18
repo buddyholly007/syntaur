@@ -119,7 +119,8 @@ Generated image from prompt: {}",
                     // Without this the agent keeps saying "your image will
                     // appear shortly" forever.
                     if let (Some(ref cid), Some(ref cm)) = (&conv_id, &convs) {
-                        let msg = format_image_failure(&e, &prompt_owned);
+                        let has_paid = config.image_gen.openrouter_paid_model.is_some();
+                        let msg = format_image_failure(&e, &prompt_owned, has_paid);
                         let _ = cm.append(cid, "assistant", &msg).await;
                     }
                 }
@@ -135,68 +136,87 @@ Generated image from prompt: {}",
     }
 }
 
-/// Build a human-readable error message that explains what failed and
-/// offers 2-3 NUMBERED fix options the user can approve by reply. The
-/// agent reading this on its next turn sees the same structure — we
-/// include explicit action hints so the agent knows what to do when
-/// the user picks.
+/// Build a user-friendly failure message. Two principles drive this:
 ///
-/// Pattern: the message is both for the user (decide what to do) and
-/// for the agent (execute the chosen path). The agent's STYLE.md
-/// teaches it to recognize this structure and act on the user's
-/// numbered reply.
-fn format_image_failure(err: &str, prompt: &str) -> String {
-    let lower = err.to_lowercase();
+/// 1. **Don't make the user learn infrastructure.** Never mention
+///    "Pollinations", "Local SD", "ComfyUI", "OpenRouter", or HTTP
+///    status codes. Speak in outcomes ("try a different description")
+///    not mechanisms.
+/// 2. **Only offer what the agent can actually do.** Every option is
+///    something the agent executes — not "go to Settings and change X".
+///    If the user genuinely needs to make a decision the agent can't
+///    (install new software, change billing), hand off to the debug
+///    specialist instead of giving them a to-do list.
+///
+/// The auto-retry + auto-fallback happens BEFORE we get here (see
+/// `call_image_api`). By the time this message shows up, we've already
+/// tried 3 times and fallen back to free where we could.
+fn format_image_failure(err: &str, prompt: &str, has_paid_configured: bool) -> String {
     let short_prompt = if prompt.len() > 80 {
         format!("{}…", &prompt[..77])
     } else {
         prompt.to_string()
     };
 
-    // Pick the option set based on failure type. Each option is numbered
-    // and has a clear action verb so the user can reply "1" or "2" and
-    // the agent knows what to execute.
-    let options = if lower.contains("pollinations unreachable")
-        || lower.contains("connection")
-        || lower.contains("timed out")
-        || lower.contains("dns")
-    {
-        // Network / reachability failure. Retry is cheap; provider swap
-        // costs the user nothing if they already have ComfyUI running.
-        "**Fix options — reply with a number:**\n\
-         1. **Try again** — Pollinations may have been briefly overloaded\n\
-         2. **Switch to Local SD** — requires ComfyUI/Automatic1111 on your GPU (Settings → Image generation → Local SD URL)\n\
-         3. **Switch to paid OpenRouter** — ~$0.001/image via your existing OpenRouter account (Settings → Image generation → OpenRouter paid)"
-    } else if lower.contains("local sd unreachable") || lower.contains("sdapi/v1/txt2img") {
-        "**Fix options — reply with a number:**\n\
-         1. **Check that your SD server is running** — ComfyUI/Automatic1111/SD.Next at the configured URL\n\
-         2. **Fall back to free Pollinations** — I can clear your Local SD URL in Settings so images keep working\n\
-         3. **Try again** — in case the server just briefly restarted"
-    } else if lower.contains("http 429") || lower.contains("rate limit") {
-        "**Fix options — reply with a number:**\n\
-         1. **Wait 30-60s and retry** — rate limits usually clear quickly\n\
-         2. **Switch to a different provider** — Local SD (free, your GPU) or paid OpenRouter avoid this limit"
-    } else if lower.contains("http 401") || lower.contains("http 403") || lower.contains("unauthoriz") || lower.contains("billing") {
-        "**Fix options — reply with a number:**\n\
-         1. **Fall back to free Pollinations** — no key needed, I'll switch the default\n\
-         2. **Fix the API key** — go to Settings → Image generation and update your credentials"
-    } else if lower.contains("declined") || lower.contains("refus") || lower.contains("content policy") {
-        "**Fix options — reply with a number:**\n\
-         1. **Rephrase the prompt** — tell me how you'd rather describe it and I'll try again\n\
-         2. **Switch to Local SD** — your own model has no content policy (Settings → Image generation → Local SD URL)"
-    } else {
-        "**Fix options — reply with a number:**\n\
-         1. **Try again** — may be a transient hiccup\n\
-         2. **Switch to Local SD** — requires ComfyUI/Automatic1111 on your GPU\n\
-         3. **Switch to paid OpenRouter** — ~$0.001/image"
+    // Unpack our sentinel error prefixes from call_image_api — they tell
+    // us *what the system already tried on the user's behalf* so we can
+    // narrate it rather than repeating the offer.
+    let (_already_fell_back, _already_retried, real_err) =
+        if let Some(rest) = err.strip_prefix("__AUTO_FALLBACK_FAILED__|") {
+            let (_a, b) = rest.split_once('|').unwrap_or(("", rest));
+            (true, false, b.to_string())
+        } else if let Some(rest) = err.strip_prefix("__TRIED_EVERYTHING__|") {
+            (false, true, rest.to_string())
+        } else {
+            (false, false, err.to_string())
+        };
+
+    let class = classify_image_error(&real_err);
+
+    // Headline adapts to what the system already did.
+    let headline = match class {
+        ImageErrorClass::Policy => "⚠ That description got blocked — the model wouldn't generate it.",
+        ImageErrorClass::Auth => "⚠ I had trouble reaching the image service, and the backup free one didn't work either.",
+        ImageErrorClass::Transient => "⚠ The image service kept timing out. I tried a few times.",
+        ImageErrorClass::Terminal => "⚠ Something unexpected went wrong generating that image.",
+    };
+
+    // Options — every option is an action the agent can take. No
+    // "go to Settings" instructions.
+    let options = match class {
+        ImageErrorClass::Policy => {
+            "**What would you like to do?**\n\
+             1. **Try a different description** — tell me what you'd rather see and I'll generate that instead\n\
+             2. **Let my debug specialist look at this** — for tricky cases we can hand off to the coder agent"
+        }
+        ImageErrorClass::Transient | ImageErrorClass::Terminal => {
+            if has_paid_configured {
+                // Only suggest the paid path if the user ALREADY has it set up.
+                "**What would you like to do?**\n\
+                 1. **Wait a minute and try again** — I'll retry automatically\n\
+                 2. **Use your backup image service** — I'll switch over and regenerate\n\
+                 3. **Let my debug specialist look at this** — if the problem keeps coming back"
+            } else {
+                "**What would you like to do?**\n\
+                 1. **Wait a minute and try again** — I'll retry automatically\n\
+                 2. **Let my debug specialist look at this** — if the problem keeps coming back"
+            }
+        }
+        ImageErrorClass::Auth => {
+            // Both the configured provider AND the free fallback failed.
+            // This is unusual — network down, or the user set a local SD
+            // URL that's wrong. Offer retry + handoff, not "fix API key".
+            "**What would you like to do?**\n\
+             1. **Try again in a minute** — I'll run it one more time for you\n\
+             2. **Let my debug specialist look at this** — something's off with the image service setup"
+        }
     };
 
     format!(
-        "⚠ **Image generation failed.**\n\n\
-         **Prompt:** _{}_\n\n\
-         **Error:** {}\n\n\
+        "{}\n\n\
+         **Your prompt:** _{}_\n\n\
          {}",
-        short_prompt, err, options
+        headline, short_prompt, options
     )
 }
 
@@ -309,7 +329,8 @@ Edited: {}", url, edit_desc);
                     error!("[image-edit] task {} failed: {}", tid, e);
                     tm.fail(&tid, &e).await;
                     if let (Some(ref cid), Some(ref cm)) = (&conv_id, &convs) {
-                        let msg = format_image_failure(&e, &edit_desc);
+                        let has_paid = config.image_gen.openrouter_paid_model.is_some();
+                        let msg = format_image_failure(&e, &edit_desc, has_paid);
                         let _ = cm.append(cid, "assistant", &msg).await;
                     }
                 }
@@ -414,7 +435,98 @@ fn select_image_provider(config: &crate::config::Config) -> ImageProvider<'_> {
     ImageProvider::Pollinations
 }
 
+/// Error classes we auto-handle without asking the user anything:
+///
+/// - `Transient`: timeouts, 5xx, 429 rate limits — retry 2 more times with
+///   exponential backoff (3s, 9s) before surfacing.
+/// - `Auth`: 401/403/billing — the configured paid/local provider is broken;
+///   silently fall back to free Pollinations and carry on. Tell the user
+///   what we did, don't ask.
+/// - `Policy`: content-policy refusal — user needs to rephrase. Show a
+///   single friendly prompt asking for a different description.
+/// - `Terminal`: everything else (malformed, unsupported parameter, etc).
+///   One retry, then hand off to the debug specialist.
+enum ImageErrorClass { Transient, Auth, Policy, Terminal }
+
+fn classify_image_error(err: &str) -> ImageErrorClass {
+    let e = err.to_lowercase();
+    if e.contains("timed out") || e.contains("timeout") || e.contains("connection")
+        || e.contains("dns") || e.contains("unreachable") || e.contains("stream stalled")
+        || e.contains("http 5") || e.contains("rate limit") || e.contains("http 429")
+        || e.contains("overloaded") {
+        ImageErrorClass::Transient
+    } else if e.contains("http 401") || e.contains("http 403") || e.contains("unauthoriz")
+        || e.contains("billing") || e.contains("api key") || e.contains("invalid_api_key") {
+        ImageErrorClass::Auth
+    } else if e.contains("declined") || e.contains("refus") || e.contains("content policy")
+        || e.contains("safety") {
+        ImageErrorClass::Policy
+    } else {
+        ImageErrorClass::Terminal
+    }
+}
+
 async fn call_image_api(
+    http: &reqwest::Client,
+    config: &crate::config::Config,
+    prompt: &str,
+    size: &str,
+) -> Result<String, String> {
+    // Attempt 1: configured provider.
+    let first_provider_label = match select_image_provider(config) {
+        ImageProvider::Pollinations => "free image service",
+        ImageProvider::LocalSd { .. } => "your local image server",
+        ImageProvider::OpenrouterPaid { .. } => "the paid image service",
+    };
+    let first = call_image_api_single(http, config, prompt, size).await;
+    if first.is_ok() { return first; }
+    let err1 = first.unwrap_err();
+
+    match classify_image_error(&err1) {
+        // Auth: provider's credentials are broken. Skip retries, fall back
+        // to free Pollinations immediately so the user gets their image.
+        // The background-task failure path can log what we did.
+        ImageErrorClass::Auth => {
+            info!(
+                "[image] auto-fallback from {} to free Pollinations (auth failure: {})",
+                first_provider_label, err1
+            );
+            match call_pollinations(http, prompt, size).await {
+                Ok(url) => Ok(url),
+                Err(e2) => Err(format!("__AUTO_FALLBACK_FAILED__|{}|{}", err1, e2)),
+            }
+        }
+
+        // Transient: two more tries with exponential backoff. No user
+        // message, just retries silently. If all attempts fail we fall
+        // back to the free service as a last-ditch effort.
+        ImageErrorClass::Transient => {
+            for (attempt, delay_secs) in [(2u32, 3u64), (3u32, 9u64)] {
+                info!("[image] transient failure, retry {} of 3 after {}s: {}", attempt, delay_secs, err1);
+                tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+                if let Ok(url) = call_image_api_single(http, config, prompt, size).await {
+                    return Ok(url);
+                }
+            }
+            // All retries failed — if we weren't already on Pollinations,
+            // try it as a last resort so the user gets SOMETHING.
+            if !matches!(select_image_provider(config), ImageProvider::Pollinations) {
+                info!("[image] all retries failed, falling back to free Pollinations");
+                if let Ok(url) = call_pollinations(http, prompt, size).await {
+                    return Ok(url);
+                }
+            }
+            Err(format!("__TRIED_EVERYTHING__|{}", err1))
+        }
+
+        // Policy + Terminal: no amount of retry helps. Return as-is; the
+        // failure handler composes a user message with the right tone.
+        _ => Err(err1),
+    }
+}
+
+/// Single attempt — no retry, no fallback. Used by `call_image_api` above.
+async fn call_image_api_single(
     http: &reqwest::Client,
     config: &crate::config::Config,
     prompt: &str,
