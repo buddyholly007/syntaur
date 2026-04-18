@@ -690,32 +690,35 @@ const BODY_HTML: &str = r##"<!-- Top bar — matches the dashboard so the music 
       <p id="local-lib-error" class="text-xs text-red-400 mt-2 hidden"></p>
 
       <!-- Folder picker modal -->
-      <div id="fs-picker-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
-        <div class="bg-gray-900 border border-gray-700 rounded-xl max-w-2xl w-full max-h-[85vh] flex flex-col">
-          <div class="p-4 border-b border-gray-800 flex items-center gap-3">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-oc-400 flex-shrink-0">
+      <!-- Folder picker modal.
+           Inline CSS rather than Tailwind utilities for the sizing math so
+           it renders correctly in WebKitGTK (Gaming PC viewer) where some
+           Tailwind arbitrary values behave inconsistently. -->
+      <div id="fs-picker-modal" class="hidden" style="position:fixed;inset:0;z-index:9999;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);padding:16px;box-sizing:border-box;">
+        <div style="background:#111827;border:1px solid #374151;border-radius:12px;width:100%;max-width:640px;height:min(85vh, 640px);display:flex;flex-direction:column;overflow:hidden;box-sizing:border-box;">
+          <div style="padding:16px;border-bottom:1px solid #1f2937;display:flex;align-items:center;gap:12px;flex-shrink:0;">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:#38bdf8;flex-shrink:0;">
               <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
             </svg>
-            <h3 class="font-medium text-gray-200 flex-1">Pick a music folder</h3>
-            <button onclick="closeFolderPicker()" class="text-gray-500 hover:text-gray-300 text-xl leading-none">&times;</button>
+            <h3 style="font-weight:500;color:#e5e7eb;flex:1;margin:0;">Pick a music folder</h3>
+            <button onclick="closeFolderPicker()" style="color:#6b7280;background:none;border:none;font-size:22px;line-height:1;cursor:pointer;padding:0 6px;">&times;</button>
           </div>
-          <div class="p-3 border-b border-gray-800 flex items-center gap-2 text-xs">
-            <button onclick="fsPickerGoUp()" id="fs-picker-up" class="text-gray-400 hover:text-oc-400 disabled:opacity-30 disabled:cursor-not-allowed px-2 py-1 rounded">&#8593; Up</button>
-            <span id="fs-picker-breadcrumb" class="text-gray-300 font-mono truncate flex-1">Loading&hellip;</span>
+          <div style="padding:12px;border-bottom:1px solid #1f2937;display:flex;align-items:center;gap:8px;font-size:12px;flex-shrink:0;">
+            <button onclick="fsPickerGoUp()" id="fs-picker-up" style="color:#9ca3af;background:none;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;">&#8593; Up</button>
+            <span id="fs-picker-breadcrumb" style="color:#d1d5db;font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">Loading&hellip;</span>
           </div>
-          <div class="flex-1 overflow-y-auto flex min-h-[320px]">
+          <div style="flex:1;display:flex;min-height:0;overflow:hidden;">
             <!-- Shortcuts sidebar -->
-            <div class="w-44 border-r border-gray-800 p-2 space-y-1 flex-shrink-0 bg-gray-950/50" id="fs-picker-roots"></div>
+            <div id="fs-picker-roots" style="width:176px;border-right:1px solid #1f2937;padding:8px;flex-shrink:0;background:rgba(3,7,18,0.5);overflow-y:auto;"></div>
             <!-- Entry list -->
-            <div class="flex-1 p-2 space-y-0.5 overflow-y-auto" id="fs-picker-entries">
-              <p class="text-xs text-gray-500 italic p-3">Loading&hellip;</p>
+            <div id="fs-picker-entries" style="flex:1;padding:8px;overflow-y:auto;min-width:0;">
+              <p style="font-size:12px;color:#6b7280;font-style:italic;padding:12px;">Loading&hellip;</p>
             </div>
           </div>
-          <div class="p-3 border-t border-gray-800 flex items-center justify-between gap-3">
-            <div id="fs-picker-hint" class="text-xs text-gray-500 truncate flex-1">Pick a folder, or click "Select this folder" to use the current one.</div>
-            <button onclick="closeFolderPicker()" class="text-gray-400 hover:text-gray-200 px-3 py-1.5 text-sm">Cancel</button>
-            <button id="fs-picker-select" onclick="fsPickerSelectCurrent()" disabled
-              class="bg-oc-600 hover:bg-oc-700 disabled:bg-gray-700 disabled:cursor-not-allowed text-white px-4 py-1.5 rounded-lg text-sm font-medium">Select this folder</button>
+          <div style="padding:12px;border-top:1px solid #1f2937;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-shrink:0;">
+            <div id="fs-picker-hint" style="font-size:12px;color:#6b7280;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">Pick a folder, or click "Select this folder" to use the current one.</div>
+            <button onclick="closeFolderPicker()" style="color:#9ca3af;background:none;border:none;padding:6px 12px;font-size:13px;cursor:pointer;">Cancel</button>
+            <button id="fs-picker-select" onclick="fsPickerSelectCurrent()" disabled style="background:#0284c7;color:#fff;padding:6px 16px;border:none;border-radius:8px;font-size:13px;font-weight:500;cursor:pointer;">Select this folder</button>
           </div>
         </div>
       </div>
@@ -1879,19 +1882,21 @@ function toggleManualPathEntry() {
 }
 function openFolderPicker() {
   const modal = document.getElementById('fs-picker-modal');
-  // If the modal's ancestor has overflow/transform/filter rules (CSS containing
-  // block), `position: fixed` gets clipped to that ancestor instead of the
-  // viewport — which is what "only a small section is visible" means. Move
-  // it to document.body so it's relative to the viewport. Idempotent.
+  // Hoist to document.body so position:fixed is relative to the viewport,
+  // not to any ancestor that accidentally became a CSS containing block
+  // (overflow, transform, filter all do this). Idempotent.
   if (modal && modal.parentNode !== document.body) {
     document.body.appendChild(modal);
   }
   modal.classList.remove('hidden');
+  modal.style.display = 'flex'; // override inline display:none baseline
   document.getElementById('local-lib-error').classList.add('hidden');
   fsPickerLoad(''); // start at root shortcuts
 }
 function closeFolderPicker() {
-  document.getElementById('fs-picker-modal').classList.add('hidden');
+  const modal = document.getElementById('fs-picker-modal');
+  modal.classList.add('hidden');
+  modal.style.display = 'none';
 }
 async function fsPickerLoad(path) {
   try {
