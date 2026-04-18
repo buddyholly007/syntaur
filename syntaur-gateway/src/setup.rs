@@ -1268,11 +1268,18 @@ pub struct NetworkComputeInfo {
     pub kind: String,
     pub name: String,
     /// Numeric GB as a string (VRAM, unified, or RAM depending on kind).
+    /// Empty when the node was discovered but not probed (e.g. Mac without
+    /// Remote Login enabled — seen via mDNS but no way to inspect capacity).
     pub memory_gb: String,
     /// "VRAM" | "unified" | "RAM"
     pub memory_kind: String,
     /// Suggested inference runtime for this node.
     pub runtime_hint: Option<String>,
+    /// How we found it: "ssh" = full probe with chip + memory; "mdns" =
+    /// discovered via Bonjour broadcast, capacity unknown.
+    pub source: String,
+    /// User-facing next step when the node can't be fully probed.
+    pub probe_hint: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1644,7 +1651,127 @@ async fn probe_remote_compute(host: &str) -> Option<NetworkComputeInfo> {
         memory_gb: format!("{:.1}", mem),
         memory_kind: lc.memory_kind,
         runtime_hint: lc.runtime_hint,
+        source: "ssh".to_string(),
+        probe_hint: None,
     })
+}
+
+/// Discover Apple devices on the LAN via mDNS/Bonjour. Returns lightweight
+/// `NetworkComputeInfo` entries for Mac-class hardware (MacBook / iMac /
+/// Mac Studio / Mac Pro / Mac mini). iPhones, iPads, Apple TVs, HomePods
+/// are skipped — they're not AI-accessible targets.
+///
+/// We probe `_device-info._tcp.local.` (Apple's discovery service with a
+/// `model=...` TXT record) and `_ssh._tcp.local.` (Remote-Login-enabled
+/// Macs). Both are passive broadcasts; no auth, no state changes.
+async fn scan_mdns_apple() -> Vec<NetworkComputeInfo> {
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+
+    // Run the blocking mDNS daemon on a thread pool so we don't block
+    // tokio's executor.
+    let result = tokio::task::spawn_blocking(|| -> Vec<NetworkComputeInfo> {
+        let daemon = match mdns_sd::ServiceDaemon::new() {
+            Ok(d) => d,
+            Err(_) => return Vec::new(),
+        };
+        // Keyed by IP so we don't emit duplicates when a Mac responds on
+        // both service types.
+        let mut devices: HashMap<String, NetworkComputeInfo> = HashMap::new();
+
+        for service_type in &["_device-info._tcp.local.", "_ssh._tcp.local.", "_rfb._tcp.local."] {
+            let rx = match daemon.browse(service_type) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let deadline = Instant::now() + Duration::from_millis(1500);
+            while Instant::now() < deadline {
+                let wait = deadline.saturating_duration_since(Instant::now());
+                match rx.recv_timeout(wait) {
+                    Ok(mdns_sd::ServiceEvent::ServiceResolved(info)) => {
+                        let hostname = info.get_hostname().to_string();
+                        let addrs: Vec<String> = info.get_addresses().iter()
+                            .map(|a| a.to_string())
+                            .filter(|a| a.contains('.'))  // IPv4 only for simplicity
+                            .collect();
+                        // Parse TXT records — Apple device-info includes "model=..."
+                        let mut model: Option<String> = None;
+                        for prop in info.get_properties().iter() {
+                            if prop.key() == "model" {
+                                model = Some(prop.val_str().to_string());
+                            }
+                        }
+                        let (display_name, is_mac) = classify_apple_model(&model, &hostname);
+                        if !is_mac { continue; }  // Skip iOS / tvOS / audioOS
+                        for ip in &addrs {
+                            devices.entry(ip.clone()).or_insert_with(|| NetworkComputeInfo {
+                                host: ip.clone(),
+                                kind: "apple".to_string(),
+                                name: display_name.clone(),
+                                memory_gb: String::new(),
+                                memory_kind: "unified".to_string(),
+                                runtime_hint: Some("Metal".to_string()),
+                                source: "mdns".to_string(),
+                                probe_hint: Some(
+                                    "Enable Remote Login on this Mac (System Settings → General → Sharing) and authorize this host's SSH key to see chip and unified-memory details."
+                                        .to_string(),
+                                ),
+                            });
+                        }
+                    }
+                    Ok(_) => continue,
+                    Err(_) => break,
+                }
+            }
+            let _ = daemon.stop_browse(service_type);
+        }
+        let _ = daemon.shutdown();
+        devices.into_values().collect()
+    }).await;
+
+    result.unwrap_or_default()
+}
+
+/// Map an Apple model string (from mDNS TXT `model=...`, e.g.
+/// "MacBookAir10,1", "iPhone13,2", "AppleTV14,1") to a friendly name and
+/// a flag for whether it's a Mac-class host (AI-usable).
+fn classify_apple_model(model: &Option<String>, fallback_hostname: &str) -> (String, bool) {
+    // Trim ".local." and trailing index numbers from hostname for display
+    // when model is unavailable.
+    let clean_hostname = fallback_hostname
+        .trim_end_matches('.')
+        .trim_end_matches(".local")
+        .to_string();
+
+    let Some(m) = model.as_deref() else {
+        // No model TXT — guess from hostname
+        let lower = clean_hostname.to_lowercase();
+        let is_mac = lower.contains("macbook") || lower.contains("imac")
+            || lower.contains("mac-mini") || lower.contains("macmini")
+            || lower.contains("mac-studio") || lower.contains("macpro");
+        return (clean_hostname, is_mac);
+    };
+    // Known Mac-class model prefixes
+    let friendly = match m {
+        s if s.starts_with("MacBookAir") => "MacBook Air",
+        s if s.starts_with("MacBookPro") => "MacBook Pro",
+        s if s.starts_with("MacBook")    => "MacBook",
+        s if s.starts_with("iMacPro")    => "iMac Pro",
+        s if s.starts_with("iMac")       => "iMac",
+        s if s.starts_with("Macmini")    => "Mac mini",
+        s if s.starts_with("MacStudio")  => "Mac Studio",
+        s if s.starts_with("MacPro")     => "Mac Pro",
+        s if s.starts_with("Mac")        => "Mac",
+        // Non-Mac Apple hardware we deliberately skip
+        s if s.starts_with("iPhone")   => return (format!("iPhone ({})", s), false),
+        s if s.starts_with("iPad")     => return (format!("iPad ({})", s), false),
+        s if s.starts_with("iPod")     => return (format!("iPod ({})", s), false),
+        s if s.starts_with("AppleTV")  => return (format!("Apple TV ({})", s), false),
+        s if s.starts_with("AudioAccessory") => return (format!("HomePod ({})", s), false),
+        s if s.starts_with("Watch")    => return (format!("Apple Watch ({})", s), false),
+        other => return (other.to_string(), false),
+    };
+    (format!("{} ({})", friendly, m), true)
 }
 
 /// Decorator used by scan_network_llms to annotate an LLM-serving host
@@ -1702,12 +1829,28 @@ async fn scan_network_compute() -> (Vec<NetworkComputeInfo>, bool) {
         }));
     }
 
-    let mut found = Vec::new();
+    // Run the SSH sweep and the mDNS Apple scan concurrently — mDNS is
+    // multicast so it can't be parallelized per-host, but it can overlap
+    // the full SSH pass.
+    let mdns_fut = scan_mdns_apple();
+
+    let mut found: Vec<NetworkComputeInfo> = Vec::new();
     let mut any_blocked = false;
     for handle in handles {
         if let Ok((compute, was_blocked)) = handle.await {
             if let Some(c) = compute { found.push(c); }
             if was_blocked { any_blocked = true; }
+        }
+    }
+
+    // Merge mDNS-discovered Macs. SSH results win on conflict (they carry
+    // real capacity); mDNS fills in Macs with Remote Login disabled.
+    let mdns_devices = mdns_fut.await;
+    let known_hosts: std::collections::HashSet<String> =
+        found.iter().map(|c| c.host.clone()).collect();
+    for d in mdns_devices {
+        if !known_hosts.contains(&d.host) {
+            found.push(d);
         }
     }
 

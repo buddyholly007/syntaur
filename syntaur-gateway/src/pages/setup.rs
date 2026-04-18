@@ -1142,22 +1142,35 @@ async function runScan() {
       selectLlm('local');
       document.getElementById('llm-local-desc').textContent = `Run a model on your ${scan.gpu_name}`;
     } else if (scan.network_compute && scan.network_compute.length > 0) {
-      // Show ALL network compute, sorted so richer-memory hosts float up.
-      const sorted = [...scan.network_compute].sort((a, b) =>
-        parseFloat(b.memory_gb) - parseFloat(a.memory_gb));
-      const lines = sorted.map(c =>
+      // Split probed (real capacity) vs discovered-only (mDNS, no capacity).
+      // Render probed first, discovered-only second with the hint line.
+      const probed = scan.network_compute.filter(c => c.source !== 'mdns' && c.memory_gb);
+      const discovered = scan.network_compute.filter(c => c.source === 'mdns');
+      probed.sort((a, b) => parseFloat(b.memory_gb) - parseFloat(a.memory_gb));
+
+      const probedLines = probed.map(c =>
         `${c.name} <span class="text-oc-500">(${c.memory_gb} ${memUnit(c.memory_kind)})</span> ${kindBadge(c.kind)} <span class="badge badge-blue ml-1">on ${c.host}</span>`
       );
-      document.getElementById('hw-gpu-val').innerHTML = lines.join('<br>');
-      if (sorted.length > 1) {
+      const discoveredLines = discovered.map(c =>
+        `<span class="text-gray-300">${c.name}</span> <span class="text-xs text-gray-500">(capacity unknown)</span> ${kindBadge(c.kind)} <span class="badge badge-blue ml-1">on ${c.host}</span>`
+        + (c.probe_hint ? `<br><span class="text-xs text-gray-500 pl-4">↳ ${c.probe_hint}</span>` : '')
+      );
+
+      document.getElementById('hw-gpu-val').innerHTML =
+        [...probedLines, ...discoveredLines].join('<br>');
+      if (probed.length > 1) {
         document.getElementById('hw-gpu-val').innerHTML +=
-          `<br><span class="text-xs text-gray-500 mt-1">${sorted.length} compute node(s) found</span>`;
+          `<br><span class="text-xs text-gray-500 mt-1">${probed.length} probed + ${discovered.length} discovered</span>`;
         document.getElementById('gpu-roles').classList.remove('hidden');
-        renderGpuRoles(sorted.map(c => ({ name: c.name, vram_gb: c.memory_gb, host: c.host, kind: c.kind })));
+        renderGpuRoles(probed.map(c => ({ name: c.name, vram_gb: c.memory_gb, host: c.host, kind: c.kind })));
       }
-      selectLlm('network');
-      const best = sorted[0];
-      document.getElementById('llm-network-desc').textContent = `Use ${best.name} on ${best.host}`;
+      if (probed.length > 0) {
+        selectLlm('network');
+        const best = probed[0];
+        document.getElementById('llm-network-desc').textContent = `Use ${best.name} on ${best.host}`;
+      } else {
+        selectLlm('cloud');
+      }
     } else if (scan.compute_kind === 'cpu' && parseFloat(scan.ram_total_gb) >= 8) {
       // Local CPU-only but enough RAM for tiny-model inference.
       document.getElementById('hw-gpu-val').innerHTML =
