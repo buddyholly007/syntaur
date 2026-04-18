@@ -1468,6 +1468,13 @@ async fn handle_api_message(
     // can't converge in 15 rounds are flailing — see round-budget warning
     // below for the escalating bail-out nudges.
     let max_rounds = 15;
+    // Per-turn file-read budget. `search_everything` already gives the model
+    // substantial content snippets; follow-up file reads are for pulling one
+    // specific file's full text, not for reconstructing a timeline across
+    // many daily notes. Cap at 3 reads per turn so "summarize recent
+    // activity" style prompts don't fan out into 10+ `read` calls.
+    let max_reads_per_turn: usize = 3;
+    let mut read_count: usize = 0;
 
     for round in 0..max_rounds {
         let result = match llm_chain.call_raw(&messages, Some(&tools)).await {
@@ -1516,8 +1523,29 @@ async fn handle_api_message(
                     let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     let args_str = func.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}");
                     let args: serde_json::Value = serde_json::from_str(args_str).unwrap_or(serde_json::json!({}));
-                    let tool_call = crate::tools::ToolCall { id: id.clone(), name, arguments: args };
-                    let result = tool_registry.execute(&tool_call).await;
+                    let tool_call = crate::tools::ToolCall { id: id.clone(), name: name.clone(), arguments: args };
+
+                    // Per-turn file-read cap: after `max_reads_per_turn` reads,
+                    // reject further `read`/`list_files` calls with an instructive
+                    // error so the model stops fanning out across daily notes and
+                    // answers from what it has.
+                    let is_read_family = matches!(name.as_str(),
+                        "read" | "file_read" | "list_files" | "memory_read");
+                    let result = if is_read_family && read_count >= max_reads_per_turn {
+                        crate::tools::ToolResult {
+                            tool_call_id: id.clone(),
+                            success: false,
+                            output: format!(
+                                "Error: already used {} file reads this turn (limit: {}). \
+                                 Answer the user with the content you've already gathered. \
+                                 If you genuinely need more, explain to the user which specific file would help and let them ask.",
+                                read_count, max_reads_per_turn
+                            ),
+                        }
+                    } else {
+                        if is_read_family { read_count += 1; }
+                        tool_registry.execute(&tool_call).await
+                    };
 
                     // Truncate large results to prevent context bloat
                     let mut output = result.output;
@@ -1920,6 +1948,9 @@ async fn handle_message_start(
     let tools = tool_registry.tool_definitions();
         // See handle_api_message for rationale — 15 rounds caps flailing turns.
         let max_rounds = 15;
+        // Per-turn file-read budget — see handle_api_message.
+        let max_reads_per_turn: usize = 3;
+        let mut read_count: usize = 0;
 
         for round in 0..max_rounds {
             // Persona-flavored "thinking" line — renders in grey in the UI
@@ -1977,7 +2008,24 @@ async fn handle_message_start(
                             args_preview: preview,
                         });
                         let tool_call = crate::tools::ToolCall { id: id.clone(), name: name.clone(), arguments: args };
-                        let result = tool_registry.execute(&tool_call).await;
+                        // Per-turn file-read cap — keep in sync with handle_api_message.
+                        let is_read_family = matches!(name.as_str(),
+                            "read" | "file_read" | "list_files" | "memory_read");
+                        let result = if is_read_family && read_count >= max_reads_per_turn {
+                            crate::tools::ToolResult {
+                                tool_call_id: id.clone(),
+                                success: false,
+                                output: format!(
+                                    "Error: already used {} file reads this turn (limit: {}). \
+                                     Answer the user with the content you've already gathered. \
+                                     If you genuinely need more, explain which specific file would help and let them ask.",
+                                    read_count, max_reads_per_turn
+                                ),
+                            }
+                        } else {
+                            if is_read_family { read_count += 1; }
+                            tool_registry.execute(&tool_call).await
+                        };
                         let _ = tx.send(AgentTurnEvent::ToolCallCompleted {
                             turn_id: turn_id_for_task.clone(),
                             round,
