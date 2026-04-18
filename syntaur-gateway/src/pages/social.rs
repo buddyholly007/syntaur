@@ -461,7 +461,7 @@ pub async fn render() -> Html<String> {
                     }
                     button class="soc-chat-close" onclick="socToggleChat()" aria-label="Close chat" { "×" }
                 }
-                div class="soc-chat-body" {
+                div class="soc-chat-body" id="soc-chat-body" {
                     div class="soc-chat-msg soc-chat-msg-nyota" {
                         p { "Frequencies open. Walk me through what you want to say — I'll help you land it." }
                         p class="soc-chat-signoff" { "—Nyota" }
@@ -471,7 +471,6 @@ pub async fn render() -> Html<String> {
                     input type="text" id="soc-chat-input" placeholder="Say the thing..." autocomplete="off";
                     button type="submit" class="soc-btn" { "Send" }
                 }
-                p class="soc-chat-note" { "Chat wiring ships in a later phase — this rail is a placeholder for now." }
             }
         }
 
@@ -735,7 +734,12 @@ body { background: var(--soc-bg); color: var(--soc-ink); }
   background: #fffdf6; color: var(--soc-ink); font-size: 13px;
 }
 .soc-btn { padding: 7px 14px; border-radius: 6px; background: var(--soc-amber); color: #1a1208; border: 0; font-weight: 500; font-size: 13px; cursor: pointer; }
-.soc-chat-note { margin-top: 10px; font-size: 11px; color: var(--soc-ink-soft); font-style: italic; }
+.soc-chat-msg-user {
+  background: var(--soc-surface-2); border-left: 3px solid var(--soc-ink-soft);
+  padding: 8px 10px; border-radius: 0 6px 6px 0; margin-bottom: 10px; font-size: 13px;
+}
+.soc-chat-msg-user p { margin: 0; color: var(--soc-ink); }
+.soc-chat-err { color: #953224; background: #f3d1cb; padding: 6px 10px; border-radius: 4px; }
 
 /* Compose pane */
 .soc-compose-form { max-width: 720px; display: flex; flex-direction: column; gap: 16px; background: #fffdf6; border: 1px solid var(--soc-rule); border-radius: 10px; padding: 20px 22px; }
@@ -1385,6 +1389,8 @@ async function socRefreshConnections() {
     SOC_CONNECTIONS_MAP = map;
     socRenderPlatforms(map);
     socUpdateFirstRunBanner();
+    // Re-render Compose's platform picker now that we know what's connected.
+    if (typeof socComposeRenderPlatforms === 'function') socComposeRenderPlatforms();
   } catch (_) { /* page renders stub cards even if fetch fails */ }
 }
 window.addEventListener('DOMContentLoaded', socRefreshConnections);
@@ -2273,12 +2279,61 @@ function socToggleChat() {
   const open = rail.classList.toggle('soc-chat-collapsed');
   if (open) { btn.classList.remove('active'); } else { btn.classList.add('active'); }
 }
-function socChatSend(ev) {
+
+// Nyota chat rail — posts to /api/message with agent='social' so the
+// conversation lands on Nyota's persona. Keeps its own rolling
+// conversation_id so the context accumulates across turns.
+let SOC_CHAT_CONV_ID = null;
+
+function socChatAppend(role, text) {
+  const body = document.getElementById('soc-chat-body');
+  if (!body) return;
+  const div = document.createElement('div');
+  div.className = 'soc-chat-msg ' + (role === 'user' ? 'soc-chat-msg-user' : 'soc-chat-msg-nyota');
+  if (role === 'user') {
+    div.innerHTML = `<p>${socEscape(text)}</p>`;
+  } else {
+    div.innerHTML = `<p>${socEscape(text).replace(/\n\n+/g,'</p><p>').replace(/\n/g,'<br>')}</p><p class="soc-chat-signoff">—Nyota</p>`;
+  }
+  body.appendChild(div);
+  body.scrollTop = body.scrollHeight;
+  return div;
+}
+
+async function socChatSend(ev) {
   ev.preventDefault();
   const input = document.getElementById('soc-chat-input');
-  if (!input.value.trim()) return false;
-  // Wiring ships in a later phase.
+  const text = (input.value || '').trim();
+  if (!text) return false;
   input.value = '';
+  socChatAppend('user', text);
+  const thinking = socChatAppend('nyota', '…');
+  try {
+    // Lazily create a conversation the first time we need one.
+    if (!SOC_CHAT_CONV_ID) {
+      const cr = await socAuthFetch('/api/conversations', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: socAuthToken(), agent: 'social' }),
+      });
+      const cd = cr.ok ? await cr.json() : {};
+      if (cd.id) SOC_CHAT_CONV_ID = cd.id;
+    }
+    const r = await socAuthFetch('/api/message', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        token: socAuthToken(),
+        agent: 'social',
+        message: text,
+        conversation_id: SOC_CHAT_CONV_ID,
+      }),
+    });
+    const data = await r.json();
+    const reply = data.response || data.error || '(no response)';
+    thinking.innerHTML = `<p>${socEscape(reply).replace(/\n\n+/g,'</p><p>').replace(/\n/g,'<br>')}</p><p class="soc-chat-signoff">—Nyota</p>`;
+    document.getElementById('soc-chat-body').scrollTop = 1e9;
+  } catch (e) {
+    thinking.innerHTML = `<p class="soc-chat-err">Couldn't reach Nyota — ${socEscape(e.message || 'try again')}.</p>`;
+  }
   return false;
 }
 "##;

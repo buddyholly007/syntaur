@@ -5277,6 +5277,7 @@ async fn main() {
         .route("/api/message/start", post(handle_message_start))
         .route("/api/message/{id}/stream", get(handle_message_stream))
         .route("/api/llm/complete", post(handle_api_llm_complete))
+        .route("/api/llm/complete/stream", post(handle_api_llm_complete_stream))
         .route("/api/conversations/{id}/append", post(handle_api_conversation_append))
         .route("/api/conversations", post(handle_conv_create))
         .route("/api/conversations", get(handle_conv_list))
@@ -6159,21 +6160,18 @@ async fn resolve_agent_display_name(state: &AppState, uid: i64, agent_id: &str) 
     crate::agents::handoff::agent_display_for_module(agent_id).to_string()
 }
 
-/// POST /api/llm/complete — thin LLM passthrough for out-of-band clients.
-///
-/// Resolves the caller's agent (persona system prompt from STYLE/SOUL/IDENTITY)
-/// and then calls the shared LLM chain with the supplied messages + tools.
-/// No server-side tool execution, no conversation history injection, no
-/// memory retrieval — the caller owns the tool loop and the message state.
-/// Used by MACE (the /coders CLI) which runs tools on its own host rather
-/// than on the gateway, so tools that touch the filesystem hit the right
-/// machine.
-async fn handle_api_llm_complete(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
-    let principal = resolve_principal(&state, token).await?;
+/// Shared core for `/api/llm/complete` (blocking) and
+/// `/api/llm/complete/stream` (SSE). Resolves the caller's persona + tools,
+/// fires a single LLM chain call, returns JSON already in the response shape
+/// the clients expect.
+async fn llm_complete_inner(
+    state: Arc<AppState>,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let token = body["token"].as_str().ok_or("missing token".to_string())?;
+    let principal = resolve_principal(&state, token)
+        .await
+        .map_err(|s| format!("auth failed: {}", s.as_u16()))?;
     let agent_id = body["agent"].as_str().unwrap_or("main").to_string();
 
     // Persona system prompt — the same files /api/message loads, minus the
@@ -6223,7 +6221,7 @@ async fn handle_api_llm_complete(
 
     let result = chain.call_raw(&messages, tools_ref).await.map_err(|e| {
         log::error!("[llm/complete] chain failed: {e}");
-        axum::http::StatusCode::BAD_GATEWAY
+        e
     })?;
 
     let (content, tool_calls, finish_reason) = match result {
@@ -6233,11 +6231,80 @@ async fn handle_api_llm_complete(
         }
     };
 
-    Ok(Json(serde_json::json!({
+    Ok(serde_json::json!({
+        "type": "done",
         "content": content,
         "tool_calls": tool_calls,
         "finish_reason": finish_reason,
-    })))
+    }))
+}
+
+/// POST /api/llm/complete — thin LLM passthrough for out-of-band clients.
+///
+/// Resolves the caller's agent (persona system prompt from STYLE/SOUL/IDENTITY)
+/// and then calls the shared LLM chain with the supplied messages + tools.
+/// No server-side tool execution, no conversation history injection, no
+/// memory retrieval — the caller owns the tool loop and the message state.
+/// Used by MACE (the /coders CLI) which runs tools on its own host rather
+/// than on the gateway, so tools that touch the filesystem hit the right
+/// machine.
+async fn handle_api_llm_complete(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    match llm_complete_inner(state, body).await {
+        Ok(v) => Ok(Json(v)),
+        Err(_) => Err(axum::http::StatusCode::BAD_GATEWAY),
+    }
+}
+
+/// POST /api/llm/complete/stream — same contract as `/api/llm/complete`, but
+/// wraps the LLM call in an SSE stream that emits `{"type":"thinking",
+/// "elapsed_ms":N}` heartbeats every 500ms while the call is in flight and
+/// a final `{"type":"done", ...}` event when it completes. Lets MACE show a
+/// live "thinking…" timer so users don't stare at a frozen prompt during a
+/// 20-second Cerebras/Groq turn.
+async fn handle_api_llm_complete_stream(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<axum::response::Response, axum::http::StatusCode> {
+    use axum::response::IntoResponse;
+    use futures_util::stream::StreamExt;
+    let state_c = state.clone();
+    let stream = async_stream::stream! {
+        let start = tokio::time::Instant::now();
+        let mut task = Box::pin(llm_complete_inner(state_c, body));
+        let mut ticker = tokio::time::interval(std::time::Duration::from_millis(500));
+        ticker.tick().await; // skip the immediate first tick
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut task => {
+                    let data = match result {
+                        Ok(v) => v,
+                        Err(e) => serde_json::json!({"type":"error","error":e}),
+                    };
+                    let ev = axum::response::sse::Event::default().data(data.to_string());
+                    yield Ok::<_, std::convert::Infallible>(ev);
+                    break;
+                }
+                _ = ticker.tick() => {
+                    let elapsed = start.elapsed().as_millis() as u64;
+                    let ev = axum::response::sse::Event::default().data(
+                        serde_json::json!({"type":"thinking","elapsed_ms":elapsed}).to_string()
+                    );
+                    yield Ok::<_, std::convert::Infallible>(ev);
+                }
+            }
+        }
+    };
+    Ok(axum::response::sse::Sse::new(stream.boxed())
+        .keep_alive(
+            axum::response::sse::KeepAlive::new()
+                .interval(std::time::Duration::from_secs(15))
+                .text("keepalive"),
+        )
+        .into_response())
 }
 
 /// POST /api/conversations/{id}/append — append a message to a conversation.
