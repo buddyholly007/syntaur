@@ -35,6 +35,7 @@ mod calendar_reminder;
 mod sync;
 mod music;
 mod music_local;
+mod fs_browser;
 pub mod crypto;
 pub mod terminal;
 mod agents;
@@ -5157,6 +5158,7 @@ async fn main() {
         // Local music library
         .route("/api/music/local/folders", get(music_local::list_folders).post(music_local::add_folder))
         .route("/api/music/local/folders/{id}", axum::routing::delete(music_local::remove_folder))
+        .route("/api/fs/list", get(fs_browser::handle_fs_list))
         .route("/api/music/local/scan", post(music_local::scan))
         .route("/api/music/local/tracks", get(music_local::list_tracks))
         .route("/api/music/local/file/{id}", get(music_local::stream_file))

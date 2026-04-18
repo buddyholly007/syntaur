@@ -669,14 +669,56 @@ const BODY_HTML: &str = r##"<!-- Top bar — matches the dashboard so the music 
       <!-- Folder list -->
       <div id="local-lib-folders" class="mt-3 space-y-1"></div>
 
-      <!-- Add folder row -->
+      <!-- Add folder row — browser-first, manual entry is secondary -->
       <div class="flex gap-2 mt-3">
+        <button onclick="openFolderPicker()"
+          class="flex-1 min-w-0 bg-oc-600 hover:bg-oc-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex items-center justify-center gap-2">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+          </svg>
+          Browse for folder
+        </button>
+        <button onclick="toggleManualPathEntry()" title="Type a path manually"
+          class="bg-gray-800 hover:bg-gray-700 text-gray-300 px-3 rounded-lg text-sm font-medium flex-shrink-0">…</button>
+      </div>
+      <div id="local-lib-manual-row" class="flex gap-2 mt-2 hidden">
         <input type="text" id="local-lib-path" placeholder="/home/sean/Music  or  ~/Music"
           class="flex-1 min-w-0 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-500 outline-none focus:border-oc-500"
           onkeydown="if(event.key==='Enter')addLocalFolder()">
         <button onclick="addLocalFolder()" class="bg-oc-600 hover:bg-oc-700 text-white px-3 rounded-lg text-sm font-medium flex-shrink-0">Add</button>
       </div>
       <p id="local-lib-error" class="text-xs text-red-400 mt-2 hidden"></p>
+
+      <!-- Folder picker modal -->
+      <div id="fs-picker-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+        <div class="bg-gray-900 border border-gray-700 rounded-xl max-w-2xl w-full max-h-[85vh] flex flex-col">
+          <div class="p-4 border-b border-gray-800 flex items-center gap-3">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-oc-400 flex-shrink-0">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+            </svg>
+            <h3 class="font-medium text-gray-200 flex-1">Pick a music folder</h3>
+            <button onclick="closeFolderPicker()" class="text-gray-500 hover:text-gray-300 text-xl leading-none">&times;</button>
+          </div>
+          <div class="p-3 border-b border-gray-800 flex items-center gap-2 text-xs">
+            <button onclick="fsPickerGoUp()" id="fs-picker-up" class="text-gray-400 hover:text-oc-400 disabled:opacity-30 disabled:cursor-not-allowed px-2 py-1 rounded">&#8593; Up</button>
+            <span id="fs-picker-breadcrumb" class="text-gray-300 font-mono truncate flex-1">Loading&hellip;</span>
+          </div>
+          <div class="flex-1 overflow-y-auto flex min-h-[320px]">
+            <!-- Shortcuts sidebar -->
+            <div class="w-44 border-r border-gray-800 p-2 space-y-1 flex-shrink-0 bg-gray-950/50" id="fs-picker-roots"></div>
+            <!-- Entry list -->
+            <div class="flex-1 p-2 space-y-0.5 overflow-y-auto" id="fs-picker-entries">
+              <p class="text-xs text-gray-500 italic p-3">Loading&hellip;</p>
+            </div>
+          </div>
+          <div class="p-3 border-t border-gray-800 flex items-center justify-between gap-3">
+            <div id="fs-picker-hint" class="text-xs text-gray-500 truncate flex-1">Pick a folder, or click "Select this folder" to use the current one.</div>
+            <button onclick="closeFolderPicker()" class="text-gray-400 hover:text-gray-200 px-3 py-1.5 text-sm">Cancel</button>
+            <button id="fs-picker-select" onclick="fsPickerSelectCurrent()" disabled
+              class="bg-oc-600 hover:bg-oc-700 disabled:bg-gray-700 disabled:cursor-not-allowed text-white px-4 py-1.5 rounded-lg text-sm font-medium">Select this folder</button>
+          </div>
+        </div>
+      </div>
 
       <!-- Search -->
       <div class="mt-3 flex gap-2">
@@ -1820,6 +1862,131 @@ async function addLocalFolder() {
   } catch(e) {
     err.textContent = 'Network error: ' + e.message;
     err.classList.remove('hidden');
+  }
+}
+
+// ── Folder picker modal ──────────────────────────────────────────────
+// Server-driven so we can offer native-feeling navigation without the
+// browser's sandboxed folder picker (which doesn't expose absolute paths
+// for security). Works for local dirs AND network mounts (/mnt, /media).
+let fsPickerCurrent = null; // current resolved path, "" = root shortcuts view
+function toggleManualPathEntry() {
+  const row = document.getElementById('local-lib-manual-row');
+  row.classList.toggle('hidden');
+  if (!row.classList.contains('hidden')) {
+    document.getElementById('local-lib-path').focus();
+  }
+}
+function openFolderPicker() {
+  document.getElementById('fs-picker-modal').classList.remove('hidden');
+  document.getElementById('local-lib-error').classList.add('hidden');
+  fsPickerLoad(''); // start at root shortcuts
+}
+function closeFolderPicker() {
+  document.getElementById('fs-picker-modal').classList.add('hidden');
+}
+async function fsPickerLoad(path) {
+  try {
+    const url = '/api/fs/list?token=' + encodeURIComponent(token) + (path ? '&path=' + encodeURIComponent(path) : '');
+    const r = await fetch(url);
+    if (!r.ok) {
+      const msg = r.status === 403 ? 'This folder is outside the allowed roots.' :
+                  r.status === 404 ? 'Folder not found.' :
+                  'Could not list folder (HTTP ' + r.status + ')';
+      document.getElementById('fs-picker-entries').innerHTML =
+        '<p class="text-xs text-red-400 p-3">' + msg + '</p>';
+      return;
+    }
+    const d = await r.json();
+    fsPickerCurrent = d.path || '';
+    // Breadcrumb
+    document.getElementById('fs-picker-breadcrumb').textContent = d.path || 'Pick a starting location';
+    // Up button
+    const up = document.getElementById('fs-picker-up');
+    up.disabled = !d.parent;
+    up.onclick = d.parent ? () => fsPickerLoad(d.parent) : null;
+    // Select-current enabled only when we're actually inside a folder
+    document.getElementById('fs-picker-select').disabled = !d.path;
+    // Roots sidebar (always the same, but re-render for state)
+    const rootsEl = document.getElementById('fs-picker-roots');
+    rootsEl.innerHTML = (d.roots || []).map(r =>
+      '<button onclick="fsPickerLoad(' + JSON.stringify(r.path).replace(/"/g, '&quot;') + ')" ' +
+      'class="w-full text-left px-2 py-1.5 rounded hover:bg-gray-800 text-xs text-gray-300 ' +
+      (d.path && d.path.startsWith(r.path) ? 'bg-gray-800 text-oc-400' : '') + '">' +
+      escapeHtml(r.label) + '</button>'
+    ).join('');
+    // Entries
+    const entriesEl = document.getElementById('fs-picker-entries');
+    if (!d.path) {
+      entriesEl.innerHTML = '<p class="text-xs text-gray-500 italic p-3">Pick a starting location from the left.</p>';
+      return;
+    }
+    const dirs = (d.entries || []).filter(e => e.is_dir);
+    const files = (d.entries || []).filter(e => !e.is_dir);
+    if (dirs.length === 0 && files.length === 0) {
+      entriesEl.innerHTML = '<p class="text-xs text-gray-500 italic p-3">Empty folder. You can still "Select this folder" to use it as-is, but it won\'t contain any music.</p>';
+      return;
+    }
+    let html = '';
+    if (dirs.length) {
+      html += dirs.map(e => {
+        const childPath = d.path.replace(/\/$/, '') + '/' + e.name;
+        return '<button onclick="fsPickerLoad(' + JSON.stringify(childPath).replace(/"/g, '&quot;') + ')" ' +
+          'class="w-full text-left px-2 py-1.5 rounded hover:bg-gray-800 text-xs text-gray-200 flex items-center gap-2">' +
+          '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-oc-500 flex-shrink-0"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>' +
+          '<span class="truncate">' + escapeHtml(e.name) + '</span></button>';
+      }).join('');
+    }
+    if (files.length) {
+      // Files shown grayed out — can't pick them, just visual context
+      html += files.slice(0, 20).map(e =>
+        '<div class="px-2 py-1 rounded text-xs text-gray-600 flex items-center gap-2 cursor-default">' +
+        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="flex-shrink-0"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>' +
+        '<span class="truncate">' + escapeHtml(e.name) + '</span></div>'
+      ).join('');
+      if (files.length > 20) {
+        html += '<p class="text-[11px] text-gray-600 italic p-2">&hellip;and ' + (files.length - 20) + ' more file(s)</p>';
+      }
+    }
+    entriesEl.innerHTML = html;
+  } catch(e) {
+    console.warn('[fs-picker] load failed', e);
+    document.getElementById('fs-picker-entries').innerHTML =
+      '<p class="text-xs text-red-400 p-3">Network error: ' + escapeHtml(e.message) + '</p>';
+  }
+}
+function fsPickerGoUp() {
+  // Up button is wired dynamically in fsPickerLoad
+}
+async function fsPickerSelectCurrent() {
+  if (!fsPickerCurrent) return;
+  const btn = document.getElementById('fs-picker-select');
+  btn.disabled = true;
+  btn.textContent = 'Adding…';
+  try {
+    const r = await fetch('/api/music/local/folders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, path: fsPickerCurrent }),
+    });
+    if (!r.ok) {
+      const txt = await r.text();
+      document.getElementById('fs-picker-hint').textContent =
+        txt || ('Add failed (HTTP ' + r.status + ')');
+      document.getElementById('fs-picker-hint').className = 'text-xs text-red-400 truncate flex-1';
+      btn.disabled = false;
+      btn.textContent = 'Select this folder';
+      return;
+    }
+    const d = await r.json();
+    closeFolderPicker();
+    await loadLocalFolders();
+    if (d.id) scanLocalLibrary(d.id);
+  } catch(e) {
+    document.getElementById('fs-picker-hint').textContent = 'Network error: ' + e.message;
+    document.getElementById('fs-picker-hint').className = 'text-xs text-red-400 truncate flex-1';
+    btn.disabled = false;
+    btn.textContent = 'Select this folder';
   }
 }
 
