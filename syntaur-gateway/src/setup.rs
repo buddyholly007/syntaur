@@ -712,6 +712,24 @@ pub async fn handle_setup_apply(
     }
     config["modules"]["entries"] = serde_json::Value::Object(mod_entries);
 
+    // Image generation — only write a block if the user opted into local SD
+    // or paid OpenRouter. No block == Pollinations default (free, zero-config).
+    if let Some(ig) = &req.image_gen {
+        let mut img = serde_json::Map::new();
+        if let Some(u) = ig.local_sd_url.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            img.insert("local_sd_url".to_string(), serde_json::json!(u));
+        }
+        if let Some(m) = ig.local_sd_model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            img.insert("local_sd_model".to_string(), serde_json::json!(m));
+        }
+        if let Some(m) = ig.openrouter_paid_model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            img.insert("openrouter_paid_model".to_string(), serde_json::json!(m));
+        }
+        if !img.is_empty() {
+            config["image_gen"] = serde_json::Value::Object(img);
+        }
+    }
+
     // Write config (backup existing first)
     let config_path = data_dir.join("syntaur.json");
     if config_path.exists() {
@@ -806,6 +824,20 @@ pub struct SetupApplyRequest {
     pub ha_url: Option<String>,
     pub ha_token: Option<String>,
     pub disabled_modules: Vec<String>,
+    /// Image generation provider selection, written through to
+    /// `config.image_gen`. Missing = Pollinations default (zero config).
+    #[serde(default)]
+    pub image_gen: Option<ImageGenInput>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct ImageGenInput {
+    #[serde(default)]
+    pub local_sd_url: Option<String>,
+    #[serde(default)]
+    pub local_sd_model: Option<String>,
+    #[serde(default)]
+    pub openrouter_paid_model: Option<String>,
 }
 
 #[derive(Deserialize)]

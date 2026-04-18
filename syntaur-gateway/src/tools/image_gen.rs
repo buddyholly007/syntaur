@@ -113,6 +113,15 @@ Generated image from prompt: {}",
                 Err(e) => {
                     error!("[image] task {} failed: {}", tid, e);
                     tm.fail(&tid, &e).await;
+                    // Append a user-facing error message to the conversation
+                    // so the user (and the agent on its next turn) actually
+                    // sees that image gen failed and what to try instead.
+                    // Without this the agent keeps saying "your image will
+                    // appear shortly" forever.
+                    if let (Some(ref cid), Some(ref cm)) = (&conv_id, &convs) {
+                        let msg = format_image_failure(&e, &prompt_owned);
+                        let _ = cm.append(cid, "assistant", &msg).await;
+                    }
                 }
             }
         });
@@ -124,6 +133,44 @@ Generated image from prompt: {}",
             task_id
         )))
     }
+}
+
+/// Build a human-readable error message that explains what failed and
+/// what the user can try next. Suggestions are tailored to the failure
+/// type so the user sees a concrete action, not a stack trace.
+fn format_image_failure(err: &str, prompt: &str) -> String {
+    let lower = err.to_lowercase();
+    let short_prompt = if prompt.len() > 80 {
+        format!("{}…", &prompt[..77])
+    } else {
+        prompt.to_string()
+    };
+
+    let suggestion = if lower.contains("pollinations unreachable")
+        || lower.contains("connection")
+        || lower.contains("timed out")
+        || lower.contains("dns")
+    {
+        "**What to try:** Check your internet connection. Pollinations.ai may also be overloaded — retry in a minute. If Pollinations keeps failing, you can enable a local Stable Diffusion server (Settings → Image generation → Local SD) or switch to a paid OpenRouter model."
+    } else if lower.contains("local sd unreachable") || lower.contains("sdapi/v1/txt2img") {
+        "**What to try:** Your configured local SD server isn't responding. Check that ComfyUI / Automatic1111 / SD.Next is running at the URL you set in Settings → Image generation. You can temporarily fall back to the free Pollinations provider by clearing the local SD URL in Settings."
+    } else if lower.contains("http 429") || lower.contains("rate limit") {
+        "**What to try:** The image provider rate-limited the request. Wait 30-60 seconds and try again, or switch to a different provider in Settings."
+    } else if lower.contains("http 401") || lower.contains("http 403") || lower.contains("unauthoriz") || lower.contains("billing") {
+        "**What to try:** Authentication with the image provider failed — likely an expired or missing API key. Check Settings → Image generation, or fall back to the free Pollinations provider (no key needed)."
+    } else if lower.contains("declined") || lower.contains("refus") || lower.contains("content policy") {
+        "**What to try:** The model declined to generate that prompt (content policy). Try rephrasing or describing the same scene in different terms."
+    } else {
+        "**What to try:** Try again in a moment. If it keeps failing, you can switch image providers in Settings → Image generation (Pollinations is free and needs no signup; Local SD runs on your own GPU)."
+    };
+
+    format!(
+        "⚠ **Image generation failed.**\n\n\
+         **Prompt:** _{}_\n\n\
+         **Error:** {}\n\n\
+         {}",
+        short_prompt, err, suggestion
+    )
 }
 
 
@@ -231,7 +278,14 @@ Edited: {}", url, edit_desc);
                         let _ = cm.append(cid, "assistant", &msg).await;
                     }
                 }
-                Err(e) => { error!("[image-edit] task {} failed: {}", tid, e); tm.fail(&tid, &e).await; }
+                Err(e) => {
+                    error!("[image-edit] task {} failed: {}", tid, e);
+                    tm.fail(&tid, &e).await;
+                    if let (Some(ref cid), Some(ref cm)) = (&conv_id, &convs) {
+                        let msg = format_image_failure(&e, &edit_desc);
+                        let _ = cm.append(cid, "assistant", &msg).await;
+                    }
+                }
             }
         });
 

@@ -373,6 +373,53 @@ const BODY_HTML: &str = r##"<div class="max-w-2xl mx-auto px-4 py-8">
 
         <p class="text-xs text-gray-600 mt-3" id="fallback-skip-note">You can always add a fallback later in Settings.</p>
       </div>
+
+      <!-- Image generation (free-first) -->
+      <div class="mt-6 p-4 rounded-lg bg-gray-900 border border-gray-700">
+        <div class="mb-3">
+          <p class="text-sm font-medium text-gray-200">Image generation</p>
+          <p class="text-xs text-gray-500 mt-1">How should Syntaur generate images when you ask for one? All options have free paths — paid is opt-in only.</p>
+        </div>
+        <div class="space-y-2">
+          <label class="block p-3 rounded-lg border-2 cursor-pointer transition-colors border-oc-600" id="img-opt-pollinations">
+            <input type="radio" name="image-provider" value="pollinations" class="hidden" checked onchange="selectImageProvider('pollinations')">
+            <div class="flex items-start gap-3">
+              <span class="badge badge-green text-xs flex-shrink-0 mt-0.5">Free · No signup</span>
+              <div class="flex-1">
+                <p class="text-sm font-medium">Pollinations.ai (recommended)</p>
+                <p class="text-xs text-gray-500 mt-0.5">Free public image API, no key, no account. Uses FLUX.1 under the hood. Anonymous and instant — zero config. Optional watermark disabled. <a href="https://pollinations.ai" target="_blank" class="text-oc-500 hover:text-oc-400">Learn more &#8599;</a></p>
+              </div>
+            </div>
+          </label>
+          <label class="block p-3 rounded-lg border-2 cursor-pointer transition-colors border-gray-700 hover:border-oc-600" id="img-opt-local">
+            <input type="radio" name="image-provider" value="local" class="hidden" onchange="selectImageProvider('local')">
+            <div class="flex items-start gap-3">
+              <span class="badge badge-blue text-xs flex-shrink-0 mt-0.5">Free · Local GPU</span>
+              <div class="flex-1">
+                <p class="text-sm font-medium">Local Stable Diffusion</p>
+                <p class="text-xs text-gray-500 mt-0.5">Run ComfyUI / Automatic1111 / SD.Next on your own GPU. Fully private, free forever, usually 3-8s per image on a modern card. Best quality since you pick the model. <a href="https://github.com/comfyanonymous/ComfyUI" target="_blank" class="text-oc-500 hover:text-oc-400">Install ComfyUI &#8599;</a></p>
+                <div id="img-local-config" class="hidden mt-2 space-y-2">
+                  <input type="text" id="img-local-url" placeholder="http://192.168.1.69:7860" class="input text-xs" value="http://127.0.0.1:7860">
+                  <p class="text-[11px] text-gray-600">Enter your SD server URL. Leave blank to skip — falls back to Pollinations until you wire it up in Settings.</p>
+                </div>
+              </div>
+            </div>
+          </label>
+          <label class="block p-3 rounded-lg border-2 cursor-pointer transition-colors border-gray-700 hover:border-oc-600" id="img-opt-openrouter">
+            <input type="radio" name="image-provider" value="openrouter" class="hidden" onchange="selectImageProvider('openrouter')">
+            <div class="flex items-start gap-3">
+              <span class="badge bg-yellow-900/50 text-yellow-400 text-xs flex-shrink-0 mt-0.5">Pay-per-use</span>
+              <div class="flex-1">
+                <p class="text-sm font-medium">OpenRouter (paid)</p>
+                <p class="text-xs text-gray-500 mt-0.5">Uses your OpenRouter account — charges per image. Best cheap model is <code class="text-gray-400">google/gemini-2.5-flash-image</code> at ~$0.001/image. Reuses the OpenRouter key you set above. Opt-in only.</p>
+                <div id="img-openrouter-config" class="hidden mt-2">
+                  <input type="text" id="img-openrouter-model" placeholder="google/gemini-2.5-flash-image" class="input text-xs" value="google/gemini-2.5-flash-image">
+                </div>
+              </div>
+            </div>
+          </label>
+        </div>
+      </div>
     </div>
     <div class="flex justify-between mt-6">
       <button class="btn-secondary" onclick="goStep(1)">Back</button>
@@ -1867,6 +1914,35 @@ async function testHa() {
   }
 }
 
+// Step 2b: Image generation provider (Pollinations default, opt-in local/paid)
+let imageProviderChoice = 'pollinations';
+function selectImageProvider(which) {
+  imageProviderChoice = which;
+  for (const t of ['pollinations','local','openrouter']) {
+    const el = document.getElementById(`img-opt-${t}`);
+    if (!el) continue;
+    el.className = el.className.replace(/border-oc-600|border-gray-700/g, '') +
+      (t === which ? ' border-oc-600' : ' border-gray-700');
+  }
+  // Show inline config for local + openrouter, hide others
+  const lc = document.getElementById('img-local-config');
+  if (lc) lc.classList.toggle('hidden', which !== 'local');
+  const oc = document.getElementById('img-openrouter-config');
+  if (oc) oc.classList.toggle('hidden', which !== 'openrouter');
+}
+function buildImageGenPayload() {
+  if (imageProviderChoice === 'local') {
+    const url = (document.getElementById('img-local-url')?.value || '').trim();
+    return url ? { local_sd_url: url } : {}; // empty block -> default Pollinations
+  }
+  if (imageProviderChoice === 'openrouter') {
+    const model = (document.getElementById('img-openrouter-model')?.value || '').trim()
+      || 'google/gemini-2.5-flash-image';
+    return { openrouter_paid_model: model };
+  }
+  return {}; // pollinations = zero config, no block needed (default)
+}
+
 // Step 6: Summary
 function buildSummary() {
   const name = document.getElementById('agent-name').value || 'Claw';
@@ -1874,6 +1950,7 @@ function buildSummary() {
   const llmLabels = { local: 'Local (Ollama)', network: 'Network LLM', cloud: 'Cloud API' };
   const fbProvider = document.getElementById('fallback-provider').value;
   const fbLabels = { none: 'None', openrouter: 'OpenRouter', groq: 'Groq', cerebras: 'Cerebras', ollama: 'Local (Ollama)', openai: 'OpenAI', anthropic: 'Anthropic' };
+  const imgLabels = { pollinations: 'Pollinations (free)', local: 'Local SD (free)', openrouter: 'OpenRouter (paid)' };
   const enabledMods = modules.filter(m => m.enabled).length;
 
   document.getElementById('summary').innerHTML = `
@@ -1881,6 +1958,7 @@ function buildSummary() {
     <div class="flex justify-between"><span>Your name</span><span class="text-white">${user}</span></div>
     <div class="flex justify-between"><span>Primary LLM</span><span class="text-white">${llmLabels[llmChoice]}</span></div>
     <div class="flex justify-between"><span>Fallback LLM</span><span class="text-white">${fbLabels[fbProvider] || 'None'}${fbProvider === 'none' ? ' <span class="text-yellow-500 text-xs">(not recommended)</span>' : ''}</span></div>
+    <div class="flex justify-between"><span>Image generation</span><span class="text-white">${imgLabels[imageProviderChoice] || 'Pollinations (free)'}</span></div>
     <div class="flex justify-between"><span>Voice</span><span class="text-white">${voiceEnabled ? 'Enabled' : 'Off'}</span></div>
     <div class="flex justify-between"><span>Telegram</span><span class="text-white">${telegramEnabled ? 'Paired' : 'Off'}</span></div>
     <div class="flex justify-between"><span>Modules</span><span class="text-white">${enabledMods} enabled</span></div>
@@ -1929,6 +2007,7 @@ async function finishSetup() {
     ha_url: document.querySelector('#ha-url')?.value || null,
     ha_token: document.querySelector('#ha-token')?.value || null,
     disabled_modules: [],
+    image_gen: buildImageGenPayload(),
   };
 
   try {
