@@ -5102,6 +5102,12 @@ async fn main() {
         .route("/api/journal/dates", get(voice_api::get_journal_dates))
         .route("/api/journal/search", get(voice_api::search_journal))
         .route("/api/journal/sessions", get(voice_api::get_sessions))
+        .route("/api/journal/export", get(voice_api::export_journal))
+        .route("/api/journal/moments", post(voice_api::create_moment).get(voice_api::list_moments))
+        .route("/api/journal/moments/{id}", axum::routing::delete(voice_api::delete_moment))
+        .route("/api/journal/training", get(voice_api::list_training))
+        .route("/api/journal/training/delete", post(voice_api::delete_training))
+        .route("/api/journal/settings", get(voice_api::get_settings))
         .route("/api/tts", post(voice_api::synthesize_speech))
         // Terminal / Coders module routes
         .route("/coders", get(pages::coders::render))

@@ -1570,6 +1570,25 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX IF NOT EXISTS idx_user_prefs_user ON user_preferences(user_id);
     "#,
+    // ── v42 ──────────────────────────────────────────────────────────────
+    // Journal moments — fragments the user has starred while reviewing a
+    // day's entries. Lives fully inside journal isolation: no foreign keys
+    // out to conversations, nothing that another module could join on.
+    // Just text + date + optional metadata, owned by the user.
+    r#"
+    CREATE TABLE IF NOT EXISTS journal_moments (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        date        TEXT NOT NULL,
+        text        TEXT NOT NULL,
+        source      TEXT,
+        time_of_day TEXT,
+        note        TEXT,
+        created_at  INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_journal_moments_user ON journal_moments(user_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_journal_moments_date ON journal_moments(user_id, date);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
