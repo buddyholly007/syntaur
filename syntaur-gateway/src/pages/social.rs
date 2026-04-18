@@ -741,6 +741,28 @@ body { background: var(--soc-bg); color: var(--soc-ink); }
 .soc-chat-msg-user p { margin: 0; color: var(--soc-ink); }
 .soc-chat-err { color: #953224; background: #f3d1cb; padding: 6px 10px; border-radius: 4px; }
 
+/* Thinking bubble — three bouncing dots + rotating Nyota-voice thought */
+.soc-chat-thinking {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 2px 10px 2px;
+}
+.soc-chat-dots { display: inline-flex; gap: 4px; }
+.soc-chat-dots span {
+  width: 6px; height: 6px; border-radius: 999px;
+  background: var(--soc-amber);
+  animation: soc-chat-bounce 1.2s infinite ease-in-out;
+}
+.soc-chat-dots span:nth-child(2) { animation-delay: .15s; }
+.soc-chat-dots span:nth-child(3) { animation-delay: .3s; }
+@keyframes soc-chat-bounce {
+  0%, 80%, 100% { transform: translateY(0); opacity: .4; }
+  40%           { transform: translateY(-4px); opacity: 1; }
+}
+.soc-chat-thought {
+  font-size: 12px; font-style: italic; color: var(--soc-ink-soft);
+  transition: opacity .25s ease;
+}
+
 /* Compose pane */
 .soc-compose-form { max-width: 720px; display: flex; flex-direction: column; gap: 16px; background: #fffdf6; border: 1px solid var(--soc-rule); border-radius: 10px; padding: 20px 22px; }
 .soc-compose-platforms { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
@@ -2285,6 +2307,18 @@ function socToggleChat() {
 // conversation_id so the context accumulates across turns.
 let SOC_CHAT_CONV_ID = null;
 
+// Mirror of main.rs::persona_thinking_bank("nyota") — shown as the
+// grey italic thought line while an LLM turn is in flight, matching
+// the thinking-bubble pattern every other persona's chat surface uses.
+const SOC_NYOTA_THOUGHTS = [
+  'Reading the draft.',
+  'One moment — checking the line.',
+  'Looking at recent posts.',
+  'Pulling the draft queue.',
+  'Checking what\u2019s scheduled.',
+  'Re-reading the tone.',
+];
+
 function socChatAppend(role, text) {
   const body = document.getElementById('soc-chat-body');
   if (!body) return;
@@ -2300,6 +2334,27 @@ function socChatAppend(role, text) {
   return div;
 }
 
+function socChatThinkingBubble() {
+  const body = document.getElementById('soc-chat-body');
+  if (!body) return null;
+  const div = document.createElement('div');
+  div.className = 'soc-chat-msg soc-chat-msg-nyota soc-chat-thinking';
+  div.innerHTML = `
+    <span class="soc-chat-dots"><span></span><span></span><span></span></span>
+    <span class="soc-chat-thought"></span>`;
+  body.appendChild(div);
+  body.scrollTop = body.scrollHeight;
+  const thought = div.querySelector('.soc-chat-thought');
+  // Rotate a phrase from the Nyota bank every 3s so the bubble feels alive
+  let i = Math.floor(Math.random() * SOC_NYOTA_THOUGHTS.length);
+  thought.textContent = SOC_NYOTA_THOUGHTS[i];
+  const handle = setInterval(() => {
+    i = (i + 1) % SOC_NYOTA_THOUGHTS.length;
+    if (thought) thought.textContent = SOC_NYOTA_THOUGHTS[i];
+  }, 3000);
+  return { el: div, stop: () => clearInterval(handle) };
+}
+
 async function socChatSend(ev) {
   ev.preventDefault();
   const input = document.getElementById('soc-chat-input');
@@ -2307,7 +2362,7 @@ async function socChatSend(ev) {
   if (!text) return false;
   input.value = '';
   socChatAppend('user', text);
-  const thinking = socChatAppend('nyota', '…');
+  const bubble = socChatThinkingBubble();
   try {
     // Lazily create a conversation the first time we need one.
     if (!SOC_CHAT_CONV_ID) {
@@ -2329,10 +2384,18 @@ async function socChatSend(ev) {
     });
     const data = await r.json();
     const reply = data.response || data.error || '(no response)';
-    thinking.innerHTML = `<p>${socEscape(reply).replace(/\n\n+/g,'</p><p>').replace(/\n/g,'<br>')}</p><p class="soc-chat-signoff">—Nyota</p>`;
+    if (bubble) {
+      bubble.stop();
+      bubble.el.classList.remove('soc-chat-thinking');
+      bubble.el.innerHTML = `<p>${socEscape(reply).replace(/\n\n+/g,'</p><p>').replace(/\n/g,'<br>')}</p><p class="soc-chat-signoff">—Nyota</p>`;
+    }
     document.getElementById('soc-chat-body').scrollTop = 1e9;
   } catch (e) {
-    thinking.innerHTML = `<p class="soc-chat-err">Couldn't reach Nyota — ${socEscape(e.message || 'try again')}.</p>`;
+    if (bubble) {
+      bubble.stop();
+      bubble.el.classList.remove('soc-chat-thinking');
+      bubble.el.innerHTML = `<p class="soc-chat-err">Couldn't reach Nyota — ${socEscape(e.message || 'try again')}.</p>`;
+    }
   }
   return false;
 }
