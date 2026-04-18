@@ -1,8 +1,12 @@
 //! /settings — command-center style settings page.
 //!
-//! Two-pane sidebar layout (10 sections) replacing the old 6-tab strip.
-//! Deep-linkable via URL hash: `#account/profile`, `#integrations/telegram`,
-//! etc. Includes a ⌘K command palette that indexes every setting leaf.
+//! Two-pane sidebar layout organized by user goal — Set up / Helpers /
+//! Connect things / Account / Appearance / Advanced. Six groups replace
+//! the old 10-section engineering taxonomy. Deep-linkable via URL hash:
+//! `#setup/start`, `#helpers/all`, `#connect/telegram`, `#advanced/brain`.
+//! Old hashes (`#llm/providers`, `#integrations/telegram`, etc.) are
+//! silently redirected by the JS in NEW_JS so bookmarks keep working.
+//! Includes a ⌘K command palette that indexes every setting leaf.
 //!
 //! Legacy tab HTML chunks are extracted from the former raw `BODY_HTML`
 //! string and kept as `include_str!` blobs in `settings_chunks/` so the
@@ -14,7 +18,7 @@
 use axum::response::Html;
 use maud::{html, Markup, PreEscaped};
 
-use super::shared::{shell, Page};
+use super::shared::{shell, top_bar as shared_top_bar, Page};
 
 // Legacy JS + shared modals stay as raw strings (JS can't be maud; modals
 // are a dense tangle of dialogs the JS expects at specific IDs).
@@ -34,7 +38,8 @@ pub async fn render() -> Html<String> {
     // Substitute the server-rendered palette index into the JS template.
     let resolved_js = NEW_JS.replace("%%SS_INDEX%%", &palette_index_json());
     let body = html! {
-        (top_bar())
+        (shared_top_bar("Settings", None))
+        (sub_crumb_bar())
         // Agents page CSS — scoped via `.agent-*` class names so it's safe
         // to load globally. Powers the inlined Agent manager on the Agents
         // → All agents sub-page.
@@ -52,6 +57,15 @@ pub async fn render() -> Html<String> {
         // Command palette overlay (⌘K)
         (cmdk_palette())
 
+        // Global "Am I done?" banner — sticky at top of every page except
+        // the Setup landing (which has its own larger version). JS hides
+        // this on #setup/start and lights it up green when required steps
+        // are both done; amber with a CTA when not.
+        (setup_status_banner())
+
+        // Global toast stack — ssToast(msg, kind, opts) drops a pill here.
+        div id="ss-toasts" class="ss-toast-stack" aria-live="polite" {}
+
         // Dirty-state banner (hidden by default; shown by JS on change)
         (dirty_banner())
 
@@ -65,27 +79,24 @@ pub async fn render() -> Html<String> {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// Top bar + sidebar
+// Settings-specific sub-crumb bar
 // ══════════════════════════════════════════════════════════════════════
+// Global navigation now lives in `shared::top_bar`. This thin bar sits
+// below it and shows (a) the current settings sub-section ("Agents → Add
+// new"), and (b) the in-settings search hint that opens the
+// `ssOpenPalette` fuzzy finder. Keep the `#ss-current-crumb` id so
+// existing sub-section navigation JS doesn't break.
 
-fn top_bar() -> Markup {
+fn sub_crumb_bar() -> Markup {
     html! {
-        div class="ss-topbar" {
-            div class="ss-topbar-inner" {
-                a href="/" class="flex items-center gap-2 hover:opacity-80" {
-                    img src="/app-icon.jpg" class="h-8 w-8 rounded-lg" alt="";
-                    span class="font-semibold text-lg" { "Syntaur" }
-                }
-                span class="ss-crumb-sep" { "/" }
-                span class="ss-crumb" { "Settings" }
+        div class="ss-subbar" {
+            div class="ss-subbar-inner" {
                 span class="ss-crumb-page" id="ss-current-crumb" { "" }
                 div class="flex-1" {}
-                button class="ss-search-hint" onclick="ssOpenPalette()" title="Search settings (⌘K)" {
+                button class="ss-search-hint" onclick="ssOpenPalette()" title="Search settings" {
                     svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" { circle cx="11" cy="11" r="7" {} path d="M21 21l-5-5" {} }
-                    span { "Search…" }
-                    kbd { "⌘K" }
+                    span { "Search settings" }
                 }
-                a href="/" class="ss-link" { "← Dashboard" }
             }
         }
     }
@@ -132,101 +143,198 @@ fn sidebar_section(sec: &SectionDef) -> Markup {
 
 fn content_area() -> Markup {
     html! {
-        // Home / welcome page — shown when no hash is set.
-        (page_wrap("home", "home", "Settings", "Manage Syntaur, your agents, and how you connect.",
+        // ── SET UP SYNTAUR ─────────────────────────────────
+        // Default landing. Phase 2 rewrites this into a full stepped flow;
+        // for now it reuses the existing welcome / checklist body.
+        (page_wrap("setup", "start", "Set up Syntaur",
+            "One page to get you running. Everything else is optional.",
             home_body()))
 
-        // ── ACCOUNT ────────────────────────────────────────
-        (page_wrap("account", "profile", "Profile",
-            "Your identity and personal info. Visible only to you.",
-            account_profile_body()))
-        (page_wrap("account", "security", "Password & security",
-            "Change your password, manage active sessions.",
-            account_security_body()))
-        (page_wrap("account", "users", "Users (admin)",
-            "Invite, promote, or remove users on this Syntaur instance.",
-            tab_users()))
-
-        // ── AGENTS ─────────────────────────────────────────
-        (page_wrap("agents", "all", "All agents",
-            "Create, import, and manage the agents in your Syntaur.",
+        // ── YOUR HELPERS ───────────────────────────────────
+        (page_wrap("helpers", "all", "Your helpers",
+            "Create, import, and manage the helpers you talk to.",
             agents_all_body()))
-        (page_wrap("agents", "personas", "Personas & tone",
-            "The eight built-in personas (Peter, Kyron, Positron, Cortex, Silvr, Thaddeus, Maurice, Mushi) plus humor dials and memory protocol.",
+        (page_wrap("helpers", "personas", "Built-in helper styles",
+            "Eight built-in styles, each with its own voice and role.",
             agents_personas_body()))
 
-        // ── INTEGRATIONS ───────────────────────────────────
-        (page_wrap("integrations", "telegram", "Telegram",
-            "Chat with your agents from your phone.",
+        // ── CONNECT THINGS ─────────────────────────────────
+        (page_wrap("connect", "things", "All connections",
+            "Everything Syntaur can connect to, with one-click sign-in.",
+            connect_things_body()))
+        (page_wrap("connect", "telegram", "Telegram (phone)",
+            "Chat with Syntaur from your phone through a Telegram bot.",
             integration_telegram_body()))
-        (page_wrap("integrations", "homeassistant", "Home Assistant",
-            "Let your agents see + control your smart home.",
+        (page_wrap("connect", "homeassistant", "Smart home",
+            "Give Syntaur access to lights, locks, temperature, and more.",
             integration_ha_body()))
-        (page_wrap("integrations", "sync", "Sync",
-            "Connect cloud services so agents can read your calendar, email, bank, and more.",
+        (page_wrap("connect", "sync", "Cloud services",
+            "Sign in to cloud accounts Syntaur can read from.",
             integration_sync_body()))
-        (page_wrap("integrations", "media", "Media bridge",
-            "Local companion app that lets agents play hidden audio/video from Apple Music, Spotify, Tidal, and YouTube.",
+        (page_wrap("connect", "media", "Music companion",
+            "Small app on your computer so Syntaur can play music in the background.",
             integration_media_body()))
 
-        // ── LLM ────────────────────────────────────────────
-        (page_wrap("llm", "providers", "Providers",
-            "Which model answers each agent. Order + fallback + per-provider API keys.",
+        // ── YOUR ACCOUNT ───────────────────────────────────
+        (page_wrap("account", "profile", "Profile",
+            "Your name and how Syntaur addresses you.",
+            account_profile_body()))
+        (page_wrap("account", "security", "Password",
+            "Change your password, sign out of other browsers.",
+            account_security_body()))
+        (page_wrap("account", "users", "Other people on this Syntaur",
+            "Invite, enable, or remove users. Admin only.",
+            tab_users()))
+        (page_wrap("account", "privacy", "What Syntaur stores",
+            "A plain table of what's kept, where, and for how long.",
+            privacy_data_body()))
+
+        // ── HOW SYNTAUR LOOKS ──────────────────────────────
+        (page_wrap("appearance", "theme", "Color and layout",
+            "Dashboard colors and spacing. Module themes stay as-is.",
+            appearance_theme_body()))
+
+        // ── ADVANCED ───────────────────────────────────────
+        (page_wrap("advanced", "brain", "Brain settings",
+            "Which AI model runs each helper. Backup brains, API keys, and model details.",
             html! {
+                // Helpers cross-link — so users see which of their named
+                // helpers will be affected when they change the model chain.
+                // JS fills in the count/names from /health.
+                div class="ss-agent-brain-link" {
+                    span class="ss-agent-brain-label" { "These models power every helper — " }
+                    span class="ss-agent-brain-name" id="ss-brain-agent-list" { "your helpers" }
+                    span class="ss-agent-brain-label" { "." }
+                    a class="ss-agent-brain-change" href="#helpers/all" onclick="ssNavigate('helpers','all');return false;" {
+                        "See helpers →"
+                    }
+                }
                 div class="ss-card" {
                     div class="ss-card-head" {
-                        h3 class="ss-card-title" { "LLM providers" }
+                        h3 class="ss-card-title" { "AI model providers" }
                         (status_pill("ss-pill-llm"))
                     }
                     p class="ss-help" {
-                        "Providers are tried in fallback order. If the primary "
-                        "fails (rate limit, 5xx, timeout) the chain moves to the "
-                        "next automatically."
+                        "Providers are tried in order. If the main one is down, "
+                        "Syntaur automatically uses the backup."
                     }
                     (tab_llm())
                 }
             }))
-
-        // ── VOICE ──────────────────────────────────────────
-        (page_wrap("voice", "satellites", "Satellites",
-            "Smart speakers running your wake word. Train voice prints, assign rooms.",
+        (page_wrap("advanced", "voice", "Voice speakers",
+            "Smart speakers that listen for the wake word and talk to Syntaur.",
             html! {
                 div class="ss-card" {
                     div class="ss-card-head" {
-                        h3 class="ss-card-title" { "Voice satellites" }
+                        h3 class="ss-card-title" { "Voice speakers" }
                         (status_pill("ss-pill-voice"))
                     }
                     (voice_satellites_body())
                 }
             }))
-
-        // ── MODULES ────────────────────────────────────────
-        (page_wrap("modules", "installed", "Installed modules",
-            "Turn module capabilities on and off. Each module has its own settings gear.",
+        (page_wrap("advanced", "modules", "Modules",
+            "Turn Syntaur features on and off. Each module has its own settings page.",
             modules_installed_body()))
-
-        // ── APPEARANCE ─────────────────────────────────────
-        (page_wrap("appearance", "theme", "Theme",
-            "Dashboard color palette and density. Individual modules keep their own themes.",
-            appearance_theme_body()))
-
-        // ── PRIVACY & DATA ─────────────────────────────────
-        (page_wrap("privacy", "data", "What Syntaur stores",
-            "A frank table of what's kept, where, and for how long.",
-            privacy_data_body()))
-
-        // ── SYSTEM ─────────────────────────────────────────
-        (page_wrap("system", "gateway", "Gateway & ports",
-            "Network + runtime configuration. Some fields require a gateway restart.",
+        (page_wrap("advanced", "gateway", "Gateway and ports",
+            "Network and runtime configuration. Some changes need a restart. Admin only.",
             tab_system()))
-        (page_wrap("system", "danger", "Danger zone",
-            "Destructive actions. Typed confirmation required.",
+        (page_wrap("advanced", "danger", "Danger zone",
+            "Destructive actions. Typed confirmation required. Admin only.",
             system_danger_body()))
-
-        // ── ABOUT ──────────────────────────────────────────
-        (page_wrap("about", "info", "About this Syntaur",
-            "Version, uptime, tool count, and attribution.",
+        (page_wrap("advanced", "about", "About Syntaur",
+            "Version, uptime, tool count, and credits.",
             about_body()))
+    }
+}
+
+// Connect things — the unified provider table. Every integration
+// Syntaur supports in one place, with a status pill and a single action
+// button. JS fn ssRefreshConnections() hydrates status from
+// /api/settings/integration_status + /api/sync/providers. The underlying
+// connect flows live on the per-category sub-pages (telegram / ha /
+// sync / media) — this page is the overview, not a rewrite of every
+// flow.
+fn connect_things_body() -> Markup {
+    html! {
+        p class="ss-help" {
+            "Every service Syntaur can connect to. ✓ means signed in. "
+            "Click any row to manage it."
+        }
+
+        // Everyday
+        (connect_category("Everyday", &[
+            ConnectRow { id: "telegram",      name: "Phone (Telegram)",   desc: "Chat with Syntaur from anywhere",         icon: "📱", target: ("connect", "telegram") },
+            ConnectRow { id: "homeassistant", name: "Smart home",         desc: "Home Assistant — lights, locks, sensors", icon: "🏠", target: ("connect", "homeassistant") },
+            ConnectRow { id: "voice",         name: "Voice speakers",     desc: "Speakers with wake word (Hey Peter)",      icon: "🎙", target: ("advanced", "voice") },
+        ]))
+
+        // Google / Microsoft / Apple — the major cloud accounts that
+        // bring along calendar, email, and drive in one sign-in.
+        (connect_category("Your accounts", &[
+            ConnectRow { id: "sync:google_workspace", name: "Google",     desc: "Calendar, email, Drive, YouTube",  icon: "🔵", target: ("connect", "sync") },
+            ConnectRow { id: "sync:microsoft",       name: "Microsoft",  desc: "Outlook, OneDrive, Teams",          icon: "🟦", target: ("connect", "sync") },
+            ConnectRow { id: "sync:apple",           name: "Apple",       desc: "iCloud calendar + reminders",       icon: "🍎", target: ("connect", "sync") },
+        ]))
+
+        // Finance
+        (connect_category("Money", &[
+            ConnectRow { id: "sync:plaid",     name: "Banks (Plaid)",    desc: "Checking, savings, credit cards",   icon: "🏦", target: ("connect", "sync") },
+            ConnectRow { id: "sync:simplefin", name: "Banks (SimpleFIN)", desc: "Low-cost alternative to Plaid",     icon: "🏦", target: ("connect", "sync") },
+            ConnectRow { id: "sync:stripe",    name: "Stripe",            desc: "Payments you've received",          icon: "💳", target: ("connect", "sync") },
+            ConnectRow { id: "sync:coinbase",  name: "Coinbase",          desc: "Crypto balances + transactions",    icon: "₿",  target: ("connect", "sync") },
+        ]))
+
+        // Music
+        (connect_category("Music", &[
+            ConnectRow { id: "media_bridge", name: "Music companion app", desc: "Play music in the background without popup tabs", icon: "🎶", target: ("connect", "media") },
+            ConnectRow { id: "sync:spotify",      name: "Spotify",        desc: "Your library + playback",           icon: "🟢", target: ("connect", "sync") },
+            ConnectRow { id: "sync:apple_music",  name: "Apple Music",    desc: "Your library + playback",           icon: "🍎", target: ("connect", "sync") },
+            ConnectRow { id: "sync:tidal",        name: "Tidal",          desc: "Your library + playback",           icon: "🌊", target: ("connect", "sync") },
+            ConnectRow { id: "sync:youtube_music", name: "YouTube Music", desc: "Your library + playback",           icon: "🎵", target: ("connect", "sync") },
+        ]))
+
+        div class="ss-help" style="margin-top: 8px" {
+            "Don't see something? "
+            a href="#connect/sync" class="ss-link" onclick="ssNavigate('connect','sync');return false;" {
+                "The full provider list lives here →"
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ConnectRow {
+    /// Matches the `id` field in /api/settings/integration_status OR
+    /// `sync:<provider>` for per-sync entries from /api/sync/providers.
+    id: &'static str,
+    name: &'static str,
+    desc: &'static str,
+    icon: &'static str,
+    /// Which sub-page handles the actual connect/manage flow.
+    target: (&'static str, &'static str),
+}
+
+fn connect_category(title: &str, rows: &[ConnectRow]) -> Markup {
+    html! {
+        div class="ss-conn-section" {
+            h3 class="ss-conn-title" { (title) }
+            div class="ss-conn-list" {
+                @for row in rows {
+                    a class="ss-conn-row"
+                       data-conn=(row.id)
+                       href={ "#" (row.target.0) "/" (row.target.1) }
+                       onclick={ "ssNavigate('" (row.target.0) "','" (row.target.1) "');return false;" } {
+                        span class="ss-conn-ico" { (row.icon) }
+                        div class="ss-conn-main" {
+                            div class="ss-conn-name" { (row.name) }
+                            div class="ss-conn-desc" { (row.desc) }
+                        }
+                        span class="ss-conn-status" data-conn-status=(row.id) { "checking…" }
+                        span class="ss-conn-action" { "Manage →" }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -259,71 +367,157 @@ fn lookup_scope(section: &str, page: &str) -> &'static str {
     ""
 }
 
-// ── Home welcome ───────────────────────────────────────────
+// ── Set up Syntaur — stepped one-page flow ─────────────────
+// Each step is a card showing EITHER the action button(s) if not done
+// yet, OR the done-state with what was chosen. A single "Syntaur is
+// ready" banner at the top lights up when both required steps are
+// satisfied. JS fn ssRefreshSetup() fills each step's state from
+// /health + /api/setup/status + /api/agents/list.
 fn home_body() -> Markup {
     html! {
-        // Getting-started checklist — tasks light up as actual state
-        // is satisfied. Hides itself once every task is done.
-        div class="ss-gs-card" id="ss-gs-card" {
-            div class="ss-gs-head" {
-                div {
-                    div class="ss-gs-eyebrow" { "Getting started" }
-                    h3 class="ss-gs-title" { "Finish setting up Syntaur" }
-                }
-                div class="ss-gs-progress" {
-                    svg class="ss-gs-ring" width="44" height="44" viewBox="0 0 44 44" {
-                        circle class="ss-gs-ring-bg" cx="22" cy="22" r="18" stroke-width="4" fill="none" {}
-                        circle id="ss-gs-ring-fill" class="ss-gs-ring-fill" cx="22" cy="22" r="18" stroke-width="4" fill="none"
-                            stroke-dasharray="113.1" stroke-dashoffset="113.1" transform="rotate(-90 22 22)" {}
-                    }
-                    span class="ss-gs-progress-text" id="ss-gs-progress-text" { "0 / 5" }
-                }
+        // Ready banner — hidden until both required steps are done.
+        div class="ss-ready" id="ss-ready-banner" style="display:none" {
+            div class="ss-ready-check" { "✓" }
+            div class="ss-ready-body" {
+                div class="ss-ready-title" { "Syntaur is ready." }
+                div class="ss-ready-sub" { "You can close this page and start using it." }
             }
-            ul class="ss-gs-list" id="ss-gs-list" {
-                li data-task="llm"      { span class="ss-gs-check" {} "Add an LLM provider" a class="ss-gs-go" href="#llm/providers" onclick="ssNavigate('llm','providers');return false;" { "Set up →" } }
-                li data-task="agent"    { span class="ss-gs-check" {} "Pick a main agent" a class="ss-gs-go" href="#agents/all" onclick="ssNavigate('agents','all');return false;" { "Choose →" } }
-                li data-task="telegram" { span class="ss-gs-check" {} "Connect Telegram for phone chat" a class="ss-gs-go" href="#integrations/telegram" onclick="ssNavigate('integrations','telegram');return false;" { "Connect →" } }
-                li data-task="voice"    { span class="ss-gs-check" {} "Set up a voice satellite" a class="ss-gs-go" href="#voice/satellites" onclick="ssNavigate('voice','satellites');return false;" { "Set up →" } }
-                li data-task="privacy"  { span class="ss-gs-check" {} "Review what Syntaur stores" a class="ss-gs-go" href="#privacy/data" onclick="ssNavigate('privacy','data');return false;" { "Review →" } }
+            a href="/" class="ss-btn-primary" { "Go to Syntaur →" }
+        }
+
+        // Warm hero when still setting up.
+        div class="ss-setup-hero" id="ss-setup-hero" {
+            div class="ss-setup-eyebrow" { "Set up" }
+            h2 class="ss-setup-title" { "Let's get you going." }
+            p class="ss-setup-sub" {
+                "Each step takes about a minute. Steps 1 and 2 are required; "
+                "3 and 4 are optional — you can add them whenever."
             }
         }
 
-        div class="ss-welcome-grid" {
-            a class="ss-welcome-tile" href="#agents/all" onclick="ssNavigate('agents','all');return false;" {
-                div class="ss-welcome-ico" { "🧑‍🚀" }
-                div class="ss-welcome-label" { "Agents" }
-                div class="ss-welcome-sub" { "Create, import, or promote" }
-            }
-            a class="ss-welcome-tile" href="#integrations/telegram" onclick="ssNavigate('integrations','telegram');return false;" {
-                div class="ss-welcome-ico" { "🔗" }
-                div class="ss-welcome-label" { "Integrations" }
-                div class="ss-welcome-sub" { "Telegram, HA, Sync…" }
-            }
-            a class="ss-welcome-tile" href="#llm/providers" onclick="ssNavigate('llm','providers');return false;" {
-                div class="ss-welcome-ico" { "🧠" }
-                div class="ss-welcome-label" { "LLM" }
-                div class="ss-welcome-sub" { "Providers + fallback" }
-            }
-            a class="ss-welcome-tile" href="#voice/satellites" onclick="ssNavigate('voice','satellites');return false;" {
-                div class="ss-welcome-ico" { "🎙" }
-                div class="ss-welcome-label" { "Voice" }
-                div class="ss-welcome-sub" { "Wake word + satellites" }
-            }
-            a class="ss-welcome-tile" href="#privacy/data" onclick="ssNavigate('privacy','data');return false;" {
-                div class="ss-welcome-ico" { "🛡" }
-                div class="ss-welcome-label" { "Privacy" }
-                div class="ss-welcome-sub" { "What's stored + export" }
-            }
-            a class="ss-welcome-tile" href="#about/info" onclick="ssNavigate('about','info');return false;" {
-                div class="ss-welcome-ico" { "ℹ️" }
-                div class="ss-welcome-label" { "About" }
-                div class="ss-welcome-sub" { "Version + uptime" }
+        // STEP 1 — Brain
+        (setup_step(
+            "brain", "1", "Give Syntaur a brain",
+            "This is the AI model that powers every helper you talk to.",
+            html! {
+                div class="ss-step-actions" {
+                    button class="ss-btn-primary" onclick="ssSetupGoBrain()" {
+                        "Set up a brain →"
+                    }
+                    a class="ss-step-help" href="#advanced/brain" onclick="ssNavigate('advanced','brain');return false;" {
+                        "I already have one, take me to the details"
+                    }
+                }
+            },
+        ))
+
+        // STEP 2 — Helper
+        (setup_step(
+            "helper", "2", "Meet your helper",
+            "Pick which helper Syntaur talks to you as by default. You can add more later.",
+            html! {
+                div class="ss-step-actions" {
+                    button class="ss-btn-primary" onclick="ssNavigate('helpers','all')" {
+                        "Pick your main helper →"
+                    }
+                    a class="ss-step-help" href="#helpers/personas" onclick="ssNavigate('helpers','personas');return false;" {
+                        "Show me the built-in styles"
+                    }
+                }
+            },
+        ))
+
+        // STEP 3 — Where
+        div class="ss-step" data-step="where" {
+            div class="ss-step-num" { "3" }
+            div class="ss-step-body" {
+                div class="ss-step-head" {
+                    div class="ss-step-title" { "Where do you want to talk to Syntaur?" }
+                    div class="ss-step-optional" { "optional" }
+                }
+                div class="ss-step-desc" {
+                    "You can always use this page. Add your phone or a voice speaker if you want."
+                }
+                div class="ss-where-row" data-where="computer" {
+                    span class="ss-where-check ss-where-done" { "✓" }
+                    span class="ss-where-label" { "On this computer" }
+                    span class="ss-where-note" { "already set up" }
+                }
+                div class="ss-where-row" data-where="phone" id="ss-where-phone" {
+                    span class="ss-where-check" { "○" }
+                    span class="ss-where-label" { "On your phone (Telegram)" }
+                    a class="ss-where-action" href="#connect/telegram" onclick="ssNavigate('connect','telegram');return false;" { "Connect →" }
+                }
+                div class="ss-where-row" data-where="voice" id="ss-where-voice" {
+                    span class="ss-where-check" { "○" }
+                    span class="ss-where-label" { "With your voice (smart speaker)" }
+                    a class="ss-where-action" href="#advanced/voice" onclick="ssNavigate('advanced','voice');return false;" { "Show me how →" }
+                }
             }
         }
+
+        // STEP 4 — Connect the things Syntaur can see
+        div class="ss-step" data-step="things" {
+            div class="ss-step-num" { "4" }
+            div class="ss-step-body" {
+                div class="ss-step-head" {
+                    div class="ss-step-title" { "Connect the things Syntaur can see" }
+                    div class="ss-step-optional" { "optional" }
+                }
+                div class="ss-step-desc" {
+                    "Give Syntaur access to your calendar, music, and home so "
+                    "helpers can use them. Nothing gets shared until you sign in."
+                }
+                div class="ss-things-grid" {
+                    a class="ss-things-tile" href="#connect/sync" onclick="ssNavigate('connect','sync');return false;" {
+                        div class="ss-things-ico" { "📅" }
+                        div class="ss-things-label" { "Calendar" }
+                        div class="ss-things-sub" { "Google or Apple" }
+                    }
+                    a class="ss-things-tile" href="#connect/sync" onclick="ssNavigate('connect','sync');return false;" {
+                        div class="ss-things-ico" { "🎵" }
+                        div class="ss-things-label" { "Music" }
+                        div class="ss-things-sub" { "Spotify, Apple Music, more" }
+                    }
+                    a class="ss-things-tile" href="#connect/homeassistant" onclick="ssNavigate('connect','homeassistant');return false;" {
+                        div class="ss-things-ico" { "🏠" }
+                        div class="ss-things-label" { "Smart home" }
+                        div class="ss-things-sub" { "Lights, locks, sensors" }
+                    }
+                    a class="ss-things-tile" href="#connect/things" onclick="ssNavigate('connect','things');return false;" {
+                        div class="ss-things-ico" { "➕" }
+                        div class="ss-things-label" { "See everything" }
+                        div class="ss-things-sub" { "Banks, email, more" }
+                    }
+                }
+            }
+        }
+
         div class="ss-tip" {
             "Tip — press "
             kbd { "⌘K" }
             " to jump to any setting."
+        }
+    }
+}
+
+// A stepped-flow card. Shows the action area by default, and JS swaps
+// in a done state (filled by ssRefreshSetup) once the step is complete.
+fn setup_step(id: &str, num: &str, title: &str, desc: &str, action: Markup) -> Markup {
+    html! {
+        div class="ss-step" data-step=(id) id={ "ss-step-" (id) } {
+            div class="ss-step-num" { (num) }
+            div class="ss-step-body" {
+                div class="ss-step-head" {
+                    div class="ss-step-title" { (title) }
+                }
+                div class="ss-step-desc" { (desc) }
+                div class="ss-step-state" id={ "ss-step-" (id) "-state" } {
+                    // Default: show the action. JS replaces with done-state
+                    // when the step has been completed.
+                    (action)
+                }
+            }
         }
     }
 }
@@ -386,9 +580,20 @@ fn account_security_body() -> Markup {
 // ── Agents ─────────────────────────────────────────────────
 fn agents_all_body() -> Markup {
     html! {
+        // Brain cross-link — so users aren't surprised when changing
+        // their brain affects every helper. JS fills in the current
+        // brain name from /health.
+        div class="ss-agent-brain-link" {
+            span class="ss-agent-brain-label" { "Every helper uses the same AI model — " }
+            span class="ss-agent-brain-name" id="ss-agent-brain-name" { "the one you picked" }
+            span class="ss-agent-brain-label" { "." }
+            a class="ss-agent-brain-change" href="#advanced/brain" onclick="ssNavigate('advanced','brain');return false;" {
+                "Change brain →"
+            }
+        }
         p class="ss-help" {
-            "You can run multiple main-thread agents (Peter / Kyron-tier privileges) "
-            "and import agents from other platforms via Markdown, plain text, or JSON."
+            "You can have several helpers with different names and personalities, "
+            "and import helpers from other tools as Markdown, plain text, or JSON."
         }
         // Inlined — same component that powers the standalone /settings/agents page.
         (crate::pages::settings_agents::inline_body())
@@ -776,6 +981,24 @@ fn dirty_banner() -> Markup {
 }
 
 // ══════════════════════════════════════════════════════════════════════
+// Sticky "Am I done?" banner — shown at the top of every settings page
+// except the Setup landing. JS fills it with one of:
+//   • hidden      (on #setup/start — the hero takes over there)
+//   • green done  ("Syntaur is fully set up.")
+//   • amber todo  ("1 thing left: pick a brain" / "2 things left: …")
+// ══════════════════════════════════════════════════════════════════════
+
+fn setup_status_banner() -> Markup {
+    html! {
+        div id="ss-setup-status" class="ss-setup-status" style="display:none" {
+            span class="ss-setup-status-icon" id="ss-setup-status-icon" { "" }
+            span class="ss-setup-status-text" id="ss-setup-status-text" { "" }
+            a class="ss-setup-status-cta" id="ss-setup-status-cta" href="#setup/start" onclick="ssNavigate('setup','start');return false;" { "" }
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
 // Section / page index — drives sidebar + palette.
 // ══════════════════════════════════════════════════════════════════════
 
@@ -896,6 +1119,9 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   /* Top bar */
   .ss-topbar { background: rgba(10,13,18,0.85); border-bottom: 1px solid var(--ss-line); backdrop-filter: blur(8px); position: sticky; top: 0; z-index: 40; }
   .ss-topbar-inner { max-width: 1400px; margin: 0 auto; padding: 10px 18px; display: flex; align-items: center; gap: 10px; }
+  /* Settings sub-crumb bar — rides below the shared top bar, sticky to it. */
+  .ss-subbar { background: rgba(10,13,18,0.6); border-bottom: 1px solid var(--ss-line); position: sticky; top: 48px; z-index: 30; }
+  .ss-subbar-inner { max-width: 1400px; margin: 0 auto; padding: 6px 18px; display: flex; align-items: center; gap: 10px; min-height: 32px; }
   .ss-crumb-sep { color: var(--ss-ink-faint); margin: 0 2px; }
   .ss-crumb { color: var(--ss-ink-dim); font-size: 13.5px; }
   .ss-crumb-page { color: var(--ss-ink); font-size: 13.5px; }
@@ -1173,6 +1399,306 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   .ss-pill-not_configured::before { background: var(--ss-ink-faint); }
 
   .ss-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+
+  /* ── Set-up stepped flow ─────────────────────────────── */
+  .ss-ready {
+    display: flex; align-items: center; gap: 14px;
+    background: linear-gradient(135deg, rgba(127,191,138,0.15), rgba(127,191,138,0.06));
+    border: 1px solid rgba(127,191,138,0.35);
+    border-radius: 12px; padding: 16px 20px; margin-bottom: 16px;
+  }
+  .ss-ready-check {
+    width: 34px; height: 34px; border-radius: 50%;
+    background: var(--ss-success); color: #0a0d12;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 18px; flex-shrink: 0;
+  }
+  .ss-ready-body { flex: 1; }
+  .ss-ready-title { font-size: 15px; font-weight: 600; color: var(--ss-ink); }
+  .ss-ready-sub { font-size: 12.5px; color: var(--ss-ink-dim); margin-top: 2px; }
+
+  .ss-setup-hero { margin-bottom: 16px; }
+  .ss-setup-eyebrow { font-size: 10.5px; font-weight: 600; letter-spacing: 0.09em; text-transform: uppercase; color: var(--ss-accent); }
+  .ss-setup-title { font-size: 19px; font-weight: 600; color: var(--ss-ink); margin-top: 3px; }
+  .ss-setup-sub { font-size: 13px; color: var(--ss-ink-dim); margin-top: 4px; line-height: 1.5; max-width: 620px; }
+
+  .ss-step {
+    display: flex; gap: 14px;
+    background: var(--ss-panel); border: 1px solid var(--ss-line);
+    border-radius: 12px; padding: 16px 18px;
+    margin-bottom: 12px;
+    transition: border-color 0.15s;
+  }
+  .ss-step.ss-step-done { border-color: rgba(127,191,138,0.3); background: linear-gradient(135deg, rgba(127,191,138,0.05), var(--ss-panel)); }
+  .ss-step-num {
+    width: 28px; height: 28px; border-radius: 50%;
+    background: var(--ss-panel-2); border: 1px solid var(--ss-line-2);
+    color: var(--ss-ink-dim);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; font-weight: 600; flex-shrink: 0;
+    margin-top: 2px;
+  }
+  .ss-step.ss-step-done .ss-step-num { background: var(--ss-success); color: #0a0d12; border-color: var(--ss-success); }
+  .ss-step.ss-step-done .ss-step-num::before { content: '✓'; }
+  .ss-step.ss-step-done .ss-step-num > * { display: none; }
+  .ss-step-body { flex: 1; min-width: 0; }
+  .ss-step-head { display: flex; align-items: center; gap: 10px; margin-bottom: 2px; }
+  .ss-step-title { font-size: 14.5px; font-weight: 600; color: var(--ss-ink); }
+  .ss-step-optional { font-size: 10.5px; padding: 1px 8px; border-radius: 999px; background: var(--ss-panel-2); color: var(--ss-ink-mute); border: 1px solid var(--ss-line-2); }
+  .ss-step-desc { font-size: 12.5px; color: var(--ss-ink-dim); line-height: 1.5; margin-bottom: 10px; }
+  .ss-step-actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .ss-step-help { font-size: 12px; color: var(--ss-ink-dim); text-decoration: none; cursor: pointer; }
+  .ss-step-help:hover { color: var(--ss-accent); }
+
+  /* Done-state row inside a step (JS fills this in). */
+  .ss-step-done-row {
+    display: flex; align-items: center; gap: 10px;
+    background: rgba(127,191,138,0.08); border: 1px solid rgba(127,191,138,0.25);
+    border-radius: 8px; padding: 8px 12px;
+    font-size: 13px;
+  }
+  .ss-step-done-icon { color: var(--ss-success); font-weight: 700; }
+  .ss-step-done-text { flex: 1; color: var(--ss-ink); }
+  .ss-step-done-change { color: var(--ss-ink-dim); font-size: 12px; text-decoration: none; }
+  .ss-step-done-change:hover { color: var(--ss-accent); }
+
+  /* Step 3 "where" rows */
+  .ss-where-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 12px; border-radius: 8px;
+    background: var(--ss-panel-2); border: 1px solid var(--ss-line);
+    font-size: 13px; margin-bottom: 6px;
+  }
+  .ss-where-row:last-child { margin-bottom: 0; }
+  .ss-where-check {
+    width: 20px; height: 20px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; flex-shrink: 0;
+    color: var(--ss-ink-mute); border: 1px solid var(--ss-line-2);
+  }
+  .ss-where-check.ss-where-done { background: var(--ss-success); color: #0a0d12; border-color: var(--ss-success); font-weight: 700; }
+  .ss-where-label { flex: 1; color: var(--ss-ink); }
+  .ss-where-note { font-size: 11.5px; color: var(--ss-ink-mute); }
+  .ss-where-action { font-size: 12px; color: var(--ss-accent); text-decoration: none; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--ss-line-2); background: var(--ss-panel); }
+  .ss-where-action:hover { border-color: var(--ss-accent); }
+
+  /* Unified Connect things page */
+  .ss-conn-section { margin-top: 14px; }
+  .ss-conn-section:first-child { margin-top: 0; }
+  .ss-conn-title {
+    font-size: 11px; font-weight: 600; letter-spacing: 0.09em;
+    text-transform: uppercase; color: var(--ss-ink-mute);
+    padding: 0 2px 8px; margin-bottom: 4px;
+    border-bottom: 1px solid var(--ss-line);
+  }
+  .ss-conn-list { display: flex; flex-direction: column; gap: 4px; }
+  .ss-conn-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 12px; border-radius: 8px;
+    text-decoration: none; color: var(--ss-ink);
+    background: var(--ss-panel);
+    border: 1px solid var(--ss-line);
+    transition: border-color 0.12s, background 0.12s;
+  }
+  .ss-conn-row:hover { border-color: var(--ss-accent); background: var(--ss-panel-2); }
+  .ss-conn-ico { font-size: 18px; flex-shrink: 0; width: 24px; text-align: center; }
+  .ss-conn-main { flex: 1; min-width: 0; }
+  .ss-conn-name { font-size: 13.5px; font-weight: 500; color: var(--ss-ink); }
+  .ss-conn-desc { font-size: 11.5px; color: var(--ss-ink-mute); margin-top: 1px; }
+  .ss-conn-status {
+    font-size: 11px; font-weight: 500;
+    padding: 2px 9px; border-radius: 999px;
+    background: var(--ss-panel-2); color: var(--ss-ink-mute);
+    border: 1px solid var(--ss-line-2);
+    white-space: nowrap;
+  }
+  .ss-conn-status.ss-conn-connected {
+    background: rgba(127,191,138,0.12);
+    color: var(--ss-success);
+    border-color: rgba(127,191,138,0.3);
+  }
+  .ss-conn-status.ss-conn-error {
+    background: rgba(217,122,122,0.12);
+    color: var(--ss-danger);
+    border-color: rgba(217,122,122,0.3);
+  }
+  .ss-conn-action { font-size: 11.5px; color: var(--ss-ink-mute); white-space: nowrap; }
+  .ss-conn-row:hover .ss-conn-action { color: var(--ss-accent); }
+
+  /* Cross-link bubble that surfaces the invisible coupling between
+     the Helpers page and the Brain page. Shows the "other side" of the
+     relationship so users see what changes when they change a model. */
+  .ss-agent-brain-link {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 14px; margin-bottom: 14px;
+    background: rgba(122,162,255,0.06);
+    border: 1px solid rgba(122,162,255,0.2);
+    border-radius: 8px;
+    font-size: 12.5px; color: var(--ss-ink-dim);
+    flex-wrap: wrap;
+  }
+  .ss-agent-brain-label {}
+  .ss-agent-brain-name { color: var(--ss-ink); font-weight: 500; }
+  .ss-agent-brain-change {
+    margin-left: auto;
+    font-size: 12px; font-weight: 500;
+    color: var(--ss-accent); text-decoration: none;
+    padding: 3px 9px; border-radius: 6px;
+    border: 1px solid var(--ss-line-2);
+    background: var(--ss-panel);
+  }
+  .ss-agent-brain-change:hover { border-color: var(--ss-accent); }
+
+  /* Plain-language tooltip — for technical terms we can't fully
+     avoid. Usage: <span class="ss-tt" data-tip="The graphics card…">GPU</span>
+     Tip: also works with keyboard focus for accessibility. */
+  .ss-tt {
+    position: relative;
+    border-bottom: 1px dotted var(--ss-ink-mute);
+    cursor: help;
+  }
+  .ss-tt::before {
+    content: '?';
+    display: inline-flex;
+    align-items: center; justify-content: center;
+    width: 13px; height: 13px;
+    margin-left: 4px;
+    border-radius: 50%;
+    background: var(--ss-panel-2);
+    color: var(--ss-ink-mute);
+    font-size: 9px; font-weight: 700;
+    vertical-align: text-top;
+    transition: background 0.12s, color 0.12s;
+  }
+  .ss-tt:hover::before, .ss-tt:focus::before {
+    background: var(--ss-accent); color: #0a0d12;
+  }
+  .ss-tt::after {
+    content: attr(data-tip);
+    position: absolute;
+    bottom: calc(100% + 8px); left: 50%;
+    transform: translateX(-50%);
+    width: 240px; max-width: 80vw;
+    padding: 8px 12px;
+    background: var(--ss-panel);
+    border: 1px solid var(--ss-line-2);
+    border-radius: 6px;
+    box-shadow: 0 6px 14px rgba(0,0,0,0.4);
+    font-size: 11.5px;
+    color: var(--ss-ink);
+    line-height: 1.5;
+    font-weight: normal; letter-spacing: 0;
+    text-align: left;
+    white-space: normal;
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.15s;
+    z-index: 40;
+  }
+  .ss-tt:hover::after, .ss-tt:focus::after { opacity: 1; }
+
+  /* Global toast stack for save-success / error / undo */
+  .ss-toast-stack {
+    position: fixed; bottom: 80px; right: 20px; z-index: 90;
+    display: flex; flex-direction: column; gap: 8px; align-items: flex-end;
+    pointer-events: none;
+  }
+  .ss-toast {
+    pointer-events: auto;
+    display: flex; align-items: center; gap: 10px;
+    min-width: 220px; max-width: 360px;
+    padding: 9px 14px;
+    background: var(--ss-panel); border: 1px solid var(--ss-line-2);
+    border-radius: 8px;
+    font-size: 13px; color: var(--ss-ink);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+    animation: ss-toast-in 0.22s ease-out;
+  }
+  @keyframes ss-toast-in {
+    from { opacity: 0; transform: translateX(10px); }
+    to   { opacity: 1; transform: translateX(0); }
+  }
+  .ss-toast.ss-toast-leaving { animation: ss-toast-out 0.22s ease-in forwards; }
+  @keyframes ss-toast-out {
+    from { opacity: 1; transform: translateX(0); }
+    to   { opacity: 0; transform: translateX(10px); }
+  }
+  .ss-toast-icon { font-weight: 700; flex-shrink: 0; }
+  .ss-toast.ss-toast-success { border-color: rgba(127,191,138,0.4); }
+  .ss-toast.ss-toast-success .ss-toast-icon { color: var(--ss-success); }
+  .ss-toast.ss-toast-error { border-color: rgba(217,122,122,0.4); }
+  .ss-toast.ss-toast-error .ss-toast-icon { color: var(--ss-danger); }
+  .ss-toast.ss-toast-info .ss-toast-icon { color: var(--ss-accent); }
+  .ss-toast-body { flex: 1; line-height: 1.4; }
+  .ss-toast-body .ss-toast-fix { display: block; margin-top: 2px; font-size: 11.5px; color: var(--ss-ink-mute); }
+  .ss-toast-undo {
+    background: transparent; color: var(--ss-accent); border: none;
+    padding: 2px 6px; font-size: 12px; font-weight: 500; cursor: pointer;
+    border-radius: 4px;
+  }
+  .ss-toast-undo:hover { background: rgba(122,162,255,0.1); }
+  .ss-toast-close {
+    background: transparent; color: var(--ss-ink-mute); border: none;
+    padding: 0 2px; font-size: 14px; cursor: pointer; line-height: 1;
+  }
+  .ss-toast-close:hover { color: var(--ss-ink); }
+
+  /* Inline field "saved" pill — anchored next to a label */
+  .ss-field-saved {
+    display: inline-flex; align-items: center; gap: 4px;
+    margin-left: 8px; font-size: 11px;
+    color: var(--ss-success); font-weight: 500;
+    animation: ss-fade-out 1.8s ease-out 0.2s forwards;
+  }
+  @keyframes ss-fade-out {
+    0%, 60% { opacity: 1; }
+    100% { opacity: 0; }
+  }
+
+  /* Sticky "Am I done?" banner (shows on every settings page except Setup) */
+  .ss-setup-status {
+    position: sticky; top: 53px; z-index: 30;
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 16px; margin: 0 0 16px 0;
+    border-radius: 8px;
+    font-size: 12.5px;
+    border: 1px solid transparent;
+  }
+  .ss-setup-status.ss-status-done {
+    background: rgba(127,191,138,0.08);
+    border-color: rgba(127,191,138,0.3);
+    color: var(--ss-ink);
+  }
+  .ss-setup-status.ss-status-todo {
+    background: rgba(240,180,112,0.08);
+    border-color: rgba(240,180,112,0.3);
+    color: var(--ss-ink);
+  }
+  .ss-setup-status-icon { font-weight: 700; font-size: 14px; flex-shrink: 0; }
+  .ss-setup-status.ss-status-done .ss-setup-status-icon { color: var(--ss-success); }
+  .ss-setup-status.ss-status-todo .ss-setup-status-icon { color: var(--ss-warn); }
+  .ss-setup-status-text { flex: 1; }
+  .ss-setup-status-cta {
+    font-size: 12px; font-weight: 500;
+    padding: 4px 11px; border-radius: 6px;
+    text-decoration: none;
+    background: var(--ss-panel); border: 1px solid var(--ss-line-2);
+    color: var(--ss-ink);
+  }
+  .ss-setup-status-cta:hover { border-color: var(--ss-accent); color: var(--ss-accent); }
+
+  /* Step 4 "things" tiles */
+  .ss-things-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  @media (max-width: 600px) { .ss-things-grid { grid-template-columns: repeat(2, 1fr); } }
+  .ss-things-tile {
+    display: block; padding: 12px 10px; border-radius: 8px;
+    background: var(--ss-panel-2); border: 1px solid var(--ss-line);
+    text-decoration: none; color: var(--ss-ink); text-align: center;
+    transition: border-color 0.12s;
+  }
+  .ss-things-tile:hover { border-color: var(--ss-accent); }
+  .ss-things-ico { font-size: 20px; margin-bottom: 4px; }
+  .ss-things-label { font-size: 12.5px; font-weight: 600; }
+  .ss-things-sub { font-size: 10.5px; color: var(--ss-ink-mute); margin-top: 2px; }
 "##;
 
 // Fresh JS used by the new shell. Legacy JS from `page.js` handles all the
@@ -1181,11 +1707,38 @@ const NEW_JS: &str = r##"
 // Settings index for the ⌘K palette. Generated server-side.
 window.SS_INDEX = %%SS_INDEX%%;
 
+// Old section/page slugs (pre-2026-04-18 restructure). Any hash that
+// matches a key here is silently rewritten to its new destination so
+// bookmarks, checklist links, and shared URLs keep working.
+const SS_HASH_REDIRECT = {
+  'home/home':                 'setup/start',
+  'home/':                     'setup/start',
+  'agents/all':                'helpers/all',
+  'agents/personas':           'helpers/personas',
+  'integrations/telegram':     'connect/telegram',
+  'integrations/homeassistant':'connect/homeassistant',
+  'integrations/sync':         'connect/sync',
+  'integrations/media':        'connect/media',
+  'llm/providers':             'advanced/brain',
+  'voice/satellites':          'advanced/voice',
+  'modules/installed':         'advanced/modules',
+  'privacy/data':              'account/privacy',
+  'system/gateway':            'advanced/gateway',
+  'system/danger':             'advanced/danger',
+  'about/info':                'advanced/about',
+};
+
 function ssParseHash() {
-  const h = (window.location.hash || '').replace(/^#/, '').trim();
-  if (!h) return { section: 'home', page: 'home' };
-  const [s, p] = h.split('/');
-  return { section: s || 'home', page: p || '' };
+  const raw = (window.location.hash || '').replace(/^#/, '').trim();
+  if (!raw) return { section: 'setup', page: 'start' };
+  // Apply legacy redirect before splitting.
+  const redirected = SS_HASH_REDIRECT[raw] || raw;
+  if (redirected !== raw) {
+    // Rewrite the URL so the redirect is sticky across reloads.
+    try { window.history.replaceState(null, '', '#' + redirected); } catch(e) {}
+  }
+  const [s, p] = redirected.split('/');
+  return { section: s || 'setup', page: p || 'start' };
 }
 
 function ssApplyRoute() {
@@ -1199,9 +1752,9 @@ function ssApplyRoute() {
   document.querySelectorAll('.ss-page').forEach(el => el.classList.remove('active'));
   let target = document.getElementById(`ss-page-${section}-${page}`);
   if (!target) {
-    // Fallback to the first page in the section, then to home.
+    // Fallback to the first page in the section, then to the setup landing.
     target = document.querySelector(`.ss-page[data-section="${section}"]`);
-    if (!target) target = document.getElementById('ss-page-home-home');
+    if (!target) target = document.getElementById('ss-page-setup-start');
   }
   if (target) {
     target.classList.add('active');
@@ -1214,14 +1767,14 @@ function ssApplyRoute() {
       crumb.textContent = h1 ? h1.textContent : '';
     }
     // Fire legacy showTab so existing JS still initializes the right tab.
-    // Map new page slugs to legacy tab ids.
+    // New slugs map to the same legacy tab ids the existing JS expects.
     const LEGACY = {
-      'integrations/telegram': 'general',
-      'integrations/sync': 'sync',
-      'integrations/media': 'media',
-      'llm/providers': 'llm',
-      'system/gateway': 'system',
-      'account/users': 'users',
+      'connect/telegram':  'general',
+      'connect/sync':      'sync',
+      'connect/media':     'media',
+      'advanced/brain':    'llm',
+      'advanced/gateway':  'system',
+      'account/users':     'users',
     };
     const key = `${section}/${page}`;
     const legacyTab = LEGACY[key];
@@ -1393,45 +1946,291 @@ function ssSignOutOthers()  { alert('Sign-out-other-sessions flow — Phase E.')
 function ssHaTest() { const r = document.getElementById('ss-ha-result'); if (r) r.textContent = 'Testing… (endpoint wiring coming)'; }
 function ssHaSave() { const r = document.getElementById('ss-ha-result'); if (r) r.textContent = 'Save — wiring coming.'; }
 
-// ── Getting-started checklist ──────────────────────────────
-// Drives off /health + /api/agents/list + user_preferences. Each task lights
-// up when its real condition is met; checklist hides when all 5 are done.
-async function ssRefreshGettingStarted() {
-  const list = document.getElementById('ss-gs-list');
-  if (!list) return;
-  const status = { llm: false, agent: false, telegram: false, voice: false, privacy: false };
-  // Read /health for providers + agents
+// ── Setup flow status ──────────────────────────────────────
+// Fetches /health + /api/setup/status, updates each step card to show
+// either its action buttons or a done-state row. Lights up the "Syntaur
+// is ready" banner on the Setup landing, and the sticky "am I done?"
+// banner on every other page.
+async function ssRefreshSetup() {
+  const hero = document.getElementById('ss-setup-hero');
+  const ready = document.getElementById('ss-ready-banner');
+  const stickyEl = document.getElementById('ss-setup-status');
+
+  const state = { brain: null, helper: null, phone: false, voice: false };
+
   try {
     const hr = await fetch('/health');
     if (hr.ok) {
       const h = await hr.json();
-      status.llm = (h.providers || []).length > 0;
-      status.agent = (h.agents || []).length > 0;
-      status.telegram = !!(h.telegram_configured || h.telegram || (h.features || []).includes('telegram'));
-      status.voice = !!(h.voice_configured || (h.features || []).includes('voice'));
+      const providers = h.providers || [];
+      if (providers.length > 0) {
+        state.brain = providers[0].name || 'a model provider';
+      }
+      const agents = h.agents || [];
+      if (agents.length > 0) {
+        const a = agents[0];
+        state.helper = (typeof a === 'object' ? (a.name || a.id) : a) || 'Peter';
+      }
+      state.phone = !!(h.telegram_configured || h.telegram || (h.features || []).includes('telegram'));
+      state.voice = !!(h.voice_configured || (h.features || []).includes('voice'));
     }
   } catch(e) {}
-  // Privacy: if user has set at least one preference, count them as having reviewed.
-  try {
-    const pr = await fetch('/api/settings/preferences?token=' + encodeURIComponent(sessionStorage.getItem('syntaur_token') || ''));
-    if (pr.ok) {
-      const prefs = await pr.json();
-      status.privacy = Object.keys(prefs).length > 0 || !!localStorage.getItem('ss_privacy_reviewed');
+
+  // Paint the sticky "am I done?" banner — hidden on the setup page,
+  // green on every other page when both required steps are satisfied,
+  // amber with a CTA when not.
+  if (stickyEl) {
+    const onSetup = (ssParseHash().section === 'setup');
+    if (onSetup) {
+      stickyEl.style.display = 'none';
+    } else {
+      stickyEl.style.display = 'flex';
+      const icon = document.getElementById('ss-setup-status-icon');
+      const text = document.getElementById('ss-setup-status-text');
+      const cta  = document.getElementById('ss-setup-status-cta');
+      const missing = [];
+      if (!state.brain)  missing.push('pick a brain');
+      if (!state.helper) missing.push('pick a main helper');
+      if (missing.length === 0) {
+        stickyEl.className = 'ss-setup-status ss-status-done';
+        if (icon) icon.textContent = '✓';
+        if (text) text.textContent = 'Syntaur is fully set up.';
+        if (cta) { cta.textContent = 'What else can I do? →'; }
+      } else {
+        stickyEl.className = 'ss-setup-status ss-status-todo';
+        if (icon) icon.textContent = '⚠';
+        if (text) {
+          text.textContent = missing.length === 1
+            ? `1 thing left: ${missing[0]}.`
+            : `${missing.length} things left: ${missing.join(' and ')}.`;
+        }
+        if (cta) cta.textContent = 'Finish setup →';
+      }
     }
-  } catch(e) {}
-  let done = 0;
-  list.querySelectorAll('li').forEach(li => {
-    const key = li.dataset.task;
-    if (status[key]) { li.classList.add('done'); done++; }
-    else li.classList.remove('done');
-  });
-  const total = 5;
-  const txt = document.getElementById('ss-gs-progress-text');
-  if (txt) txt.textContent = done + ' / ' + total;
-  const ring = document.getElementById('ss-gs-ring-fill');
-  if (ring) ring.setAttribute('stroke-dashoffset', String(113.1 * (1 - done / total)));
-  const card = document.getElementById('ss-gs-card');
-  if (card) card.classList.toggle('ss-gs-done', done === total);
+  }
+
+  // Cross-link labels — Helpers page shows current brain, Brain page
+  // shows count of helpers. These appear on those pages regardless of
+  // whether the user has completed setup.
+  const brainLabel = document.getElementById('ss-agent-brain-name');
+  if (brainLabel) {
+    brainLabel.textContent = state.brain ? state.brain : 'not set yet';
+  }
+  const helperList = document.getElementById('ss-brain-agent-list');
+  if (helperList) {
+    try {
+      const hr = await fetch('/health');
+      if (hr.ok) {
+        const h = await hr.json();
+        const names = (h.agents || []).map(a => (typeof a === 'object' ? (a.name || a.id) : a)).filter(Boolean);
+        if (names.length === 0) {
+          helperList.textContent = 'your helpers';
+        } else if (names.length === 1) {
+          helperList.textContent = names[0];
+        } else if (names.length <= 3) {
+          helperList.textContent = names.join(', ');
+        } else {
+          helperList.textContent = `${names.slice(0, 2).join(', ')}, and ${names.length - 2} more`;
+        }
+      }
+    } catch(e) {}
+  }
+
+  if (!hero) return;  // not on the setup page — step painting below is skipped
+
+  // Paint step 1 (brain)
+  const s1 = document.getElementById('ss-step-brain');
+  const s1state = document.getElementById('ss-step-brain-state');
+  if (s1 && s1state) {
+    if (state.brain) {
+      s1.classList.add('ss-step-done');
+      s1state.innerHTML = `
+        <div class="ss-step-done-row">
+          <span class="ss-step-done-icon">✓</span>
+          <span class="ss-step-done-text">Using <strong>${esc(state.brain)}</strong></span>
+          <a class="ss-step-done-change" href="#advanced/brain" onclick="ssNavigate('advanced','brain');return false;">Change →</a>
+        </div>`;
+    } else {
+      s1.classList.remove('ss-step-done');
+      // Keep the server-rendered action buttons as-is on first paint.
+    }
+  }
+
+  // Paint step 2 (helper)
+  const s2 = document.getElementById('ss-step-helper');
+  const s2state = document.getElementById('ss-step-helper-state');
+  if (s2 && s2state) {
+    if (state.helper) {
+      s2.classList.add('ss-step-done');
+      s2state.innerHTML = `
+        <div class="ss-step-done-row">
+          <span class="ss-step-done-icon">✓</span>
+          <span class="ss-step-done-text">You'll be talking to <strong>${esc(state.helper)}</strong></span>
+          <a class="ss-step-done-change" href="#helpers/all" onclick="ssNavigate('helpers','all');return false;">Manage helpers →</a>
+        </div>`;
+    } else {
+      s2.classList.remove('ss-step-done');
+    }
+  }
+
+  // Paint step 3 (where — phone + voice rows)
+  const phoneRow = document.getElementById('ss-where-phone');
+  if (phoneRow) {
+    const check = phoneRow.querySelector('.ss-where-check');
+    if (state.phone) {
+      check.classList.add('ss-where-done');
+      check.textContent = '✓';
+    } else {
+      check.classList.remove('ss-where-done');
+      check.textContent = '○';
+    }
+  }
+  const voiceRow = document.getElementById('ss-where-voice');
+  if (voiceRow) {
+    const check = voiceRow.querySelector('.ss-where-check');
+    if (state.voice) {
+      check.classList.add('ss-where-done');
+      check.textContent = '✓';
+    } else {
+      check.classList.remove('ss-where-done');
+      check.textContent = '○';
+    }
+  }
+
+  // Ready banner — only show when both required steps are done.
+  if (ready) {
+    if (state.brain && state.helper) {
+      ready.style.display = 'flex';
+      if (hero) hero.style.display = 'none';
+    } else {
+      ready.style.display = 'none';
+      if (hero) hero.style.display = '';
+    }
+  }
+}
+
+// "Set up a brain" button — jumps to Advanced → Brain settings with a
+// focus hint so the user lands directly in the provider form.
+function ssSetupGoBrain() {
+  ssNavigate('advanced', 'brain');
+  // Scroll the first configurable provider card into view after route applies.
+  setTimeout(() => {
+    const el = document.querySelector('#ss-page-advanced-brain .ss-card');
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, 120);
+}
+
+// ── Global toast / save feedback helpers ───────────────────
+// ssToast(message, kind, opts)  — bottom-right pill, auto-dismiss.
+//   kind:    'success' (default) | 'error' | 'info'
+//   opts:    { fix: "plain-english what to do",   // shown under message
+//              undo: fn,                          // shows Undo button (10s)
+//              ttl: ms }                          // override auto-dismiss
+// ssFieldSaved(id)  — tiny green "Saved" pill next to a form field's label,
+//   fades out after ~2s. Use for any field with an id whose ancestor
+//   .ss-field carries a <label>.
+// ssDescribeError(err) — turns a fetch/caught exception into a plain-
+//   English sentence. Use before passing to ssToast so users don't see
+//   "TypeError: Failed to fetch".
+function ssToast(message, kind, opts) {
+  kind = kind || 'success';
+  opts = opts || {};
+  const stack = document.getElementById('ss-toasts');
+  if (!stack) { if (kind === 'error') console.error(message); return; }
+  const el = document.createElement('div');
+  el.className = 'ss-toast ss-toast-' + kind;
+  const icon = kind === 'error' ? '!' : (kind === 'info' ? 'i' : '✓');
+  const body = document.createElement('div');
+  body.className = 'ss-toast-body';
+  body.textContent = message;
+  if (opts.fix) {
+    const fix = document.createElement('span');
+    fix.className = 'ss-toast-fix';
+    fix.textContent = opts.fix;
+    body.appendChild(fix);
+  }
+  const iconEl = document.createElement('span');
+  iconEl.className = 'ss-toast-icon';
+  iconEl.textContent = icon;
+  el.appendChild(iconEl);
+  el.appendChild(body);
+
+  let dismissTimer = null;
+  const dismiss = () => {
+    if (!el.parentNode) return;
+    el.classList.add('ss-toast-leaving');
+    setTimeout(() => el.remove(), 220);
+  };
+
+  if (opts.undo) {
+    const undoBtn = document.createElement('button');
+    undoBtn.className = 'ss-toast-undo';
+    undoBtn.textContent = 'Undo';
+    undoBtn.onclick = () => { try { opts.undo(); } catch(e) {} dismiss(); };
+    el.appendChild(undoBtn);
+  }
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'ss-toast-close';
+  closeBtn.setAttribute('aria-label', 'Dismiss');
+  closeBtn.textContent = '✕';
+  closeBtn.onclick = () => { if (dismissTimer) clearTimeout(dismissTimer); dismiss(); };
+  el.appendChild(closeBtn);
+
+  stack.appendChild(el);
+  const ttl = opts.ttl != null ? opts.ttl
+            : (opts.undo ? 10000
+            : (kind === 'error' ? 5000 : 2000));
+  dismissTimer = setTimeout(dismiss, ttl);
+}
+
+function ssFieldSaved(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const field = el.closest('.ss-field');
+  if (!field) return;
+  const label = field.querySelector('label, .ss-label');
+  if (!label) return;
+  // Remove any previous pill first.
+  field.querySelectorAll('.ss-field-saved').forEach(x => x.remove());
+  const pill = document.createElement('span');
+  pill.className = 'ss-field-saved';
+  pill.textContent = '✓ Saved';
+  label.appendChild(pill);
+  setTimeout(() => pill.remove(), 2200);
+}
+
+function ssDescribeError(err) {
+  if (!err) return 'Something went wrong.';
+  const msg = (typeof err === 'string') ? err : (err.message || String(err));
+  // Translate the common browser fetch failures to plain English.
+  if (/Failed to fetch|NetworkError|ERR_NETWORK/i.test(msg)) {
+    return "Couldn't reach Syntaur. Check your internet or the gateway.";
+  }
+  if (/401|unauthoriz/i.test(msg)) {
+    return "Syntaur didn't recognize your sign-in. Try reloading the page.";
+  }
+  if (/403|forbidden/i.test(msg)) {
+    return "You don't have permission for that.";
+  }
+  if (/404/.test(msg)) {
+    return "Syntaur couldn't find that. It may have been renamed or removed.";
+  }
+  if (/429|rate.?limit/i.test(msg)) {
+    return "The AI is busy right now. Wait a minute and try again.";
+  }
+  if (/5\d\d|server error|Internal Server/i.test(msg)) {
+    return "Syntaur hit an internal error. Check the gateway log for details.";
+  }
+  return msg;
+}
+
+// Shared destructive-action prompt — replaces ad-hoc confirm() calls.
+// Usage: ssConfirmDestructive("Delete Peter?", "this removes every memory", () => doDelete())
+function ssConfirmDestructive(title, detail, onConfirm) {
+  const yes = window.confirm(title + (detail ? '\n\n' + detail : '') + '\n\nThis cannot be undone.');
+  if (yes) {
+    try { onConfirm(); } catch(e) { ssToast(ssDescribeError(e), 'error'); }
+  }
 }
 
 // ── Privacy preferences (persist via /api/settings/preferences) ──────
@@ -1459,7 +2258,10 @@ async function ssSavePref(inp) {
     });
     if (!r.ok) throw new Error('save failed');
     localStorage.setItem('ss_privacy_reviewed', '1');
-  } catch(e) { console.error('save pref:', e); }
+    if (inp.id) ssFieldSaved(inp.id);
+  } catch(e) {
+    ssToast("Couldn't save that setting.", 'error', { fix: ssDescribeError(e) });
+  }
 }
 
 // ── Export / import config ──────────────────────────────────
@@ -1571,7 +2373,7 @@ async function ssResetPreferences() {
       });
     } catch(e) {}
   }
-  alert('Preferences reset.');
+  ssToast('Preferences reset.', 'success');
 }
 async function ssWipeMemories() {
   try {
@@ -1582,8 +2384,8 @@ async function ssWipeMemories() {
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || data.message || 'wipe failed');
-    alert('Wiped ' + (data.deleted || 0) + ' memory rows. Agents will rebuild context from scratch.');
-  } catch(e) { alert('Error: ' + e.message); }
+    ssToast('Wiped ' + (data.deleted || 0) + ' memory rows. Helpers will rebuild context from scratch.', 'success', { ttl: 4000 });
+  } catch(e) { ssToast("Couldn't wipe memories.", 'error', { fix: ssDescribeError(e) }); }
 }
 async function ssFactoryReset() {
   try {
@@ -1592,14 +2394,67 @@ async function ssFactoryReset() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token: sessionStorage.getItem('syntaur_token'), confirm: 'factory reset' }),
     });
-    if (r.status === 403) { alert('Factory reset is admin-only. Ask the gateway admin to run it.'); return; }
+    if (r.status === 403) {
+      ssToast('Factory reset is admin-only.', 'error', { fix: 'Ask the gateway admin to run it.' });
+      return;
+    }
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || 'reset failed');
     const wiped = data.wiped || {};
     const summary = Object.entries(wiped).map(([k, v]) => k + '=' + v).join(', ');
-    alert('Factory reset complete.\n\n' + summary + '\n\nYou will be returned to the dashboard.');
-    window.location.href = '/';
-  } catch(e) { alert('Error: ' + e.message); }
+    ssToast('Factory reset complete. Returning to the dashboard…', 'success', { ttl: 2500, fix: summary });
+    setTimeout(() => { window.location.href = '/'; }, 2500);
+  } catch(e) { ssToast("Factory reset failed.", 'error', { fix: ssDescribeError(e) }); }
+}
+
+// ── Connect-things unified table hydration ────────────────
+// Paints one status badge per row (Connected / not connected). Reads
+// the aggregate /api/settings/integration_status for telegram / ha /
+// voice / media bridge, and /api/sync/providers for per-service sync
+// connections (prefix `sync:`).
+async function ssRefreshConnections() {
+  const rows = document.querySelectorAll('[data-conn-status]');
+  if (!rows.length) return;
+  const token = sessionStorage.getItem('syntaur_token') || '';
+  let agg = null, sync = null;
+  try {
+    const r = await fetch('/api/settings/integration_status?token=' + encodeURIComponent(token));
+    if (r.ok) agg = await r.json();
+  } catch(e) {}
+  try {
+    const r = await fetch('/api/sync/providers?token=' + encodeURIComponent(token));
+    if (r.ok) sync = await r.json();
+  } catch(e) {}
+  const connected = sync && sync.connections ? sync.connections : {};
+
+  rows.forEach(el => {
+    const id = el.dataset.connStatus;
+    let status = 'unknown', label = 'not connected';
+    if (id.startsWith('sync:')) {
+      const provider = id.slice(5);
+      if (connected[provider]) { status = 'connected'; label = '✓ connected'; }
+    } else if (agg) {
+      const key = id === 'telegram' ? 'telegram'
+                : id === 'homeassistant' ? 'homeassistant'
+                : id === 'voice' ? 'voice'
+                : id === 'media_bridge' ? 'media_bridge'
+                : null;
+      if (key && agg[key]) {
+        const s = agg[key].status;
+        if (s === 'connected') { status = 'connected'; label = '✓ connected'; }
+        else if (s === 'error' || s === 'degraded') { status = 'error'; label = 'needs attention'; }
+      }
+    }
+    el.className = 'ss-conn-status' + (status === 'connected' ? ' ss-conn-connected'
+                                     : status === 'error' ? ' ss-conn-error' : '');
+    el.textContent = label;
+    // Update the action label so connected rows say "Manage" and empty rows say "Connect".
+    const row = el.closest('.ss-conn-row');
+    if (row) {
+      const action = row.querySelector('.ss-conn-action');
+      if (action) action.textContent = status === 'connected' ? 'Manage →' : 'Connect →';
+    }
+  });
 }
 
 // Live integration status pills — updates every 30s.
@@ -1646,15 +2501,17 @@ async function ssRefreshAbout() {
 // Init: apply the URL-hash route, snapshot forms, refresh About, set up listeners.
 (function () {
   ssApplyRoute();
-  window.addEventListener('hashchange', ssApplyRoute);
+  window.addEventListener('hashchange', () => { ssApplyRoute(); ssRefreshSetup(); });
   setTimeout(() => { ssSnapshotForms(); }, 400);
   ssRefreshAbout();
   ssLoadPreferences();
-  ssRefreshGettingStarted();
+  ssRefreshSetup();
   ssRefreshIntegrationStatus();
-  // Re-refresh the checklist every 60s + on return from other tabs so it
+  ssRefreshConnections();
+  // Re-refresh setup state every 60s + on return from other tabs so it
   // reflects what the user just did elsewhere.
-  setInterval(ssRefreshGettingStarted, 60000);
-  window.addEventListener('focus', () => { ssRefreshGettingStarted(); ssRefreshIntegrationStatus(); });
+  setInterval(ssRefreshSetup, 60000);
+  setInterval(ssRefreshConnections, 30000);
+  window.addEventListener('focus', () => { ssRefreshSetup(); ssRefreshIntegrationStatus(); ssRefreshConnections(); });
 })();
 "##;

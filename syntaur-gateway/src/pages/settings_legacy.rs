@@ -109,10 +109,10 @@ pub fn tab_llm() -> Markup {
             div class="space-y-4" {
                 div class="card" {
                     h3 class="font-medium mb-2" {
-                        "Active LLM Backends"
+                        "AI models Syntaur can use"
                     }
                     p class="text-sm text-gray-400 mb-4" {
-                        "These are the AI models Syntaur uses to process your requests. The primary is tried first; fallbacks activate automatically if the primary fails."
+                        "Syntaur tries these in order. If the first one is down or busy, it automatically uses the next. You can add more below."
                     }
                     div class="space-y-3" id="llm-providers-list" {
                         p class="text-gray-500" {
@@ -122,10 +122,10 @@ pub fn tab_llm() -> Markup {
                 }
                 div class="card" {
                     h3 class="font-medium mb-2" {
-                        "Quick Setup"
+                        "Add a model"
                     }
                     p class="text-sm text-gray-400 mb-4" {
-                        "Choose the option that fits your setup. You can always change this later."
+                        "Pick the kind that matches your setup. You can mix and match — add a cloud service and a model on your computer, and Syntaur will use both."
                     }
                     div class="space-y-3" {
                         details class="group" {
@@ -135,10 +135,10 @@ pub fn tab_llm() -> Markup {
                                 }
                                 div class="flex-1" {
                                     p class="text-sm font-medium text-white" {
-                                        "Cloud API (Recommended)"
+                                        "A cloud service (easiest)"
                                     }
                                     p class="text-xs text-gray-500" {
-                                        "OpenRouter, Groq, Cerebras (all free), Anthropic, or OpenAI — best quality, no hardware needed"
+                                        "OpenRouter, Groq, Cerebras are free with a sign-up. Anthropic and OpenAI are paid but top quality."
                                     }
                                 }
                                 span class="text-xs text-gray-600 group-open:rotate-90 transition-transform" {
@@ -323,10 +323,10 @@ pub fn tab_llm() -> Markup {
                                 }
                                 div class="flex-1" {
                                     p class="text-sm font-medium text-white" {
-                                        "Local Model (Private, Free)"
+                                        "A model on your own computer (most private)"
                                     }
                                     p class="text-xs text-gray-500" {
-                                        "Ollama, LM Studio, or llama.cpp — runs on your own hardware, no API costs"
+                                        "Ollama, LM Studio, or llama.cpp. Nothing you say leaves your computer. Needs a decent graphics card to be fast."
                                     }
                                 }
                                 span class="text-xs text-gray-600 group-open:rotate-90 transition-transform" {
@@ -391,10 +391,10 @@ pub fn tab_llm() -> Markup {
                                 }
                                 div class="flex-1" {
                                     p class="text-sm font-medium text-white" {
-                                        "Hybrid (Cloud + Local Fallback)"
+                                        "Both — cloud first, your computer as backup"
                                     }
                                     p class="text-xs text-gray-500" {
-                                        "Cloud for quality, local for privacy/offline — automatic failover"
+                                        "Fast cloud for everyday use, falls back to your computer when the cloud is down or you're offline."
                                     }
                                 }
                                 span class="text-xs text-gray-600 group-open:rotate-90 transition-transform" {
@@ -403,7 +403,7 @@ pub fn tab_llm() -> Markup {
                             }
                             div class="mt-2 ml-9 text-sm" {
                                 p class="text-xs text-gray-400 p-3 bg-gray-900/50 rounded-lg border border-gray-800" {
-                                    "Set up a cloud provider above as primary, then add a local model as fallback. Syntaur tries the primary first and falls back automatically if it fails or is unreachable."
+                                    "Add a cloud service at the top, then add a model on your computer below it. Syntaur tries the cloud first. If it's down or your internet is out, your local model takes over — no interruption."
                                 }
                             }
                         }
@@ -414,10 +414,10 @@ pub fn tab_llm() -> Markup {
                                 }
                                 div class="flex-1" {
                                     p class="text-sm font-medium text-white" {
-                                        "Vision Model (Receipt/Document Scanning)"
+                                        "Reading pictures (for receipts, screenshots, docs)"
                                     }
                                     p class="text-xs text-gray-500" {
-                                        "Local GPU or cloud model for scanning receipts and tax documents"
+                                        "A separate model for when Syntaur needs to look at images. Your cloud service can do this, or a model on your computer."
                                     }
                                 }
                                 span class="text-xs text-gray-600 group-open:rotate-90 transition-transform" {
@@ -427,10 +427,10 @@ pub fn tab_llm() -> Markup {
                             div class="mt-2 ml-9 space-y-3 text-sm" {
                                 div class="p-3 bg-gray-900/50 rounded-lg border border-gray-800" {
                                     p class="text-gray-300 font-medium mb-2" {
-                                        "Local GPU (fastest, private)"
+                                        "On your computer (fastest, most private)"
                                     }
                                     p class="text-xs text-gray-400 mb-2" {
-                                        "If you have an NVIDIA GPU, Syntaur can scan receipts locally. Your documents never leave your machine."
+                                        "If you have a decent graphics card (NVIDIA, 8 GB+), Syntaur can read pictures locally. Your documents never leave your computer."
                                     }
                                     ol class="text-xs text-gray-400 space-y-1 list-decimal ml-4" {
                                         li {
@@ -460,15 +460,15 @@ pub fn tab_llm() -> Markup {
                                         }
                                     }
                                     p class="text-[10px] text-gray-600 mt-1" {
-                                        "Recommended: Qwen2.5-VL-7B (4.7GB, needs 8GB+ VRAM). Also works: MiniCPM-V, LLaVA."
+                                        "Suggested model: Qwen2.5-VL-7B (about 5 GB). Alternatives: MiniCPM-V, LLaVA."
                                     }
                                 }
                                 div class="p-3 bg-gray-900/50 rounded-lg border border-gray-800" {
                                     p class="text-gray-300 font-medium mb-2" {
-                                        "Cloud (no GPU needed)"
+                                        "Use the cloud (no special hardware needed)"
                                     }
                                     p class="text-xs text-gray-400" {
-                                        "If no vision model is configured, Syntaur uses your cloud provider for scanning. OpenRouter's free Nemotron Nano VL model works well. No additional setup needed."
+                                        "If you don't set up a picture reader, Syntaur uses the cloud service you added above. OpenRouter's free picture reader works well — nothing else to do."
                                     }
                                 }
                             }
@@ -480,32 +480,32 @@ pub fn tab_llm() -> Markup {
                 div class="card" id="gpu-assignment-card" {
                     div class="flex items-center justify-between mb-3" {
                         h3 class="font-medium" {
-                            "GPU & Model Assignment"
+                            "Share work across your computers"
                         }
                         button onclick="scanGpus()" class="text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 px-3 py-1 rounded-lg" id="gpu-scan-btn" {
-                            "Scan Network"
+                            "Find computers"
                         }
                     }
                     p class="text-sm text-gray-400 mb-3" {
-                        "Syntaur can use multiple GPUs across your network. Assign each GPU a role for optimal performance."
+                        "If you have more than one computer at home with a graphics card, Syntaur can use them. Give each one a job — chatting, reading pictures, voice, or quick tasks."
                     }
                     div id="gpu-list" class="space-y-2" {
                         p class="text-xs text-gray-600" {
-                            "Click \"Scan Network\" to detect GPUs on your LAN."
+                            "Click \"Find computers\" to look for ones on your home network."
                         }
                     }
                     div id="gpu-assignments" class="hidden mt-4 pt-3 border-t border-gray-700" {
                         p class="text-xs text-gray-500 font-medium mb-2" {
-                            "Model Assignments"
+                            "Who does what"
                         }
                         div class="space-y-2 text-sm" {
                             div class="flex items-center justify-between p-2 rounded-lg bg-gray-900" {
                                 div {
                                     span class="text-gray-400" {
-                                        "Chat / Agent"
+                                        "Chatting"
                                     }
                                     p class="text-[10px] text-gray-600" {
-                                        "Main conversational AI, tool calling"
+                                        "The main model your helpers use when you talk to them"
                                     }
                                 }
                                 select id="assign-chat" class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-xs text-gray-300 outline-none w-48" onchange="saveAssignment('primary', this.value)" {
@@ -517,10 +517,10 @@ pub fn tab_llm() -> Markup {
                             div class="flex items-center justify-between p-2 rounded-lg bg-gray-900" {
                                 div {
                                     span class="text-gray-400" {
-                                        "Vision / OCR"
+                                        "Reading pictures"
                                     }
                                     p class="text-[10px] text-gray-600" {
-                                        "Receipt scanning, document analysis"
+                                        "Receipts, screenshots, photos"
                                     }
                                 }
                                 select id="assign-vision" class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-xs text-gray-300 outline-none w-48" onchange="saveAssignment('vision', this.value)" {
@@ -532,10 +532,10 @@ pub fn tab_llm() -> Markup {
                             div class="flex items-center justify-between p-2 rounded-lg bg-gray-900" {
                                 div {
                                     span class="text-gray-400" {
-                                        "Voice / TTS"
+                                        "Listening and speaking"
                                     }
                                     p class="text-[10px] text-gray-600" {
-                                        "Speech-to-text, text-to-speech"
+                                        "Turning your voice into words, and words back into voice"
                                     }
                                 }
                                 select id="assign-voice" class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-xs text-gray-300 outline-none w-48" onchange="saveAssignment('voice', this.value)" {
@@ -547,10 +547,10 @@ pub fn tab_llm() -> Markup {
                             div class="flex items-center justify-between p-2 rounded-lg bg-gray-900" {
                                 div {
                                     span class="text-gray-400" {
-                                        "Fast / Classification"
+                                        "Quick jobs"
                                     }
                                     p class="text-[10px] text-gray-600" {
-                                        "Quick tasks, categorization, routing"
+                                        "Short questions, routing to the right helper"
                                     }
                                 }
                                 select id="assign-fast" class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-xs text-gray-300 outline-none w-48" onchange="saveAssignment('fast', this.value)" {
@@ -566,10 +566,10 @@ pub fn tab_llm() -> Markup {
                 }
                 div class="card" {
                     h3 class="font-medium mb-2" {
-                        "Test a Connection"
+                        "Test a model"
                     }
                     p class="text-sm text-gray-400 mb-4" {
-                        "Verify an LLM endpoint is reachable and responding."
+                        "Paste an address and key to check if Syntaur can reach the model."
                     }
                     div class="space-y-3" {
                         div class="grid grid-cols-3 gap-3" {
@@ -869,10 +869,10 @@ pub fn tab_system() -> Markup {
                 }
                 div class="card" {
                     h3 class="font-medium mb-4" {
-                        "API Token"
+                        "Developer key"
                     }
                     p class="text-sm text-gray-400 mb-3" {
-                        "Use this token to access Syntaur from scripts, automations, or external tools."
+                        "A long, random password that lets your own scripts and automations talk to Syntaur. If you don't write scripts, you can ignore this."
                     }
                     div class="flex gap-2" {
                         input type="password" class="input font-mono" id="api-token-display" readonly;
@@ -886,7 +886,7 @@ pub fn tab_system() -> Markup {
                 }
                 div class="card" {
                     h3 class="font-medium mb-4" {
-                        "License"
+                        "Your Syntaur license"
                     }
                     div id="license-info" class="mb-4" {
                         p class="text-sm text-gray-400" {
@@ -895,9 +895,12 @@ pub fn tab_system() -> Markup {
                     }
                     div {
                         label class="label" {
-                            "License Key"
+                            "Paste the activation code"
                         }
-                        textarea class="input font-mono text-xs" rows="3" id="license-key-input" placeholder="Paste your license key here (JSON format)..." {
+                        textarea class="input font-mono text-xs" rows="3" id="license-key-input" placeholder="Paste the activation code you got after buying Syntaur Pro..." {
+                        }
+                        p class="text-xs text-gray-500 mt-1" {
+                            "Copy-paste the whole block. Don't worry if it looks like a long scrambled string — that's normal."
                         }
                         div class="flex items-center gap-3 mt-2" {
                             button class="btn-primary" onclick="activateLicense()" {
@@ -953,10 +956,10 @@ pub fn tab_system() -> Markup {
                         }
                         div class="flex gap-3" {
                             button onclick="installShortcut('menu')" class="px-4 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm transition-colors" id="btn-shortcut-menu" {
-                                " Install App Shortcut "
+                                " Add to your app menu "
                             }
                             button onclick="installShortcut('desktop')" class="px-4 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm transition-colors" id="btn-shortcut-desktop" {
-                                " Add to Desktop "
+                                " Put on the desktop "
                             }
                         }
                         p class="text-xs text-gray-500" id="shortcut-status" {
@@ -979,18 +982,18 @@ pub fn tab_system() -> Markup {
                     div class="space-y-2 text-sm" {
                         a href="/setup" class="block p-3 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors" {
                             p class="font-medium text-gray-300" {
-                                "Re-run Setup Wizard"
+                                "Start setup over"
                             }
                             p class="text-xs text-gray-500" {
-                                "Change LLM backend, modules, or communication channels"
+                                "Walk through the whole setup wizard again"
                             }
                         }
                         a href="/modules" class="block p-3 rounded-lg bg-gray-900 hover:bg-gray-800 transition-colors" {
                             p class="font-medium text-gray-300" {
-                                "Module Management"
+                                "Modules"
                             }
                             p class="text-xs text-gray-500" {
-                                "Enable, disable, or configure modules"
+                                "Turn Syntaur features on and off"
                             }
                         }
                     }
