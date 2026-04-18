@@ -1779,85 +1779,116 @@ function authFetch(url, opts = {}) {
 
 // Load dashboard data
 async function loadDashboard() {
+  // Small helper: set text only if element exists (avoids null-deref throws
+  // from a DOM node that got removed or renamed since this code was written).
+  const setText = (id, text) => { const e = document.getElementById(id); if (e) e.textContent = text; };
+  const setHtml = (id, html) => { const e = document.getElementById(id); if (e) e.innerHTML = html; };
+  // Each section is independent: a failure in one shouldn't clobber the
+  // whole banner. Only a failure of the health probe itself flips the
+  // status badge to red.
+  const failed = [];
+
+  // 1) Health — the ONLY section that reflects the banner status.
+  let health = null;
   try {
-    // Health
-    const health = await (await authFetch('/health')).json();
+    health = await (await authFetch('/health')).json();
     const uptime = health.uptime_secs || 0;
     const h = Math.floor(uptime / 3600);
     const m = Math.floor((uptime % 3600) / 60);
     const uptimeStr = h > 0 ? `${h}h ${m}m` : `${m}m`;
-    document.getElementById('stat-uptime').textContent = uptimeStr;
-    const el2 = document.getElementById('stat-uptime2');
-    if (el2) el2.textContent = uptimeStr;
+    setText('stat-uptime', uptimeStr);
+    setText('stat-uptime2', uptimeStr);
     const agentNames = (health.agents || []).map(a => typeof a === 'object' ? a.name : a);
-    document.getElementById('stat-agents').textContent = agentNames.join(', ');
-    const ag2 = document.getElementById('stat-agents2');
-    if (ag2) ag2.textContent = agentNames.join(', ');
-    document.getElementById('sys-version').textContent = `v${health.version || '?'}`;
+    setText('stat-agents', agentNames.join(', '));
+    setText('stat-agents2', agentNames.join(', '));
+    setText('sys-version', `v${health.version || '?'}`);
+    const sb = document.getElementById('status-badge');
+    if (sb) {
+      sb.className = 'badge badge-green text-xs';
+      sb.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-green-400 mr-1"></span>Online';
+      sb.removeAttribute('title');
+    }
+  } catch(e) {
+    console.error('[dashboard] /health failed', e);
+    failed.push('health');
+    const sb = document.getElementById('status-badge');
+    if (sb) {
+      sb.className = 'badge badge-red text-xs';
+      sb.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-red-400 mr-1"></span>Offline';
+      sb.title = `Gateway /health unreachable: ${e && e.message ? e.message : e}`;
+    }
+  }
 
-    // Build agent switcher — system agents + user's own agents
-    const rawAgents = health.agents || [];
+  // 2) Agent switcher — uses health + /api/me. Independent failure OK.
+  try {
+    const rawAgents = (health && health.agents) || [];
     dashAgentIdMap = {};
     dashAgents = rawAgents.map(a => {
       if (typeof a === 'object') { dashAgentIdMap[a.name] = a.id; return a.name; }
       return a;
     });
-    // Merge user agents
     try {
       const me = await (await authFetch('/api/me?token=' + encodeURIComponent(authToken))).json();
-      if (me.user && me.user.name) {
-        document.getElementById('user-label').textContent = me.user.name;
-      }
+      if (me.user && me.user.name) setText('user-label', me.user.name);
       for (const ua of (me.agents || [])) {
         if (!dashAgents.includes(ua.display_name)) {
           dashAgentIdMap[ua.display_name] = ua.agent_id;
           dashAgents.push(ua.display_name);
         }
       }
-    } catch {}
+    } catch(e) { console.warn('[dashboard] /api/me failed', e); }
     if (dashAgents.length > 0 && !dashAgents.includes(dashCurrentAgent)) {
       dashCurrentAgent = dashAgents[0];
     }
-    document.getElementById('chat-agent-name').textContent = dashCurrentAgent;
+    setText('chat-agent-name', dashCurrentAgent);
     buildDashAgentMenu();
+  } catch(e) { console.warn('[dashboard] agent switcher failed', e); failed.push('agents'); }
 
-    // Setup status
-    const setup = await (await authFetch('/api/setup/status')).json();
-    if (setup.agent_name) {
-      document.getElementById('welcome-text').textContent = `Welcome back`;
-      document.getElementById('welcome-sub').textContent = `${setup.agent_name} is online and ready.`;
-      document.getElementById('chat-greeting').textContent = `Hey! I'm ${setup.agent_name}. How can I help you?`;
-      document.getElementById('chat-agent-name').textContent = setup.agent_name;
+  // 3) Setup status — greeting strings.
+  let setup = null;
+  try {
+    setup = await (await authFetch('/api/setup/status')).json();
+    if (setup && setup.agent_name) {
+      setText('welcome-text', 'Welcome back');
+      setText('welcome-sub', `${setup.agent_name} is online and ready.`);
+      setText('chat-greeting', `Hey! I'm ${setup.agent_name}. How can I help you?`);
+      setText('chat-agent-name', setup.agent_name);
     }
+  } catch(e) { console.warn('[dashboard] /api/setup/status failed', e); failed.push('setup'); }
 
-    // Modules
+  // 4) Modules — the grid + stat counts.
+  try {
     const mods = await (await authFetch('/api/setup/modules')).json();
-    const allMods = [...mods.core_modules, ...mods.extension_modules];
-    const enabled = allMods.filter(m => m.enabled);
-    const totalTools = enabled.reduce((s, m) => s + m.tool_count, 0);
-
-    document.getElementById('stat-modules').textContent = enabled.length;
-    const sm2 = document.getElementById('stat-modules2');
-    if (sm2) sm2.textContent = enabled.length;
-    document.getElementById('stat-tools').textContent = `${totalTools} tools`;
-    document.getElementById('module-count').textContent = `${enabled.length} of ${allMods.length}`;
-
-    const grid = document.getElementById('module-grid');
-    grid.innerHTML = enabled.map(m => `
+    const core = Array.isArray(mods && mods.core_modules) ? mods.core_modules : [];
+    const ext = Array.isArray(mods && mods.extension_modules) ? mods.extension_modules : [];
+    const allMods = [...core, ...ext];
+    const enabled = allMods.filter(m => m && m.enabled);
+    const totalTools = enabled.reduce((s, m) => s + (m.tool_count || 0), 0);
+    setText('stat-modules', enabled.length);
+    setText('stat-modules2', enabled.length);
+    setText('stat-tools', `${totalTools} tools`);
+    setText('module-count', `${enabled.length} of ${allMods.length}`);
+    setHtml('module-grid', enabled.map(m => `
       <div class="p-2.5 rounded-lg bg-gray-900 text-xs">
-        <p class="font-medium text-gray-300 truncate">${m.name}</p>
-        <p class="text-gray-500 mt-0.5">${m.tool_count} tools</p>
+        <p class="font-medium text-gray-300 truncate">${escapeHtml(m.name || '')}</p>
+        <p class="text-gray-500 mt-0.5">${m.tool_count || 0} tools</p>
       </div>
-    `).join('');
+    `).join(''));
+  } catch(e) { console.warn('[dashboard] /api/setup/modules failed', e); failed.push('modules'); }
 
-    // LLM status
-    document.getElementById('stat-llm').textContent = setup.has_llm_configured ? 'Connected' : 'Not configured';
-    document.getElementById('stat-llm-status').textContent = setup.has_llm_configured ? 'Primary + fallbacks' : '';
+  // 5) LLM status (derived from setup result when present).
+  try {
+    if (setup) {
+      setText('stat-llm', setup.has_llm_configured ? 'Connected' : 'Not configured');
+      setText('stat-llm-status', setup.has_llm_configured ? 'Primary + fallbacks' : '');
+    }
+  } catch(e) { console.warn('[dashboard] llm status failed', e); }
 
-    // License status
-    try {
-      const lic = await (await authFetch('/api/license/status')).json();
-      const badge = document.getElementById('license-badge');
+  // 6) License.
+  try {
+    const lic = await (await authFetch('/api/license/status')).json();
+    const badge = document.getElementById('license-badge');
+    if (badge) {
       badge.classList.remove('hidden');
       if (lic.mode === 'licensed') {
         badge.className = 'badge badge-green text-xs';
@@ -1866,16 +1897,19 @@ async function loadDashboard() {
         const days = Math.ceil((lic.demo_remaining_secs || 0) / 86400);
         badge.className = 'badge bg-yellow-900/50 text-yellow-400 text-xs';
         badge.textContent = `Demo: ${days}d left`;
+      } else if (lic.mode === 'free') {
+        badge.className = 'badge badge-gray text-xs';
+        badge.textContent = 'Free';
       } else {
         badge.className = 'badge badge-red text-xs cursor-pointer';
         badge.textContent = 'Demo Expired';
         badge.onclick = () => location.href = '/settings';
       }
-    } catch(e) {}
+    }
+  } catch(e) { console.warn('[dashboard] /api/license/status failed', e); }
 
-  } catch(e) {
-    document.getElementById('status-badge').className = 'badge badge-red';
-    document.getElementById('status-badge').innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-red-400 mr-1"></span>Error';
+  if (failed.length) {
+    console.warn('[dashboard] partial load, failed sections:', failed);
   }
 }
 

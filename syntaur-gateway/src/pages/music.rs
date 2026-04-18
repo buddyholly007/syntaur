@@ -1878,7 +1878,15 @@ function toggleManualPathEntry() {
   }
 }
 function openFolderPicker() {
-  document.getElementById('fs-picker-modal').classList.remove('hidden');
+  const modal = document.getElementById('fs-picker-modal');
+  // If the modal's ancestor has overflow/transform/filter rules (CSS containing
+  // block), `position: fixed` gets clipped to that ancestor instead of the
+  // viewport — which is what "only a small section is visible" means. Move
+  // it to document.body so it's relative to the viewport. Idempotent.
+  if (modal && modal.parentNode !== document.body) {
+    document.body.appendChild(modal);
+  }
+  modal.classList.remove('hidden');
   document.getElementById('local-lib-error').classList.add('hidden');
   fsPickerLoad(''); // start at root shortcuts
 }
