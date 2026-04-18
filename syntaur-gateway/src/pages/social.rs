@@ -174,7 +174,7 @@ pub async fn render() -> Html<String> {
             }
 
             // ── Reconnect modal (hidden by default) ───────────────────────
-            div id="soc-modal" class="soc-modal-hidden" {
+            div id="soc-modal" {
                 div class="soc-modal-backdrop" onclick="socCloseModal()" {}
                 div class="soc-modal-card" role="dialog" aria-modal="true" {
                     div class="soc-modal-head" {
@@ -435,12 +435,18 @@ body { background: var(--soc-bg); color: var(--soc-ink); }
 .soc-btn { padding: 7px 14px; border-radius: 6px; background: var(--soc-amber); color: #1a1208; border: 0; font-weight: 500; font-size: 13px; cursor: pointer; }
 .soc-chat-note { margin-top: 10px; font-size: 11px; color: var(--soc-ink-soft); font-style: italic; }
 
-/* Modal */
-.soc-modal-hidden { display: none; }
+/* Modal.
+ * Default is hidden — the .soc-modal-open class opts IN to flex display.
+ * Putting display on an ID selector would lose the specificity fight
+ * against any hidden-state class, so the container stays displayless
+ * and we toggle one class on/off in JS.
+ */
 #soc-modal {
+  display: none;
   position: fixed; inset: 0; z-index: 100;
-  display: flex; align-items: center; justify-content: center;
+  align-items: center; justify-content: center;
 }
+#soc-modal.soc-modal-open { display: flex; }
 .soc-modal-backdrop {
   position: absolute; inset: 0;
   background: rgba(22, 18, 16, 0.72); backdrop-filter: blur(2px);
@@ -680,11 +686,11 @@ function socOpenModal(platformId) {
   const flow = desc.auth_flow || {};
   submit.disabled = (flow.kind !== 'app_password');
   submit.textContent = 'Reconnect';
-  document.getElementById('soc-modal').classList.remove('soc-modal-hidden');
+  document.getElementById('soc-modal').classList.add('soc-modal-open');
 }
 
 function socCloseModal() {
-  document.getElementById('soc-modal').classList.add('soc-modal-hidden');
+  document.getElementById('soc-modal').classList.remove('soc-modal-open');
   SOC_MODAL_PLATFORM = null;
 }
 
@@ -758,7 +764,7 @@ window.addEventListener('DOMContentLoaded', socRefreshConnections);
 window.addEventListener('focus', socRefreshConnections);
 // Escape closes the modal — expected keyboard habit for dialogs.
 window.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !document.getElementById('soc-modal').classList.contains('soc-modal-hidden')) {
+  if (e.key === 'Escape' && document.getElementById('soc-modal').classList.contains('soc-modal-open')) {
     socCloseModal();
   }
 });
