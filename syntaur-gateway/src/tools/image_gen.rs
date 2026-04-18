@@ -76,13 +76,12 @@ impl Tool for GenerateImageTool {
         info!("[image] spawning generation task {} for user {}: {}...",
             task_id, ctx.user_id, &prompt[..prompt.len().min(40)]);
 
-        // Spawn the actual generation in the background
+        // Spawn the actual generation in the background. Config is already
+        // available on the tool struct — clone the Arc and pass it through
+        // so the provider dispatch can see the user's choice.
         let tm = Arc::clone(&self.task_manager);
         let http = self.http.clone();
-        let api_key = self.config.models.providers.values()
-            .find(|p| p.base_url.contains("openrouter"))
-            .map(|p| p.api_key.clone())
-            .unwrap_or_default();
+        let config = Arc::clone(&self.config);
         let prompt_owned = prompt.to_string();
         let size_owned = size.to_string();
         let tid = task_id.clone();
@@ -90,7 +89,7 @@ impl Tool for GenerateImageTool {
         let conv_id = conv_id;
 
         tokio::spawn(async move {
-            let result = call_image_api(&http, &api_key, &prompt_owned, &size_owned).await;
+            let result = call_image_api(&http, &config, &prompt_owned, &size_owned).await;
 
             match result {
                 Ok(image_url) => {
@@ -210,16 +209,14 @@ impl Tool for EditImageTool {
 
         let tm = Arc::clone(&self.task_manager);
         let http = self.http.clone();
-        let api_key = self.config.models.providers.values()
-            .find(|p| p.base_url.contains("openrouter"))
-            .map(|p| p.api_key.clone()).unwrap_or_default();
+        let config = Arc::clone(&self.config);
         let tid = task_id.clone();
         let convs = self.conversations.clone();
         let edit_desc = edit_instruction.to_string();
         let size_owned = size.to_string();
 
         tokio::spawn(async move {
-            match call_image_api(&http, &api_key, &refined_prompt, &size_owned).await {
+            match call_image_api(&http, &config, &refined_prompt, &size_owned).await {
                 Ok(url) => {
                     info!("[image-edit] task {} completed", tid);
                     tm.complete(&tid, json!({
@@ -290,50 +287,207 @@ impl Tool for SaveImageTool {
     }
 }
 
-/// Call OpenRouter's image generation API (Seedream 4.5 or similar).
+/// Provider for image generation. Dispatch is chosen at call time from the
+/// `image_gen` section of openclaw.json, with Pollinations.ai as the
+/// zero-config default so a fresh install generates images without any
+/// signup, API key, or paid account.
+///
+/// Options, in the order we prefer them:
+/// - `local`     — user has ComfyUI / SD.Next running somewhere (Gaming PC
+///                 RTX 3090 is the intended target). Best quality, fully
+///                 private, free forever. Requires local setup.
+/// - `pollinations` — free public API at image.pollinations.ai, no auth,
+///                 no key, no signup. Returns a stable cached URL. Quality
+///                 is decent (FLUX under the hood). Default.
+/// - `openrouter` — paid OpenRouter image-capable model via /chat/completions.
+///                 Best for users without a GPU who are willing to pay.
+enum ImageProvider<'a> {
+    Pollinations,
+    LocalSd { base_url: &'a str, model: Option<&'a str> },
+    OpenrouterPaid { api_key: &'a str, model: &'a str },
+}
+
+fn select_image_provider(config: &crate::config::Config) -> ImageProvider<'_> {
+    // 1. Local Stable Diffusion, if configured
+    if let Some(url) = config.image_gen.local_sd_url.as_deref() {
+        if !url.trim().is_empty() {
+            return ImageProvider::LocalSd {
+                base_url: url,
+                model: config.image_gen.local_sd_model.as_deref(),
+            };
+        }
+    }
+    // 2. OpenRouter paid, only if the user has explicitly set a model id
+    if let Some(model) = config.image_gen.openrouter_paid_model.as_deref() {
+        if !model.trim().is_empty() {
+            let key = config.models.providers.values()
+                .find(|p| p.base_url.contains("openrouter"))
+                .map(|p| p.api_key.as_str())
+                .unwrap_or("");
+            if !key.is_empty() {
+                return ImageProvider::OpenrouterPaid { api_key: key, model };
+            }
+        }
+    }
+    // 3. Default: free public Pollinations
+    ImageProvider::Pollinations
+}
+
 async fn call_image_api(
     http: &reqwest::Client,
-    api_key: &str,
+    config: &crate::config::Config,
+    prompt: &str,
+    size: &str,
+) -> Result<String, String> {
+    match select_image_provider(config) {
+        ImageProvider::Pollinations => call_pollinations(http, prompt, size).await,
+        ImageProvider::LocalSd { base_url, model } => call_local_sd(http, base_url, model, prompt, size).await,
+        ImageProvider::OpenrouterPaid { api_key, model } => call_openrouter_chat(http, api_key, model, prompt).await,
+    }
+}
+
+/// Free image generation via Pollinations.ai. No key, no auth, no signup.
+/// GET request returns the image bytes directly; we return the URL itself
+/// (Pollinations caches the output so subsequent hits are fast).
+///
+/// Terms of service (as of 2026-04): no rate limit published, anonymous use
+/// allowed, includes an unobtrusive watermark unless `nologo=true`. We set
+/// nologo since the user asked for their own image. If Pollinations adds
+/// auth requirements in the future, this path will 4xx and we surface it.
+async fn call_pollinations(
+    http: &reqwest::Client,
     prompt: &str,
     size: &str,
 ) -> Result<String, String> {
     let (width, height) = match size {
-        "1024x1536" => (1024, 1536),
+        "1024x1536" => (1024u32, 1536u32),
         "1536x1024" => (1536, 1024),
         _ => (1024, 1024),
     };
-
-    let body = json!({
-        "model": "bytedance/seedream-4.5",
-        "prompt": prompt,
-        "n": 1,
-        "size": format!("{}x{}", width, height),
-    });
-
+    // URL-encode the prompt — Pollinations puts it right in the path.
+    let encoded: String = prompt
+        .chars()
+        .flat_map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '~' {
+                vec![c]
+            } else {
+                format!("%{:02X}", c as u32).chars().collect()
+            }
+        })
+        .collect();
+    let url = format!(
+        "https://image.pollinations.ai/prompt/{}?width={}&height={}&nologo=true&enhance=true",
+        encoded, width, height
+    );
+    // HEAD probe to confirm Pollinations is reachable and the URL resolves
+    // to an image. The frontend will hit the same URL to actually render.
     let resp = http
-        .post("https://openrouter.ai/api/v1/images/generations")
+        .head(&url)
+        .timeout(std::time::Duration::from_secs(120))
+        .send()
+        .await
+        .map_err(|e| format!("Pollinations unreachable: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "Pollinations returned HTTP {} — service may be overloaded. Try again in a moment or switch to a local SD provider.",
+            resp.status()
+        ));
+    }
+    Ok(url)
+}
+
+/// Local ComfyUI / Automatic1111 / SD.Next HTTP API. Assumes Automatic1111-
+/// compatible `/sdapi/v1/txt2img` endpoint (ComfyUI has a compatibility
+/// mode, SD.Next is compatible out of the box).
+async fn call_local_sd(
+    http: &reqwest::Client,
+    base_url: &str,
+    model: Option<&str>,
+    prompt: &str,
+    size: &str,
+) -> Result<String, String> {
+    let (width, height) = match size {
+        "1024x1536" => (1024u32, 1536u32),
+        "1536x1024" => (1536, 1024),
+        _ => (1024, 1024),
+    };
+    let mut body = json!({
+        "prompt": prompt,
+        "width": width,
+        "height": height,
+        "steps": 20,
+        "sampler_name": "Euler a",
+        "cfg_scale": 7.0,
+        "batch_size": 1,
+    });
+    if let Some(m) = model {
+        body["override_settings"] = json!({"sd_model_checkpoint": m});
+    }
+    let url = format!("{}/sdapi/v1/txt2img", base_url.trim_end_matches('/'));
+    let resp = http
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(180))
+        .send()
+        .await
+        .map_err(|e| format!("Local SD unreachable at {}: {}", base_url, e))?;
+    if !resp.status().is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "Local SD returned HTTP {} — is ComfyUI/Automatic1111 running? Body: {}",
+            0,
+            body.chars().take(200).collect::<String>()
+        ));
+    }
+    let data: Value = resp.json().await
+        .map_err(|e| format!("Local SD response parse: {}", e))?;
+    // A1111 returns {"images": ["<base64 png>"]}
+    let b64 = data
+        .get("images")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Local SD response missing 'images'".to_string())?;
+    Ok(format!("data:image/png;base64,{}", b64))
+}
+
+/// OpenRouter paid path — kept for users who opt-in. Not used by default
+/// (the free Pollinations path is the default for a reason).
+async fn call_openrouter_chat(
+    http: &reqwest::Client,
+    api_key: &str,
+    model: &str,
+    prompt: &str,
+) -> Result<String, String> {
+    let body = json!({
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "content": format!("Generate an image: {}", prompt),
+        }],
+    });
+    let resp = http
+        .post("https://openrouter.ai/api/v1/chat/completions")
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .json(&body)
+        .timeout(std::time::Duration::from_secs(180))
         .send()
         .await
-        .map_err(|e| format!("image API request failed: {}", e))?;
-
+        .map_err(|e| format!("OpenRouter paid image call failed: {}", e))?;
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("image API error {}: {}", status, &body[..body.len().min(200)]));
+        return Err(format!("OpenRouter {} — {}", status, &body[..body.len().min(200)]));
     }
-
     let data: Value = resp.json().await
-        .map_err(|e| format!("image API response parse error: {}", e))?;
-
-    // Extract image URL from OpenAI-compatible response
-    data.get("data")
-        .and_then(|d| d.as_array())
-        .and_then(|arr| arr.first())
-        .and_then(|img| img.get("url").or_else(|| img.get("b64_json")))
+        .map_err(|e| format!("OpenRouter paid response parse: {}", e))?;
+    if let Some(url) = data
+        .pointer("/choices/0/message/images/0/image_url/url")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| "No image URL in response".to_string())
+    {
+        return Ok(url.to_string());
+    }
+    Err("OpenRouter paid returned no image".to_string())
 }
