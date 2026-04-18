@@ -132,29 +132,10 @@ pub async fn render() -> Html<String> {
                         h1 class="soc-h1" { "Connections" }
                         p class="soc-subhead" { "Which platforms Nyota can speak to, and how healthy each one is." }
                     }
-                    div class="soc-platform-grid" {
-                        // Stub cards. Real auth flows ship in Phase 2.
-                        @for (name, sub, tone) in [
-                            ("Bluesky",   "AT Protocol app password",            "skyblue"),
-                            ("Threads",   "Meta OAuth2 (via Facebook Graph)",    "graphite"),
-                            ("YouTube",   "Google OAuth2, community posts + comments", "crimson"),
-                            ("Instagram", "Meta OAuth2 (Business or Creator)",   "rose"),
-                            ("LinkedIn",  "LinkedIn OAuth2 (Member / Page)",     "steel"),
-                            ("TikTok",    "TikTok for Developers",                "graphite"),
-                            ("Facebook",  "Meta OAuth2 (Page posts)",             "navy"),
-                            ("X / Twitter", "Paid API tier required",             "graphite"),
-                        ] {
-                            div class={ "soc-platform-card soc-tone-" (tone) } {
-                                div class="soc-platform-head" {
-                                    span class="soc-platform-name" { (name) }
-                                    span class="soc-pill soc-pill-idle" { "not connected" }
-                                }
-                                p class="soc-platform-sub" { (sub) }
-                                button class="soc-btn-ghost" disabled {
-                                    "Connect — coming next phase"
-                                }
-                            }
-                        }
+                    div class="soc-platform-grid" id="soc-platform-grid" {
+                        // Cards render from the PLATFORMS JS constant on load.
+                        // Each card is updated with live status from /api/social/connections
+                        // via socRefreshConnections(). Stubbed "Connect" buttons land in Phase 2.
                     }
                     div class="soc-note" {
                         "Each platform has its own quirks. Nyota will walk you through the connect flow one at a time, with screenshots and a plain-language error if something goes sideways."
@@ -376,7 +357,12 @@ body { background: var(--soc-bg); color: var(--soc-ink); }
   font-size: 10px; padding: 2px 8px; border-radius: 999px;
   text-transform: uppercase; letter-spacing: .1em; font-weight: 600;
 }
-.soc-pill-idle { background: #eee4ce; color: #8a7558; }
+.soc-pill-idle      { background: #eee4ce; color: #8a7558; }
+.soc-pill-connected { background: #d8ecd0; color: #3f6a2e; }
+.soc-pill-degraded  { background: #f5e3ba; color: #8a6214; }
+.soc-pill-error     { background: #f3d1cb; color: #953224; }
+.soc-platform-handle { font-size: 12px; color: var(--soc-ink); font-weight: 500; margin: 2px 0 8px; font-family: 'JetBrains Mono', ui-monospace, monospace; }
+.soc-platform-detail { font-size: 11px; color: var(--soc-amber-deep); margin: 0 0 10px; font-style: italic; }
 .soc-btn-ghost {
   width: 100%; padding: 7px 10px; border-radius: 6px;
   border: 1px solid var(--soc-rule); background: transparent; color: var(--soc-ink-soft);
@@ -444,6 +430,81 @@ body { background: var(--soc-bg); color: var(--soc-ink); }
 "##;
 
 const PAGE_JS: &str = r##"
+const SOC_PLATFORMS = [
+  { id: 'bluesky',   name: 'Bluesky',     sub: 'AT Protocol app password',            tone: 'skyblue' },
+  { id: 'threads',   name: 'Threads',     sub: 'Meta OAuth2 (via Facebook Graph)',    tone: 'graphite' },
+  { id: 'youtube',   name: 'YouTube',     sub: 'Google OAuth2, community posts + comments', tone: 'crimson' },
+  { id: 'instagram', name: 'Instagram',   sub: 'Meta OAuth2 (Business or Creator)',   tone: 'rose' },
+  { id: 'linkedin',  name: 'LinkedIn',    sub: 'LinkedIn OAuth2 (Member / Page)',     tone: 'steel' },
+  { id: 'tiktok',    name: 'TikTok',      sub: 'TikTok for Developers',                tone: 'graphite' },
+  { id: 'facebook',  name: 'Facebook',    sub: 'Meta OAuth2 (Page posts)',             tone: 'navy' },
+  { id: 'twitter',   name: 'X / Twitter', sub: 'Paid API tier required',               tone: 'graphite' },
+];
+
+const SOC_STATUS_LABELS = {
+  connected:      { label: 'connected',     cls: 'soc-pill-connected' },
+  degraded:       { label: 'degraded',      cls: 'soc-pill-degraded' },
+  error:          { label: 'error',         cls: 'soc-pill-error' },
+  expired:        { label: 'expired',       cls: 'soc-pill-error' },
+  not_configured: { label: 'not connected', cls: 'soc-pill-idle' },
+};
+
+function socAuthToken() {
+  return sessionStorage.getItem('syntaur_token') || '';
+}
+
+function socAuthFetch(url, opts) {
+  opts = opts || {};
+  opts.headers = opts.headers || {};
+  const tok = socAuthToken();
+  if (tok) opts.headers['Authorization'] = 'Bearer ' + tok;
+  return fetch(url, opts);
+}
+
+function socEscape(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function socRenderPlatforms(connMap) {
+  const grid = document.getElementById('soc-platform-grid');
+  if (!grid) return;
+  grid.innerHTML = SOC_PLATFORMS.map(p => {
+    const conn = connMap[p.id];
+    const statusKey = conn ? (conn.status || 'connected') : 'not_configured';
+    const sLabel = (SOC_STATUS_LABELS[statusKey] || SOC_STATUS_LABELS.not_configured);
+    const handle = conn && conn.display_name ? `<p class="soc-platform-handle">${socEscape(conn.display_name)}</p>` : '';
+    const detail = conn && conn.status_detail ? `<p class="soc-platform-detail">${socEscape(conn.status_detail)}</p>` : '';
+    const btnLabel = conn ? (statusKey === 'connected' ? 'Connected' : 'Reconnect — next phase') : 'Connect — next phase';
+    return `
+      <div class="soc-platform-card soc-tone-${socEscape(p.tone)}">
+        <div class="soc-platform-head">
+          <span class="soc-platform-name">${socEscape(p.name)}</span>
+          <span class="soc-pill ${sLabel.cls}">${sLabel.label}</span>
+        </div>
+        ${handle}
+        <p class="soc-platform-sub">${socEscape(p.sub)}</p>
+        ${detail}
+        <button class="soc-btn-ghost" disabled>${btnLabel}</button>
+      </div>`;
+  }).join('');
+}
+
+async function socRefreshConnections() {
+  socRenderPlatforms({});
+  try {
+    const r = await socAuthFetch(`/api/social/connections?token=${encodeURIComponent(socAuthToken())}`);
+    if (!r.ok) return;
+    const rows = await r.json();
+    const map = {};
+    for (const c of rows) map[c.platform] = c;
+    socRenderPlatforms(map);
+  } catch (_) { /* page renders stub cards even if fetch fails */ }
+}
+window.addEventListener('DOMContentLoaded', socRefreshConnections);
+window.addEventListener('focus', socRefreshConnections);
+
 // Deep-linkable section switching via hash.
 function socActivate(section) {
   document.querySelectorAll('.soc-nav-row').forEach(el => {

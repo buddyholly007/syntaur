@@ -1624,6 +1624,33 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX IF NOT EXISTS idx_local_tracks_folder ON local_music_tracks(folder_id);
     CREATE UNIQUE INDEX IF NOT EXISTS uniq_local_tracks_user_path ON local_music_tracks(user_id, path);
     "#,
+    // ── v44 ──────────────────────────────────────────────────────────────
+    // Social-module platform connections. Each row represents one connected
+    // platform (Bluesky, Threads, YouTube, etc.) for one user. `credentials_json`
+    // holds the platform-specific auth blob (app password, OAuth tokens, etc.);
+    // plaintext for v1 — align with the rest of the SQLite storage posture.
+    // `agent_id` is optional so a multi-agent user can have e.g. a Bluesky
+    // connection for their artist persona and a different one for their
+    // business persona, keyed independently.
+    r#"
+    CREATE TABLE IF NOT EXISTS social_connections (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id           INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        platform          TEXT    NOT NULL,
+        display_name      TEXT,
+        credentials_json  TEXT    NOT NULL,
+        status            TEXT    NOT NULL DEFAULT 'connected',
+        status_detail     TEXT,
+        agent_id          TEXT,
+        connected_at      INTEGER NOT NULL,
+        last_verified_at  INTEGER,
+        expires_at        INTEGER,
+        created_at        INTEGER NOT NULL,
+        updated_at        INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_social_conn_user     ON social_connections(user_id);
+    CREATE INDEX IF NOT EXISTS idx_social_conn_platform ON social_connections(user_id, platform);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

@@ -18,6 +18,7 @@ mod telegram;
 mod plans;
 mod skills;
 mod slash;
+mod social;
 mod tool_hooks;
 mod tools;
 mod voice;
@@ -5425,6 +5426,9 @@ async fn main() {
         .route("/settings", get(pages::settings::render))
         .route("/settings/agents", get(pages::settings_agents::render))
         .route("/social", get(pages::social::render))
+        .route("/api/social/connections", get(social::handle_list))
+        .route("/api/social/connections", post(social::handle_create))
+        .route("/api/social/connections/{id}", axum::routing::delete(social::handle_delete))
         .route("/tax", get(pages::tax::render))
         .route("/chat", get(pages::chat::render))
         .route("/history", get(pages::history::render))
