@@ -85,6 +85,9 @@ pub enum AuthFlow {
         setup_steps: Vec<WizardStep>,
     },
     /// OAuth2 with PKCE. Filled in phases 4+.
+    /// Explicit rename because serde's snake_case mangler turns `OAuth2`
+    /// into `o_auth2`, which the UI's `kind === 'oauth2'` check would miss.
+    #[serde(rename = "oauth2")]
     OAuth2 {
         authorize_url: &'static str,
         token_url: &'static str,
