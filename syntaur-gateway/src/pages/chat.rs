@@ -560,11 +560,17 @@ async function send(msg) {
             const secs = ((Date.now() - t0) / 1000).toFixed(1);
             const rounds = ev.rounds > 1 ? ` &middot; ${ev.rounds} rounds` : '';
             const tools = toolsUsed.length ? ` &middot; ${toolsUsed.join(', ')}` : '';
-            responseEl.innerHTML = `<div class="text-gray-300 leading-relaxed text-sm chat-md">${md(ev.response)}</div>
+            // Strip the [HANDBACK] control marker from the user-visible text
+            // — it's internal metadata used to route agent switching.
+            const displayResp = (ev.response || '').replace(/\s*\[HANDBACK\]\s*/gi, '');
+            responseEl.innerHTML = `<div class="text-gray-300 leading-relaxed text-sm chat-md">${md(displayResp)}</div>
               <div class="flex items-center gap-3 mt-2"><span class="text-xs text-gray-600">${secs}s${rounds}${tools}</span>
-              <button onclick="copy(this)" class="text-xs text-gray-600 hover:text-gray-400" data-t="${escAttr(ev.response)}">Copy</button></div>`;
+              <button onclick="copy(this)" class="text-xs text-gray-600 hover:text-gray-400" data-t="${escAttr(displayResp)}">Copy</button></div>`;
             scroll.scrollTop = scroll.scrollHeight;
             if (voiceInitiated) { playTts(ev.response); voiceInitiated = false; }
+            // Maurice ends his turn with [HANDBACK] when done — flip the
+            // agent selector back to whoever summoned him.
+            if (typeof checkForHandback === 'function') checkForHandback(ev.response);
             sending = false; btn.disabled = false;
             document.getElementById('input').focus();
             return;
@@ -719,10 +725,73 @@ function pickFixOption(num, btn) {
       btn.classList.add('bg-oc-700','opacity-100');
     }
   }
+  // "Let my debug specialist look at this" special-cases to a handoff:
+  // switch the agent selector to Maurice and submit a context message.
+  // Detect via label text so we don't need to smuggle a marker through the
+  // failure-message format.
+  const label = btn ? (btn.dataset.label || btn.textContent || '') : '';
+  if (/\b(debug specialist|specialist look|get.*specialist)\b/i.test(label)
+      || /\bmaurice\b/i.test(label)) {
+    handoffToMaurice(btn);
+    return;
+  }
   const input = document.getElementById('input');
   if (!input) return;
   input.value = String(num);
   if (typeof sendMessage === 'function') sendMessage();
+}
+
+// Switch the chat to Maurice and kick off his turn with the failure
+// context pulled from the preceding conversation. Maurice's SOUL/STYLE/
+// IDENTITY files teach him to read the prior messages, diagnose, and
+// post back with `[HANDBACK]` when he's done so we can auto-return
+// control to Peter (or whoever was the prior main agent).
+function handoffToMaurice(btn) {
+  const priorAgent = currentAgent;
+  window._handoffReturnAgent = priorAgent; // remembered for [HANDBACK] later
+  // Grab the nearest ai-message's text so we can pass the failure summary
+  // to Maurice as context. We walk up from the button to the enclosing
+  // message container.
+  let ctx = '';
+  let el = btn ? btn.closest('.chat-md, [data-ai-msg]') : null;
+  if (!el) {
+    // Fallback: take last assistant message's text
+    const msgs = document.querySelectorAll('#messages .chat-md');
+    if (msgs.length) el = msgs[msgs.length - 1];
+  }
+  if (el) ctx = (el.innerText || '').trim().slice(0, 1500);
+
+  if (typeof switchAgent === 'function' && agents.includes('Maurice')) {
+    switchAgent('Maurice');
+  } else {
+    currentAgent = 'Maurice';
+    if (typeof updateAgentDisplay === 'function') updateAgentDisplay();
+  }
+
+  // Seed the prompt; the agent's STYLE.md makes him acknowledge once and
+  // then investigate. The `[HANDOFF FROM <prior>]` tag helps him set his
+  // opening frame.
+  const priorLabel = priorAgent || 'Peter';
+  const seedMsg = `[HANDOFF FROM ${priorLabel}] A tool just failed for Sean. Can you take a look? Here's what happened:\n\n${ctx}\n\nPlease diagnose and either fix it or report what Sean needs to decide. End your final reply with [HANDBACK] so we can return control.`;
+  const input = document.getElementById('input');
+  if (!input) return;
+  input.value = seedMsg;
+  if (typeof sendMessage === 'function') sendMessage();
+}
+
+// Watch for Maurice's [HANDBACK] marker and auto-flip back to the prior
+// agent. Called from the SSE complete event handler.
+function checkForHandback(responseText) {
+  if (!responseText || !/\[HANDBACK\]/i.test(responseText)) return;
+  const returnTo = window._handoffReturnAgent || 'Peter';
+  window._handoffReturnAgent = null;
+  if (currentAgent === returnTo) return;
+  if (typeof switchAgent === 'function' && agents.includes(returnTo)) {
+    switchAgent(returnTo);
+  } else {
+    currentAgent = returnTo;
+    if (typeof updateAgentDisplay === 'function') updateAgentDisplay();
+  }
 }
 
 // Drag and drop

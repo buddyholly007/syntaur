@@ -1704,12 +1704,18 @@ async function sendMessage() {
     const rounds = data.rounds || 0;
 
     if (data.response) {
-      const rendered = renderMarkdown(data.response);
+      // Strip the [HANDBACK] marker from displayed text — it's control
+      // metadata, not part of the user-visible message.
+      const displayText = data.response.replace(/\s*\[HANDBACK\]\s*/gi, '');
+      const rendered = renderMarkdown(displayText);
       const meta = rounds > 1 ? `<span class="text-xs text-gray-600 mt-2 block">${elapsed}s &middot; ${rounds} rounds</span>` : `<span class="text-xs text-gray-600 mt-2 block">${elapsed}s</span>`;
       aiDiv.querySelector('.flex-1').innerHTML = `
         <div class="text-gray-300 leading-relaxed chat-md">${rendered}</div>
         ${meta}
-        <button onclick="copyText(this)" class="text-xs text-gray-600 hover:text-gray-400 mt-1" data-text="${escapeAttr(data.response)}">Copy</button>`;
+        <button onclick="copyText(this)" class="text-xs text-gray-600 hover:text-gray-400 mt-1" data-text="${escapeAttr(displayText)}">Copy</button>`;
+      // Check for Maurice's [HANDBACK] marker in the raw response and
+      // flip the agent selector back to the summoning persona.
+      if (typeof checkForHandbackDash === 'function') checkForHandbackDash(data.response);
     } else if (data.error) {
       aiDiv.querySelector('.flex-1').innerHTML = `<p class="text-red-400 text-sm">${escapeHtml(data.error)}</p>`;
     }
@@ -1822,11 +1828,60 @@ function pickFixOptionDash(num, btn) {
     btn.classList.remove('bg-gray-700','opacity-60');
     btn.classList.add('bg-oc-700','opacity-100');
   }
+  const label = btn ? (btn.dataset.label || btn.textContent || '') : '';
+  // "Let my debug specialist look at this" routes to the Maurice handoff.
+  if (/\b(debug specialist|specialist look|get.*specialist)\b/i.test(label)
+      || /\bmaurice\b/i.test(label)) {
+    handoffToMauriceDash(btn);
+    return;
+  }
   const input = document.getElementById('chat-input') || document.getElementById('input');
   if (!input) return;
   input.value = String(num);
   if (typeof sendChat === 'function') sendChat();
   else if (typeof sendMessage === 'function') sendMessage();
+}
+
+// Dashboard variant of the Maurice handoff — flips the top-of-dash
+// agent selector (dashCurrentAgent) and seeds the chat input with the
+// failure context so Maurice opens with what went wrong.
+function handoffToMauriceDash(btn) {
+  const priorAgent = (typeof dashCurrentAgent !== 'undefined' && dashCurrentAgent) || 'Peter';
+  window._handoffReturnAgent = priorAgent;
+  let ctx = '';
+  let el = btn ? btn.closest('.chat-md, [data-ai-msg]') : null;
+  if (!el) {
+    const msgs = document.querySelectorAll('.chat-md');
+    if (msgs.length) el = msgs[msgs.length - 1];
+  }
+  if (el) ctx = (el.innerText || '').trim().slice(0, 1500);
+
+  // Flip selector
+  if (typeof dashAgents !== 'undefined' && dashAgents.includes('Maurice')) {
+    if (typeof switchDashAgent === 'function') switchDashAgent('Maurice');
+    else { dashCurrentAgent = 'Maurice'; if (typeof buildDashAgentMenu === 'function') buildDashAgentMenu(); }
+  }
+
+  const priorLabel = priorAgent || 'Peter';
+  const seedMsg = `[HANDOFF FROM ${priorLabel}] A tool just failed for Sean. Can you take a look? Here's what happened:\n\n${ctx}\n\nPlease diagnose and either fix it or report what Sean needs to decide. End your final reply with [HANDBACK] so we can return control.`;
+  const input = document.getElementById('chat-input') || document.getElementById('input');
+  if (!input) return;
+  input.value = seedMsg;
+  if (typeof sendChat === 'function') sendChat();
+  else if (typeof sendMessage === 'function') sendMessage();
+}
+
+// Dashboard equivalent of checkForHandback — flip the agent selector
+// back to the summoning persona when Maurice ends with [HANDBACK].
+function checkForHandbackDash(responseText) {
+  if (!responseText || !/\[HANDBACK\]/i.test(responseText)) return;
+  const returnTo = window._handoffReturnAgent || 'Peter';
+  window._handoffReturnAgent = null;
+  if (typeof dashCurrentAgent === 'undefined' || dashCurrentAgent === returnTo) return;
+  if (typeof dashAgents !== 'undefined' && dashAgents.includes(returnTo)) {
+    if (typeof switchDashAgent === 'function') switchDashAgent(returnTo);
+    else { dashCurrentAgent = returnTo; if (typeof buildDashAgentMenu === 'function') buildDashAgentMenu(); }
+  }
 }
 
 // Authenticated fetch helper
