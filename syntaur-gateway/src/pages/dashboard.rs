@@ -1772,7 +1772,61 @@ function renderMarkdown(text) {
   html = html.replace(/(^|<br>)### (.+?)(?=<br>|$)/g, '$1<p class="font-semibold text-white mt-2">$2</p>');
   html = html.replace(/(^|<br>)## (.+?)(?=<br>|$)/g, '$1<p class="font-bold text-white text-base mt-2">$2</p>');
 
+  // Fix-options → clickable buttons (see chat.rs for the full rationale).
+  html = renderFixOptionsDash(html);
+
   return html;
+}
+
+// Mirror of chat.rs renderFixOptions, tuned for dashboard's renderMarkdown
+// output shape (uses <span class="flex gap-2"> instead of <div>). Emitted
+// buttons submit the number into the dashboard chat input.
+function renderFixOptionsDash(html) {
+  const markerRe = /<strong[^>]*>\s*Fix options[^<]*<\/strong>\s*(?:<br>)?/i;
+  const m = html.match(markerRe);
+  if (!m) return html;
+  const prefix = html.slice(0, m.index + m[0].length);
+  const after = html.slice(m.index + m[0].length);
+  const itemRe = /<span class="flex gap-2"><span class="text-gray-500">(\d+)\.<\/span><span>([\s\S]*?)<\/span><\/span>/g;
+  const items = [];
+  let match, firstStart = -1, lastEnd = -1;
+  while ((match = itemRe.exec(after)) !== null) {
+    if (firstStart < 0) firstStart = match.index;
+    lastEnd = match.index + match[0].length;
+    items.push({ num: match[1], inner: match[2] });
+  }
+  if (items.length < 2) return html;
+  let btnHtml = '<div class="mt-2 mb-1 flex flex-wrap gap-2">';
+  for (const it of items) {
+    const labelMatch = it.inner.match(/<strong[^>]*>([^<]+)<\/strong>/);
+    const label = labelMatch ? labelMatch[1].trim() : `Option ${it.num}`;
+    const safeLabel = label.replace(/"/g, '&quot;');
+    btnHtml += `<button onclick="pickFixOptionDash(${it.num}, this)" data-label="${safeLabel}" ` +
+      `class="px-3 py-1.5 bg-oc-600 hover:bg-oc-700 text-white rounded-lg text-sm font-medium transition-colors shadow-sm">` +
+      escapeHtml(label) +
+      `</button>`;
+  }
+  btnHtml += '</div>';
+  return prefix + btnHtml + after.slice(0, firstStart) +
+    '<div class="text-xs text-gray-500 italic mt-1">Or reply with the number:</div>' +
+    after.slice(firstStart, lastEnd) + after.slice(lastEnd);
+}
+
+function pickFixOptionDash(num, btn) {
+  if (btn && btn.parentElement) {
+    for (const b of btn.parentElement.children) {
+      b.disabled = true;
+      b.classList.remove('bg-oc-600','hover:bg-oc-700');
+      b.classList.add('bg-gray-700','cursor-not-allowed','opacity-60');
+    }
+    btn.classList.remove('bg-gray-700','opacity-60');
+    btn.classList.add('bg-oc-700','opacity-100');
+  }
+  const input = document.getElementById('chat-input') || document.getElementById('input');
+  if (!input) return;
+  input.value = String(num);
+  if (typeof sendChat === 'function') sendChat();
+  else if (typeof sendMessage === 'function') sendMessage();
 }
 
 // Authenticated fetch helper

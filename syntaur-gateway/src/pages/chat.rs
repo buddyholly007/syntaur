@@ -654,7 +654,75 @@ function md(text) {
   h = h.replace(/(^|<br>)### (.+?)(?=<br>|$)/g, '$1<p class="font-semibold text-white mt-3 mb-1">$2</p>');
   // H2
   h = h.replace(/(^|<br>)## (.+?)(?=<br>|$)/g, '$1<p class="font-bold text-white text-base mt-3 mb-1">$2</p>');
+  // Fix-options → clickable buttons (runs last, operates on rendered HTML)
+  h = renderFixOptions(h);
   return h;
+}
+
+// Detect "Fix options — reply with a number" blocks emitted by tool failures
+// (see src/tools/image_gen.rs format_image_failure) and turn the numbered
+// items into clickable approval buttons. Clicking a button submits the
+// number as the user's next message — the agent's STYLE.md teaches it to
+// read the preceding options block and execute the chosen action.
+function renderFixOptions(html) {
+  // The marker is a bolded header containing "Fix options"; be lenient on
+  // punctuation + surrounding tags so agents that rephrase still trigger.
+  const markerRe = /<strong[^>]*>\s*Fix options[^<]*<\/strong>\s*(?:<br>)?/i;
+  const m = html.match(markerRe);
+  if (!m) return html;
+  const prefix = html.slice(0, m.index + m[0].length);
+  const after = html.slice(m.index + m[0].length);
+  // Each numbered item rendered by the Numbered rule above is:
+  //   <div class="flex gap-2 pl-1"><span class="text-gray-500 w-5 text-right flex-shrink-0">N.</span><span>INNER</span></div>
+  const itemRe = /<div class="flex gap-2 pl-1"><span class="text-gray-500 w-5 text-right flex-shrink-0">(\d+)\.<\/span><span>([\s\S]*?)<\/span><\/div>/g;
+  const items = [];
+  let match, firstStart = -1, lastEnd = -1;
+  while ((match = itemRe.exec(after)) !== null) {
+    if (firstStart < 0) firstStart = match.index;
+    lastEnd = match.index + match[0].length;
+    items.push({ num: match[1], inner: match[2] });
+  }
+  if (items.length < 2) return html; // not enough options to warrant buttons
+  // Build a horizontal button row to replace the numbered list.
+  let btnHtml = '<div class="mt-2.5 mb-1 flex flex-wrap gap-2">';
+  for (const it of items) {
+    const labelMatch = it.inner.match(/<strong[^>]*>([^<]+)<\/strong>/);
+    const label = labelMatch ? labelMatch[1].trim() : `Option ${it.num}`;
+    const safeLabel = label.replace(/"/g, '&quot;');
+    btnHtml += `<button onclick="pickFixOption(${it.num}, this)" data-label="${safeLabel}" ` +
+      `class="px-3 py-1.5 bg-oc-600 hover:bg-oc-700 text-white rounded-lg text-sm font-medium transition-colors shadow-sm">` +
+      esc(label) +
+      `</button>`;
+  }
+  btnHtml += '</div>';
+  // Keep the original numbered block so the agent can still read the full
+  // details when it processes this message as context on its next turn.
+  // Buttons appear ABOVE the numbered list.
+  return prefix + btnHtml + after.slice(0, firstStart) +
+    `<div class="text-xs text-gray-500 italic mt-1">Or reply with the number:</div>` +
+    after.slice(firstStart, lastEnd) + after.slice(lastEnd);
+}
+
+// User clicked a fix-option button — submit the number as a user message,
+// then visually mark all sibling buttons as disabled so they don't get
+// clicked twice.
+function pickFixOption(num, btn) {
+  if (btn) {
+    const row = btn.parentElement;
+    if (row) {
+      for (const b of row.children) {
+        b.disabled = true;
+        b.classList.remove('bg-oc-600','hover:bg-oc-700');
+        b.classList.add('bg-gray-700','cursor-not-allowed','opacity-60');
+      }
+      btn.classList.remove('bg-gray-700','opacity-60');
+      btn.classList.add('bg-oc-700','opacity-100');
+    }
+  }
+  const input = document.getElementById('input');
+  if (!input) return;
+  input.value = String(num);
+  if (typeof sendMessage === 'function') sendMessage();
 }
 
 // Drag and drop
