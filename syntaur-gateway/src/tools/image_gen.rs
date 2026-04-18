@@ -290,43 +290,31 @@ impl Tool for SaveImageTool {
     }
 }
 
-/// Generate an image via OpenRouter.
-///
-/// OpenRouter does NOT expose the OpenAI `/v1/images/generations` endpoint —
-/// image-capable models return generated images as base64 data URLs in
-/// `choices[0].message.images[]` through regular chat/completions. The
-/// previous `bytedance/seedream-4.5` + `/v1/images/generations` path hit
-/// OpenRouter's Next.js 404 page because that endpoint doesn't exist on
-/// their platform (and that model isn't listed either).
-///
-/// Model: `google/gemini-2.5-flash-image` — cheapest image-output model
-/// on OpenRouter as of 2026-04 (~$0.001 per image). For higher quality:
-/// `google/gemini-3-pro-image-preview` or `openai/gpt-5-image`.
-///
-/// `size` is accepted for API compatibility but ignored — Gemini doesn't
-/// take an explicit size argument, it generates at its default (roughly
-/// square, 1024-ish px). Callers that want a specific aspect should
-/// include it in the prompt ("square", "landscape 16:9", etc).
+/// Call OpenRouter's image generation API (Seedream 4.5 or similar).
 async fn call_image_api(
     http: &reqwest::Client,
     api_key: &str,
     prompt: &str,
-    _size: &str,
+    size: &str,
 ) -> Result<String, String> {
+    let (width, height) = match size {
+        "1024x1536" => (1024, 1536),
+        "1536x1024" => (1536, 1024),
+        _ => (1024, 1024),
+    };
+
     let body = json!({
-        "model": "google/gemini-2.5-flash-image",
-        "messages": [{
-            "role": "user",
-            "content": format!("Generate an image: {}", prompt),
-        }],
+        "model": "bytedance/seedream-4.5",
+        "prompt": prompt,
+        "n": 1,
+        "size": format!("{}x{}", width, height),
     });
 
     let resp = http
-        .post("https://openrouter.ai/api/v1/chat/completions")
+        .post("https://openrouter.ai/api/v1/images/generations")
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .json(&body)
-        .timeout(std::time::Duration::from_secs(180))
         .send()
         .await
         .map_err(|e| format!("image API request failed: {}", e))?;
@@ -340,32 +328,12 @@ async fn call_image_api(
     let data: Value = resp.json().await
         .map_err(|e| format!("image API response parse error: {}", e))?;
 
-    // Response shape: choices[0].message.images[0].image_url.url = "data:image/png;base64,..."
-    if let Some(url) = data
-        .pointer("/choices/0/message/images/0/image_url/url")
+    // Extract image URL from OpenAI-compatible response
+    data.get("data")
+        .and_then(|d| d.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|img| img.get("url").or_else(|| img.get("b64_json")))
         .and_then(|v| v.as_str())
-    {
-        return Ok(url.to_string());
-    }
-
-    // Model refused or returned no image — surface the reason so the user
-    // sees why instead of a generic "No image" error.
-    let refusal = data
-        .pointer("/choices/0/message/refusal")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let content = data
-        .pointer("/choices/0/message/content")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    if !refusal.is_empty() {
-        Err(format!("image model declined: {}", refusal))
-    } else if !content.is_empty() {
-        Err(format!(
-            "no image returned (model replied with text): {}",
-            &content[..content.len().min(200)]
-        ))
-    } else {
-        Err("image API returned no image and no explanation".to_string())
-    }
+        .map(|s| s.to_string())
+        .ok_or_else(|| "No image URL in response".to_string())
 }
