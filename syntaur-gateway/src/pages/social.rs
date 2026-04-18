@@ -389,6 +389,16 @@ body { background: var(--soc-bg); color: var(--soc-ink); }
   border: 1px solid var(--soc-rule); background: transparent; color: var(--soc-ink-soft);
   font-size: 12px; cursor: not-allowed;
 }
+/* Secondary / muted: clickable but not urgent — used on healthy cards so
+ * the user can still rotate credentials or re-verify without the button
+ * shouting at them the way the primary amber does. */
+.soc-btn-secondary {
+  width: 100%; padding: 7px 10px; border-radius: 6px;
+  border: 1px solid var(--soc-amber); background: transparent; color: var(--soc-amber-deep);
+  font-size: 12px; cursor: pointer;
+  transition: background .15s ease, color .15s ease;
+}
+.soc-btn-secondary:hover { background: var(--soc-amber-soft); color: var(--soc-amber-deep); }
 .soc-note {
   margin-top: 24px; padding: 14px 18px;
   font-family: 'Playfair Display', Georgia, serif; font-style: italic;
@@ -611,12 +621,15 @@ function socRenderPlatforms(connMap) {
     const detail = conn && conn.status_detail ? `<p class="soc-platform-detail">${socEscape(conn.status_detail)}</p>` : '';
     const kind = desc && desc.auth_flow ? desc.auth_flow.kind : 'unknown';
     const hasAdapter = kind && kind !== 'not_implemented' && kind !== 'unknown';
-    // Both paths route through the modal — the modal renders a friendly
-    // explainer for stubbed platforms instead of a dead-end disabled button.
+    // Button style tracks urgency. Healthy = muted (secondary); broken or
+    // unset = primary amber so the user's eye goes there first.
+    const isHealthy = statusKey === 'connected';
     const btnLabel = hasAdapter
       ? (conn ? 'Reconnect' : 'Connect')
-      : (conn ? "What's coming" : "What's coming");
-    const btnCls = hasAdapter ? 'soc-btn' : 'soc-btn-ghost';
+      : "What's coming";
+    const btnCls = !hasAdapter
+      ? 'soc-btn-ghost'
+      : (isHealthy ? 'soc-btn-secondary' : 'soc-btn');
     return `
       <div class="soc-platform-card soc-tone-${socEscape(p.tone)}">
         <div class="soc-platform-head">
