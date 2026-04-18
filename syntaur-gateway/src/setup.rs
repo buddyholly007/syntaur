@@ -1595,23 +1595,43 @@ fn get_subnet_prefix() -> String {
 }
 
 
-/// Probe a remote host's compute over SSH. Runs [PROBE_SCRIPT] and parses
-/// the tagged-line output. Returns `Some(NetworkComputeInfo)` if SSH
-/// connected and produced usable output, `None` if unreachable/denied.
-async fn probe_remote_compute(host: &str) -> Option<NetworkComputeInfo> {
-    let out = tokio::process::Command::new("ssh")
+/// Run [PROBE_SCRIPT] against a remote host by SSH'ing in and piping the
+/// script to `sh` on stdin. This sidesteps the user's login shell entirely
+/// — critical because some hosts in our LAN (e.g. gaming PC) log in to
+/// fish, which rejects POSIX `$()` + `=` assignment syntax.
+async fn run_probe_over_ssh(host: &str, timeout_secs: &str) -> Option<Vec<u8>> {
+    use tokio::io::AsyncWriteExt;
+    use std::process::Stdio;
+
+    let mut child = tokio::process::Command::new("ssh")
         .args([
-            "-o", "ConnectTimeout=1",
+            "-o", &format!("ConnectTimeout={}", timeout_secs),
             "-o", "StrictHostKeyChecking=no",
             "-o", "BatchMode=yes",
             &format!("sean@{}", host),
-            PROBE_SCRIPT,
+            "sh",
         ])
-        .output()
-        .await
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .ok()?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(PROBE_SCRIPT.as_bytes()).await.ok()?;
+        drop(stdin); // close so `sh` sees EOF and exits
+    }
+
+    let out = child.wait_with_output().await.ok()?;
     if !out.status.success() { return None; }
-    let lc = parse_probe_output(&String::from_utf8_lossy(&out.stdout));
+    Some(out.stdout)
+}
+
+/// Probe a remote host's compute over SSH. Returns `Some(NetworkComputeInfo)`
+/// if SSH connected and produced usable output, `None` if unreachable/denied.
+async fn probe_remote_compute(host: &str) -> Option<NetworkComputeInfo> {
+    let stdout = run_probe_over_ssh(host, "1").await?;
+    let lc = parse_probe_output(&String::from_utf8_lossy(&stdout));
     // Skip hosts where we couldn't identify anything useful.
     if lc.name.as_deref().unwrap_or("").is_empty() && lc.kind == "cpu" && lc.memory_gb.unwrap_or(0.0) < 4.0 {
         return None;
@@ -1895,16 +1915,31 @@ pub async fn handle_test_gpu(
     Json(req): Json<TestGpuRequest>,
 ) -> Result<Json<TestGpuResponse>, StatusCode> {
     require_setup_auth(&state, &extract_token_from_headers(&headers)).await?;
-    let output = tokio::process::Command::new("ssh")
+    // Pipe PROBE_SCRIPT to `sh` on stdin (sidesteps fish/zsh login shells).
+    use tokio::io::AsyncWriteExt;
+    use std::process::Stdio;
+    let child_result = tokio::process::Command::new("ssh")
         .args([
             "-o", "ConnectTimeout=5",
             "-o", "StrictHostKeyChecking=no",
             "-o", "BatchMode=yes",
             &format!("{}@{}", req.username, req.host),
-            PROBE_SCRIPT,
+            "sh",
         ])
-        .output()
-        .await;
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+    let output = match child_result {
+        Ok(mut child) => {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(PROBE_SCRIPT.as_bytes()).await;
+                drop(stdin);
+            }
+            child.wait_with_output().await
+        }
+        Err(e) => Err(e),
+    };
 
     match output {
         Ok(out) if out.status.success() => {
