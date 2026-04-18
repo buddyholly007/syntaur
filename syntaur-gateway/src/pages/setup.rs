@@ -297,7 +297,7 @@ const BODY_HTML: &str = r##"<div class="max-w-2xl mx-auto px-4 py-8">
         <label class="block p-4 rounded-lg border-2 cursor-pointer transition-colors border-gray-700 hover:border-oc-600" id="llm-opt-cloud">
           <input type="radio" name="llm" value="cloud" class="hidden" onchange="selectLlm('cloud')">
           <div class="flex items-center justify-between">
-            <div><span class="font-medium">Cloud API</span><p class="text-sm text-gray-400 mt-1">OpenRouter (free tier available), OpenAI, or Anthropic</p></div>
+            <div><span class="font-medium">Cloud API</span><p class="text-sm text-gray-400 mt-1">Free: OpenRouter, Groq, Cerebras. Paid: OpenAI, Anthropic</p></div>
             <span class="badge badge-yellow">Cloud</span>
           </div>
         </label>
@@ -308,7 +308,9 @@ const BODY_HTML: &str = r##"<div class="max-w-2xl mx-auto px-4 py-8">
         <div>
           <label class="label">Provider</label>
           <select id="cloud-provider" class="input" onchange="updateCloudProvider()">
-            <option value="openrouter">OpenRouter (free models available)</option>
+            <option value="openrouter">OpenRouter (free, tool-capable)</option>
+            <option value="groq">Groq (free, ~250 tok/s)</option>
+            <option value="cerebras">Cerebras (free, ~2000 tok/s — fastest)</option>
             <option value="openai">OpenAI ($5-15/mo)</option>
             <option value="anthropic">Anthropic ($10-30/mo)</option>
           </select>
@@ -349,6 +351,8 @@ const BODY_HTML: &str = r##"<div class="max-w-2xl mx-auto px-4 py-8">
             <select id="fallback-provider" class="input" onchange="updateFallbackProvider()">
               <option value="none">Skip — no fallback</option>
               <option value="openrouter">OpenRouter (free tier)</option>
+              <option value="groq">Groq (free, fast)</option>
+              <option value="cerebras">Cerebras (free, fastest)</option>
               <option value="ollama">Local model (Ollama)</option>
               <option value="openai">OpenAI</option>
               <option value="anthropic">Anthropic</option>
@@ -1523,6 +1527,18 @@ function updateCloudProvider() {
       intro: 'Get your free API key in under a minute:',
       detail: 'Free tier includes tool-capable models. No credit card required.'
     },
+    groq: {
+      url: 'https://console.groq.com/keys',
+      label: 'Open Groq Console &#8599;',
+      intro: 'Sign up (free, no card) and create an API key:',
+      detail: 'Runs Llama 3.3 70B at ~250 tok/s on custom LPU hardware. Free tier: ~30 req/min, 14k req/day.'
+    },
+    cerebras: {
+      url: 'https://cloud.cerebras.ai/',
+      label: 'Open Cerebras Cloud &#8599;',
+      intro: 'Sign up (free, no card) → API Keys → Create:',
+      detail: 'Runs Qwen 3 235B MoE at ~2000 tok/s on wafer-scale chips — fastest inference available. Free tier: 1M tokens/day.'
+    },
     openai: {
       url: 'https://platform.openai.com/api-keys',
       label: 'Open OpenAI API Keys Page &#8599;',
@@ -1547,7 +1563,13 @@ function updateCloudProvider() {
 async function testLlm() {
   const provider = document.getElementById('cloud-provider').value;
   const key = document.getElementById('cloud-key').value;
-  const urls = { openrouter: 'https://openrouter.ai/api/v1', openai: 'https://api.openai.com/v1', anthropic: 'https://api.anthropic.com/v1' };
+  const urls = {
+    openrouter: 'https://openrouter.ai/api/v1',
+    groq: 'https://api.groq.com/openai/v1',
+    cerebras: 'https://api.cerebras.ai/v1',
+    openai: 'https://api.openai.com/v1',
+    anthropic: 'https://api.anthropic.com/v1'
+  };
   const result = document.getElementById('llm-test-result');
   result.className = 'text-sm mt-2 text-gray-400';
   result.classList.remove('hidden');
@@ -1595,6 +1617,18 @@ function updateFallbackProvider() {
       text: 'Free tier available — no credit card required. Great as a backup.',
       link: 'https://openrouter.ai/settings/keys',
       linkText: 'Get OpenRouter API Key &#8599;',
+      showKey: true
+    },
+    groq: {
+      text: 'Free tier, no card. Llama 3.3 70B at ~250 tok/s — very fast as a backup.',
+      link: 'https://console.groq.com/keys',
+      linkText: 'Get Groq API Key &#8599;',
+      showKey: true
+    },
+    cerebras: {
+      text: 'Free tier, no card. Qwen 3 235B at ~2000 tok/s — fastest backup available.',
+      link: 'https://cloud.cerebras.ai/',
+      linkText: 'Get Cerebras API Key &#8599;',
       showKey: true
     },
     ollama: {
@@ -1839,7 +1873,7 @@ function buildSummary() {
   const user = document.getElementById('user-name').value || 'User';
   const llmLabels = { local: 'Local (Ollama)', network: 'Network LLM', cloud: 'Cloud API' };
   const fbProvider = document.getElementById('fallback-provider').value;
-  const fbLabels = { none: 'None', openrouter: 'OpenRouter', ollama: 'Local (Ollama)', openai: 'OpenAI', anthropic: 'Anthropic' };
+  const fbLabels = { none: 'None', openrouter: 'OpenRouter', groq: 'Groq', cerebras: 'Cerebras', ollama: 'Local (Ollama)', openai: 'OpenAI', anthropic: 'Anthropic' };
   const enabledMods = modules.filter(m => m.enabled).length;
 
   document.getElementById('summary').innerHTML = `
@@ -1868,7 +1902,13 @@ async function finishSetup() {
   // Collect all choices
   const cloudProvider = document.getElementById('cloud-provider')?.value || 'openrouter';
   const cloudKey = document.getElementById('cloud-key')?.value || '';
-  const providerModels = { openrouter: 'nvidia/llama-3.3-nemotron-super-49b-v1:free', openai: 'gpt-4o-mini', anthropic: 'claude-sonnet-4-6' };
+  const providerModels = {
+    openrouter: 'nvidia/nemotron-3-super-120b-a12b:free',
+    groq: 'llama-3.3-70b-versatile',
+    cerebras: 'qwen-3-235b-a22b-instruct-2507',
+    openai: 'gpt-4o-mini',
+    anthropic: 'claude-sonnet-4-6'
+  };
 
   const body = {
     agent_name: name,

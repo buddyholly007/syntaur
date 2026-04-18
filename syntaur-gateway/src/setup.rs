@@ -825,6 +825,8 @@ pub struct SetupApplyResponse {
 fn build_provider(input: &LlmProviderInput) -> serde_json::Value {
     let base_url = match input.provider.as_str() {
         "openrouter" => input.base_url.as_deref().unwrap_or("https://openrouter.ai/api/v1"),
+        "groq" => input.base_url.as_deref().unwrap_or("https://api.groq.com/openai/v1"),
+        "cerebras" => input.base_url.as_deref().unwrap_or("https://api.cerebras.ai/v1"),
         "openai" => input.base_url.as_deref().unwrap_or("https://api.openai.com/v1"),
         "anthropic" => input.base_url.as_deref().unwrap_or("https://api.anthropic.com/v1"),
         _ => input.base_url.as_deref().unwrap_or("http://127.0.0.1:11434/v1"),

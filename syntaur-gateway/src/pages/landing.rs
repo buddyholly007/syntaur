@@ -143,16 +143,18 @@ fn llm_options() -> Markup {
     let opts = [
         ("Local GPU", "Ollama + your NVIDIA/AMD/Apple GPU", "Free · Private", "text-green-400"),
         ("Network LLM", "Auto-discovers Ollama on your LAN", "Free · LAN-only", "text-blue-400"),
-        ("OpenRouter", "Free tier with tool-capable models", "Free tier available", "text-yellow-400"),
+        ("OpenRouter", "Free tier with tool-capable models", "Free · No card", "text-yellow-400"),
+        ("Groq", "Llama 3.3 70B at ~250 tok/s", "Free · No card", "text-yellow-400"),
+        ("Cerebras", "Qwen 3 235B at ~2000 tok/s (fastest)", "Free · No card", "text-yellow-400"),
         ("OpenAI / Anthropic", "GPT-4o, Claude Sonnet", "Pay-per-use", "text-gray-400"),
     ];
     html! {
         section class="max-w-5xl mx-auto px-4 py-16" {
             h2 class="text-3xl font-bold text-center mb-4" { "Bring your own brain" }
             p class="text-gray-400 text-center mb-12 max-w-xl mx-auto" {
-                "Use any LLM — local or cloud. Syntaur auto-detects your hardware and recommends the best setup with automatic fallbacks."
+                "Use any LLM — local or cloud. Syntaur auto-detects your hardware and recommends the best setup with automatic fallbacks across three free cloud tiers."
             }
-            div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4" {
+            div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4" {
                 @for (name, desc, badge, badge_color) in &opts {
                     div class="bg-gray-800/30 border border-gray-700/50 rounded-xl p-4 text-center" {
                         p class="font-medium" { (name) }

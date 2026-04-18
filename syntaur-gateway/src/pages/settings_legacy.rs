@@ -138,7 +138,7 @@ pub fn tab_llm() -> Markup {
                                         "Cloud API (Recommended)"
                                     }
                                     p class="text-xs text-gray-500" {
-                                        "OpenRouter, Anthropic, or OpenAI — best quality, no hardware needed"
+                                        "OpenRouter, Groq, Cerebras (all free), Anthropic, or OpenAI — best quality, no hardware needed"
                                     }
                                 }
                                 span class="text-xs text-gray-600 group-open:rotate-90 transition-transform" {
@@ -208,6 +208,66 @@ pub fn tab_llm() -> Markup {
                                                 "Add credits →"
                                             }
                                         }
+                                    }
+                                }
+                                div class="p-3 bg-gray-900/50 rounded-lg border border-gray-800" {
+                                    p class="text-gray-300 font-medium mb-2" {
+                                        "Groq (fast free tier, no card)"
+                                    }
+                                    ol class="text-xs text-gray-400 space-y-1 list-decimal ml-4" {
+                                        li {
+                                            "Sign up at "
+                                            a href="https://console.groq.com/" target="_blank" class="text-oc-500 hover:text-oc-400" {
+                                                "console.groq.com"
+                                            }
+                                        }
+                                        li {
+                                            "Go to "
+                                            a href="https://console.groq.com/keys" target="_blank" class="text-oc-500 hover:text-oc-400" {
+                                                "API Keys"
+                                            }
+                                            " → Create API Key"
+                                        }
+                                        li {
+                                            "Paste below and click Save"
+                                        }
+                                    }
+                                    div class="flex gap-2 mt-2" {
+                                        input class="input flex-1 text-xs" id="setup-groq-key" placeholder="gsk_...";
+                                        button onclick="saveProvider('groq','https://api.groq.com/openai/v1',document.getElementById('setup-groq-key').value,'openai-completions','llama-3.3-70b-versatile')" class="btn-primary text-xs" {
+                                            "Save"
+                                        }
+                                    }
+                                    p class="text-[11px] text-gray-500 mt-2" {
+                                        "Llama 3.3 70B at ~250 tok/s on custom LPU hardware. Free tier: ~30 req/min, 14,400 req/day. No credit card required."
+                                    }
+                                }
+                                div class="p-3 bg-gray-900/50 rounded-lg border border-gray-800" {
+                                    p class="text-gray-300 font-medium mb-2" {
+                                        "Cerebras (fastest free tier, no card)"
+                                    }
+                                    ol class="text-xs text-gray-400 space-y-1 list-decimal ml-4" {
+                                        li {
+                                            "Sign up at "
+                                            a href="https://cloud.cerebras.ai/" target="_blank" class="text-oc-500 hover:text-oc-400" {
+                                                "cloud.cerebras.ai"
+                                            }
+                                        }
+                                        li {
+                                            "Dashboard → API Keys → Create"
+                                        }
+                                        li {
+                                            "Paste below and click Save"
+                                        }
+                                    }
+                                    div class="flex gap-2 mt-2" {
+                                        input class="input flex-1 text-xs" id="setup-cerebras-key" placeholder="csk-...";
+                                        button onclick="saveProvider('cerebras','https://api.cerebras.ai/v1',document.getElementById('setup-cerebras-key').value,'openai-completions','qwen-3-235b-a22b-instruct-2507')" class="btn-primary text-xs" {
+                                            "Save"
+                                        }
+                                    }
+                                    p class="text-[11px] text-gray-500 mt-2" {
+                                        "Qwen 3 235B MoE at ~2000 tok/s on wafer-scale chips — fastest inference available. Free tier: 1M tokens/day. Occasional 'high traffic' queues on free tier are normal — Syntaur auto-skips to the next provider."
                                     }
                                 }
                                 div class="p-3 bg-gray-900/50 rounded-lg border border-gray-800" {
