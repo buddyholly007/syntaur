@@ -274,24 +274,48 @@ pub async fn handle_reconnect(
     // treat it as a fresh connect with whatever fields they supplied.
     let fields_empty = req.fields.as_object().map(|o| o.is_empty()).unwrap_or(true);
 
-    let existing_creds: Option<serde_json::Value> = if fields_empty {
+    // When agent_id is specified, match exact. When the client didn't
+    // send one (typical — most UIs today don't know which persona's row
+    // they're targeting), fall back to any row for (user, platform) and
+    // take the most recently verified one. Sean's rows are tagged with
+    // agent_id='crimson-lantern' from the workspace import; the modal
+    // doesn't know that and shouldn't have to.
+    let existing: Option<(i64, Option<String>, serde_json::Value)> = if fields_empty {
         let db = state.db_path.clone();
         let platform_q = platform.clone();
         let agent_q = req.agent_id.clone();
-        tokio::task::spawn_blocking(move || -> Option<serde_json::Value> {
+        tokio::task::spawn_blocking(move || -> Option<(i64, Option<String>, serde_json::Value)> {
             let conn = rusqlite::Connection::open(&db).ok()?;
-            let json: String = conn.query_row(
-                "SELECT credentials_json FROM social_connections \
-                 WHERE user_id = ? AND platform = ? AND COALESCE(agent_id,'') = COALESCE(?,'')",
-                rusqlite::params![uid, platform_q, agent_q],
-                |r| r.get(0),
-            ).ok()?;
-            serde_json::from_str(&json).ok()
+            let row: Option<(i64, Option<String>, String)> = if let Some(agent) = agent_q.as_deref() {
+                conn.query_row(
+                    "SELECT id, agent_id, credentials_json FROM social_connections \
+                     WHERE user_id = ? AND platform = ? AND agent_id = ?",
+                    rusqlite::params![uid, platform_q, agent],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                ).ok()
+            } else {
+                conn.query_row(
+                    "SELECT id, agent_id, credentials_json FROM social_connections \
+                     WHERE user_id = ? AND platform = ? \
+                     ORDER BY COALESCE(last_verified_at, updated_at) DESC LIMIT 1",
+                    rusqlite::params![uid, platform_q],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                ).ok()
+            };
+            let (id, found_agent, json) = row?;
+            let creds: serde_json::Value = serde_json::from_str(&json).ok()?;
+            Some((id, found_agent, creds))
         })
         .await
         .ok()
         .flatten()
     } else { None };
+    let existing_creds = existing.as_ref().map(|(_, _, c)| c.clone());
+    // When the request didn't specify agent_id but we found one, use it
+    // on the write path so we update the SAME row instead of inserting a
+    // duplicate.
+    let effective_agent_id = req.agent_id.clone()
+        .or_else(|| existing.as_ref().and_then(|(_, a, _)| a.clone()));
 
     let stored = if let Some(creds) = existing_creds {
         // Silent refresh. On success we rebuild a StoredCredentials from
@@ -327,20 +351,35 @@ pub async fn handle_reconnect(
     let now = chrono::Utc::now().timestamp();
     let db = state.db_path.clone();
     let platform_s = platform.clone();
-    let agent_id = req.agent_id.clone();
+    let agent_id = effective_agent_id.clone();
     let display_name = stored.display_name.clone();
     let creds_str = stored.credentials.to_string();
     let expires_at = stored.expires_at;
+    let existing_id: Option<i64> = existing.as_ref().map(|(id, _, _)| *id);
 
     let row_id = tokio::task::spawn_blocking(move || -> Result<i64, String> {
         let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
-        let existing: Option<i64> = conn.query_row(
-            "SELECT id FROM social_connections \
-             WHERE user_id = ? AND platform = ? AND COALESCE(agent_id,'') = COALESCE(?,'')",
-            rusqlite::params![uid, platform_s, agent_id],
-            |r| r.get(0),
-        ).ok();
-        if let Some(id) = existing {
+        // If we already looked up the row (refresh path), reuse its id
+        // directly so we can't miss it due to an agent_id mismatch.
+        let target_id: Option<i64> = existing_id.or_else(|| {
+            if let Some(agent) = agent_id.as_deref() {
+                conn.query_row(
+                    "SELECT id FROM social_connections \
+                     WHERE user_id = ? AND platform = ? AND agent_id = ?",
+                    rusqlite::params![uid, platform_s, agent],
+                    |r| r.get(0),
+                ).ok()
+            } else {
+                conn.query_row(
+                    "SELECT id FROM social_connections \
+                     WHERE user_id = ? AND platform = ? \
+                     ORDER BY COALESCE(last_verified_at, updated_at) DESC LIMIT 1",
+                    rusqlite::params![uid, platform_s],
+                    |r| r.get(0),
+                ).ok()
+            }
+        });
+        if let Some(id) = target_id {
             conn.execute(
                 "UPDATE social_connections SET \
                    display_name = ?, credentials_json = ?, status = 'connected', \
