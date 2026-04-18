@@ -684,7 +684,13 @@ function socWizardHtml(desc, conn) {
       <div id="soc-modal-status"></div>`;
   }
 
-  const steps = (flow.setup_steps || []).map((s, i) => {
+  // Reconnect vs first-time-connect: if a row already exists the user
+  // has already done all the provider-console setup work. Skip the
+  // setup steps and show a brief re-auth prompt instead.
+  const isReconnect = !!conn;
+
+  // Setup wizard — first-time connect only.
+  const stepsHtml = isReconnect ? '' : (flow.setup_steps || []).map((s, i) => {
     const linkHtml = s.deep_link
       ? `<a class="soc-wizard-link" href="${socEscape(s.deep_link)}" target="_blank" rel="noopener">${socEscape(s.deep_link)}</a>`
       : '';
@@ -696,6 +702,46 @@ function socWizardHtml(desc, conn) {
       </div>`;
   }).join('');
 
+  // Reconnect intro — short explainer pointing at whatever the user
+  // most likely needs to do. For app_password platforms we surface the
+  // first setup-step deep link so they can rotate the password if they
+  // suspect that's what broke. For OAuth we show a stored-token banner.
+  let introHtml = '';
+  if (isReconnect) {
+    if (kind === 'app_password') {
+      const firstLinkStep = (flow.setup_steps || []).find(s => s.deep_link);
+      const handleNote = conn.display_name
+        ? `You were connected as <code>${socEscape(conn.display_name)}</code>.`
+        : '';
+      const rotateHelp = firstLinkStep
+        ? `If you think your app password rotated (or you'd just rather make a fresh one), generate one here first: <a class="soc-wizard-link" href="${socEscape(firstLinkStep.deep_link)}" target="_blank" rel="noopener">${socEscape(firstLinkStep.deep_link)}</a>`
+        : '';
+      introHtml = `
+        <div class="soc-wizard-step">
+          <h3 class="soc-wizard-step-title">Reconnect ${socEscape(desc.display_name)}</h3>
+          <p class="soc-wizard-step-body">${handleNote} Paste your handle and app password below — I'll verify them with ${socEscape(desc.display_name)} and save a fresh session.</p>
+          ${rotateHelp ? `<p class="soc-wizard-step-body" style="margin-top:8px">${rotateHelp}</p>` : ''}
+        </div>`;
+    } else if (kind === 'oauth2') {
+      const handleNote = conn.display_name
+        ? `Connected as <code>${socEscape(conn.display_name)}</code>. `
+        : '';
+      introHtml = `
+        <div class="soc-modal-info">
+          <strong>You already have a connection on file.</strong>
+          <p>${handleNote}Hit <em>Refresh</em> and I'll use your stored refresh token to get a fresh access token from ${socEscape(desc.display_name)}. No re-login required, no forms to fill.</p>
+        </div>`;
+    } else if (kind === 'paid') {
+      introHtml = `
+        <div class="soc-modal-info">
+          <strong>Reconnect ${socEscape(desc.display_name)}</strong>
+          <p>${socEscape(desc.display_name)} requires a paid API tier. If your subscription lapsed, renew it first; then come back here to paste your refreshed key.</p>
+        </div>`;
+    }
+  }
+
+  // Form section — only the data-entry parts. For reconnect-OAuth2 the
+  // "form" is just the Refresh button itself, handled in socOpenModal.
   let formHtml = '';
   if (kind === 'app_password') {
     const labels = flow.field_labels || ['Field 1', 'Field 2'];
@@ -703,7 +749,7 @@ function socWizardHtml(desc, conn) {
     formHtml = `
       <div class="soc-field-group">
         <label class="soc-field-label" for="soc-field-handle">${socEscape(labels[0])}</label>
-        <input type="text" id="soc-field-handle" class="soc-field-input" autocomplete="off" spellcheck="false">
+        <input type="text" id="soc-field-handle" class="soc-field-input" autocomplete="off" spellcheck="false" value="${isReconnect && conn.display_name ? socEscape(conn.display_name) : ''}">
         <div class="soc-field-help">${socEscape(helps[0])}</div>
       </div>
       <div class="soc-field-group">
@@ -711,27 +757,17 @@ function socWizardHtml(desc, conn) {
         <input type="password" id="soc-field-password" class="soc-field-input" autocomplete="new-password" spellcheck="false">
         <div class="soc-field-help">${socEscape(helps[1])}</div>
       </div>`;
-  } else if (kind === 'oauth2') {
-    // If we already have a row on file, offer the silent-refresh path.
-    // First-time connect UI (popup OAuth window + callback catcher) is
-    // the next piece of work.
-    if (conn) {
-      formHtml = `
-        <div class="soc-modal-info">
-          <strong>You already have a connection on file.</strong>
-          <p>Hit <em>Refresh</em> and I'll use your stored refresh token to get a fresh access token from ${socEscape(desc.display_name)}. No re-login required.</p>
-        </div>`;
-    } else {
-      formHtml = `
-        <div class="soc-modal-info">
-          <strong>First-time OAuth connect</strong>
-          <p>The popup-based Google OAuth flow is arriving in the next release. For now, if you already have tokens from an existing setup, you can import them via the <code>/api/social/connections</code> endpoint.</p>
-        </div>`;
-    }
-  } else if (kind === 'paid') {
+  } else if (kind === 'oauth2' && !isReconnect) {
+    formHtml = `
+      <div class="soc-modal-info">
+        <strong>First-time OAuth connect</strong>
+        <p>The popup-based OAuth flow arrives in the next release. For now, if you already have tokens from an existing integration, import them via the <code>/api/social/connections</code> endpoint and come back — the Refresh path takes over from there.</p>
+      </div>`;
+  } else if (kind === 'paid' && !isReconnect) {
     formHtml = `<div class="soc-modal-info">This platform requires a paid API tier. Sign up first, then come back and paste your key.</div>`;
   }
-  return steps + formHtml + '<div id="soc-modal-status"></div>';
+
+  return introHtml + stepsHtml + formHtml + '<div id="soc-modal-status"></div>';
 }
 
 function socOpenModal(platformId) {
