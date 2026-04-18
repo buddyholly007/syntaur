@@ -1057,11 +1057,12 @@ async function loadTimeline() {
     const has = availableDates.has(d);
     const secs = intensityByDate[d] || 0;
     let lvl = 0;
-    if (has && secs === 0) lvl = 1;
-    else if (secs > 0 && secs < 600) lvl = 1;
-    else if (secs < 1800) lvl = 2;
-    else if (secs < 3600) lvl = 3;
-    else if (secs >= 3600) lvl = 4;
+    if (has || secs > 0) {
+      if (secs >= 3600) lvl = 4;
+      else if (secs >= 1800) lvl = 3;
+      else if (secs >= 600) lvl = 2;
+      else lvl = 1;
+    }
     const cls = 'j-year-cell' + (lvl ? ' l' + lvl : '');
     html += '<div class="' + cls + '" title="' + esc(longDate(d)) + (secs ? (' — ' + Math.round(secs/60) + ' min') : '') + '" onclick="showTab(\'today\');loadDay(\'' + d + '\');"></div>';
     cursor.setDate(cursor.getDate() + 1);
