@@ -27,6 +27,9 @@ pub async fn render() -> Html<String> {
                 span class="soc-crumb-sep" { "/" }
                 span class="soc-crumb-current" { "Social" }
                 div class="soc-topbar-right" {
+                    span id="soc-pause-pill" class="soc-pause-pill soc-pause-hidden" title="Something is paused — see Settings → Pause" {
+                        "Paused"
+                    }
                     span class="soc-persona-pill" title="Module specialist: Nyota" {
                         span class="soc-persona-sigil" { "★" }
                         span class="soc-persona-name" { "Nyota" }
@@ -132,6 +135,19 @@ pub async fn render() -> Html<String> {
                         h1 class="soc-h1" { "Connections" }
                         p class="soc-subhead" { "Which platforms Nyota can speak to, and how healthy each one is." }
                     }
+                    // First-run nudge — shown when user has a connection but no brand voice yet.
+                    div id="soc-firstrun-banner" class="soc-firstrun-banner soc-firstrun-hidden" {
+                        div class="soc-firstrun-sigil" { "★" }
+                        div {
+                            p class="soc-firstrun-h" { "One more thing before drafts start landing." }
+                            p class="soc-firstrun-p" {
+                                "You're connected, but I don't have your voice yet. Give me a paragraph — who you are, how you sound, what you avoid — and I'll seed every draft with it. "
+                                a href="#settings" onclick="socGoto('settings'); return false;" { "Go to Settings → Voice & audience" }
+                                "."
+                            }
+                            p class="soc-firstrun-sig" { "—Nyota" }
+                        }
+                    }
                     div class="soc-platform-grid" id="soc-platform-grid" {
                         // Cards render from the PLATFORMS JS constant on load.
                         // Each card is updated with live status from /api/social/connections
@@ -146,26 +162,52 @@ pub async fn render() -> Html<String> {
                 section id="pane-settings" class="soc-pane" {
                     div class="soc-pane-head" {
                         h1 class="soc-h1" { "Settings" }
-                        p class="soc-subhead" { "Voice, schedule, engagement strategy, notifications." }
+                        p class="soc-subhead" { "Voice, audience, approval, engagement, notifications, pause, privacy, and a couple advanced knobs." }
                     }
                     div class="soc-settings-stack" {
-                        // Brand voice
+                        // Voice & audience
                         div class="soc-setting-card" {
-                            h3 class="soc-setting-h" { "Brand voice" }
-                            p class="soc-setting-p" { "One paragraph describing how you want to sound. Nyota seeds every LLM draft with this text, so make it specific — your values, your aesthetic, what you avoid." }
-                            textarea id="soc-set-brand-voice" class="soc-field-input soc-set-textarea" rows="5" placeholder="e.g. Crimson Lantern is an indie singer-songwriter. Warm and grounded. First person. Never uses AI language (delve, tapestry, resonate). Talks like a person who actually made the thing." oninput="socMarkDirty()" {}
-                        }
-                        // Posting schedule
-                        div class="soc-setting-card" {
-                            h3 class="soc-setting-h" { "Posting schedule" }
-                            p class="soc-setting-p" { "When daily auto-drafts land in your queue so you can approve them with your morning coffee." }
-                            label class="soc-set-check" {
-                                input type="checkbox" id="soc-set-schedule-enabled" onchange="socMarkDirty()";
-                                span { "Draft a daily post for me" }
+                            h3 class="soc-setting-h" { "Voice & audience" }
+                            p class="soc-setting-p" { "Nyota seeds every draft with this. Make it specific — your values, your aesthetic, what you avoid." }
+                            div class="soc-field-group" {
+                                div class="soc-field-labelrow" {
+                                    label class="soc-field-label" for="soc-set-brand-voice" { "Brand voice" }
+                                    button type="button" class="soc-assist-btn" onclick="socAssistOpen('brand_voice','soc-set-brand-voice')" title="Let Nyota draft this from sample posts" { "✨ Help me draft it" }
+                                }
+                                textarea id="soc-set-brand-voice" class="soc-field-input soc-set-textarea" rows="5" placeholder="e.g. Crimson Lantern is an indie singer-songwriter. Warm and grounded. First person. Never uses AI language (delve, tapestry, resonate). Talks like a person who actually made the thing." oninput="socMarkDirty()" {}
                             }
-                            div class="soc-set-row" {
-                                label class="soc-set-label" for="soc-set-schedule-time" { "Time of day (local)" }
-                                input type="time" id="soc-set-schedule-time" class="soc-field-input soc-set-time" value="09:00" oninput="socMarkDirty()";
+                            div class="soc-field-group" {
+                                div class="soc-field-labelrow" {
+                                    label class="soc-field-label" for="soc-set-audience" { "Who you're writing for" }
+                                    button type="button" class="soc-assist-btn" onclick="socAssistOpen('audience','soc-set-audience')" title="Let Nyota sharpen a rough sketch" { "✨ Sharpen" }
+                                }
+                                textarea id="soc-set-audience" class="soc-field-input soc-set-textarea soc-set-textarea-short" rows="2" placeholder="e.g. Fans of indie folk who care about craft over virality. Late 20s to early 40s." oninput="socMarkDirty()" {}
+                            }
+                        }
+                        // Approval mode
+                        div class="soc-setting-card" {
+                            h3 class="soc-setting-h" { "Approval mode" }
+                            p class="soc-setting-p" { "How much Nyota can ship on her own. Start with always-review; move to auto-post once you trust a few drafts." }
+                            label class="soc-set-radio" {
+                                input type="radio" name="soc-set-approval" value="always_review" onchange="socMarkDirty()";
+                                div {
+                                    strong { "Always review" }
+                                    p { "Every draft waits for your yes. Recommended when you're starting out." }
+                                }
+                            }
+                            label class="soc-set-radio" {
+                                input type="radio" name="soc-set-approval" value="auto_post_routine" onchange="socMarkDirty()";
+                                div {
+                                    strong { "Auto-post routine, review risky" }
+                                    p { "Recurring stuff goes live automatically. Nyota flags anything she isn't sure about." }
+                                }
+                            }
+                            label class="soc-set-radio" {
+                                input type="radio" name="soc-set-approval" value="auto_post_all" onchange="socMarkDirty()";
+                                div {
+                                    strong { "Auto-post all" }
+                                    p { "High-trust mode. Nyota posts without review. You'll see the result in Queue either way." }
+                                }
                             }
                         }
                         // Engagement strategy
@@ -211,6 +253,63 @@ pub async fn render() -> Html<String> {
                                 span { "Weekly stats summary" }
                             }
                         }
+                        // Pause
+                        div class="soc-setting-card" {
+                            h3 class="soc-setting-h" { "Pause" }
+                            p class="soc-setting-p" { "Master switches. Vacation mode, quiet period, whatever life asks for. Flip these back when you're ready." }
+                            label class="soc-set-check" {
+                                input type="checkbox" id="soc-set-pause-posting" onchange="socMarkDirty()";
+                                span { "Pause all posting (drafts still land in Queue for review)" }
+                            }
+                            label class="soc-set-check" {
+                                input type="checkbox" id="soc-set-pause-engagement" onchange="socMarkDirty()";
+                                span { "Pause engagement (no likes, follows, unfollows)" }
+                            }
+                            label class="soc-set-check" {
+                                input type="checkbox" id="soc-set-pause-notifications" onchange="socMarkDirty()";
+                                span { "Quiet notifications" }
+                            }
+                        }
+                        // Privacy
+                        div class="soc-setting-card" {
+                            h3 class="soc-setting-h" { "Privacy" }
+                            p class="soc-setting-p" { "Which other modules Nyota may read for richer drafts. Everything is opt-in. Journal is never accessible to Nyota, regardless of these toggles." }
+                            label class="soc-set-check" {
+                                input type="checkbox" id="soc-set-privacy-calendar" onchange="socMarkDirty()";
+                                span { "Calendar — upcoming shows, deadlines, travel" }
+                            }
+                            label class="soc-set-check" {
+                                input type="checkbox" id="soc-set-privacy-music" onchange="socMarkDirty()";
+                                span { "Music module — new tracks, recent listens" }
+                            }
+                            label class="soc-set-check" {
+                                input type="checkbox" id="soc-set-privacy-research" onchange="socMarkDirty()";
+                                span { "Research — knowledge base + saved sources" }
+                            }
+                            p class="soc-setting-hint" { "Journal is hardcoded-isolated. No toggle." }
+                        }
+                        // Advanced: tone + blocklist
+                        div class="soc-setting-card" {
+                            h3 class="soc-setting-h" { "Advanced — tone + blocklist" }
+                            p class="soc-setting-p" { "Fine-tune Nyota's dials and tell her what to avoid. Most users leave these alone." }
+                            div class="soc-set-row" {
+                                label class="soc-set-label" for="soc-set-tone-humor" { "Humor (0 = dry, 10 = playful)" }
+                                input type="range" id="soc-set-tone-humor" class="soc-set-slider" min="0" max="10" value="4" oninput="socSliderLabel('soc-set-tone-humor'); socMarkDirty()";
+                                span class="soc-set-sliderval" id="soc-set-tone-humor-val" { "4" }
+                            }
+                            div class="soc-set-row" {
+                                label class="soc-set-label" for="soc-set-tone-formality" { "Formality (0 = casual, 10 = formal)" }
+                                input type="range" id="soc-set-tone-formality" class="soc-set-slider" min="0" max="10" value="4" oninput="socSliderLabel('soc-set-tone-formality'); socMarkDirty()";
+                                span class="soc-set-sliderval" id="soc-set-tone-formality-val" { "4" }
+                            }
+                            div class="soc-field-group" {
+                                div class="soc-field-labelrow" {
+                                    label class="soc-field-label" for="soc-set-blocklist" { "Blocklist (comma-separated)" }
+                                    button type="button" class="soc-assist-btn" onclick="socAssistOpen('blocklist','soc-set-blocklist')" title="Describe what you avoid, Nyota drafts a list" { "✨ Draft from description" }
+                                }
+                                textarea id="soc-set-blocklist" class="soc-field-input soc-set-textarea soc-set-textarea-short" rows="2" placeholder="e.g. grind, hustle, delve, unpack, tapestry, resonate, crushing it" oninput="socMarkDirty()" {}
+                            }
+                        }
                     }
                     // Sticky save bar — only visible when dirty.
                     div id="soc-settings-savebar" class="soc-savebar soc-savebar-hidden" {
@@ -223,6 +322,115 @@ pub async fn render() -> Html<String> {
 
             // ── Toast (for settings save confirmation) ────────────────────
             div id="soc-toast" { "" }
+
+            // ── Nyota-assist modal ────────────────────────────────────────
+            div id="soc-assist-modal" {
+                div class="soc-modal-backdrop" onclick="socAssistClose()" {}
+                div class="soc-modal-card" role="dialog" aria-modal="true" {
+                    div class="soc-modal-head" {
+                        div {
+                            h2 class="soc-modal-title" id="soc-assist-title" { "Help me draft" }
+                            p class="soc-modal-sub" id="soc-assist-subtitle" { "" }
+                        }
+                        button class="soc-modal-close" onclick="socAssistClose()" aria-label="Close" { "×" }
+                    }
+                    div class="soc-modal-body" {
+                        textarea id="soc-assist-input" class="soc-field-input soc-assist-input" rows="6" {}
+                        div id="soc-assist-result-row" style="display:none" {
+                            div class="soc-assist-draft-head" { "Nyota's draft (edit freely after):" }
+                            div id="soc-assist-result" class="soc-assist-draft" { "" }
+                        }
+                        div id="soc-assist-status" class="soc-assist-status" { "" }
+                        p class="soc-modal-note" { "—Nyota" }
+                    }
+                    div class="soc-modal-foot" {
+                        button class="soc-btn-ghost" onclick="socAssistClose()" { "Cancel" }
+                        button class="soc-btn-secondary" onclick="socAssistSend()" id="soc-assist-submit" { "Draft it" }
+                        button class="soc-btn" onclick="socAssistKeep()" { "Keep this draft" }
+                    }
+                }
+            }
+
+            // ── Per-connection slide-in panel ─────────────────────────────
+            aside id="soc-plat-panel" class="soc-plat-panel" aria-label="Platform settings" {
+                div class="soc-plat-head" {
+                    div {
+                        h2 class="soc-plat-title" id="soc-plat-title" { "" }
+                        p class="soc-plat-handle" id="soc-plat-handle" { "" }
+                    }
+                    button class="soc-modal-close" onclick="socClosePlatformPanel()" aria-label="Close" { "×" }
+                }
+                div class="soc-plat-body" {
+                    div class="soc-setting-card" {
+                        h3 class="soc-setting-h" { "Voice override" }
+                        p class="soc-setting-p" id="soc-plat-voice-placeholder" { "" }
+                        textarea id="soc-plat-voice" class="soc-field-input soc-set-textarea soc-set-textarea-short" rows="3" placeholder="Optional. e.g. More formal for LinkedIn, or terser for Threads." {}
+                    }
+                    div class="soc-setting-card" {
+                        h3 class="soc-setting-h" { "Content pillars" }
+                        p class="soc-setting-p" { "3–5 recurring post types Nyota rotates through when drafting. One per line." }
+                        textarea id="soc-plat-pillars" class="soc-field-input soc-set-textarea" rows="5" placeholder="e.g.\nBehind the song — one paragraph on what a track is about\nRelease announcements — new single or EP drops\nGigs + rehearsal — show reminders, studio updates\nQuiet reflections — songwriting or music industry\nCommunity — boost other indie artists" {}
+                    }
+                    div class="soc-setting-card" {
+                        h3 class="soc-setting-h" { "Posting cadence" }
+                        p class="soc-setting-p" { "Which days a draft lands in your Queue, and whether it auto-posts without review." }
+                        div class="soc-plat-daygrid" {
+                            @for (id, label) in [("mon","M"), ("tue","T"), ("wed","W"), ("thu","T"), ("fri","F"), ("sat","S"), ("sun","S")] {
+                                label class="soc-plat-day" {
+                                    input type="checkbox" id={"soc-plat-day-" (id)};
+                                    span { (label) }
+                                }
+                            }
+                        }
+                        div class="soc-set-row" {
+                            label class="soc-set-label" for="soc-plat-time" { "Time of day (local)" }
+                            input type="time" id="soc-plat-time" class="soc-field-input soc-set-time" value="09:00";
+                        }
+                        label class="soc-set-check" {
+                            input type="checkbox" id="soc-plat-autopost";
+                            span { "Auto-post (no review) on this platform" }
+                        }
+                    }
+                    div class="soc-setting-card" {
+                        h3 class="soc-setting-h" { "Engagement — hashtags" }
+                        p class="soc-setting-p" { "Comma-separated hashtags Nyota engages on. Blank = inherit your global strategy." }
+                        textarea id="soc-plat-hashtags" class="soc-field-input soc-set-textarea soc-set-textarea-short" rows="2" placeholder="e.g. indiefolk, songwriter, indiemusic, acoustic" {}
+                    }
+                    div class="soc-setting-card" {
+                        h3 class="soc-setting-h" { "Signature / CTA" }
+                        p class="soc-setting-p" { "Optional outro for this platform. Blank = no signature." }
+                        textarea id="soc-plat-signature" class="soc-field-input soc-set-textarea soc-set-textarea-short" rows="2" placeholder="e.g. New single out now → crimsonlantern.band" {}
+                    }
+                    div class="soc-setting-card" {
+                        h3 class="soc-setting-h" { "Approval override" }
+                        p class="soc-setting-p" { "Override your global approval mode for this platform only." }
+                        select id="soc-plat-approval" class="soc-field-input soc-set-select" {
+                            option value="inherit" { "Inherit global setting" }
+                            option value="always_review" { "Always review" }
+                            option value="auto_post_routine" { "Auto-post routine, review risky" }
+                            option value="auto_post_all" { "Auto-post all" }
+                        }
+                    }
+                    div class="soc-setting-card" {
+                        h3 class="soc-setting-h" { "Pause this platform" }
+                        p class="soc-setting-p" { "Mute this one without pausing everything. Useful when one account is in a rough spot." }
+                        label class="soc-set-check" {
+                            input type="checkbox" id="soc-plat-pause";
+                            span { "Pause posting + engagement on this platform" }
+                        }
+                    }
+                    div class="soc-setting-card soc-plat-danger" {
+                        h3 class="soc-setting-h" { "Disconnect" }
+                        p class="soc-setting-p" { "Remove this platform entirely. You can reconnect later with fresh credentials." }
+                        button class="soc-btn-danger" onclick="socPlatformDisconnect()" { "Disconnect…" }
+                    }
+                }
+                div class="soc-plat-foot" {
+                    span class="soc-assist-status" id="soc-plat-status" { "" }
+                    button class="soc-btn-ghost" onclick="socClosePlatformPanel()" { "Cancel" }
+                    button class="soc-btn" onclick="socPlatformPanelSave()" { "Save" }
+                }
+            }
 
             // ── Reconnect modal (hidden by default) ───────────────────────
             div id="soc-modal" {
@@ -537,12 +745,12 @@ body { background: var(--soc-bg); color: var(--soc-ink); }
  * against any hidden-state class, so the container stays displayless
  * and we toggle one class on/off in JS.
  */
-#soc-modal {
+#soc-modal, #soc-assist-modal {
   display: none;
   position: fixed; inset: 0; z-index: 100;
   align-items: center; justify-content: center;
 }
-#soc-modal.soc-modal-open { display: flex; }
+#soc-modal.soc-modal-open, #soc-assist-modal.soc-modal-open { display: flex; }
 .soc-modal-backdrop {
   position: absolute; inset: 0;
   background: rgba(22, 18, 16, 0.72); backdrop-filter: blur(2px);
@@ -637,6 +845,132 @@ body { background: var(--soc-bg); color: var(--soc-ink); }
   font-style: italic; color: var(--soc-ink-soft); font-size: 13px; text-align: right;
 }
 
+/* Additional setting controls */
+.soc-field-labelrow { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.soc-assist-btn {
+  font-size: 11px; padding: 3px 10px; border-radius: 999px;
+  background: var(--soc-amber-soft); color: var(--soc-amber-deep); border: 1px solid var(--soc-amber);
+  cursor: pointer; transition: background .15s ease;
+}
+.soc-assist-btn:hover { background: var(--soc-amber); color: #1a1208; }
+.soc-set-textarea-short { min-height: 56px; }
+.soc-set-radio {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 10px 12px; margin-top: 8px;
+  background: #fffdf6; border: 1px solid var(--soc-rule); border-radius: 8px;
+  cursor: pointer; transition: border-color .15s ease, background .15s ease;
+}
+.soc-set-radio:hover { border-color: var(--soc-amber); }
+.soc-set-radio input[type="radio"] { accent-color: var(--soc-amber); margin-top: 2px; }
+.soc-set-radio strong { font-family: 'Playfair Display', Georgia, serif; font-size: 14px; color: var(--soc-ink); display: block; margin-bottom: 2px; }
+.soc-set-radio p { font-size: 12px; color: var(--soc-ink-mute); margin: 0; line-height: 1.45; }
+.soc-set-slider { flex: 1; max-width: 260px; accent-color: var(--soc-amber); }
+.soc-set-sliderval {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 13px; color: var(--soc-amber-deep); min-width: 24px; text-align: right;
+}
+
+/* Top-bar pause pill */
+.soc-pause-pill {
+  display: inline-flex; align-items: center;
+  padding: 4px 10px; border-radius: 999px;
+  background: #f5e3ba; color: #8a6214; border: 1px solid #d6a94a;
+  font-size: 11px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase;
+}
+.soc-pause-hidden { display: none !important; }
+
+/* First-run banner on Connections */
+.soc-firstrun-banner {
+  margin: 12px 0 20px; padding: 16px 18px;
+  background: #fffdf6; border: 1px solid var(--soc-amber); border-left: 4px solid var(--soc-amber);
+  border-radius: 8px; display: flex; gap: 14px; align-items: flex-start;
+}
+.soc-firstrun-hidden { display: none !important; }
+.soc-firstrun-sigil {
+  flex-shrink: 0; width: 32px; height: 32px; border-radius: 999px;
+  background: var(--soc-amber-soft); color: var(--soc-amber-deep);
+  display: flex; align-items: center; justify-content: center;
+  font-family: 'Playfair Display', Georgia, serif; font-size: 14px;
+}
+.soc-firstrun-h {
+  font-family: 'Playfair Display', Georgia, serif;
+  font-size: 16px; font-weight: 600; color: var(--soc-ink); margin: 0 0 6px;
+}
+.soc-firstrun-p { font-size: 13px; color: var(--soc-ink-mute); margin: 0 0 6px; line-height: 1.55; }
+.soc-firstrun-p a { color: var(--soc-amber-deep); text-decoration: underline; text-underline-offset: 2px; }
+.soc-firstrun-sig {
+  font-family: 'Playfair Display', Georgia, serif;
+  font-style: italic; color: var(--soc-ink-soft); font-size: 12px; margin: 4px 0 0;
+}
+
+/* Clickable healthy cards + manage hint */
+.soc-platform-card-clickable { cursor: pointer; transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease; }
+.soc-platform-card-clickable:hover { transform: translateY(-1px); box-shadow: 0 4px 18px -10px rgba(73,49,12,0.4); border-color: var(--soc-amber); }
+.soc-platform-manage {
+  margin-top: 10px; font-size: 11px; color: var(--soc-ink-soft); font-style: italic; text-align: right;
+}
+.soc-platform-card-clickable:hover .soc-platform-manage { color: var(--soc-amber-deep); }
+
+/* Per-connection slide-in panel */
+.soc-plat-panel {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(520px, 92vw);
+  background: var(--soc-surface);
+  border-left: 1px solid var(--soc-rule);
+  box-shadow: -12px 0 40px -10px rgba(73,49,12,0.35);
+  display: flex; flex-direction: column;
+  transform: translateX(100%); transition: transform .22s ease;
+  z-index: 90;
+}
+.soc-plat-panel.soc-plat-open { transform: translateX(0); }
+.soc-plat-head {
+  padding: 18px 22px 14px; border-bottom: 1px solid var(--soc-rule);
+  display: flex; align-items: flex-start; gap: 12px;
+  background: var(--soc-surface-2);
+}
+.soc-plat-title {
+  font-family: 'Playfair Display', Georgia, serif;
+  font-size: 22px; font-weight: 600; margin: 0; color: var(--soc-ink);
+}
+.soc-plat-handle { margin: 3px 0 0; font-size: 13px; color: var(--soc-ink-soft); font-family: 'JetBrains Mono', ui-monospace, monospace; }
+.soc-plat-handle code { background: transparent; padding: 0; color: var(--soc-ink); }
+.soc-plat-body { flex: 1; overflow-y: auto; padding: 18px 22px; display: flex; flex-direction: column; gap: 12px; }
+.soc-plat-foot {
+  padding: 12px 22px; border-top: 1px solid var(--soc-rule);
+  display: flex; justify-content: flex-end; gap: 8px; align-items: center;
+  background: var(--soc-surface-2);
+}
+.soc-plat-foot .soc-assist-status { flex: 1; font-style: italic; color: var(--soc-ink-soft); font-size: 12px; }
+.soc-plat-daygrid { display: flex; gap: 6px; margin: 10px 0; }
+.soc-plat-day {
+  flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px;
+  padding: 6px 0; border: 1px solid var(--soc-rule); border-radius: 6px;
+  cursor: pointer; font-size: 11px; color: var(--soc-ink-soft); background: #fffdf6;
+  transition: border-color .12s ease, background .12s ease, color .12s ease;
+}
+.soc-plat-day:has(input:checked) { border-color: var(--soc-amber); background: var(--soc-amber-soft); color: var(--soc-amber-deep); font-weight: 600; }
+.soc-plat-day input { accent-color: var(--soc-amber); margin: 0; }
+.soc-plat-day span { font-family: 'Playfair Display', Georgia, serif; font-size: 13px; }
+.soc-plat-danger { border-color: #e0c0b7; background: #fdf5f2; }
+.soc-btn-danger {
+  padding: 7px 14px; border-radius: 6px;
+  background: #c94c3a; color: #fff; border: 0; font-weight: 500; font-size: 13px; cursor: pointer;
+  transition: background .15s ease;
+}
+.soc-btn-danger:hover { background: #a33a2a; }
+
+/* Nyota-assist modal body bits */
+.soc-assist-input { width: 100%; resize: vertical; font-family: 'Inter', sans-serif; font-size: 13px; }
+.soc-assist-draft-head { font-size: 12px; font-weight: 600; color: var(--soc-ink); margin: 14px 0 4px; letter-spacing: .02em; }
+.soc-assist-draft {
+  padding: 12px; background: #fffdf6; border: 1px solid var(--soc-rule);
+  border-left: 3px solid var(--soc-amber); border-radius: 6px;
+  font-size: 13px; line-height: 1.55; color: var(--soc-ink); white-space: pre-wrap;
+  font-family: 'Inter', sans-serif;
+}
+.soc-assist-status { margin-top: 10px; font-size: 13px; color: var(--soc-ink-soft); font-style: italic; }
+.soc-assist-status-busy { color: var(--soc-amber-deep); }
+.soc-assist-status-error { color: #953224; background: #f3d1cb; padding: 8px 10px; border-radius: 4px; font-style: normal; }
+
 /* Tone accents on platform cards (subtle) */
 .soc-tone-skyblue  { border-top: 2px solid #7fb2d4; }
 .soc-tone-graphite { border-top: 2px solid #6b6760; }
@@ -709,25 +1043,31 @@ function socRenderPlatforms(connMap) {
     const hasAdapter = kind && kind !== 'not_implemented' && kind !== 'unknown';
     const isHealthy = statusKey === 'connected';
 
-    // A button should only exist when there's a meaningful action behind it:
-    //  - live adapter + broken connection → primary "Reconnect"
-    //  - live adapter + never connected   → primary "Connect"
+    // Per-state affordance:
+    //  - live adapter + healthy           → whole card clicks into the
+    //    per-platform settings panel (voice override, pillars, cadence,
+    //    engagement, signature, disconnect). No primary button needed —
+    //    the card body is the affordance, plus a subtle "Manage →" hint
+    //  - live adapter + broken connection → primary "Reconnect" button
+    //  - live adapter + never connected   → primary "Connect" button
     //  - stubbed platform                 → ghost "What's coming" explainer
-    //  - live adapter + healthy           → NO button. The status pill is
-    //    the affordance; there's nothing to act on. If the connection
-    //    ever degrades, the status flips and the button reappears.
-    //    Deliberate disconnect / account-switch belongs to a future
-    //    Settings pane or card-level menu, not the primary affordance.
     let buttonHtml = '';
+    let cardCls = `soc-platform-card soc-tone-${socEscape(p.tone)}`;
+    let cardOnClick = '';
     if (!hasAdapter) {
       buttonHtml = `<button class="soc-btn-ghost" onclick="socOpenModal('${p.id}')">What's coming</button>`;
     } else if (!isHealthy) {
       const lbl = conn ? 'Reconnect' : 'Connect';
       buttonHtml = `<button class="soc-btn" onclick="socOpenModal('${p.id}')">${lbl}</button>`;
+    } else {
+      // Healthy: clickable card → platform panel
+      cardCls += ' soc-platform-card-clickable';
+      cardOnClick = `onclick="socOpenPlatformPanel('${p.id}')"`;
+      buttonHtml = `<div class="soc-platform-manage">Manage →</div>`;
     }
 
     return `
-      <div class="soc-platform-card soc-tone-${socEscape(p.tone)}">
+      <div class="${cardCls}" ${cardOnClick}>
         <div class="soc-platform-head">
           <span class="soc-platform-name">${socEscape(p.name)}</span>
           <span class="soc-pill ${sLabel.cls}">${sLabel.label}</span>
@@ -992,6 +1332,7 @@ async function socRefreshConnections() {
     for (const c of rows) map[c.platform] = c;
     SOC_CONNECTIONS_MAP = map;
     socRenderPlatforms(map);
+    socUpdateFirstRunBanner();
   } catch (_) { /* page renders stub cards even if fetch fails */ }
 }
 window.addEventListener('DOMContentLoaded', socRefreshConnections);
@@ -1011,15 +1352,34 @@ window.addEventListener('keydown', (e) => {
 // numbers so the round-trip is lossless).
 
 const SOC_PREF_KEYS = [
+  // Voice & audience
   'social.brand_voice',
+  'social.audience',
+  // Approval
+  'social.approval_mode',
+  // Posting schedule
   'social.schedule.enabled',
   'social.schedule.time',
+  // Engagement
   'social.engage.preset',
   'social.engage.likes_per_day',
   'social.engage.follows_per_day',
   'social.engage.unfollow_after_days',
+  // Notifications
   'social.notify.telegram',
   'social.notify.stats',
+  // Pause
+  'social.pause.posting',
+  'social.pause.engagement',
+  'social.pause.notifications',
+  // Privacy
+  'social.privacy.calendar',
+  'social.privacy.music',
+  'social.privacy.research',
+  // Advanced — tone + blocklist
+  'social.tone.humor',
+  'social.tone.formality',
+  'social.blocklist.words',
 ];
 
 let SOC_SETTINGS_BASELINE = {};  // last-loaded values, for dirty + revert
@@ -1031,30 +1391,49 @@ function socPrefGet(map, key, fallback) {
 }
 
 function socApplySettingsToUI(map) {
-  document.getElementById('soc-set-brand-voice').value =
-    socPrefGet(map, 'social.brand_voice', '');
-  document.getElementById('soc-set-schedule-enabled').checked =
-    socPrefGet(map, 'social.schedule.enabled', 'false') === 'true';
-  document.getElementById('soc-set-schedule-time').value =
-    socPrefGet(map, 'social.schedule.time', '09:00');
-  document.getElementById('soc-set-engage-preset').value =
-    socPrefGet(map, 'social.engage.preset', 'off');
-  document.getElementById('soc-set-engage-likes').value =
-    socPrefGet(map, 'social.engage.likes_per_day', '20');
-  document.getElementById('soc-set-engage-follows').value =
-    socPrefGet(map, 'social.engage.follows_per_day', '15');
-  document.getElementById('soc-set-engage-unfollow').value =
-    socPrefGet(map, 'social.engage.unfollow_after_days', '7');
-  document.getElementById('soc-set-notify-telegram').checked =
-    socPrefGet(map, 'social.notify.telegram', 'true') === 'true';
-  document.getElementById('soc-set-notify-stats').checked =
-    socPrefGet(map, 'social.notify.stats', 'false') === 'true';
+  // Voice & audience
+  document.getElementById('soc-set-brand-voice').value = socPrefGet(map, 'social.brand_voice', '');
+  document.getElementById('soc-set-audience').value    = socPrefGet(map, 'social.audience', '');
+  // Approval mode
+  const approval = socPrefGet(map, 'social.approval_mode', 'always_review');
+  const approvalRadio = document.querySelector(`input[name="soc-set-approval"][value="${approval}"]`);
+  if (approvalRadio) approvalRadio.checked = true;
+  // Posting schedule
+  document.getElementById('soc-set-schedule-enabled').checked = socPrefGet(map, 'social.schedule.enabled', 'false') === 'true';
+  document.getElementById('soc-set-schedule-time').value = socPrefGet(map, 'social.schedule.time', '09:00');
+  // Engagement
+  document.getElementById('soc-set-engage-preset').value = socPrefGet(map, 'social.engage.preset', 'off');
+  document.getElementById('soc-set-engage-likes').value = socPrefGet(map, 'social.engage.likes_per_day', '20');
+  document.getElementById('soc-set-engage-follows').value = socPrefGet(map, 'social.engage.follows_per_day', '15');
+  document.getElementById('soc-set-engage-unfollow').value = socPrefGet(map, 'social.engage.unfollow_after_days', '7');
+  // Notifications
+  document.getElementById('soc-set-notify-telegram').checked = socPrefGet(map, 'social.notify.telegram', 'true') === 'true';
+  document.getElementById('soc-set-notify-stats').checked = socPrefGet(map, 'social.notify.stats', 'false') === 'true';
+  // Pause
+  document.getElementById('soc-set-pause-posting').checked = socPrefGet(map, 'social.pause.posting', 'false') === 'true';
+  document.getElementById('soc-set-pause-engagement').checked = socPrefGet(map, 'social.pause.engagement', 'false') === 'true';
+  document.getElementById('soc-set-pause-notifications').checked = socPrefGet(map, 'social.pause.notifications', 'false') === 'true';
+  // Privacy
+  document.getElementById('soc-set-privacy-calendar').checked = socPrefGet(map, 'social.privacy.calendar', 'false') === 'true';
+  document.getElementById('soc-set-privacy-music').checked = socPrefGet(map, 'social.privacy.music', 'false') === 'true';
+  document.getElementById('soc-set-privacy-research').checked = socPrefGet(map, 'social.privacy.research', 'false') === 'true';
+  // Advanced — tone + blocklist
+  document.getElementById('soc-set-tone-humor').value = socPrefGet(map, 'social.tone.humor', '4');
+  document.getElementById('soc-set-tone-formality').value = socPrefGet(map, 'social.tone.formality', '4');
+  socSliderLabel('soc-set-tone-humor');
+  socSliderLabel('soc-set-tone-formality');
+  document.getElementById('soc-set-blocklist').value = socPrefGet(map, 'social.blocklist.words', '');
   socEngagePresetChanged();
+  // Global pause indicator in top bar
+  socRefreshPauseBadge();
 }
 
 function socCollectSettingsFromUI() {
+  const approvalChecked = document.querySelector('input[name="soc-set-approval"]:checked');
   return {
     'social.brand_voice':            document.getElementById('soc-set-brand-voice').value,
+    'social.audience':               document.getElementById('soc-set-audience').value,
+    'social.approval_mode':          (approvalChecked && approvalChecked.value) || 'always_review',
     'social.schedule.enabled':       String(document.getElementById('soc-set-schedule-enabled').checked),
     'social.schedule.time':          document.getElementById('soc-set-schedule-time').value || '09:00',
     'social.engage.preset':          document.getElementById('soc-set-engage-preset').value,
@@ -1063,7 +1442,22 @@ function socCollectSettingsFromUI() {
     'social.engage.unfollow_after_days': String(document.getElementById('soc-set-engage-unfollow').value || '7'),
     'social.notify.telegram':        String(document.getElementById('soc-set-notify-telegram').checked),
     'social.notify.stats':           String(document.getElementById('soc-set-notify-stats').checked),
+    'social.pause.posting':          String(document.getElementById('soc-set-pause-posting').checked),
+    'social.pause.engagement':       String(document.getElementById('soc-set-pause-engagement').checked),
+    'social.pause.notifications':    String(document.getElementById('soc-set-pause-notifications').checked),
+    'social.privacy.calendar':       String(document.getElementById('soc-set-privacy-calendar').checked),
+    'social.privacy.music':          String(document.getElementById('soc-set-privacy-music').checked),
+    'social.privacy.research':       String(document.getElementById('soc-set-privacy-research').checked),
+    'social.tone.humor':             String(document.getElementById('soc-set-tone-humor').value || '4'),
+    'social.tone.formality':         String(document.getElementById('soc-set-tone-formality').value || '4'),
+    'social.blocklist.words':        document.getElementById('soc-set-blocklist').value,
   };
+}
+
+function socSliderLabel(id) {
+  const el = document.getElementById(id);
+  const lbl = document.getElementById(id + '-val');
+  if (el && lbl) lbl.textContent = el.value;
 }
 
 function socEngagePresetChanged() {
@@ -1096,8 +1490,13 @@ async function socLoadSettings() {
     socApplySettingsToUI(prefs);
     SOC_SETTINGS_LOADED = true;
     document.getElementById('soc-settings-savebar').classList.add('soc-savebar-hidden');
+    socUpdateFirstRunBanner();
   } catch (_) {}
 }
+
+// Load settings early (not just on Settings-pane entry) so the first-run
+// banner + pause badge reflect reality on any page load.
+window.addEventListener('DOMContentLoaded', () => { socLoadSettings(); });
 
 function socRevertSettings() {
   SOC_SETTINGS_LOADED = false;
@@ -1130,9 +1529,291 @@ async function socSaveSettings() {
     SOC_SETTINGS_BASELINE = { ...now };
     document.getElementById('soc-settings-savebar').classList.add('soc-savebar-hidden');
     socToast('Settings saved.');
+    socRefreshPauseBadge();
+    socUpdateFirstRunBanner();
   } else {
     socToast('Couldn\'t save — try again in a moment.');
   }
+}
+
+// ── Pause indicator in top bar ─────────────────────────────────────────────
+
+function socRefreshPauseBadge() {
+  const paused =
+    document.getElementById('soc-set-pause-posting')?.checked ||
+    document.getElementById('soc-set-pause-engagement')?.checked ||
+    document.getElementById('soc-set-pause-notifications')?.checked;
+  const pill = document.getElementById('soc-pause-pill');
+  if (!pill) return;
+  if (paused) pill.classList.remove('soc-pause-hidden');
+  else        pill.classList.add('soc-pause-hidden');
+}
+
+// ── First-run nudge ────────────────────────────────────────────────────────
+// On Connections, if the user has a connected platform but no brand voice
+// saved, show a warm Nyota-voice banner linking to Settings.
+
+function socUpdateFirstRunBanner() {
+  const banner = document.getElementById('soc-firstrun-banner');
+  if (!banner) return;
+  const haveConnection = Object.values(SOC_CONNECTIONS_MAP || {}).some(c => c && c.status === 'connected');
+  const haveVoice = (SOC_SETTINGS_BASELINE['social.brand_voice'] || '').trim().length > 0;
+  if (haveConnection && !haveVoice) banner.classList.remove('soc-firstrun-hidden');
+  else                              banner.classList.add('soc-firstrun-hidden');
+}
+
+// ── Nyota-assist modal ─────────────────────────────────────────────────────
+// Inline helper that asks Nyota to draft a field value from a short user
+// description (or sample posts for brand_voice).
+
+let SOC_ASSIST_TARGET = null;  // { intent, fieldId }
+
+const SOC_ASSIST_CONFIG = {
+  brand_voice: {
+    title: 'Help me draft your brand voice',
+    subtitle: 'Paste 2–4 of your recent posts — I\'ll listen for tone, what you care about, what you avoid, and draft a paragraph. You can edit it after.',
+    prompt: 'Paste posts (one per line is fine)…',
+    key: 'sample_posts',
+    rows: 8,
+  },
+  audience: {
+    title: 'Sharpen your audience sketch',
+    subtitle: 'Who are you writing for? A few words is enough — I\'ll tighten it.',
+    prompt: 'e.g. people who love indie folk, listen to vinyl, late 20s-early 40s',
+    key: 'content',
+    rows: 3,
+  },
+  blocklist: {
+    title: 'Draft a blocklist from a description',
+    subtitle: 'Describe what to avoid — words, vibes, phrases. I\'ll produce a comma-separated list you can edit.',
+    prompt: 'e.g. no growth-hacker language, no tapestry/delve/unpack, no grindset',
+    key: 'content',
+    rows: 4,
+  },
+};
+
+function socAssistOpen(intent, fieldId) {
+  const cfg = SOC_ASSIST_CONFIG[intent];
+  if (!cfg) return;
+  SOC_ASSIST_TARGET = { intent, fieldId };
+  document.getElementById('soc-assist-title').textContent = cfg.title;
+  document.getElementById('soc-assist-subtitle').textContent = cfg.subtitle;
+  const ta = document.getElementById('soc-assist-input');
+  ta.value = '';
+  ta.rows = cfg.rows;
+  ta.placeholder = cfg.prompt;
+  document.getElementById('soc-assist-result').textContent = '';
+  document.getElementById('soc-assist-result-row').style.display = 'none';
+  document.getElementById('soc-assist-status').textContent = '';
+  document.getElementById('soc-assist-submit').disabled = false;
+  document.getElementById('soc-assist-submit').textContent = 'Draft it';
+  document.getElementById('soc-assist-modal').classList.add('soc-modal-open');
+  setTimeout(() => ta.focus(), 100);
+}
+
+function socAssistClose() {
+  document.getElementById('soc-assist-modal').classList.remove('soc-modal-open');
+  SOC_ASSIST_TARGET = null;
+}
+
+async function socAssistSend() {
+  if (!SOC_ASSIST_TARGET) return;
+  const { intent, fieldId } = SOC_ASSIST_TARGET;
+  const cfg = SOC_ASSIST_CONFIG[intent];
+  const ta = document.getElementById('soc-assist-input');
+  const val = ta.value.trim();
+  if (!val) { socAssistStatus('error', 'Give me something to work with.'); return; }
+  const submit = document.getElementById('soc-assist-submit');
+  submit.disabled = true; submit.textContent = 'Drafting…';
+  socAssistStatus('busy', 'Listening…');
+  const body = { token: socAuthToken(), intent: intent };
+  if (cfg.key === 'sample_posts') {
+    body.sample_posts = val.split(/\n\n+|\n/).map(s => s.trim()).filter(s => s.length > 0);
+  } else {
+    body.content = val;
+  }
+  try {
+    const r = await socAuthFetch('/api/social/nyota/assist', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await r.json();
+    if (!r.ok || !data.ok) {
+      socAssistStatus('error', data.error || 'I couldn\'t draft that.');
+      submit.disabled = false; submit.textContent = 'Try again';
+      return;
+    }
+    document.getElementById('soc-assist-result').textContent = data.draft;
+    document.getElementById('soc-assist-result-row').style.display = 'block';
+    socAssistStatus('', '');
+    submit.disabled = false; submit.textContent = 'Re-draft';
+  } catch (e) {
+    socAssistStatus('error', 'Network error — try again.');
+    submit.disabled = false; submit.textContent = 'Try again';
+  }
+}
+
+function socAssistKeep() {
+  if (!SOC_ASSIST_TARGET) return;
+  const draft = document.getElementById('soc-assist-result').textContent;
+  const field = document.getElementById(SOC_ASSIST_TARGET.fieldId);
+  if (field) {
+    field.value = draft;
+    socMarkDirty();
+  }
+  socAssistClose();
+  socToast('Dropped into the field — edit it before you save.');
+}
+
+function socAssistStatus(kind, msg) {
+  const el = document.getElementById('soc-assist-status');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.className = 'soc-assist-status' + (kind ? ' soc-assist-status-' + kind : '');
+}
+
+// ── Per-connection slide-in panel ──────────────────────────────────────────
+
+const SOC_PLATFORM_KEYS = [
+  'voice_override',
+  'pillars',
+  'cadence.days',
+  'cadence.time',
+  'cadence.auto_post',
+  'engage.hashtags',
+  'signature',
+  'approval_override',
+  'pause',
+];
+
+let SOC_PANEL_PLATFORM = null;
+let SOC_PANEL_BASELINE = {};
+
+function socPlatformPrefKey(platformId, suffix) { return `social.platform.${platformId}.${suffix}`; }
+
+async function socOpenPlatformPanel(platformId) {
+  const conn = SOC_CONNECTIONS_MAP[platformId];
+  const desc = SOC_DESCRIPTORS[platformId];
+  if (!conn || !desc) return;
+  SOC_PANEL_PLATFORM = platformId;
+
+  // Load current prefs (from the global preferences fetch)
+  const tok = socAuthToken();
+  try {
+    const r = await socAuthFetch(`/api/settings/preferences?token=${encodeURIComponent(tok)}`);
+    const prefs = r.ok ? await r.json() : {};
+    SOC_PANEL_BASELINE = {};
+    for (const suffix of SOC_PLATFORM_KEYS) {
+      SOC_PANEL_BASELINE[suffix] = prefs[socPlatformPrefKey(platformId, suffix)] || '';
+    }
+  } catch (_) { SOC_PANEL_BASELINE = {}; }
+
+  const handleLine = conn.display_name ? `Connected as <code>${socEscape(conn.display_name)}</code>` : '';
+  document.getElementById('soc-plat-title').textContent = desc.display_name;
+  document.getElementById('soc-plat-handle').innerHTML = handleLine;
+
+  const globalBrand = SOC_SETTINGS_BASELINE['social.brand_voice'] || '';
+  document.getElementById('soc-plat-voice-placeholder').textContent =
+    globalBrand ? `Blank = inherit global voice: "${globalBrand.slice(0, 120)}${globalBrand.length > 120 ? '…' : ''}"` : 'Blank = use your global brand voice.';
+
+  document.getElementById('soc-plat-voice').value = SOC_PANEL_BASELINE['voice_override'] || '';
+  // Pillars: JSON array or newline-separated
+  let pillarsText = '';
+  try {
+    const arr = JSON.parse(SOC_PANEL_BASELINE['pillars'] || '[]');
+    if (Array.isArray(arr)) pillarsText = arr.join('\n');
+  } catch (_) { pillarsText = SOC_PANEL_BASELINE['pillars'] || ''; }
+  document.getElementById('soc-plat-pillars').value = pillarsText;
+
+  const days = (SOC_PANEL_BASELINE['cadence.days'] || '').split(',').filter(d => d);
+  ['mon','tue','wed','thu','fri','sat','sun'].forEach(d => {
+    const box = document.getElementById('soc-plat-day-' + d);
+    if (box) box.checked = days.includes(d);
+  });
+  document.getElementById('soc-plat-time').value = SOC_PANEL_BASELINE['cadence.time'] || '09:00';
+  document.getElementById('soc-plat-autopost').checked = SOC_PANEL_BASELINE['cadence.auto_post'] === 'true';
+
+  document.getElementById('soc-plat-hashtags').value = SOC_PANEL_BASELINE['engage.hashtags'] || '';
+  document.getElementById('soc-plat-signature').value = SOC_PANEL_BASELINE['signature'] || '';
+  document.getElementById('soc-plat-approval').value = SOC_PANEL_BASELINE['approval_override'] || 'inherit';
+  document.getElementById('soc-plat-pause').checked = SOC_PANEL_BASELINE['pause'] === 'true';
+
+  document.getElementById('soc-plat-status').textContent = '';
+  document.getElementById('soc-plat-panel').classList.add('soc-plat-open');
+}
+
+function socClosePlatformPanel() {
+  document.getElementById('soc-plat-panel').classList.remove('soc-plat-open');
+  SOC_PANEL_PLATFORM = null;
+}
+
+async function socPlatformPanelSave() {
+  if (!SOC_PANEL_PLATFORM) return;
+  const platformId = SOC_PANEL_PLATFORM;
+
+  const days = ['mon','tue','wed','thu','fri','sat','sun']
+    .filter(d => document.getElementById('soc-plat-day-' + d)?.checked);
+  const pillarsArr = (document.getElementById('soc-plat-pillars').value || '')
+    .split('\n').map(s => s.trim()).filter(s => s);
+
+  const now = {
+    'voice_override':     document.getElementById('soc-plat-voice').value,
+    'pillars':            JSON.stringify(pillarsArr),
+    'cadence.days':       days.join(','),
+    'cadence.time':       document.getElementById('soc-plat-time').value || '09:00',
+    'cadence.auto_post':  String(document.getElementById('soc-plat-autopost').checked),
+    'engage.hashtags':    document.getElementById('soc-plat-hashtags').value,
+    'signature':          document.getElementById('soc-plat-signature').value,
+    'approval_override':  document.getElementById('soc-plat-approval').value,
+    'pause':              String(document.getElementById('soc-plat-pause').checked),
+  };
+  const changed = SOC_PLATFORM_KEYS.filter(k => (now[k] || '') !== (SOC_PANEL_BASELINE[k] || ''));
+  if (changed.length === 0) { socClosePlatformPanel(); return; }
+
+  document.getElementById('soc-plat-status').textContent = 'Saving…';
+  const tok = socAuthToken();
+  let ok = true;
+  for (const suffix of changed) {
+    try {
+      const r = await socAuthFetch('/api/settings/preferences', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: tok, key: socPlatformPrefKey(platformId, suffix), value: now[suffix] }),
+      });
+      if (!r.ok) { ok = false; break; }
+    } catch (_) { ok = false; break; }
+  }
+  if (ok) {
+    SOC_PANEL_BASELINE = { ...now };
+    socToast(`${platformId} settings saved.`);
+    socClosePlatformPanel();
+  } else {
+    document.getElementById('soc-plat-status').textContent = 'Couldn\'t save — try again.';
+  }
+}
+
+async function socPlatformDisconnect() {
+  if (!SOC_PANEL_PLATFORM) return;
+  const platformId = SOC_PANEL_PLATFORM;
+  const conn = SOC_CONNECTIONS_MAP[platformId];
+  if (!conn) return;
+  const confirmText = prompt(`Disconnect ${platformId}? Type "disconnect" to confirm.`);
+  if (confirmText !== 'disconnect') return;
+  try {
+    const r = await socAuthFetch(`/api/social/connections/${conn.id}`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: socAuthToken() }),
+    });
+    if (r.ok) {
+      socToast(`${platformId} disconnected.`);
+      socClosePlatformPanel();
+      await socRefreshConnections();
+    } else {
+      socToast('Couldn\'t disconnect — try again.');
+    }
+  } catch (_) { socToast('Network error — try again.'); }
 }
 
 function socToast(msg) {

@@ -5431,6 +5431,7 @@ async fn main() {
         .route("/api/social/connections/{id}", axum::routing::delete(social::handle_delete))
         .route("/api/social/connections/reconnect/{platform}", post(social::handle_reconnect))
         .route("/api/social/platforms", get(social::handle_platforms))
+        .route("/api/social/nyota/assist", post(social::handle_nyota_assist))
         .route("/tax", get(pages::tax::render))
         .route("/chat", get(pages::chat::render))
         .route("/history", get(pages::history::render))
@@ -6131,6 +6132,32 @@ async fn handle_api_dismiss_escalation(
     Ok(Json(serde_json::json!({"dismissed": true, "module": module})))
 }
 
+/// Resolve the display name for an agent_id on behalf of a user.
+/// Priority: per-user override in user_agents → config agents.list `name` → module default.
+async fn resolve_agent_display_name(state: &AppState, uid: i64, agent_id: &str) -> String {
+    if let Some(name) = state
+        .users
+        .get_user_agent(uid, agent_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|ua| ua.display_name)
+    {
+        return name;
+    }
+    if let Some(name) = state
+        .config
+        .agents
+        .list
+        .iter()
+        .find(|a| a.id == agent_id)
+        .and_then(|a| a.extra.get("name").and_then(|v| v.as_str()).map(String::from))
+    {
+        return name;
+    }
+    crate::agents::handoff::agent_display_for_module(agent_id).to_string()
+}
+
 /// POST /api/agents/handoff — carry context from main agent to a specialist.
 async fn handle_api_agent_handoff(
     State(state): State<Arc<AppState>>,
@@ -6152,11 +6179,8 @@ async fn handle_api_agent_handoff(
         .iter().rev().take(context_count).rev()
         .map(|m| (m.role.clone(), m.content.clone())).collect();
 
-    let from_name = state.users.get_user_agent(uid, "main").await.ok().flatten()
-        .map(|ua| ua.display_name).unwrap_or_else(|| "Kyron".to_string());
-    let to_name = state.users.get_user_agent(uid, to_module).await.ok().flatten()
-        .map(|ua| ua.display_name)
-        .unwrap_or_else(|| crate::agents::handoff::agent_display_for_module(to_module).to_string());
+    let from_name = resolve_agent_display_name(&state, uid, "main").await;
+    let to_name = resolve_agent_display_name(&state, uid, to_module).await;
 
     // Include relevant memories in handoff context
     let mem_context = {
@@ -7249,14 +7273,7 @@ async fn try_default_persona(
         .map(|ua| ua.display_name);
     let effective_name = user_display_override.as_deref().unwrap_or(&display_name);
     // Resolve the user's main agent name (for {{main_agent_name}} in specialist prompts)
-    let main_agent_display = state
-        .users
-        .get_user_agent(user_id, "main")
-        .await
-        .ok()
-        .flatten()
-        .map(|ua| ua.display_name)
-        .unwrap_or_else(|| "Kyron".to_string());
+    let main_agent_display = resolve_agent_display_name(&state, user_id, "main").await;
     let mut ctx = crate::agents::templates::base_context(
         first_name.as_deref(),
         personality_opt.as_deref(),
@@ -7334,14 +7351,7 @@ async fn handle_api_agent_resolve_prompt(
         .map(|ua| ua.display_name);
     let effective_name = debug_user_display.as_deref().unwrap_or(&display_name);
     // Resolve user's main agent name for {{main_agent_name}}
-    let debug_main_display = state
-        .users
-        .get_user_agent(uid, "main")
-        .await
-        .ok()
-        .flatten()
-        .map(|ua| ua.display_name)
-        .unwrap_or_else(|| "Kyron".to_string());
+    let debug_main_display = resolve_agent_display_name(&state, uid, "main").await;
 
     let mut ctx = crate::agents::templates::base_context(
         first_name.as_deref(),

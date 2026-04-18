@@ -64,6 +64,26 @@ pub struct ReconnectRequest {
     pub agent_id: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct NyotaAssistRequest {
+    pub token: String,
+    /// What Nyota should draft. One of:
+    ///   "draft_voice"     — caller passes sample_posts, gets a brand-voice paragraph
+    ///   "draft_pillars"   — caller passes a few topics/interests, gets 3-5 pillar lines
+    ///   "draft_audience"  — caller passes a rough sketch, gets a tighter audience description
+    ///   "draft_blocklist" — caller passes a short description of what to avoid, gets a word list
+    pub intent: String,
+    /// Platform-specific hint (for draft_pillars or draft_voice). Optional.
+    #[serde(default)]
+    pub platform: Option<String>,
+    /// Raw content the user pasted or typed.
+    #[serde(default)]
+    pub content: String,
+    /// Optional sample posts (array of strings) used by draft_voice.
+    #[serde(default)]
+    pub sample_posts: Vec<String>,
+}
+
 // ── Handlers ────────────────────────────────────────────────────────────────
 
 /// GET /api/social/connections?token=...
@@ -220,6 +240,85 @@ pub async fn handle_delete(
     }
     log::warn!("[social] user={} deleted connection id={}", uid, id);
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// ── Nyota-assisted setup ────────────────────────────────────────────────────
+
+/// POST /api/social/nyota/assist
+///
+/// Small-bore LLM helper for Settings fields. Each `intent` has a tight
+/// system prompt in Nyota's voice that asks the model to distill rather
+/// than embellish. Output is always editable by the user before it saves.
+pub async fn handle_nyota_assist(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<NyotaAssistRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let err = |code: StatusCode, msg: &str| (code, Json(serde_json::json!({ "ok": false, "error": msg })));
+    let principal = crate::resolve_principal(&state, &req.token).await
+        .map_err(|s| err(s, "Sign in again."))?;
+    let _uid = principal.user_id();
+
+    let (system_prompt, user_prompt) = match req.intent.as_str() {
+        "draft_voice" => {
+            let samples = if !req.sample_posts.is_empty() {
+                req.sample_posts.iter()
+                    .enumerate()
+                    .map(|(i, p)| format!("SAMPLE {} —\n{}", i + 1, p.trim()))
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            } else {
+                req.content.trim().to_string()
+            };
+            if samples.is_empty() {
+                return Err(err(StatusCode::BAD_REQUEST, "Paste a few sample posts first so I have something to listen to."));
+            }
+            let sys = "You are Nyota, a calm editor. Read the user's past posts and distill a one-paragraph brand-voice description (80-140 words). Describe how they sound, what they care about, what they avoid. Use 'They' (third person) — this is a specification, not a letter to them. Do not invent traits not evidenced in the samples. Do not embellish. No emoji. No growth jargon. Output only the paragraph, nothing else.".to_string();
+            let usr = format!("Here are the samples:\n\n{}", samples);
+            (sys, usr)
+        }
+        "draft_pillars" => {
+            if req.content.trim().is_empty() {
+                return Err(err(StatusCode::BAD_REQUEST, "Tell me a few things you post about — a sentence or two is enough."));
+            }
+            let platform_note = req.platform.as_deref()
+                .filter(|s| !s.is_empty())
+                .map(|p| format!(" Platform context: {}.", p))
+                .unwrap_or_default();
+            let sys = format!(
+                "You are Nyota, a calm editor. Turn the user's rough interests into 3-5 content pillars for social media. Each pillar is one short sentence describing a recurring post type.{} Output one pillar per line, no numbering, no bullets, no prose before or after. Pillars should be distinct and actionable.",
+                platform_note
+            );
+            (sys, req.content.trim().to_string())
+        }
+        "draft_audience" => {
+            if req.content.trim().is_empty() {
+                return Err(err(StatusCode::BAD_REQUEST, "Sketch who you're writing for — a few words is enough."));
+            }
+            let sys = "You are Nyota, a calm editor. Turn the user's rough audience sketch into a one-sentence description of who they are writing for. Specific, concrete, no more than 25 words. No marketing language. Output only the sentence.".to_string();
+            (sys, req.content.trim().to_string())
+        }
+        "draft_blocklist" => {
+            if req.content.trim().is_empty() {
+                return Err(err(StatusCode::BAD_REQUEST, "Describe what you want to avoid — words, topics, vibes."));
+            }
+            let sys = "You are Nyota. The user wants a blocklist: words, phrases, hashtags, or topics to avoid in their posts. Read their description and output a comma-separated list of 5-15 terms. Lowercase. No leading # on hashtag-like terms (they'll be fuzzy-matched). Output ONLY the comma-separated list.".to_string();
+            (sys, req.content.trim().to_string())
+        }
+        _ => return Err(err(StatusCode::BAD_REQUEST, "Unknown intent.")),
+    };
+
+    let chain = crate::llm::LlmChain::from_config_fast(&state.config, "main", state.client.clone());
+    let messages = vec![
+        crate::llm::ChatMessage::system(&system_prompt),
+        crate::llm::ChatMessage::user(&user_prompt),
+    ];
+    let reply = match tokio::time::timeout(std::time::Duration::from_secs(30), chain.call(&messages)).await {
+        Ok(Ok(text)) => text.trim().to_string(),
+        Ok(Err(e)) => return Err(err(StatusCode::BAD_GATEWAY, &format!("Model error: {}", e))),
+        Err(_) => return Err(err(StatusCode::GATEWAY_TIMEOUT, "That took too long — try again in a moment.")),
+    };
+
+    Ok(Json(serde_json::json!({ "ok": true, "draft": reply })))
 }
 
 // ── Descriptors ─────────────────────────────────────────────────────────────

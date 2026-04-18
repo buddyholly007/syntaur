@@ -117,40 +117,105 @@ pub fn module_context(
     ctx
 }
 
-/// Seed Nyota's prompt with the user's saved brand voice + a short
-/// summary of which platforms are connected. Falls back to sensible
-/// empty-strings so the template's `default:` clauses kick in.
+/// Seed Nyota's prompt with everything the user has configured in
+/// /social → Settings (and per-platform panels). Each pref is read
+/// independently; if a key is unset or empty, the template's `default:`
+/// clause kicks in.
+///
+/// Privacy-scope prefs (calendar/music/research) gate cross-module
+/// context reads. Journal is never touched, regardless of pref state.
 fn populate_social(ctx: &mut HashMap<&'static str, String>, conn: &rusqlite::Connection, user_id: i64) {
-    // brand_voice — the textarea the user fills in /social → Settings.
-    // Stored as user_preferences key 'social.brand_voice'.
-    let brand: Option<String> = conn
-        .query_row(
-            "SELECT value FROM user_preferences WHERE user_id = ? AND key = 'social.brand_voice'",
-            rusqlite::params![user_id],
-            |r| r.get(0),
-        )
-        .ok();
-    if let Some(b) = brand {
-        if !b.trim().is_empty() {
-            ctx.insert("brand_voice", b);
+    let pref = |key: &str| -> Option<String> {
+        conn.query_row(
+            "SELECT value FROM user_preferences WHERE user_id = ? AND key = ?",
+            rusqlite::params![user_id, key],
+            |r| r.get::<_, Option<String>>(0),
+        ).ok().flatten()
+            .filter(|s| !s.trim().is_empty())
+    };
+
+    if let Some(b) = pref("social.brand_voice") { ctx.insert("brand_voice", b); }
+    if let Some(a) = pref("social.audience")    { ctx.insert("audience", a); }
+
+    // Blocklist — stored as comma-separated string. Rendered as a short
+    // "avoid these" line so Nyota knows what not to say.
+    if let Some(bl) = pref("social.blocklist.words") {
+        let joined = bl.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(", ");
+        if !joined.is_empty() {
+            ctx.insert("avoid_terms", format!("Avoid in drafts: {}.", joined));
         }
     }
-    // connected_platforms — comma-separated short list Nyota uses as
-    // quick context ("these are the only platforms I can speak for").
-    let mut stmt = match conn.prepare(
-        "SELECT platform FROM social_connections \
+
+    // Tone dials — humor + formality sliders (0-10). Surfaced as a short
+    // calibration line so the prompt stays in Nyota's voice but leans
+    // toward the user's sliders.
+    let humor     = pref("social.tone.humor").and_then(|v| v.parse::<u8>().ok()).unwrap_or(4);
+    let formality = pref("social.tone.formality").and_then(|v| v.parse::<u8>().ok()).unwrap_or(4);
+    ctx.insert("tone_dials", format!("Humor {}/10, formality {}/10.", humor, formality));
+
+    // Connected platforms — short list Nyota uses as quick context.
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT platform, display_name FROM social_connections \
          WHERE user_id = ? AND status IN ('connected','degraded') ORDER BY platform"
-    ) { Ok(s) => s, Err(_) => return };
-    let names: Vec<String> = stmt.query_map([user_id], |r| r.get::<_, String>(0))
-        .ok()
-        .map(|iter| iter.filter_map(Result::ok).collect())
-        .unwrap_or_default();
-    if !names.is_empty() {
-        ctx.insert("connected_platforms", names.join(", "));
+    ) {
+        let rows: Vec<(String, Option<String>)> = stmt
+            .query_map([user_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))
+            .ok()
+            .map(|iter| iter.filter_map(Result::ok).collect())
+            .unwrap_or_default();
+        if !rows.is_empty() {
+            let list = rows.iter()
+                .map(|(p, h)| match h.as_deref() {
+                    Some(hn) if !hn.is_empty() => format!("{} ({})", p, hn),
+                    _ => p.clone(),
+                })
+                .collect::<Vec<_>>().join(", ");
+            ctx.insert("connected_platforms", list);
+        }
     }
-    // social_context_summary — recent draft / reply counts when the tables
-    // exist (they don't yet; empty is fine, default clause covers it).
-    // Leave blank for now; phase 2+ fills this in.
+
+    // Privacy-gated cross-module context. User must explicitly opt in
+    // for each scope. Journal is hardcoded-off and never read, even if
+    // someone sets the pref externally.
+    let allow_calendar = pref("social.privacy.calendar").map(|v| v == "true").unwrap_or(false);
+    let allow_music    = pref("social.privacy.music").map(|v| v == "true").unwrap_or(false);
+
+    let mut ctx_bits: Vec<String> = Vec::new();
+    if allow_calendar {
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let horizon = (chrono::Utc::now() + chrono::Duration::days(7)).format("%Y-%m-%d").to_string();
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT title, start_time FROM calendar_events \
+             WHERE (user_id = ?1 OR user_id = 0) AND start_time >= ?2 AND start_time < ?3 \
+             ORDER BY start_time LIMIT 5"
+        ) {
+            let lines: Vec<String> = stmt.query_map(rusqlite::params![user_id, &today, &horizon], |r| {
+                Ok(format!("{} ({})", r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            }).ok().map(|iter| iter.filter_map(Result::ok).collect()).unwrap_or_default();
+            if !lines.is_empty() {
+                ctx_bits.push(format!("Upcoming (7d): {}", lines.join("; ")));
+            }
+        }
+    }
+    if allow_music {
+        // Recent local music additions — helpful when drafting around a release.
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT title, artist FROM local_music_tracks WHERE user_id = ? \
+             ORDER BY indexed_at DESC LIMIT 3"
+        ) {
+            let lines: Vec<String> = stmt.query_map([user_id], |r| {
+                Ok(format!("{} — {}",
+                    r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    r.get::<_, Option<String>>(1)?.unwrap_or_default()))
+            }).ok().map(|iter| iter.filter_map(Result::ok).collect()).unwrap_or_default();
+            if !lines.is_empty() {
+                ctx_bits.push(format!("Recent tracks: {}", lines.join("; ")));
+            }
+        }
+    }
+    if !ctx_bits.is_empty() {
+        ctx.insert("social_context_summary", ctx_bits.join(" | "));
+    }
 }
 
 fn populate_tax(ctx: &mut HashMap<&'static str, String>, conn: &rusqlite::Connection, user_id: i64) {
