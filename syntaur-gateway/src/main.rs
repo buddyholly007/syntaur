@@ -366,6 +366,11 @@ pub enum AgentTurnEvent {
     LlmCallStarted { turn_id: String, round: usize },
     ToolCallStarted { turn_id: String, round: usize, tool_name: String, args_preview: String },
     ToolCallCompleted { turn_id: String, round: usize, tool_name: String, success: bool, output_chars: usize },
+    /// Persona-flavored "thinking" line emitted before an LLM round so the UI
+    /// can show what the agent is about to do in grey text (ChatGPT-style).
+    /// `source` is `persona` for fabricated-in-character thoughts or `model`
+    /// when we're streaming actual reasoning from a reasoning model.
+    Thinking { turn_id: String, round: usize, source: &'static str, text: String },
     Complete { turn_id: String, response: String, rounds: usize, duration_ms: u64 },
     Error { turn_id: String, message: String },
 }
@@ -374,6 +379,121 @@ impl AgentTurnEvent {
     pub fn is_terminal(&self) -> bool {
         matches!(self, Self::Complete { .. } | Self::Error { .. })
     }
+}
+
+/// Per-agent "thinking out loud" lines shown in grey while the model works.
+/// These are intentionally fabricated to match each persona's voice — the
+/// real model reasoning would be fine but dry; persona-flavored lines
+/// build character and make waits feel animated rather than dead.
+///
+/// Each agent gets ~6 variants. Rotation is round-index mod N so the UI
+/// doesn't repeat the same line twice in the same turn (unless turn is
+/// very long).
+fn persona_thinking_bank(agent_id: &str) -> &'static [&'static str] {
+    match agent_id {
+        "main" => &[
+            "Let me check…",
+            "One sec, pulling that up.",
+            "Cross-referencing memory.",
+            "Looking through the workspace.",
+            "Checking what I know about this.",
+            "Let me see if I have that filed.",
+        ],
+        "crimson-lantern" => &[
+            "Hold on.",
+            "Checking the vault.",
+            "Reading back the release notes.",
+            "Pulling content drafts.",
+            "Looking through posts.",
+            "One sec.",
+        ],
+        "woodworks-scout" => &[
+            "Pulling product data.",
+            "Checking margins.",
+            "Cross-checking the catalog.",
+            "Scanning for listings.",
+            "Benchmarking prices.",
+            "One moment — looking.",
+        ],
+        // Planned personas (not yet bound as live agents, but ready when they are)
+        "peter" | "main_peter_local" => &[
+            "Hold on, pulling that up.",
+            "Checking.",
+            "One sec.",
+            "Let me look.",
+            "Looking at the memory.",
+            "Checking what we have.",
+        ],
+        "kyron" | "main_default" => &[
+            "Accessing relevant modules.",
+            "Cross-referencing available context.",
+            "One moment.",
+            "Querying knowledge layer.",
+            "Let me look that up.",
+            "Standby.",
+        ],
+        "positron" | "module_tax" => &[
+            "Consulting relevant records.",
+            "Examining financial data.",
+            "One moment — computing.",
+            "Verifying against recent entries.",
+            "Cross-referencing documentation.",
+            "Calculating.",
+        ],
+        "cortex" | "module_research" => &[
+            "Ooh, interesting — let me dig.",
+            "I have thoughts on this.",
+            "One moment, checking the corpus.",
+            "Let me pull up the relevant doc.",
+            "Looking across the knowledge base.",
+            "Wait, actually — let me verify.",
+        ],
+        "silvr" | "module_music" => &[
+            "Checking.",
+            "One sec.",
+            "Looking.",
+            "Pulling the catalog.",
+            "Scanning the queue.",
+            "Hold.",
+        ],
+        "thaddeus" | "module_scheduler" => &[
+            "Let me consult your schedule, sir.",
+            "One moment — checking the calendar.",
+            "Reviewing upcoming commitments.",
+            "Cross-referencing your diary.",
+            "A moment, please.",
+            "Examining the week ahead.",
+        ],
+        "maurice" | "module_coders" => &[
+            "Let me look at the code.",
+            "Checking the terminal session.",
+            "Grepping for that.",
+            "One sec, looking.",
+            "Pulling file contents.",
+            "Checking git state.",
+        ],
+        "mushi" | "module_journal" => &[
+            "Reading back your notes.",
+            "Looking through recent entries.",
+            "One moment.",
+            "Checking the journal.",
+            "Pulling recordings.",
+            "Let me see what's there.",
+        ],
+        _ => &[
+            "Let me check…",
+            "One moment.",
+            "Looking that up.",
+        ],
+    }
+}
+
+/// Pick a thinking line deterministically based on agent + round so the
+/// UI shows a different phrase per round without random jitter making it
+/// feel jittery on reload.
+fn thinking_for(agent_id: &str, round: usize) -> String {
+    let bank = persona_thinking_bank(agent_id);
+    bank[round % bank.len()].to_string()
 }
 
 #[derive(serde::Serialize, Clone, Default)]
@@ -1802,6 +1922,15 @@ async fn handle_message_start(
         let max_rounds = 15;
 
         for round in 0..max_rounds {
+            // Persona-flavored "thinking" line — renders in grey in the UI
+            // so waiting on the LLM feels alive instead of dead. One line
+            // per round, picked deterministically from the agent's bank.
+            let _ = tx.send(AgentTurnEvent::Thinking {
+                turn_id: turn_id_for_task.clone(),
+                round,
+                source: "persona",
+                text: thinking_for(&agent_for_task, round),
+            });
             let _ = tx.send(AgentTurnEvent::LlmCallStarted {
                 turn_id: turn_id_for_task.clone(),
                 round,

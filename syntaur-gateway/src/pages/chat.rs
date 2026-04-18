@@ -511,29 +511,44 @@ async function send(msg) {
       const evtSource = new EventSource(`/api/message/${turnId}/stream?token=${token}`);
       let toolsUsed = [];
 
+      // Split the response container into a persistent thought line + a
+      // status area. `thinking` events only touch the thought line so
+      // subsequent tool-call renders don't wipe them.
+      responseEl.innerHTML = '<div class="persona-thought text-xs text-gray-500 italic mb-1.5 opacity-0 transition-opacity duration-300"></div><div class="status-area"></div>';
+      const statusArea = responseEl.querySelector('.status-area');
+      const thoughtEl = responseEl.querySelector('.persona-thought');
+
       evtSource.onmessage = (event) => {
         const ev = JSON.parse(event.data);
         switch (ev.event) {
           case 'started':
-            responseEl.innerHTML = `<div class="flex items-center gap-2 text-gray-500 text-sm py-1">
+            statusArea.innerHTML = `<div class="flex items-center gap-2 text-gray-500 text-sm py-1">
               <span class="flex gap-1"><span class="w-1.5 h-1.5 rounded-full bg-oc-500 animate-bounce"></span>
               <span class="w-1.5 h-1.5 rounded-full bg-oc-500 animate-bounce" style="animation-delay:150ms"></span>
               <span class="w-1.5 h-1.5 rounded-full bg-oc-500 animate-bounce" style="animation-delay:300ms"></span></span>
               <span class="text-xs status-text">Thinking...</span></div>`;
             break;
           case 'llm_call_started':
-            const st = responseEl.querySelector('.status-text');
+            const st = statusArea.querySelector('.status-text');
             if (st) st.textContent = ev.round > 0 ? `Round ${ev.round + 1}...` : 'Thinking...';
+            break;
+          case 'thinking':
+            // Persona-flavored grey-text thought while the model works.
+            // Lives in its own .persona-thought element that survives
+            // innerHTML swaps on .status-area.
+            thoughtEl.style.opacity = '0';
+            thoughtEl.textContent = ev.text || '';
+            requestAnimationFrame(() => { thoughtEl.style.opacity = '0.75'; });
             break;
           case 'tool_call_started':
             toolsUsed.push(ev.tool_name);
-            responseEl.innerHTML = `<div class="space-y-1">${toolsUsed.map(t =>
+            statusArea.innerHTML = `<div class="space-y-1">${toolsUsed.map(t =>
               `<div class="flex items-center gap-2 text-xs text-gray-500">
                 <span class="w-1 h-1 rounded-full bg-oc-500 animate-pulse"></span>
                 Using <span class="text-gray-400">${esc(t)}</span>...</div>`).join('')}</div>`;
             break;
           case 'tool_call_completed':
-            responseEl.querySelectorAll('.text-xs').forEach(el => {
+            statusArea.querySelectorAll('.text-xs').forEach(el => {
               if (el.textContent.includes(ev.tool_name)) {
                 const dot = el.querySelector('.animate-pulse');
                 if (dot) { dot.classList.remove('animate-pulse','bg-oc-500'); dot.classList.add(ev.success?'bg-green-500':'bg-red-500'); }
