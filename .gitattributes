@@ -2,3 +2,11 @@
 # tailwind.js is a pinned minified vendor copy (for offline self-hosted
 # UI rendering), not project source. Don't count it toward JavaScript.
 syntaur-gateway/static/tailwind.js linguist-vendored
+
+# settings_chunks/*.html are authoring input to html2maud.py — the
+# generator emits Rust modules that ship to users. The .html files stay
+# in-tree for diff legibility but aren't the runtime artifact.
+syntaur-gateway/src/pages/settings_chunks/**/*.html linguist-generated
+
+# landing/index.html is a static marketing page, not product source.
+landing/index.html linguist-vendored
