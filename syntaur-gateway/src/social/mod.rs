@@ -268,13 +268,59 @@ pub async fn handle_reconnect(
             format!("No live adapter for '{}' yet. That platform will light up in a later phase.", platform),
         ))?;
 
-    let input = platforms::ConnectInput { fields: req.fields.clone() };
-    let result = adapter.reconnect(&state.client, &input).await;
-    let stored = match result {
-        Ok(s) => s,
-        Err(e) => {
-            log::warn!("[social] user={} platform={} reconnect failed: {:?}", uid, platform, e);
-            return Err(err_json(StatusCode::UNPROCESSABLE_ENTITY, e.user_message()));
+    // Detect refresh vs fresh-connect: if the user didn't hand us any
+    // wizard fields AND there's an existing row with credentials we can
+    // rotate, call adapter.refresh() with the stored blob. Otherwise
+    // treat it as a fresh connect with whatever fields they supplied.
+    let fields_empty = req.fields.as_object().map(|o| o.is_empty()).unwrap_or(true);
+
+    let existing_creds: Option<serde_json::Value> = if fields_empty {
+        let db = state.db_path.clone();
+        let platform_q = platform.clone();
+        let agent_q = req.agent_id.clone();
+        tokio::task::spawn_blocking(move || -> Option<serde_json::Value> {
+            let conn = rusqlite::Connection::open(&db).ok()?;
+            let json: String = conn.query_row(
+                "SELECT credentials_json FROM social_connections \
+                 WHERE user_id = ? AND platform = ? AND COALESCE(agent_id,'') = COALESCE(?,'')",
+                rusqlite::params![uid, platform_q, agent_q],
+                |r| r.get(0),
+            ).ok()?;
+            serde_json::from_str(&json).ok()
+        })
+        .await
+        .ok()
+        .flatten()
+    } else { None };
+
+    let stored = if let Some(creds) = existing_creds {
+        // Silent refresh. On success we rebuild a StoredCredentials from
+        // the refreshed blob + the adapter's verify() for display_name.
+        match adapter.refresh(&state.client, &creds).await {
+            Ok(refreshed) => {
+                let display_name = adapter.verify(&state.client, &refreshed.credentials).await
+                    .map(|v| v.display_name)
+                    .unwrap_or_else(|_| creds.get("handle").or_else(|| creds.get("username"))
+                        .and_then(|v| v.as_str()).unwrap_or("(refreshed)").to_string());
+                platforms::StoredCredentials {
+                    display_name,
+                    credentials: refreshed.credentials,
+                    expires_at: refreshed.expires_at,
+                }
+            }
+            Err(e) => {
+                log::warn!("[social] user={} platform={} refresh failed: {:?}", uid, platform, e);
+                return Err(err_json(StatusCode::UNPROCESSABLE_ENTITY, e.user_message()));
+            }
+        }
+    } else {
+        let input = platforms::ConnectInput { fields: req.fields.clone() };
+        match adapter.reconnect(&state.client, &input).await {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("[social] user={} platform={} reconnect failed: {:?}", uid, platform, e);
+                return Err(err_json(StatusCode::UNPROCESSABLE_ENTITY, e.user_message()));
+            }
         }
     };
 

@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub mod bluesky;
+pub mod youtube;
 
 // ── Error taxonomy ──────────────────────────────────────────────────────────
 
@@ -190,7 +191,7 @@ pub fn registry() -> HashMap<&'static str, Arc<dyn SocialPlatform>> {
     let mut m: HashMap<&'static str, Arc<dyn SocialPlatform>> = HashMap::new();
     let adapters: Vec<Arc<dyn SocialPlatform>> = vec![
         Arc::new(bluesky::Bluesky),
-        // Phase 3: Arc::new(youtube::YouTube),
+        Arc::new(youtube::YouTube),
         // Phase 5: Arc::new(threads::Threads), ...
     ];
     for a in adapters { m.insert(a.id(), a); }
@@ -206,14 +207,13 @@ pub fn all_descriptors() -> Vec<PlatformDescriptor> {
 
     // Live adapters first (in registry order would be nice, but HashMap
     // isn't ordered — list them explicitly so UI stays deterministic).
-    for id in &["bluesky"] {
+    for id in &["bluesky", "youtube"] {
         if let Some(a) = adapters.get(id) { out.push(a.descriptor()); }
     }
 
     // Stubbed platforms — will be replaced by live adapters as phases land.
     let stubbed: &[(&str, &str, &str, &str)] = &[
         ("threads",   "Threads",     "Meta OAuth2 (via Facebook Graph)",         "graphite"),
-        ("youtube",   "YouTube",     "Google OAuth2, community posts + comments", "crimson"),
         ("instagram", "Instagram",   "Meta OAuth2 (Business or Creator)",         "rose"),
         ("linkedin",  "LinkedIn",    "LinkedIn OAuth2 (Member / Page)",           "steel"),
         ("tiktok",    "TikTok",      "TikTok for Developers",                      "graphite"),

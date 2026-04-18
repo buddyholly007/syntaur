@@ -522,6 +522,24 @@ body { background: var(--soc-bg); color: var(--soc-ink); }
   margin-top: 14px; padding: 10px 12px; font-style: italic;
   color: var(--soc-ink-soft); font-size: 13px;
 }
+.soc-modal-info {
+  margin-top: 14px; padding: 12px 14px;
+  background: #fffdf6; border: 1px solid var(--soc-rule); border-left: 3px solid var(--soc-amber);
+  border-radius: 6px;
+}
+.soc-modal-info strong {
+  display: block; font-family: 'Playfair Display', Georgia, serif;
+  font-size: 14px; color: var(--soc-ink); margin-bottom: 4px;
+}
+.soc-modal-info p { margin: 0; font-size: 13px; color: var(--soc-ink-mute); line-height: 1.5; }
+.soc-modal-info code {
+  background: #efe3c9; color: var(--soc-amber-deep);
+  padding: 1px 5px; border-radius: 3px; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12px;
+}
+.soc-modal-note {
+  margin: 12px 4px 0; font-family: 'Playfair Display', Georgia, serif;
+  font-style: italic; color: var(--soc-ink-soft); font-size: 13px; text-align: right;
+}
 
 /* Tone accents on platform cards (subtle) */
 .soc-tone-skyblue  { border-top: 2px solid #7fb2d4; }
@@ -591,13 +609,14 @@ function socRenderPlatforms(connMap) {
     const sLabel = (SOC_STATUS_LABELS[statusKey] || SOC_STATUS_LABELS.not_configured);
     const handle = conn && conn.display_name ? `<p class="soc-platform-handle">${socEscape(conn.display_name)}</p>` : '';
     const detail = conn && conn.status_detail ? `<p class="soc-platform-detail">${socEscape(conn.status_detail)}</p>` : '';
-    const hasAdapter = desc && desc.auth_flow && desc.auth_flow.kind !== 'not_implemented';
-    const btnAttrs = hasAdapter
-      ? `onclick="socOpenModal('${p.id}')"`
-      : `disabled`;
-    const btnLabel = !hasAdapter
-      ? (conn ? 'Reconnect — next phase' : 'Connect — next phase')
-      : (conn ? 'Reconnect' : 'Connect');
+    const kind = desc && desc.auth_flow ? desc.auth_flow.kind : 'unknown';
+    const hasAdapter = kind && kind !== 'not_implemented' && kind !== 'unknown';
+    // Both paths route through the modal — the modal renders a friendly
+    // explainer for stubbed platforms instead of a dead-end disabled button.
+    const btnLabel = hasAdapter
+      ? (conn ? 'Reconnect' : 'Connect')
+      : (conn ? "What's coming" : "What's coming");
+    const btnCls = hasAdapter ? 'soc-btn' : 'soc-btn-ghost';
     return `
       <div class="soc-platform-card soc-tone-${socEscape(p.tone)}">
         <div class="soc-platform-head">
@@ -607,7 +626,7 @@ function socRenderPlatforms(connMap) {
         ${handle}
         <p class="soc-platform-sub">${socEscape(p.sub)}</p>
         ${detail}
-        <button class="${hasAdapter ? 'soc-btn' : 'soc-btn-ghost'}" ${btnAttrs}>${btnLabel}</button>
+        <button class="${btnCls}" onclick="socOpenModal('${p.id}')">${btnLabel}</button>
       </div>`;
   }).join('');
 }
@@ -627,6 +646,7 @@ async function socLoadDescriptors() {
 // ── Modal / wizard ──────────────────────────────────────────────────────────
 
 let SOC_MODAL_PLATFORM = null;
+let SOC_CONNECTIONS_MAP = {};
 
 function socRenderMd(md) {
   // Intentionally minimal: bold + code. Full markdown is overkill for
@@ -636,8 +656,34 @@ function socRenderMd(md) {
     .replace(/`([^`]+)`/g, '<code>$1</code>');
 }
 
-function socWizardHtml(desc) {
+// Per-platform "coming soon" copy in Nyota's voice, shown when the
+// adapter isn't wired yet. Honest about what's planned without making
+// empty promises.
+const SOC_COMING_SOON = {
+  threads:   "Threads runs through Meta's developer platform — same OAuth app as Instagram and Facebook, which is why I'm wiring those three together in one session. Business verification is the long pole; once that's in, the wizard lands with screenshots for every step.",
+  instagram: "Instagram connects through the same Meta OAuth app as Threads and Facebook. I'm doing that family in one go so you only go through Meta's setup once.",
+  facebook:  "Facebook pages share Meta's OAuth app with Threads and Instagram. Same session will cover all three.",
+  linkedin:  "LinkedIn has its own OAuth flow plus a scope list you'll want to review before granting. The wizard will walk through each one.",
+  tiktok:    "TikTok for Developers has a separate app-registration flow from everyone else. The wizard covers the business-vs-creator account distinction that trips people up.",
+  twitter:   "X requires a paid API tier — Basic is $100/month as of the last time I checked. The wizard will start by confirming your credits are live, then take you through the OAuth. Until you've signed up, this one's a dead end and I'd rather be honest about it than pretend.",
+};
+
+function socWizardHtml(desc, conn) {
   const flow = desc.auth_flow || {};
+  const kind = flow.kind || 'unknown';
+
+  // "Coming soon" path — platforms without a live adapter yet.
+  if (kind === 'not_implemented' || kind === 'unknown') {
+    const copy = SOC_COMING_SOON[desc.id] || "Adapter for this platform is planned — it'll arrive in a future release. Nyota's chat rail will walk you through the setup when it does.";
+    return `
+      <div class="soc-wizard-step">
+        <h3 class="soc-wizard-step-title">What's coming for ${socEscape(desc.display_name)}</h3>
+        <p class="soc-wizard-step-body">${socEscape(copy)}</p>
+      </div>
+      <p class="soc-modal-note">—Nyota</p>
+      <div id="soc-modal-status"></div>`;
+  }
+
   const steps = (flow.setup_steps || []).map((s, i) => {
     const linkHtml = s.deep_link
       ? `<a class="soc-wizard-link" href="${socEscape(s.deep_link)}" target="_blank" rel="noopener">${socEscape(s.deep_link)}</a>`
@@ -651,7 +697,7 @@ function socWizardHtml(desc) {
   }).join('');
 
   let formHtml = '';
-  if (flow.kind === 'app_password') {
+  if (kind === 'app_password') {
     const labels = flow.field_labels || ['Field 1', 'Field 2'];
     const helps  = flow.field_helps  || ['', ''];
     formHtml = `
@@ -665,12 +711,25 @@ function socWizardHtml(desc) {
         <input type="password" id="soc-field-password" class="soc-field-input" autocomplete="new-password" spellcheck="false">
         <div class="soc-field-help">${socEscape(helps[1])}</div>
       </div>`;
-  } else if (flow.kind === 'oauth2') {
-    formHtml = `<div class="soc-modal-busy">OAuth connect flow lands in a later phase. For now, edit the credential row directly via /api/social/connections.</div>`;
-  } else if (flow.kind === 'paid') {
-    formHtml = `<div class="soc-modal-busy">This platform requires a paid API tier. Sign up first, then come back and paste your key.</div>`;
-  } else {
-    formHtml = `<div class="soc-modal-busy">Adapter for this platform isn't wired up yet.</div>`;
+  } else if (kind === 'oauth2') {
+    // If we already have a row on file, offer the silent-refresh path.
+    // First-time connect UI (popup OAuth window + callback catcher) is
+    // the next piece of work.
+    if (conn) {
+      formHtml = `
+        <div class="soc-modal-info">
+          <strong>You already have a connection on file.</strong>
+          <p>Hit <em>Refresh</em> and I'll use your stored refresh token to get a fresh access token from ${socEscape(desc.display_name)}. No re-login required.</p>
+        </div>`;
+    } else {
+      formHtml = `
+        <div class="soc-modal-info">
+          <strong>First-time OAuth connect</strong>
+          <p>The popup-based Google OAuth flow is arriving in the next release. For now, if you already have tokens from an existing setup, you can import them via the <code>/api/social/connections</code> endpoint.</p>
+        </div>`;
+    }
+  } else if (kind === 'paid') {
+    formHtml = `<div class="soc-modal-info">This platform requires a paid API tier. Sign up first, then come back and paste your key.</div>`;
   }
   return steps + formHtml + '<div id="soc-modal-status"></div>';
 }
@@ -679,13 +738,34 @@ function socOpenModal(platformId) {
   const desc = SOC_DESCRIPTORS[platformId];
   if (!desc) return;
   SOC_MODAL_PLATFORM = platformId;
-  document.getElementById('soc-modal-title').textContent = `Reconnect ${desc.display_name}`;
-  document.getElementById('soc-modal-sub').textContent = desc.tagline || '';
-  document.getElementById('soc-modal-body').innerHTML = socWizardHtml(desc);
-  const submit = document.getElementById('soc-modal-submit');
+  const conn = SOC_CONNECTIONS_MAP[platformId] || null;
   const flow = desc.auth_flow || {};
-  submit.disabled = (flow.kind !== 'app_password');
-  submit.textContent = 'Reconnect';
+  const kind = flow.kind || 'unknown';
+
+  const titlePrefix = (kind === 'not_implemented' || kind === 'unknown')
+    ? 'About '
+    : (conn ? 'Reconnect ' : 'Connect ');
+  document.getElementById('soc-modal-title').textContent = titlePrefix + desc.display_name;
+  document.getElementById('soc-modal-sub').textContent = desc.tagline || '';
+  document.getElementById('soc-modal-body').innerHTML = socWizardHtml(desc, conn);
+
+  const submit = document.getElementById('soc-modal-submit');
+  // Enable the submit button only when there's actually a path to take:
+  // app_password (filled by user) or oauth2-refresh (existing conn).
+  if (kind === 'app_password') {
+    submit.disabled = false;
+    submit.textContent = conn ? 'Reconnect' : 'Connect';
+    submit.dataset.mode = 'fields';
+  } else if (kind === 'oauth2' && conn) {
+    submit.disabled = false;
+    submit.textContent = 'Refresh';
+    submit.dataset.mode = 'refresh';
+  } else {
+    submit.disabled = true;
+    submit.textContent = 'OK';
+    submit.dataset.mode = 'close';
+  }
+
   document.getElementById('soc-modal').classList.add('soc-modal-open');
 }
 
@@ -705,35 +785,43 @@ function socSetStatus(kind, msg) {
 async function socModalSubmit() {
   const platformId = SOC_MODAL_PLATFORM;
   if (!platformId) return;
-  const desc = SOC_DESCRIPTORS[platformId];
-  const flow = (desc && desc.auth_flow) || {};
-  if (flow.kind !== 'app_password') return;
-
   const submit = document.getElementById('soc-modal-submit');
-  submit.disabled = true;
-  submit.textContent = 'Reconnecting…';
-  socSetStatus('busy', 'Asking the platform to verify those credentials…');
+  const mode = submit.dataset.mode || 'close';
 
-  const handle = (document.getElementById('soc-field-handle').value || '').trim();
-  const password = (document.getElementById('soc-field-password').value || '').trim();
-  if (!handle || !password) {
-    socSetStatus('error', 'Both fields are required.');
-    submit.disabled = false; submit.textContent = 'Reconnect';
-    return;
+  if (mode === 'close') { socCloseModal(); return; }
+
+  let fields = {};
+  let verb = 'Reconnecting';
+  if (mode === 'fields') {
+    const handle = (document.getElementById('soc-field-handle').value || '').trim();
+    const password = (document.getElementById('soc-field-password').value || '').trim();
+    if (!handle || !password) {
+      socSetStatus('error', 'Both fields are required.');
+      return;
+    }
+    fields = { handle: handle, app_password: password };
+  } else if (mode === 'refresh') {
+    verb = 'Refreshing';
+    // Empty fields → backend detects existing row + rotates via adapter.refresh()
+    fields = {};
   }
+
+  const originalLabel = submit.textContent;
+  submit.disabled = true;
+  submit.textContent = verb + '…';
+  socSetStatus('busy', mode === 'refresh'
+    ? 'Asking the platform for a fresh access token…'
+    : 'Asking the platform to verify those credentials…');
 
   try {
     const r = await socAuthFetch(`/api/social/connections/reconnect/${encodeURIComponent(platformId)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        token: socAuthToken(),
-        fields: { handle: handle, app_password: password },
-      }),
+      body: JSON.stringify({ token: socAuthToken(), fields: fields }),
     });
     const data = await r.json();
     if (!r.ok || !data.ok) {
-      socSetStatus('error', data.error || 'Reconnect failed.');
+      socSetStatus('error', data.error || (verb + ' failed.'));
       submit.disabled = false; submit.textContent = 'Try again';
       return;
     }
@@ -742,7 +830,7 @@ async function socModalSubmit() {
     setTimeout(() => socCloseModal(), 600);
   } catch (e) {
     socSetStatus('error', 'Network error — ' + (e.message || 'try again in a moment.'));
-    submit.disabled = false; submit.textContent = 'Try again';
+    submit.disabled = false; submit.textContent = originalLabel;
   }
 }
 
@@ -750,13 +838,14 @@ async function socRefreshConnections() {
   if (Object.keys(SOC_DESCRIPTORS).length === 0) {
     await socLoadDescriptors();
   }
-  socRenderPlatforms({});
+  socRenderPlatforms(SOC_CONNECTIONS_MAP);
   try {
     const r = await socAuthFetch(`/api/social/connections?token=${encodeURIComponent(socAuthToken())}`);
     if (!r.ok) return;
     const rows = await r.json();
     const map = {};
     for (const c of rows) map[c.platform] = c;
+    SOC_CONNECTIONS_MAP = map;
     socRenderPlatforms(map);
   } catch (_) { /* page renders stub cards even if fetch fails */ }
 }
