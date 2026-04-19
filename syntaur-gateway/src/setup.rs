@@ -361,6 +361,7 @@ pub async fn first_run_redirect(
         || path == "/icon-512.png"
         || path == "/logo-mark.jpg"
         || path.starts_with("/agent-avatar/")
+        || path.starts_with("/scheduler-frame/")
         || path == "/manifest.json"
         || path == "/tailwind.js"
         || path.starts_with("/coders/xterm")
@@ -1154,6 +1155,32 @@ pub async fn handle_agent_avatar(
 
     // Final fallback: generic app icon
     Ok((h, include_bytes!("../static/avatar.png").to_vec()))
+}
+
+/// GET /scheduler-frame/{key} — serve a decorative scheduler frame image.
+/// Public (same as persona avatars) — no user data, just brand artwork.
+/// Keys map to `static/scheduler-frames/{key}.webp`. The Scheduler CSS
+/// picks one of these via `[data-sch-border]` and renders real calendar
+/// content on top.
+pub async fn handle_scheduler_frame(
+    axum::extract::Path(key): axum::extract::Path<String>,
+) -> Result<(axum::http::HeaderMap, Vec<u8>), StatusCode> {
+    // Sanitize key: lowercase + hyphen only, short. Prevents path traversal.
+    if key.is_empty() || key.len() > 40 || !key.chars().all(|c| c.is_ascii_lowercase() || c == '-') {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let mut h = axum::http::HeaderMap::new();
+    h.insert("content-type", "image/webp".parse().unwrap());
+    h.insert("cache-control", "public, max-age=604800, immutable".parse().unwrap());
+    let bytes: &[u8] = match key.as_str() {
+        "garden-notebook" => include_bytes!("../static/scheduler-frames/garden-notebook.webp"),
+        "heirloom"        => include_bytes!("../static/scheduler-frames/heirloom.webp"),
+        "woodland"        => include_bytes!("../static/scheduler-frames/woodland.webp"),
+        "cosmos"          => include_bytes!("../static/scheduler-frames/cosmos.webp"),
+        "field-journal"   => include_bytes!("../static/scheduler-frames/field-journal.webp"),
+        _ => return Err(StatusCode::NOT_FOUND),
+    };
+    Ok((h, bytes.to_vec()))
 }
 
 /// POST /api/agent-avatar/{agent_id} — upload custom agent avatar (admin only)

@@ -5982,6 +5982,7 @@ async fn main() {
         .route("/logo-mark.jpg", get(setup::handle_logo_mark))
         .route("/agent-avatar/{agent_id}", get(setup::handle_agent_avatar))
         .route("/api/agent-avatar/{agent_id}", post(setup::handle_agent_avatar_upload))
+        .route("/scheduler-frame/{key}", get(setup::handle_scheduler_frame))
         .route("/manifest.json", get(setup::handle_manifest))
         .route("/tailwind.js", get(setup::handle_tailwind))
         .route("/coders/xterm.min.js", get(setup::handle_xterm_js))
