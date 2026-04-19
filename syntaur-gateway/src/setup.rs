@@ -1075,8 +1075,24 @@ pub async fn handle_agent_avatar(
         return Ok((h, data));
     }
 
-    // Default: serve the app icon
+    // Embedded persona icons (ship with binary, overridden by disk upload above)
     h.insert("content-type", "image/png".parse().unwrap());
+    let embedded: Option<&[u8]> = match agent_id {
+        "kyron"    => Some(include_bytes!("../static/personas/kyron.png")),
+        "positron" => Some(include_bytes!("../static/personas/positron.png")),
+        "cortex"   => Some(include_bytes!("../static/personas/cortex.png")),
+        "silvr"    => Some(include_bytes!("../static/personas/silvr.png")),
+        "thaddeus" => Some(include_bytes!("../static/personas/thaddeus.png")),
+        "maurice"  => Some(include_bytes!("../static/personas/maurice.png")),
+        "nyota"    => Some(include_bytes!("../static/personas/nyota.png")),
+        "mushi"    => Some(include_bytes!("../static/personas/mushi.png")),
+        _ => None,
+    };
+    if let Some(bytes) = embedded {
+        return Ok((h, bytes.to_vec()));
+    }
+
+    // Final fallback: generic app icon
     Ok((h, include_bytes!("../static/avatar.png").to_vec()))
 }
 

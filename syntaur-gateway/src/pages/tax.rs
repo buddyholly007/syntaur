@@ -3084,7 +3084,7 @@ pub async fn render() -> Html<String> {
                 }
                 div class="flex-1 overflow-y-auto space-y-3" id="tax-chat-messages" {
                     div class="flex gap-2" {
-                        img src="/agent-avatar/main" class="w-6 h-6 rounded-lg flex-shrink-0 mt-0.5" alt="";
+                        img src="/agent-avatar/positron" class="w-12 h-12 rounded-full flex-shrink-0 mt-0.5" alt="";
                         div class="text-sm text-gray-400" {
                             p {
                                 "Positron here. I have access to your receipts, expenses, investments, and taxpayer profile. I can compute deductions, flag inconsistencies, and cite IRC when appropriate. Queries:"
@@ -3985,7 +3985,7 @@ function clearTaxChat() {
   taxConvId = null;
   document.getElementById('tax-chat-messages').innerHTML = `
     <div class="flex gap-2">
-      <img src="/agent-avatar/main" class="w-6 h-6 rounded-lg flex-shrink-0 mt-0.5" alt="">
+      <img src="/agent-avatar/positron" class="w-12 h-12 rounded-full flex-shrink-0 mt-0.5" alt="">
       <div class="text-sm text-gray-400">
         <p>New tax conversation started. How can I help?</p>
         <div class="flex flex-wrap gap-1 mt-2">
@@ -4035,7 +4035,7 @@ async function loadTaxMessages(convId) {
       } else if (msg.role === 'assistant' && msg.content) {
         const el = document.createElement('div');
         el.className = 'flex gap-2';
-        el.innerHTML = `<img src="/agent-avatar/main" class="w-6 h-6 rounded-lg flex-shrink-0 mt-0.5" alt="">
+        el.innerHTML = `<img src="/agent-avatar/positron" class="w-12 h-12 rounded-full flex-shrink-0 mt-0.5" alt="">
           <div class="flex-1 text-sm text-gray-300 leading-relaxed">${esc(msg.content).replace(/\n/g,'<br>')}</div>`;
         container.appendChild(el);
       }
@@ -4067,7 +4067,7 @@ async function sendTaxChat() {
   // Thinking
   const aiEl = document.createElement('div');
   aiEl.className = 'flex gap-2';
-  aiEl.innerHTML = `<img src="/agent-avatar/main" class="w-6 h-6 rounded-lg flex-shrink-0 mt-0.5" alt="">
+  aiEl.innerHTML = `<img src="/agent-avatar/positron" class="w-12 h-12 rounded-full flex-shrink-0 mt-0.5" alt="">
     <div class="flex-1 text-sm" id="tax-ai-resp">
       <div class="flex gap-1 py-1"><span class="w-1.5 h-1.5 rounded-full bg-oc-500 animate-bounce"></span><span class="w-1.5 h-1.5 rounded-full bg-oc-500 animate-bounce" style="animation-delay:150ms"></span><span class="w-1.5 h-1.5 rounded-full bg-oc-500 animate-bounce" style="animation-delay:300ms"></span></div>
     </div>`;

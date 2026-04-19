@@ -640,7 +640,7 @@ const BODY_HTML: &str = r##"<!-- Login overlay -->
     <!-- Chat messages (populated by existing JS) — hidden while hero is shown -->
     <div class="cc-chat-messages hidden-when-hero" id="chat-messages">
       <div class="flex gap-3">
-        <img src="/agent-avatar/main" class="w-7 h-7 rounded-full flex-shrink-0 mt-0.5" alt="">
+        <img src="/agent-avatar/kyron" class="w-10 h-10 rounded-full flex-shrink-0 mt-0.5" alt="">
         <div class="flex-1 text-sm text-gray-300" id="chat-greeting">
           <p id="welcome-sub">Hey! How can I help you?</p>
         </div>
@@ -1617,7 +1617,7 @@ function clearChat() {
   const messages = document.getElementById('chat-messages');
   messages.innerHTML = `
     <div class="flex gap-3">
-      <img src="/agent-avatar/main" class="w-7 h-7 rounded-full flex-shrink-0 mt-0.5" alt="">
+      <img src="/agent-avatar/kyron" class="w-10 h-10 rounded-full flex-shrink-0 mt-0.5" alt="">
       <div class="flex-1 text-sm text-gray-300">
         <p>Chat cleared. How can I help?</p>
       </div>
@@ -1668,7 +1668,7 @@ async function sendMessage() {
   const aiDiv = document.createElement('div');
   aiDiv.className = 'flex gap-3';
   aiDiv.innerHTML = `
-    <img src="/agent-avatar/main" class="w-7 h-7 rounded-full flex-shrink-0 mt-0.5" alt="">
+    <img src="/agent-avatar/kyron" class="w-10 h-10 rounded-full flex-shrink-0 mt-0.5" alt="">
     <div class="flex-1 text-sm">
       <div class="flex items-center gap-2 text-gray-400">
         <div class="flex gap-1">

@@ -70,7 +70,7 @@ const BODY_HTML: &str = r##"<!-- Agent strip (chips + new-chat) — lives inside
 
     <!-- Welcome message -->
     <div class="flex gap-4" id="welcome-msg">
-      <img src="/agent-avatar/main" class="w-8 h-8 rounded-lg flex-shrink-0" alt="">
+      <img src="/agent-avatar/main" id="welcome-avatar" class="w-14 h-14 rounded-full flex-shrink-0" alt="">
       <div class="flex-1">
         <p class="text-gray-300 leading-relaxed" id="greeting">Hey! I'm your AI assistant. How can I help you today?</p>
         <div class="flex flex-wrap gap-2 mt-4">
@@ -205,6 +205,8 @@ function updateAgentDisplay() {
   const gEl = document.getElementById('greeting');
   if (gEl) gEl.textContent = `Hey! I'm ${currentAgent}. How can I help you today?`;
   document.title = `${currentAgent} — Syntaur`;
+  const wa = document.getElementById('welcome-avatar');
+  if (wa) wa.src = `/agent-avatar/${getAgentId(currentAgent)}`;
 }
 
 // Renders the persona chip strip below the shared top bar. One pill per
@@ -286,7 +288,7 @@ async function loadConversationMessages(convId) {
       } else if (msg.role === 'assistant' && msg.content) {
         const el = document.createElement('div');
         el.className = 'flex gap-4';
-        el.innerHTML = `<img src="/agent-avatar/main" class="w-8 h-8 rounded-lg flex-shrink-0" alt="">
+        el.innerHTML = `<img src="/agent-avatar/${getAgentId(currentAgent)}" class="w-14 h-14 rounded-full flex-shrink-0" alt="">
           <div class="flex-1 min-w-0">
             <div class="text-gray-300 leading-relaxed text-sm chat-md">${md(msg.content)}</div>
           </div>`;
@@ -299,7 +301,7 @@ async function loadConversationMessages(convId) {
       const thinkEl = document.createElement('div');
       thinkEl.className = 'flex gap-4';
       thinkEl.id = 'pending-response';
-      thinkEl.innerHTML = `<img src="/agent-avatar/main" class="w-8 h-8 rounded-lg flex-shrink-0" alt="">
+      thinkEl.innerHTML = `<img src="/agent-avatar/${getAgentId(currentAgent)}" class="w-14 h-14 rounded-full flex-shrink-0" alt="">
         <div class="flex-1 min-w-0">
           <div class="flex items-center gap-2 text-gray-500 text-sm py-2">
             <span class="flex gap-1">
@@ -338,7 +340,7 @@ async function pollForResponse(convId, lastCount) {
           if (msg.role === 'assistant' && msg.content) {
             const el = document.createElement('div');
             el.className = 'flex gap-4';
-            el.innerHTML = `<img src="/agent-avatar/main" class="w-8 h-8 rounded-lg flex-shrink-0" alt="">
+            el.innerHTML = `<img src="/agent-avatar/${getAgentId(currentAgent)}" class="w-14 h-14 rounded-full flex-shrink-0" alt="">
               <div class="flex-1 min-w-0">
                 <div class="text-gray-300 leading-relaxed text-sm chat-md">${md(msg.content)}</div>
               </div>`;
@@ -360,7 +362,7 @@ function clearMessagesUI() {
   const container = document.getElementById('messages');
   container.innerHTML = `
     <div class="flex gap-4" id="welcome-msg">
-      <img src="/agent-avatar/main" class="w-8 h-8 rounded-lg flex-shrink-0" alt="">
+      <img src="/agent-avatar/${getAgentId(currentAgent)}" class="w-14 h-14 rounded-full flex-shrink-0" alt="">
       <div class="flex-1">
         <p class="text-gray-300 leading-relaxed" id="greeting">Hey! I'm ${esc(currentAgent)}. How can I help you today?</p>
         <div class="flex flex-wrap gap-2 mt-4">
@@ -435,7 +437,7 @@ async function send(msg) {
   const aiEl = document.createElement('div');
   aiEl.className = 'flex gap-4';
   aiEl.innerHTML = `
-    <img src="/agent-avatar/main" class="w-8 h-8 rounded-lg flex-shrink-0" alt="">
+    <img src="/agent-avatar/${getAgentId(currentAgent)}" class="w-14 h-14 rounded-full flex-shrink-0" alt="">
     <div class="flex-1 min-w-0" id="ai-response">
       <div class="flex items-center gap-2 text-gray-500 text-sm py-2">
         <span class="flex gap-1">
@@ -879,7 +881,7 @@ async function showDocumentDetection(file) {
   const isPdf = file.type === 'application/pdf';
 
   msgEl.innerHTML = `
-    <img src="/agent-avatar/main" class="w-8 h-8 rounded-lg flex-shrink-0" alt="">
+    <img src="/agent-avatar/${getAgentId(currentAgent)}" class="w-14 h-14 rounded-full flex-shrink-0" alt="">
     <div class="flex-1 min-w-0">
       <div class="p-3 rounded-lg bg-gray-800 border border-gray-700">
         <div class="flex items-start gap-3">
