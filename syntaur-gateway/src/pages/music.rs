@@ -2466,10 +2466,11 @@ function startRealEqualizer() {
   // outward-left.
   const BAR_COUNT = 38;                  // total across the full width
   const HALF = Math.floor(BAR_COUNT / 2);
-  // Headroom: peak amplitude fills only 78 % of the canvas height so
-  // loud passages don't slam into the top edge. The remaining 22 % is
-  // negative space that makes the motion feel alive instead of clipped.
-  const CEILING = 0.78;
+  // Peak ceiling: 98 % of canvas. Kick-drum transients SHOULD pop
+  // into the top band — that's what gives classic spectrum vizzes
+  // their rhythmic punch. The other 2 % is just a 1-px gutter so
+  // bars don't visually kiss the canvas frame.
+  const CEILING = 0.98;
 
   const loop = () => {
     const cssW = canvas.clientWidth;
@@ -2510,10 +2511,12 @@ function startRealEqualizer() {
       for (let b = lo; b < hi && b < bins.length; b++) { sum += bins[b]; count++; }
       const avg = count > 0 ? sum / count : 0;
       const t = i / (HALF - 1);                    // 0 = bass, 1 = treble
-      // Bump the bass floor slightly (0.72 vs previous 0.5) so the
-      // center stays prominent without pegging. Treble still tops
-      // out around 2.8 for lively edges.
-      const weight = 0.72 + Math.pow(t, 0.5) * 2.08;
+      // Let bass pop on transients (weight 1.05 at the center) while
+      // treble still gets a strong lift (2.8 at the edges). 1.05 × a
+      // loud kick bin reliably reaches the ceiling; quieter sustains
+      // come in around 60 %, giving the center the punch-and-breathe
+      // rhythm classic visualizers have.
+      const weight = 1.05 + Math.pow(t, 0.5) * 1.75;
       const v = Math.min(1, (avg / 255) * weight);
       heights[i] = Math.max(2, v * H * CEILING);
     }

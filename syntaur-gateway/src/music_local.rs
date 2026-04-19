@@ -821,38 +821,83 @@ pub async fn serve_art(
         let term = format!("{} {}", artist, album_or_title).trim().to_string();
         let entity = if album_opt.as_deref().filter(|s| !s.is_empty()).is_some() { "album" } else { "song" };
         if !term.is_empty() {
-            if let Ok(resp) = state.client.get("https://itunes.apple.com/search")
-                .query(&[("term", term.as_str()), ("entity", entity), ("limit", "1"), ("media", "music")])
-                .timeout(std::time::Duration::from_secs(6))
-                .send().await {
-                if resp.status().is_success() {
-                    if let Ok(j) = resp.json::<serde_json::Value>().await {
-                        let art_url = j.get("results")
-                            .and_then(|v| v.as_array())
-                            .and_then(|arr| arr.first())
-                            .and_then(|first| first.get("artworkUrl100").or_else(|| first.get("artworkUrl60")))
-                            .and_then(|v| v.as_str())
-                            // Upgrade 100×100 → 600×600 — iTunes serves it from the same URL pattern.
-                            .map(|s| s.replace("100x100bb", "600x600bb").replace("100x100-75", "600x600-75"));
-                        if let Some(url) = art_url {
-                            if let Ok(imgresp) = state.client.get(&url)
-                                .timeout(std::time::Duration::from_secs(6))
-                                .send().await {
-                                if imgresp.status().is_success() {
-                                    if let Ok(bytes) = imgresp.bytes().await {
-                                        let _ = cache_fetched_art(state.db_path.clone(), id, uid, &bytes, "image/jpeg").await;
-                                        return image_response(bytes.to_vec(), "image/jpeg");
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+            if let Some(bytes) = itunes_fetch_art(&state.client, &term, entity).await {
+                let _ = cache_fetched_art(state.db_path.clone(), id, uid, &bytes, "image/jpeg").await;
+                return image_response(bytes, "image/jpeg");
             }
         }
     }
 
+    // Tier 5: artist-only iTunes fallback. Covers classical catalogs
+    // (Bach's obscure BWVs, for example) and bootleg / rarity albums
+    // iTunes doesn't carry at the album level — we still get the
+    // composer or artist's profile image instead of a blank tile.
+    // Uses the top album the artist has on iTunes as a proxy cover.
+    if !artist.is_empty() {
+        if let Some(bytes) = itunes_fetch_art(&state.client, artist, "musicArtist").await {
+            let _ = cache_fetched_art(state.db_path.clone(), id, uid, &bytes, "image/jpeg").await;
+            return image_response(bytes, "image/jpeg");
+        }
+        // Artist's first album as a fallback — returns a real cover,
+        // which looks better than an artist profile photo on a tile.
+        if let Some(bytes) = itunes_fetch_art(&state.client, artist, "album").await {
+            let _ = cache_fetched_art(state.db_path.clone(), id, uid, &bytes, "image/jpeg").await;
+            return image_response(bytes, "image/jpeg");
+        }
+    }
+
     Err(StatusCode::NOT_FOUND)
+}
+
+/// Query iTunes Search and return the first artworkUrl upgraded to 600×600.
+/// Handles both `album`/`song` (return artworkUrl100) and `musicArtist`
+/// (return artistLinkUrl → fetch first album from that artist's page, or
+/// just use the first lookup result's artwork if present).
+async fn itunes_fetch_art(client: &reqwest::Client, term: &str, entity: &str) -> Option<Vec<u8>> {
+    let params = [
+        ("term", term),
+        ("entity", entity),
+        ("limit", "1"),
+        ("media", "music"),
+    ];
+    let resp = client.get("https://itunes.apple.com/search")
+        .query(&params)
+        .timeout(std::time::Duration::from_secs(6))
+        .send().await.ok()?;
+    if !resp.status().is_success() { return None; }
+    let j: serde_json::Value = resp.json().await.ok()?;
+    let first = j.get("results").and_then(|v| v.as_array())?.first()?.clone();
+
+    // For musicArtist entity, there's no artworkUrl — the result has
+    // an artistId we can look up to get the artist's top album art.
+    // Perform a second request: lookup?id=<artistId>&entity=album&limit=1
+    let art_url = if entity == "musicArtist" {
+        let artist_id = first.get("artistId").and_then(|v| v.as_i64())?;
+        let lookup = client.get("https://itunes.apple.com/lookup")
+            .query(&[("id", artist_id.to_string().as_str()), ("entity", "album"), ("limit", "2")])
+            .timeout(std::time::Duration::from_secs(6))
+            .send().await.ok()?;
+        if !lookup.status().is_success() { return None; }
+        let lj: serde_json::Value = lookup.json().await.ok()?;
+        // lookup returns [artist, album1, album2, ...] — pick the
+        // first album (skip the artist row).
+        let results = lj.get("results").and_then(|v| v.as_array())?;
+        results.iter()
+            .find(|r| r.get("wrapperType").and_then(|v| v.as_str()) == Some("collection"))
+            .and_then(|r| r.get("artworkUrl100").or_else(|| r.get("artworkUrl60")))
+            .and_then(|v| v.as_str())
+            .map(|s| s.replace("100x100bb", "600x600bb").replace("100x100-75", "600x600-75"))?
+    } else {
+        first.get("artworkUrl100").or_else(|| first.get("artworkUrl60"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.replace("100x100bb", "600x600bb").replace("100x100-75", "600x600-75"))?
+    };
+
+    let imgresp = client.get(&art_url)
+        .timeout(std::time::Duration::from_secs(6))
+        .send().await.ok()?;
+    if !imgresp.status().is_success() { return None; }
+    imgresp.bytes().await.ok().map(|b| b.to_vec())
 }
 
 /// After fetching art from a remote source (MB / iTunes), persist it
