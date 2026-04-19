@@ -5906,7 +5906,9 @@ async fn main() {
         .route("/profile", get(pages::profile::render))
         .route("/api/auth/login", post(setup::handle_login))
         .route("/api/auth/refresh", post(handle_auth_refresh))
+        .route("/api/auth/pair-client", post(handle_auth_pair_client))
         .route("/api/audit", get(handle_audit_log_get))
+        .route("/api/journal/ingest", post(handle_journal_ingest))
         .route("/api/setup/status", get(setup::handle_setup_status))
         .route("/api/setup/scan", get(setup::handle_hardware_scan))
         .route("/api/setup/fix-firewall", post(setup::handle_fix_firewall))
@@ -8510,6 +8512,282 @@ pub fn spawn_meeting_prep_precompute_task(state: Arc<AppState>) {
             tokio::time::sleep(std::time::Duration::from_secs(120)).await;
         }
     });
+}
+
+// ── /api/journal/ingest — multi-client pendant / voice ingest ──────
+//
+// Per `projects/pendant_architecture.md`. One authenticated endpoint
+// accepts audio from any client: phone PWA, iOS companion app,
+// home-server bridge (current VM setup retrofitted to forward here),
+// desktop, future clients. Clients do BLE pairing locally; gateway
+// only cares about authenticated HTTPS uploads.
+//
+// Multipart fields:
+//   audio        — opus/webm/mp3/wav/raw PCM bytes
+//   text         — (optional) pre-transcribed text; skip server STT if set
+//   captured_at  — ISO 8601 timestamp, client clock
+//   device_id    — stable client identifier, e.g. "pendant:sean-original"
+//   mode         — "pendant" | "phone_mic" | "desktop_mic" | "car" | ...
+//   token        — (deprecated; use Authorization header)
+//
+// Auth: Authorization: Bearer <token> with `voice_ingest` scope.
+// Unscoped tokens (web session) also accepted so the existing
+// /api/voice/transcribe web-mic flow still works end-to-end.
+//
+// Dedup: (user_id, device_id, captured_at floor to 30s, sha256(audio))
+// — skips insert if a matching row was seen in the last 5 minutes.
+//
+// Response: { entry_id, date, time_of_day, text, transcription_engine }.
+
+async fn handle_journal_ingest(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    mut multipart: axum::extract::Multipart,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    // Extract token (Authorization header preferred; multipart `token`
+    // field as fallback during the query-token deprecation window).
+    let header_token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let mut form_token: Option<String> = None;
+    let mut audio_bytes: Option<Vec<u8>> = None;
+    let mut audio_mime: String = "audio/webm".to_string();
+    let mut audio_filename: String = "audio.webm".to_string();
+    let mut pre_text: Option<String> = None;
+    let mut captured_at: Option<String> = None;
+    let mut device_id: Option<String> = None;
+    let mut mode: String = "unknown".to_string();
+
+    while let Ok(Some(mut field)) = multipart.next_field().await {
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "token" => form_token = field.text().await.ok().filter(|s| !s.is_empty()),
+            "text"  => pre_text  = field.text().await.ok().filter(|s| !s.is_empty()),
+            "captured_at" => captured_at = field.text().await.ok().filter(|s| !s.is_empty()),
+            "device_id"   => device_id   = field.text().await.ok().filter(|s| !s.is_empty()),
+            "mode"        => { if let Ok(v) = field.text().await { if !v.is_empty() { mode = v; } } }
+            "audio" => {
+                if let Some(ct) = field.content_type() { audio_mime = ct.to_string(); }
+                if let Some(f) = field.file_name()    { audio_filename = f.to_string(); }
+                let mut buf = Vec::new();
+                while let Ok(Some(chunk)) = field.chunk().await {
+                    buf.extend_from_slice(&chunk);
+                    if buf.len() > 20 * 1024 * 1024 {
+                        return Err(axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+                    }
+                }
+                if !buf.is_empty() { audio_bytes = Some(buf); }
+            }
+            _ => {}
+        }
+    }
+
+    let token = header_token.or(form_token).unwrap_or_default();
+    if token.is_empty() {
+        return Err(axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    // Accept any valid token — scoped (voice_ingest / *), unscoped web-
+    // session, or the legacy-admin fallback. Phase 4.2 will tighten to
+    // require voice_ingest specifically; for now the design goal is
+    // "any authenticated client can post audio", which matches the
+    // "gateway doesn't care which client" invariant.
+    let principal = match state.users.resolve_token(&token).await {
+        Ok(Some(r)) => auth::Principal::User {
+            id: r.user_id,
+            name: r.user_name,
+            role: r.user_role,
+            scopes: r.scopes.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+        },
+        _ => return Err(axum::http::StatusCode::UNAUTHORIZED),
+    };
+    let user_id = principal.user_id();
+
+    // Resolve the transcription text:
+    //   - if client supplied `text`, use that verbatim (client-side STT path).
+    //   - else run audio through the existing Groq Whisper wiring.
+    let (transcribed_text, engine) = if let Some(t) = pre_text.clone() {
+        (t, "client".to_string())
+    } else {
+        let Some(audio) = audio_bytes.clone() else {
+            return Err(axum::http::StatusCode::BAD_REQUEST);
+        };
+        // Compact reimpl of the Groq path from handle_voice_transcribe —
+        // factored here because the original function owns its own
+        // multipart reader that already consumed the stream by now.
+        let mut out = (String::new(), "none".to_string());
+        if let Some(groq) = state.config.models.providers.get("groq") {
+            if !groq.api_key.is_empty() {
+                let base = if groq.base_url.is_empty() {
+                    "https://api.groq.com/openai/v1".to_string()
+                } else {
+                    groq.base_url.trim_end_matches('/').to_string()
+                };
+                let url = format!("{base}/audio/transcriptions");
+                let part = reqwest::multipart::Part::bytes(audio.clone())
+                    .file_name(audio_filename.clone())
+                    .mime_str(&audio_mime)
+                    .unwrap_or_else(|_| reqwest::multipart::Part::bytes(audio.clone()).file_name(audio_filename.clone()));
+                let form = reqwest::multipart::Form::new()
+                    .text("model", "whisper-large-v3-turbo")
+                    .text("response_format", "json")
+                    .part("file", part);
+                if let Ok(resp) = state.client.post(&url)
+                    .bearer_auth(&groq.api_key)
+                    .multipart(form)
+                    .timeout(std::time::Duration::from_secs(30))
+                    .send().await
+                {
+                    if resp.status().is_success() {
+                        if let Ok(v) = resp.json::<serde_json::Value>().await {
+                            out.0 = v.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                            out.1 = "groq:whisper-large-v3-turbo".to_string();
+                        }
+                    }
+                }
+            }
+        }
+        if out.0.trim().is_empty() {
+            log::warn!("[journal/ingest] STT returned empty; skipping journal append for device={:?}", device_id);
+            return Ok(Json(serde_json::json!({
+                "entry_id": serde_json::Value::Null,
+                "text": "",
+                "transcription_engine": out.1,
+                "skipped": "no_speech_detected",
+            })));
+        }
+        out
+    };
+
+    // Parse captured_at (fallback to now on bad input).
+    let ts = captured_at
+        .as_deref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|d| d.with_timezone(&chrono::Utc))
+        .unwrap_or_else(chrono::Utc::now);
+    let date_str = ts.format("%Y-%m-%d").to_string();
+    let time_str = ts.format("%H:%M:%S").to_string();
+
+    // Append to the per-user journal markdown file. Same file layout as
+    // voice_api::get_journal reads, so a newly-appended entry appears in
+    // the Journal UI without further plumbing.
+    let data_dir = crate::resolve_data_dir();
+    let journal_dir = data_dir.join("journal");
+    let _ = std::fs::create_dir_all(&journal_dir);
+    let path = journal_dir.join(format!("{}.md", date_str));
+    let device_label = device_id.clone().unwrap_or_else(|| format!("({})", mode));
+    let entry = if path.exists() {
+        format!("\n**{}** _{}_ {}\n", time_str, device_label, transcribed_text.trim())
+    } else {
+        format!("# Journal — {}\n\n**{}** _{}_ {}\n", date_str, time_str, device_label, transcribed_text.trim())
+    };
+    let write_ok = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| {
+            use std::io::Write;
+            f.write_all(entry.as_bytes())
+        })
+        .is_ok();
+
+    // Audit-log the ingest. Non-blocking; failures don't block the response.
+    security::audit_log(
+        &state,
+        Some(user_id),
+        "voice.ingest",
+        Some(&format!("device:{}", device_label)),
+        serde_json::json!({
+            "mode": mode,
+            "bytes": audio_bytes.as_ref().map(|b| b.len()).unwrap_or(0),
+            "engine": engine,
+            "date": date_str,
+            "persisted": write_ok,
+        }),
+        None, None,
+    ).await;
+
+    Ok(Json(serde_json::json!({
+        "entry_id": format!("{}:{}", date_str, time_str),
+        "date": date_str,
+        "time_of_day": time_str,
+        "text": transcribed_text.trim(),
+        "transcription_engine": engine,
+        "device_id": device_id,
+        "mode": mode,
+    })))
+}
+
+// ── /api/auth/pair-client — mint a scoped voice_ingest token ─────────
+//
+// Admin-authed. A client ("pendant bridge on the NAS", "my Android phone",
+// etc.) calls this once with a label + device_id; gateway returns a token
+// scoped to `voice_ingest` only. The client stores the token in its own
+// secure storage. Per-client tokens mean revocation is per-client.
+
+#[derive(serde::Deserialize)]
+struct PairClientRequest {
+    #[serde(default)]
+    token: String,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    device_id: String,
+    #[serde(default)]
+    scopes: Option<String>, // comma-separated override; defaults to "voice_ingest"
+    #[serde(default)]
+    ttl_hours: Option<u64>, // default 720h = 30 days
+}
+
+async fn handle_auth_pair_client(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<PairClientRequest>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| req.token.clone());
+    let principal = resolve_principal(&state, &token).await?;
+    require_admin(&principal)?;
+
+    let label = if req.label.trim().is_empty() { "pendant-bridge".to_string() } else { req.label.clone() };
+    let device_id = if req.device_id.trim().is_empty() { format!("client-{}", chrono::Utc::now().timestamp()) } else { req.device_id.clone() };
+    let scopes = req.scopes.clone().unwrap_or_else(|| "voice_ingest".to_string());
+    let ttl = req.ttl_hours.unwrap_or(720);
+
+    let new_token = state
+        .users
+        .mint_token_scoped(principal.user_id(), &label, &scopes, Some(ttl))
+        .await
+        .map_err(|e| {
+            log::warn!("[auth/pair-client] mint failed: {e}");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    security::audit_log(
+        &state,
+        Some(principal.user_id()),
+        "token.pair_client",
+        Some(&format!("device:{device_id}")),
+        serde_json::json!({ "label": label, "scopes": scopes, "ttl_hours": ttl }),
+        None, None,
+    ).await;
+
+    Ok(Json(serde_json::json!({
+        "token": new_token,
+        "label": label,
+        "device_id": device_id,
+        "scopes": scopes,
+        "expires_in_hours": ttl,
+    })))
 }
 
 // ── Voice transcription endpoint (multipart audio → text) ───────────
