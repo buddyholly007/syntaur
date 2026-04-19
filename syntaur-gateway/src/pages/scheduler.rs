@@ -259,10 +259,17 @@ fn event_modal() -> Markup {
                     label { "Location" input id="ev-loc" type="text" class="sch-input"; }
                     label { "Color"
                         button type="button" class="sch-btn-ghost" onclick="schAddJitsi()" style="width:fit-content;align-self:flex-start" { "+ Video call link" }
-                div class="sch-color-swatches" id="ev-color" {
-                            @for c in &["#84a98c","#3b82f6","#059669","#6366f1","#e07a5f","#b98b52","#9b6b9e","#6b8e23"] {
+                        div class="sch-color-swatches" id="ev-color" {
+                            // 24 curated event colors — grouped pastels + brights + deep tones.
+                            @for c in &[
+                                "#e57373","#ef6c00","#fbc02d","#7cb342","#26a69a","#0288d1",
+                                "#5c6bc0","#7e57c2","#d81b60","#8d6e63","#546e7a","#455a64",
+                                "#f8b4c4","#f6dd95","#9bbfa2","#84a98c","#b7bde8","#b8a5d8",
+                                "#6366f1","#3b82f6","#059669","#e07a5f","#b98b52","#4a3426",
+                            ] {
                                 button type="button" class="sch-swatch" data-color=(c) style={"background:"(c)} onclick="schPickColor(this)" {}
                             }
+                            input type="color" id="ev-color-custom" class="sch-swatch sch-swatch-custom" value="#84a98c" title="Pick any color" onchange="schPickCustomColor(this)";
                         }
                     }
                 }
@@ -452,7 +459,52 @@ body { background: var(--sch-bg); color: var(--sch-ink); font-family: var(--sch-
 .sch-mini-day.other-month { color: var(--sch-ink-faint); opacity: 0.4; }
 .sch-mini-day.has-events::after { content: ''; display: block; width: 3px; height: 3px; border-radius: 50%; background: var(--sch-accent-2); margin: 1px auto -3px; }
 
-/* Lists */
+/* Lists — caret-expand inline; modal fallback via ↗ */
+.sch-list-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.sch-list-row {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 6px; border-radius: 4px; cursor: pointer;
+  font-size: 13px; color: var(--sch-ink-dim); user-select: none;
+}
+.sch-list-row:hover { background: color-mix(in srgb, var(--sch-accent) 10%, transparent); color: var(--sch-ink); }
+.sch-list-row.sch-list-active { background: color-mix(in srgb, var(--sch-accent) 15%, transparent); color: var(--sch-ink); }
+.sch-list-caret {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 12px; height: 12px; font-size: 10px; color: var(--sch-ink-faint);
+  transition: transform 0.1s ease;
+}
+.sch-list-row.open .sch-list-caret { color: var(--sch-accent); }
+.sch-list-icon { font-size: 13px; width: 16px; text-align: center; }
+.sch-list-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sch-list-open-modal {
+  background: transparent; border: none; color: var(--sch-ink-faint);
+  cursor: pointer; font-size: 12px; padding: 0 4px; opacity: 0;
+  transition: opacity 0.1s ease;
+}
+.sch-list-row:hover .sch-list-open-modal { opacity: 1; }
+.sch-list-open-modal:hover { color: var(--sch-accent); }
+.sch-list-items {
+  list-style: none; margin: 0 0 4px 22px;
+  padding: 6px 8px; border-left: 2px solid var(--sch-border);
+  background: color-mix(in srgb, var(--sch-paper) 70%, transparent);
+  border-radius: 0 4px 4px 0;
+}
+.sch-list-empty { font-size: 11px; color: var(--sch-ink-faint); padding: 2px 4px 6px; font-style: italic; }
+.sch-inline-items { list-style: none; margin: 0 0 6px; padding: 0; display: flex; flex-direction: column; gap: 2px; max-height: 220px; overflow-y: auto; }
+.sch-inline-item {
+  display: flex; align-items: center; gap: 6px;
+  padding: 3px 4px; font-size: 12px;
+  border-radius: 3px;
+}
+.sch-inline-item:hover { background: color-mix(in srgb, var(--sch-accent) 8%, transparent); }
+.sch-inline-item.checked { opacity: 0.55; }
+.sch-inline-item.checked .sch-inline-text { text-decoration: line-through; }
+.sch-inline-text { flex: 1; color: var(--sch-ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sch-inline-add { display: flex; gap: 4px; margin-top: 4px; }
+.sch-inline-add .sch-input { flex: 1; padding: 4px 7px; font-size: 12px; }
+.sch-inline-add .sch-btn-primary { padding: 4px 10px; font-size: 12px; }
+
+/* Legacy — still used by the modal */
 .sch-list-list { list-style: none; padding: 0; margin: 0; }
 .sch-list-row {
   display: flex; align-items: center; gap: 8px;
@@ -643,8 +695,9 @@ body { background: var(--sch-bg); color: var(--sch-ink); font-family: var(--sch-
 /* ══ Modals ══ */
 .sch-modal {
   position: fixed; inset: 0; z-index: 60;
-  background: rgba(0,0,0,0.55); backdrop-filter: blur(4px);
+  background: rgba(20,15,5,0.55); backdrop-filter: blur(4px);
   display: flex; align-items: flex-start; justify-content: center; padding-top: 10vh;
+  cursor: pointer; /* signal: click empty space to dismiss */
 }
 .sch-modal[hidden] { display: none; }
 .sch-modal-box {
@@ -653,6 +706,7 @@ body { background: var(--sch-bg); color: var(--sch-ink); font-family: var(--sch-
   width: 100%; max-width: 480px; overflow: hidden;
   box-shadow: 0 30px 80px rgba(0,0,0,0.4);
   font-family: var(--sch-font-body);
+  cursor: default;
 }
 .sch-theme-box { max-width: 720px; }
 .sch-modal-head { padding: 14px 18px; border-bottom: 1px solid var(--sch-border); display: flex; align-items: center; }
@@ -666,9 +720,12 @@ body { background: var(--sch-bg); color: var(--sch-ink); font-family: var(--sch-
   padding: 8px 10px; font-size: 13px; color: var(--sch-ink); font-family: inherit;
 }
 .sch-input:focus { outline: none; border-color: var(--sch-accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--sch-accent) 20%, transparent); }
-.sch-color-swatches { display: flex; gap: 6px; flex-wrap: wrap; }
-.sch-swatch { width: 24px; height: 24px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; }
-.sch-swatch.selected { border-color: var(--sch-ink); }
+.sch-color-swatches { display: grid; grid-template-columns: repeat(12, 1fr); gap: 6px; padding: 2px 0; }
+.sch-swatch { width: 22px; height: 22px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; }
+.sch-swatch.selected { border-color: var(--sch-ink); box-shadow: 0 0 0 2px var(--sch-paper), 0 0 0 4px var(--sch-accent); }
+.sch-swatch-custom { appearance: none; -webkit-appearance: none; background: conic-gradient(from 0deg, red, yellow, lime, cyan, blue, magenta, red); }
+.sch-swatch-custom::-webkit-color-swatch-wrapper { padding: 0; }
+.sch-swatch-custom::-webkit-color-swatch { border: none; border-radius: 50%; }
 .sch-modal-foot { padding: 12px 18px; border-top: 1px solid var(--sch-border); display: flex; gap: 8px; justify-content: flex-end; }
 .sch-btn-primary { background: var(--sch-accent); color: var(--sch-paper); border: none; border-radius: 6px; padding: 7px 14px; font-size: 13px; cursor: pointer; font-family: inherit; }
 .sch-btn-ghost   { background: transparent; border: 1px solid var(--sch-border); color: var(--sch-ink-dim); border-radius: 6px; padding: 6px 12px; font-size: 13px; cursor: pointer; font-family: inherit; }
@@ -702,16 +759,25 @@ body { background: var(--sch-bg); color: var(--sch-ink); font-family: var(--sch-
 }
 .sch-month-cell { position: relative; }
 
-/* Location autocomplete */
+/* Location autocomplete — dropdown sits BELOW the input, never covers it.
+ * The label wrapping `#ev-loc` gets position:relative so absolute children
+ * stack against it correctly. Constrained width + max-height to prevent the
+ * "floods the UI" problem Sean hit. */
+.sch-event-modal .sch-modal-body label:has(#ev-loc) { position: relative; }
 .sch-loc-ac {
-  position: absolute; z-index: 20;
+  position: absolute; z-index: 35;
+  top: 100%; left: 0; right: 0;
   background: var(--sch-paper); border: 1px solid var(--sch-border); border-radius: 6px;
-  box-shadow: var(--sch-shadow); max-width: 400px; max-height: 220px; overflow-y: auto;
-  margin-top: 2px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.14);
+  max-height: 180px; overflow-y: auto;
+  margin-top: 4px;
 }
 .sch-loc-row { display: block; width: 100%; text-align: left; background: transparent; border: none;
-  padding: 6px 10px; font-size: 12px; color: var(--sch-ink); font-family: inherit; cursor: pointer; }
+  padding: 7px 10px; font-size: 12px; color: var(--sch-ink); font-family: inherit; cursor: pointer;
+  border-bottom: 1px solid var(--sch-border); white-space: normal; line-height: 1.35; }
+.sch-loc-row:last-child { border-bottom: none; }
 .sch-loc-row:hover { background: color-mix(in srgb, var(--sch-accent) 12%, transparent); }
+.sch-loc-hint { display: block; font-size: 10px; color: var(--sch-ink-faint); padding: 4px 10px; border-top: 1px solid var(--sch-border); background: color-mix(in srgb, var(--sch-accent) 4%, transparent); }
 
 /* Sticker grid */
 .sch-sticker-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding: 16px; }
@@ -788,10 +854,12 @@ body.sch-print-mode .sch-subbar { display: none !important; }
    deploys stay a single binary. Swap via [data-sch-border="<key>"]. */
 
 .sch-border-swatch {
-  display: inline-block; width: 14px; height: 14px; border-radius: 2px;
-  background: var(--sch-paper);
-  border: 2px solid var(--sch-ink-dim);
-  box-shadow: inset 0 0 0 1px var(--sch-paper);
+  display: inline-block; width: 16px; height: 14px; border-radius: 2px;
+  background: linear-gradient(180deg, #e8d9ba 0%, #d9c69d 100%);
+  box-shadow:
+    inset 0 0 0 1px rgba(0,0,0,0.15),
+    -3px 0 0 0 #b5b5b5,
+    -3px 0 0 1px rgba(0,0,0,0.25);
 }
 .sch-border-hint {
   font-size: 12px; color: var(--sch-ink-dim);
@@ -799,136 +867,129 @@ body.sch-print-mode .sch-subbar { display: none !important; }
 }
 .sch-shell { position: relative; }
 
-/* none — no decoration (explicit rule so switching TO none clears SVGs) */
-[data-sch-border="none"] .sch-shell::before,
-[data-sch-border="none"] .sch-shell::after,
-[data-sch-border="none"] .sch-main::before,
-[data-sch-border="none"] .sch-main::after { content: none !important; display: none !important; }
+/* Frame rewrite v2: richer SVGs, proper paper backgrounds, shadows. All
+ * styles paint via multi-layer background-image on .sch-shell so they
+ * compose cleanly regardless of pseudo-element budget. Each SVG is
+ * URL-encoded inline with %23 for '#' and %25 for '%'.
+ */
 
-/* notebook (default) — three binder rings on the left edge + subtle
-   cream paper tint. The rings are a single repeating radial-gradient
-   offset up the paper edge, so they scale with the module height. */
+/* none - explicit off */
+[data-sch-border="none"] .sch-shell { background: var(--sch-bg) !important; box-shadow: none !important; padding-left: 0 !important; padding-top: 0 !important; border: none !important; }
+[data-sch-border="none"] .sch-main { background-image: none !important; }
+
+/* spiral notebook (default) - realistic metallic coil down the left */
 [data-sch-border="notebook"] .sch-shell,
 body:not([data-sch-border]) .sch-shell {
   background:
-    radial-gradient(circle at 14px 7%, var(--sch-ink-dim) 0 2px, transparent 3px 6px, var(--sch-ink-dim) 6.5px 8.5px, transparent 9px),
-    radial-gradient(circle at 14px 50%, var(--sch-ink-dim) 0 2px, transparent 3px 6px, var(--sch-ink-dim) 6.5px 8.5px, transparent 9px),
-    radial-gradient(circle at 14px 93%, var(--sch-ink-dim) 0 2px, transparent 3px 6px, var(--sch-ink-dim) 6.5px 8.5px, transparent 9px);
-  background-repeat: no-repeat;
-  padding-left: 28px;
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='44' height='44' viewBox='0 0 44 44'%3E%3Cdefs%3E%3ClinearGradient id='m' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%23a6a6a6'/%3E%3Cstop offset='.25' stop-color='%23ededed'/%3E%3Cstop offset='.5' stop-color='%23818181'/%3E%3Cstop offset='.75' stop-color='%23d2d2d2'/%3E%3Cstop offset='1' stop-color='%23676767'/%3E%3C/linearGradient%3E%3ClinearGradient id='h' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='rgba(0,0,0,.45)'/%3E%3Cstop offset='.6' stop-color='rgba(0,0,0,.15)'/%3E%3Cstop offset='1' stop-color='rgba(0,0,0,.35)'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cellipse cx='22' cy='22' rx='17' ry='11' fill='none' stroke='url(%23m)' stroke-width='3.4'/%3E%3Cpath d='M7.5 22 Q 22 12 36.5 22' fill='none' stroke='white' stroke-width='1.1' opacity='.7'/%3E%3Cpath d='M9 23.5 Q 22 30 35 23.5' fill='none' stroke='rgba(0,0,0,.35)' stroke-width='.9'/%3E%3Cellipse cx='22' cy='22' rx='8' ry='4.5' fill='url(%23h)'/%3E%3C/svg%3E") left center / 44px 44px repeat-y,
+    repeating-linear-gradient(180deg, transparent 0 3px, rgba(110,90,60,0.025) 3px 4px),
+    linear-gradient(180deg, #f9f2e1 0%, #f3ebd5 100%);
+  padding-left: 56px;
   border-radius: 4px;
-  box-shadow: inset 0 0 0 1px var(--sch-border), 2px 2px 0 var(--sch-border), 4px 4px 12px rgba(0,0,0,0.04);
+  box-shadow: 0 10px 32px rgba(40,30,15,0.12), 0 2px 4px rgba(40,30,15,0.06);
 }
 [data-sch-border="notebook"] .sch-main,
 body:not([data-sch-border]) .sch-main {
   background-image:
-    linear-gradient(to bottom, transparent 0, transparent 31px, rgba(90,100,110,0.10) 31px, rgba(90,100,110,0.10) 32px);
-  background-size: 100% 32px;
+    linear-gradient(to bottom, transparent 39px, rgba(74,105,172,0.18) 39px, rgba(74,105,172,0.18) 40px);
+  background-size: 100% 40px;
+  background-color: transparent;
 }
 
-/* washi — four colored tape strips at the corners, tilted */
-[data-sch-border="washi"] .sch-shell::before,
-[data-sch-border="washi"] .sch-shell::after {
-  content: ''; position: absolute; width: 90px; height: 26px; z-index: 5;
-  background: #f8b4c4; opacity: 0.78;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.15);
-  background-image: repeating-linear-gradient(90deg, transparent 0 4px, rgba(255,255,255,0.3) 4px 5px);
-}
-[data-sch-border="washi"] .sch-shell::before { top: -10px; left: 40px; transform: rotate(-6deg); }
-[data-sch-border="washi"] .sch-shell::after  { top: -10px; right: 40px; transform: rotate(5deg); background: #9dd4c5; }
-[data-sch-border="washi"] .sch-left::before,
-[data-sch-border="washi"] .sch-right::after {
-  content: ''; position: absolute; width: 90px; height: 26px; z-index: 5;
-  bottom: -10px;
-  background-image: repeating-linear-gradient(90deg, transparent 0 4px, rgba(255,255,255,0.3) 4px 5px);
-  box-shadow: 0 1px 3px rgba(0,0,0,0.15); opacity: 0.78;
-}
-[data-sch-border="washi"] .sch-left::before { left: 40px; transform: rotate(7deg); background: #f6dd95; }
-[data-sch-border="washi"] .sch-right::after { right: 40px; transform: rotate(-7deg); background: #b7bde8; }
-
-/* ruled — horizontal ruled lines + red margin line (legal pad look) */
-[data-sch-border="ruled"] .sch-main {
-  background-image:
-    linear-gradient(to bottom, transparent 0, transparent 33px, rgba(60,110,180,0.25) 33px, rgba(60,110,180,0.25) 34px),
-    linear-gradient(to right, transparent 0, transparent 54px, rgba(200,60,60,0.45) 54px, rgba(200,60,60,0.45) 55px, transparent 55px);
-  background-size: 100% 34px, 100% 100%;
-  padding-left: 64px !important;
+/* washi collage - four distinct patterned tape strips */
+[data-sch-border="washi"] .sch-shell {
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='38' viewBox='0 0 160 38'%3E%3Cg transform='rotate(-5 80 19)'%3E%3Crect x='0' y='6' width='160' height='26' rx='1' fill='%23f4a5b5' opacity='.92'/%3E%3Cg fill='%23fff' opacity='.55'%3E%3Ccircle cx='14' cy='14' r='2.5'/%3E%3Ccircle cx='34' cy='24' r='2.5'/%3E%3Ccircle cx='54' cy='14' r='2.5'/%3E%3Ccircle cx='74' cy='24' r='2.5'/%3E%3Ccircle cx='94' cy='14' r='2.5'/%3E%3Ccircle cx='114' cy='24' r='2.5'/%3E%3Ccircle cx='134' cy='14' r='2.5'/%3E%3C/g%3E%3Crect x='0' y='6' width='160' height='26' rx='1' fill='none' stroke='rgba(0,0,0,.1)' stroke-width='1'/%3E%3C/g%3E%3C/svg%3E") 60px 8px / 160px 38px no-repeat,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='38' viewBox='0 0 160 38'%3E%3Cg transform='rotate(6 80 19)'%3E%3Cdefs%3E%3Cpattern id='d' width='10' height='10' patternUnits='userSpaceOnUse' patternTransform='rotate(45)'%3E%3Crect width='5' height='10' fill='%23ffffff' opacity='.35'/%3E%3C/pattern%3E%3C/defs%3E%3Crect x='0' y='6' width='160' height='26' rx='1' fill='%239bbfa2' opacity='.92'/%3E%3Crect x='0' y='6' width='160' height='26' rx='1' fill='url(%23d)'/%3E%3Crect x='0' y='6' width='160' height='26' rx='1' fill='none' stroke='rgba(0,0,0,.1)' stroke-width='1'/%3E%3C/g%3E%3C/svg%3E") calc(100% - 60px) 8px / 160px 38px no-repeat,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='38' viewBox='0 0 160 38'%3E%3Cg transform='rotate(7 80 19)'%3E%3Cdefs%3E%3Cpattern id='g' width='8' height='8' patternUnits='userSpaceOnUse'%3E%3Crect width='4' height='4' fill='rgba(255,255,255,.45)'/%3E%3Crect x='4' y='4' width='4' height='4' fill='rgba(255,255,255,.45)'/%3E%3C/pattern%3E%3C/defs%3E%3Crect x='0' y='6' width='160' height='26' rx='1' fill='%23e6c25a' opacity='.92'/%3E%3Crect x='0' y='6' width='160' height='26' rx='1' fill='url(%23g)'/%3E%3Crect x='0' y='6' width='160' height='26' rx='1' fill='none' stroke='rgba(0,0,0,.1)' stroke-width='1'/%3E%3C/g%3E%3C/svg%3E") 60px calc(100% - 8px) / 160px 38px no-repeat,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='38' viewBox='0 0 160 38'%3E%3Cg transform='rotate(-6 80 19)'%3E%3Crect x='0' y='6' width='160' height='26' rx='1' fill='%23b8a5d8' opacity='.92'/%3E%3Cg fill='white' opacity='.6'%3E%3Cg transform='translate(24 19)'%3E%3Ccircle cx='0' cy='-4' r='1.8'/%3E%3Ccircle cx='3.8' cy='-1' r='1.8'/%3E%3Ccircle cx='2.3' cy='3.5' r='1.8'/%3E%3Ccircle cx='-2.3' cy='3.5' r='1.8'/%3E%3Ccircle cx='-3.8' cy='-1' r='1.8'/%3E%3Ccircle cx='0' cy='0' r='1.3' fill='%23e6c25a'/%3E%3C/g%3E%3Cg transform='translate(64 19)'%3E%3Ccircle cx='0' cy='-4' r='1.8'/%3E%3Ccircle cx='3.8' cy='-1' r='1.8'/%3E%3Ccircle cx='2.3' cy='3.5' r='1.8'/%3E%3Ccircle cx='-2.3' cy='3.5' r='1.8'/%3E%3Ccircle cx='-3.8' cy='-1' r='1.8'/%3E%3Ccircle cx='0' cy='0' r='1.3' fill='%23e6c25a'/%3E%3C/g%3E%3Cg transform='translate(104 19)'%3E%3Ccircle cx='0' cy='-4' r='1.8'/%3E%3Ccircle cx='3.8' cy='-1' r='1.8'/%3E%3Ccircle cx='2.3' cy='3.5' r='1.8'/%3E%3Ccircle cx='-2.3' cy='3.5' r='1.8'/%3E%3Ccircle cx='-3.8' cy='-1' r='1.8'/%3E%3Ccircle cx='0' cy='0' r='1.3' fill='%23e6c25a'/%3E%3C/g%3E%3Cg transform='translate(138 19)'%3E%3Ccircle cx='0' cy='-4' r='1.8'/%3E%3Ccircle cx='3.8' cy='-1' r='1.8'/%3E%3Ccircle cx='2.3' cy='3.5' r='1.8'/%3E%3Ccircle cx='-2.3' cy='3.5' r='1.8'/%3E%3Ccircle cx='-3.8' cy='-1' r='1.8'/%3E%3Ccircle cx='0' cy='0' r='1.3' fill='%23e6c25a'/%3E%3C/g%3E%3C/g%3E%3Crect x='0' y='6' width='160' height='26' rx='1' fill='none' stroke='rgba(0,0,0,.1)' stroke-width='1'/%3E%3C/g%3E%3C/svg%3E") calc(100% - 60px) calc(100% - 8px) / 160px 38px no-repeat,
+    var(--sch-paper);
+  filter: drop-shadow(0 2px 4px rgba(0,0,0,0.18));
+  border-radius: 4px;
+  padding-top: 24px;
+  padding-bottom: 24px;
 }
 
-/* gold-corners — ornate gold fleur in each corner */
-[data-sch-border="gold-corners"] .sch-shell::before {
-  content: ''; position: absolute; top: -12px; left: -12px; width: 72px; height: 72px; z-index: 5;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='72' height='72' viewBox='0 0 72 72'><g fill='none' stroke='%23b8860b' stroke-width='1.6'><path d='M4 4 L24 4 M4 4 L4 24'/><path d='M4 4 C 14 4, 18 8, 20 18 C 18 14, 14 12, 8 12 Z' fill='%23d4af37'/><circle cx='20' cy='20' r='2' fill='%23b8860b'/></g></svg>");
-  background-size: contain; background-repeat: no-repeat;
+/* legal pad - yellow cream + blue ruled lines + red margin + perforated tear */
+[data-sch-border="ruled"] .sch-shell {
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='18' viewBox='0 0 32 18'%3E%3Ccircle cx='16' cy='9' r='3' fill='rgba(80,60,30,.4)'/%3E%3Ccircle cx='16' cy='9' r='2.2' fill='rgba(0,0,0,.5)'/%3E%3C/svg%3E") left top / 32px 18px repeat-x,
+    repeating-linear-gradient(180deg, transparent 0 31px, rgba(60,110,180,0.28) 31px 32px),
+    linear-gradient(90deg, transparent 56px, rgba(200,60,60,0.5) 56px 57px, transparent 57px),
+    linear-gradient(180deg, #fff5c8 0%, #fcecb0 100%);
+  padding-top: 30px !important;
+  padding-left: 66px !important;
+  border-radius: 4px;
+  box-shadow: 0 10px 32px rgba(40,30,15,0.12);
 }
-[data-sch-border="gold-corners"] .sch-shell::after {
-  content: ''; position: absolute; top: -12px; right: -12px; width: 72px; height: 72px; z-index: 5;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='72' height='72' viewBox='0 0 72 72'><g fill='none' stroke='%23b8860b' stroke-width='1.6'><path d='M68 4 L48 4 M68 4 L68 24'/><path d='M68 4 C 58 4, 54 8, 52 18 C 54 14, 58 12, 64 12 Z' fill='%23d4af37'/><circle cx='52' cy='20' r='2' fill='%23b8860b'/></g></svg>");
-  background-size: contain; background-repeat: no-repeat;
-}
-[data-sch-border="gold-corners"] .sch-left::before {
-  content: ''; position: absolute; bottom: -12px; left: -12px; width: 72px; height: 72px; z-index: 5;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='72' height='72' viewBox='0 0 72 72'><g fill='none' stroke='%23b8860b' stroke-width='1.6'><path d='M4 68 L24 68 M4 68 L4 48'/><path d='M4 68 C 14 68, 18 64, 20 54 C 18 58, 14 60, 8 60 Z' fill='%23d4af37'/><circle cx='20' cy='52' r='2' fill='%23b8860b'/></g></svg>");
-  background-size: contain; background-repeat: no-repeat;
-}
-[data-sch-border="gold-corners"] .sch-right::after {
-  content: ''; position: absolute; bottom: -12px; right: -12px; width: 72px; height: 72px; z-index: 5;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='72' height='72' viewBox='0 0 72 72'><g fill='none' stroke='%23b8860b' stroke-width='1.6'><path d='M68 68 L48 68 M68 68 L68 48'/><path d='M68 68 C 58 68, 54 64, 52 54 C 54 58, 58 60, 64 60 Z' fill='%23d4af37'/><circle cx='52' cy='52' r='2' fill='%23b8860b'/></g></svg>");
-  background-size: contain; background-repeat: no-repeat;
+[data-sch-border="ruled"] .sch-main { background-color: transparent; background-image: none; }
+
+/* gilded frame - border-image stretches ornate SVG */
+[data-sch-border="gold-corners"] .sch-shell {
+  border: 20px solid transparent;
+  border-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200' viewBox='0 0 200 200'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23d4af37'/%3E%3Cstop offset='.5' stop-color='%23f5d370'/%3E%3Cstop offset='1' stop-color='%23a6802b'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect x='8' y='8' width='184' height='184' rx='3' fill='none' stroke='url(%23g)' stroke-width='3'/%3E%3Crect x='18' y='18' width='164' height='164' rx='2' fill='none' stroke='url(%23g)' stroke-width='1'/%3E%3Cg fill='url(%23g)'%3E%3Cpath d='M10 10 Q28 10 34 30 Q24 22 10 24 Z'/%3E%3Ccircle cx='26' cy='26' r='2.4'/%3E%3Cpath d='M190 10 Q172 10 166 30 Q176 22 190 24 Z'/%3E%3Ccircle cx='174' cy='26' r='2.4'/%3E%3Cpath d='M10 190 Q28 190 34 170 Q24 178 10 176 Z'/%3E%3Ccircle cx='26' cy='174' r='2.4'/%3E%3Cpath d='M190 190 Q172 190 166 170 Q176 178 190 176 Z'/%3E%3Ccircle cx='174' cy='174' r='2.4'/%3E%3Cpath d='M100 8 L107 14 L100 20 L93 14 Z'/%3E%3Cpath d='M100 180 L107 186 L100 192 L93 186 Z'/%3E%3Cpath d='M8 100 L14 107 L20 100 L14 93 Z'/%3E%3Cpath d='M180 100 L186 107 L192 100 L186 93 Z'/%3E%3C/g%3E%3C/svg%3E") 50 fill / 20px / 0 stretch;
+  background-color: var(--sch-paper);
+  border-radius: 4px;
 }
 
-/* pressed-flowers — botanical sprigs in corners, green & sage */
-[data-sch-border="pressed-flowers"] .sch-shell::before {
-  content: ''; position: absolute; top: -6px; left: -6px; width: 84px; height: 84px; z-index: 5;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='84' height='84' viewBox='0 0 84 84'><g fill='none' stroke='%235f7a56' stroke-width='1.2' stroke-linecap='round'><path d='M8 8 Q 30 18 50 34'/><circle cx='18' cy='14' r='2.5' fill='%23b5a97a'/><circle cx='30' cy='22' r='3' fill='%23e08f6d'/><circle cx='42' cy='28' r='2.5' fill='%23b5a97a'/><path d='M14 10 L 10 6 M 20 14 L 18 8 M 32 24 L 32 16 M 28 20 L 24 14'/></g></svg>");
-  background-size: contain; background-repeat: no-repeat;
-}
-[data-sch-border="pressed-flowers"] .sch-shell::after {
-  content: ''; position: absolute; top: -6px; right: -6px; width: 84px; height: 84px; z-index: 5;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='84' height='84' viewBox='0 0 84 84'><g fill='none' stroke='%235f7a56' stroke-width='1.2' stroke-linecap='round'><path d='M76 8 Q 54 18 34 34'/><circle cx='66' cy='14' r='2.5' fill='%23b5a97a'/><circle cx='54' cy='22' r='3' fill='%23c47fa3'/><circle cx='42' cy='28' r='2.5' fill='%23b5a97a'/><path d='M70 10 L 74 6 M 64 14 L 66 8 M 52 24 L 52 16 M 56 20 L 60 14'/></g></svg>");
-  background-size: contain; background-repeat: no-repeat;
-  transform: scaleX(-1);
-}
-[data-sch-border="pressed-flowers"] .sch-left::before {
-  content: ''; position: absolute; bottom: -6px; left: -6px; width: 84px; height: 84px; z-index: 5;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='84' height='84' viewBox='0 0 84 84'><g fill='none' stroke='%235f7a56' stroke-width='1.2' stroke-linecap='round'><path d='M8 76 Q 30 66 50 50'/><circle cx='18' cy='70' r='2.5' fill='%23b5a97a'/><circle cx='30' cy='62' r='3' fill='%23e08f6d'/><circle cx='42' cy='56' r='2.5' fill='%23b5a97a'/></g></svg>");
-  background-size: contain; background-repeat: no-repeat;
-}
-[data-sch-border="pressed-flowers"] .sch-right::after {
-  content: ''; position: absolute; bottom: -6px; right: -6px; width: 84px; height: 84px; z-index: 5;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='84' height='84' viewBox='0 0 84 84'><g fill='none' stroke='%235f7a56' stroke-width='1.2' stroke-linecap='round'><path d='M76 76 Q 54 66 34 50'/><circle cx='66' cy='70' r='2.5' fill='%23b5a97a'/><circle cx='54' cy='62' r='3' fill='%23c47fa3'/><circle cx='42' cy='56' r='2.5' fill='%23b5a97a'/></g></svg>");
-  background-size: contain; background-repeat: no-repeat;
+/* floral garland - watercolor-style sage vines with dusty-rose buds */
+[data-sch-border="pressed-flowers"] .sch-shell {
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='130' height='130' viewBox='0 0 130 130'%3E%3Cg fill='none' stroke='%235f7a56' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath d='M2 32 C 22 24 40 34 64 46 C 88 58 108 60 128 62'/%3E%3Cpath d='M12 12 C 26 18 34 32 42 40 C 52 50 68 52 80 46'/%3E%3Cg fill='%238fa889' stroke='none'%3E%3Cellipse cx='20' cy='24' rx='7' ry='3.5' transform='rotate(25 20 24)'/%3E%3Cellipse cx='36' cy='36' rx='8' ry='4' transform='rotate(30 36 36)'/%3E%3Cellipse cx='58' cy='44' rx='8' ry='4' transform='rotate(-10 58 44)'/%3E%3Cellipse cx='34' cy='16' rx='6' ry='3' transform='rotate(-35 34 16)'/%3E%3Cellipse cx='78' cy='48' rx='6' ry='3' transform='rotate(10 78 48)'/%3E%3C/g%3E%3C/g%3E%3Cg fill='%23d48fa5'%3E%3Cg transform='translate(44 50)'%3E%3Ccircle cx='0' cy='-4' r='2.4'/%3E%3Ccircle cx='3.7' cy='-1.3' r='2.4'/%3E%3Ccircle cx='2.3' cy='3.3' r='2.4'/%3E%3Ccircle cx='-2.3' cy='3.3' r='2.4'/%3E%3Ccircle cx='-3.7' cy='-1.3' r='2.4'/%3E%3Ccircle cx='0' cy='0' r='1.5' fill='%23e6c25a'/%3E%3C/g%3E%3Cg transform='translate(78 22)'%3E%3Ccircle cx='0' cy='-3' r='2'/%3E%3Ccircle cx='2.8' cy='-.8' r='2'/%3E%3Ccircle cx='1.7' cy='2.5' r='2'/%3E%3Ccircle cx='-1.7' cy='2.5' r='2'/%3E%3Ccircle cx='-2.8' cy='-.8' r='2'/%3E%3Ccircle cx='0' cy='0' r='1.2' fill='%23e6c25a'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E") top left / 130px 130px no-repeat,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='130' height='130' viewBox='0 0 130 130'%3E%3Cg transform='translate(130 0) scale(-1 1)'%3E%3Cg fill='none' stroke='%235f7a56' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath d='M2 32 C 22 24 40 34 64 46 C 88 58 108 60 128 62'/%3E%3Cg fill='%238fa889' stroke='none'%3E%3Cellipse cx='20' cy='24' rx='7' ry='3.5' transform='rotate(25 20 24)'/%3E%3Cellipse cx='36' cy='36' rx='8' ry='4' transform='rotate(30 36 36)'/%3E%3Cellipse cx='58' cy='44' rx='8' ry='4' transform='rotate(-10 58 44)'/%3E%3C/g%3E%3C/g%3E%3Cg fill='%23d48fa5'%3E%3Cg transform='translate(44 50)'%3E%3Ccircle cx='0' cy='-4' r='2.4'/%3E%3Ccircle cx='3.7' cy='-1.3' r='2.4'/%3E%3Ccircle cx='2.3' cy='3.3' r='2.4'/%3E%3Ccircle cx='-2.3' cy='3.3' r='2.4'/%3E%3Ccircle cx='-3.7' cy='-1.3' r='2.4'/%3E%3Ccircle cx='0' cy='0' r='1.5' fill='%23e6c25a'/%3E%3C/g%3E%3C/g%3E%3C/g%3E%3C/svg%3E") top right / 130px 130px no-repeat,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='130' height='130' viewBox='0 0 130 130'%3E%3Cg transform='translate(0 130) scale(1 -1)'%3E%3Cg fill='none' stroke='%235f7a56' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath d='M2 32 C 22 24 40 34 64 46 C 88 58 108 60 128 62'/%3E%3Cg fill='%238fa889' stroke='none'%3E%3Cellipse cx='20' cy='24' rx='7' ry='3.5' transform='rotate(25 20 24)'/%3E%3Cellipse cx='36' cy='36' rx='8' ry='4' transform='rotate(30 36 36)'/%3E%3Cellipse cx='58' cy='44' rx='8' ry='4' transform='rotate(-10 58 44)'/%3E%3C/g%3E%3C/g%3E%3Cg fill='%23d48fa5'%3E%3Cg transform='translate(44 50)'%3E%3Ccircle cx='0' cy='-4' r='2.4'/%3E%3Ccircle cx='3.7' cy='-1.3' r='2.4'/%3E%3Ccircle cx='2.3' cy='3.3' r='2.4'/%3E%3Ccircle cx='-2.3' cy='3.3' r='2.4'/%3E%3Ccircle cx='-3.7' cy='-1.3' r='2.4'/%3E%3Ccircle cx='0' cy='0' r='1.5' fill='%23e6c25a'/%3E%3C/g%3E%3C/g%3E%3C/g%3E%3C/svg%3E") bottom left / 130px 130px no-repeat,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='130' height='130' viewBox='0 0 130 130'%3E%3Cg transform='translate(130 130) scale(-1 -1)'%3E%3Cg fill='none' stroke='%235f7a56' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath d='M2 32 C 22 24 40 34 64 46 C 88 58 108 60 128 62'/%3E%3Cg fill='%238fa889' stroke='none'%3E%3Cellipse cx='20' cy='24' rx='7' ry='3.5' transform='rotate(25 20 24)'/%3E%3Cellipse cx='36' cy='36' rx='8' ry='4' transform='rotate(30 36 36)'/%3E%3Cellipse cx='58' cy='44' rx='8' ry='4' transform='rotate(-10 58 44)'/%3E%3C/g%3E%3C/g%3E%3Cg fill='%23d48fa5'%3E%3Cg transform='translate(44 50)'%3E%3Ccircle cx='0' cy='-4' r='2.4'/%3E%3Ccircle cx='3.7' cy='-1.3' r='2.4'/%3E%3Ccircle cx='2.3' cy='3.3' r='2.4'/%3E%3Ccircle cx='-2.3' cy='3.3' r='2.4'/%3E%3Ccircle cx='-3.7' cy='-1.3' r='2.4'/%3E%3Ccircle cx='0' cy='0' r='1.5' fill='%23e6c25a'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E") bottom right / 130px 130px no-repeat,
+    var(--sch-paper);
+  border-radius: 4px;
+  box-shadow: 0 6px 18px rgba(40,30,15,0.08);
+  padding: 32px 0;
 }
 
-/* vintage — Victorian ornate corner brackets */
+/* vintage parchment - aged gradient + double keyline + corner brackets */
 [data-sch-border="vintage"] .sch-shell {
-  box-shadow: inset 0 0 0 2px var(--sch-ink-dim), inset 0 0 0 4px var(--sch-paper), inset 0 0 0 5px var(--sch-ink-dim);
+  background:
+    radial-gradient(ellipse at center, #f3e8c8 0%, #e8d7a6 80%, #d9c37f 100%);
+  box-shadow:
+    inset 0 0 0 2px #6b4f2a,
+    inset 0 0 0 3px #f3e8c8,
+    inset 0 0 0 5px #6b4f2a,
+    0 8px 24px rgba(30,20,10,0.22);
+  border-radius: 6px;
 }
 [data-sch-border="vintage"] .sch-shell::before {
-  content: ''; position: absolute; top: -2px; left: -2px; width: 80px; height: 80px; z-index: 5;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='80' height='80' viewBox='0 0 80 80'><g fill='none' stroke='%234a3426' stroke-width='1.4'><path d='M4 20 Q 4 4 20 4'/><path d='M12 20 Q 12 12 20 12'/><circle cx='20' cy='20' r='3' fill='%234a3426'/><path d='M4 30 L 14 30 M 30 4 L 30 14'/></g></svg>");
-  background-size: contain; background-repeat: no-repeat;
-}
-[data-sch-border="vintage"] .sch-shell::after {
-  content: ''; position: absolute; top: -2px; right: -2px; width: 80px; height: 80px; z-index: 5;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='80' height='80' viewBox='0 0 80 80'><g fill='none' stroke='%234a3426' stroke-width='1.4'><path d='M76 20 Q 76 4 60 4'/><path d='M68 20 Q 68 12 60 12'/><circle cx='60' cy='20' r='3' fill='%234a3426'/><path d='M76 30 L 66 30 M 50 4 L 50 14'/></g></svg>");
-  background-size: contain; background-repeat: no-repeat;
+  content: '';
+  position: absolute; inset: 0; pointer-events: none;
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 100 100'%3E%3Cg fill='none' stroke='%234a3426' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath d='M10 40 Q 10 10 40 10'/%3E%3Cpath d='M20 40 Q 20 20 40 20'/%3E%3Cpath d='M10 50 L 30 50 M 50 10 L 50 30'/%3E%3Cpath d='M24 24 Q 32 16 40 16'/%3E%3Ccircle cx='28' cy='28' r='1.8' fill='%234a3426'/%3E%3Ccircle cx='34' cy='34' r='1.8' fill='%234a3426'/%3E%3C/g%3E%3C/svg%3E") top left / 100px 100px no-repeat,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 100 100'%3E%3Cg transform='translate(100 0) scale(-1 1)'%3E%3Cg fill='none' stroke='%234a3426' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath d='M10 40 Q 10 10 40 10'/%3E%3Cpath d='M20 40 Q 20 20 40 20'/%3E%3Ccircle cx='28' cy='28' r='1.8' fill='%234a3426'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E") top right / 100px 100px no-repeat,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 100 100'%3E%3Cg transform='translate(0 100) scale(1 -1)'%3E%3Cg fill='none' stroke='%234a3426' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath d='M10 40 Q 10 10 40 10'/%3E%3Cpath d='M20 40 Q 20 20 40 20'/%3E%3Ccircle cx='28' cy='28' r='1.8' fill='%234a3426'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E") bottom left / 100px 100px no-repeat,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 100 100'%3E%3Cg transform='translate(100 100) scale(-1 -1)'%3E%3Cg fill='none' stroke='%234a3426' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath d='M10 40 Q 10 10 40 10'/%3E%3Cpath d='M20 40 Q 20 20 40 20'/%3E%3Ccircle cx='28' cy='28' r='1.8' fill='%234a3426'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E") bottom right / 100px 100px no-repeat;
+  z-index: 4;
 }
 
 /* Preview tiles in the border picker modal */
 .sch-border-tile {
   background: var(--sch-paper); border: 1px solid var(--sch-border);
-  border-radius: 6px; padding: 0; cursor: pointer;
+  border-radius: 8px; padding: 0; cursor: pointer;
   font-family: inherit; overflow: hidden;
   display: flex; flex-direction: column; align-items: stretch; gap: 0;
+  transition: transform 0.12s ease, border-color 0.12s ease;
 }
-.sch-border-tile.active { outline: 2px solid var(--sch-accent); outline-offset: 2px; }
-.sch-border-tile:hover { border-color: var(--sch-accent); }
+.sch-border-tile.active { outline: 2px solid var(--sch-accent); outline-offset: 2px; border-color: var(--sch-accent); }
+.sch-border-tile:hover { border-color: var(--sch-accent); transform: translateY(-2px); }
 .sch-border-preview {
-  height: 92px; position: relative; background: var(--sch-bg);
-  border-bottom: 1px solid var(--sch-border);
+  height: 120px; position: relative;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--sch-bg); overflow: hidden; padding: 8px;
 }
-.sch-border-label { padding: 8px 10px; font-size: 13px; color: var(--sch-ink); font-family: var(--sch-font-heading); }
+.sch-border-preview .sch-shell {
+  width: 92%; height: 92%; min-height: 0; position: relative;
+  padding: 6px; margin: 0; font-size: 10px;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--sch-ink-dim);
+  background: var(--sch-paper);
+}
+.sch-border-label { padding: 8px 10px; font-size: 13px; color: var(--sch-ink); font-family: var(--sch-font-heading); background: var(--sch-paper); text-align: center; }
 
 /* ══ List-items modal (meal planner + any list) ══ */
 .sch-listitems-hint {
@@ -1022,6 +1083,85 @@ const PAGE_JS: &str = r##"
     document.body.setAttribute('data-sch-border', key || 'notebook');
     S.prefs.border = key || 'notebook';
   }
+
+  // ── Modal UX: backdrop click dismisses, ESC closes top modal ──────
+  // Every `.sch-modal` that wraps a `.sch-modal-box` picks this up: clicking
+  // the dimmed area outside the box hides the modal. Native `prompt()` /
+  // `confirm()` / `alert()` are replaced by schPrompt / schConfirm / schAlert
+  // so chrome stays themed inside the WebKitGTK viewer.
+  document.addEventListener('click', function(ev) {
+    const m = ev.target;
+    if (m && m.classList && m.classList.contains('sch-modal') && !m.hidden) {
+      // Click was on the backdrop itself (not a descendant).
+      m.hidden = true;
+      // Dynamic modals (stickers, prompts) remove themselves on close.
+      if (m.dataset && m.dataset.ephemeral === '1') setTimeout(() => m.remove(), 0);
+    }
+  });
+  document.addEventListener('keydown', function(ev) {
+    if (ev.key !== 'Escape') return;
+    const visible = Array.from(document.querySelectorAll('.sch-modal')).filter(m => !m.hidden);
+    const top = visible[visible.length - 1];
+    if (!top) return;
+    top.hidden = true;
+    if (top.dataset && top.dataset.ephemeral === '1') setTimeout(() => top.remove(), 0);
+    ev.preventDefault();
+  });
+
+  // Themed prompt / confirm / alert. All return Promises so call sites
+  // stay linear — no more native popups breaking the theme inside WebKitGTK.
+  function schDialog(opts) {
+    return new Promise((resolve) => {
+      const fields = opts.fields || [];
+      const m = document.createElement('div');
+      m.className = 'sch-modal';
+      m.dataset.ephemeral = '1';
+      const fieldsHtml = fields.map((f, i) => {
+        const id = 'sch-dlg-f' + i;
+        const input = f.type === 'textarea'
+          ? `<textarea id="${id}" class="sch-input" rows="${f.rows || 3}" placeholder="${escAttr(f.placeholder || '')}">${escHtml(f.default || '')}</textarea>`
+          : `<input id="${id}" type="${f.type || 'text'}" class="sch-input" placeholder="${escAttr(f.placeholder || '')}" value="${escAttr(f.default || '')}">`;
+        return `<label><span>${escHtml(f.label || '')}</span>${input}</label>`;
+      }).join('');
+      const msg = opts.message ? `<p class="sch-dialog-msg">${escHtml(opts.message)}</p>` : '';
+      const okClass  = opts.danger ? 'sch-btn-danger-solid' : 'sch-btn-primary';
+      const cancel   = opts.hideCancel ? '' : `<button class="sch-btn-ghost" data-act="cancel">${escHtml(opts.cancelLabel || 'Cancel')}</button>`;
+      m.innerHTML = `
+        <div class="sch-modal-box" style="max-width:${opts.width || 420}px">
+          <div class="sch-modal-head"><h2>${escHtml(opts.title || '')}</h2><button class="sch-modal-close" data-act="cancel">×</button></div>
+          <div class="sch-modal-body">${msg}${fieldsHtml}</div>
+          <div class="sch-modal-foot">${cancel}<button class="${okClass}" data-act="ok">${escHtml(opts.okLabel || 'OK')}</button></div>
+        </div>`;
+      document.body.appendChild(m);
+      const first = m.querySelector('input,textarea'); if (first) setTimeout(() => first.focus(), 30);
+      const close = (val) => { m.remove(); resolve(val); };
+      m.addEventListener('click', (ev) => {
+        const act = ev.target && ev.target.getAttribute && ev.target.getAttribute('data-act');
+        if (act === 'cancel') { ev.stopPropagation(); close(null); }
+        else if (act === 'ok') { ev.stopPropagation(); close(collect()); }
+      });
+      m.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Escape') { ev.preventDefault(); close(null); }
+        if (ev.key === 'Enter' && ev.target.tagName !== 'TEXTAREA') { ev.preventDefault(); close(collect()); }
+      });
+      function collect() {
+        if (fields.length === 0) return true;
+        const out = {};
+        fields.forEach((f, i) => {
+          const el = m.querySelector('#sch-dlg-f' + i);
+          out[f.name || 'value'] = el ? el.value : '';
+        });
+        return fields.length === 1 ? out[fields[0].name || 'value'] : out;
+      }
+    });
+  }
+  window.schPrompt = (title, placeholder, def) =>
+    schDialog({ title, fields: [{ name: 'value', label: '', placeholder: placeholder || '', default: def || '' }] });
+  window.schConfirm = (title, message, opts) =>
+    schDialog({ title, message: message || '', okLabel: (opts && opts.okLabel) || 'OK', cancelLabel: (opts && opts.cancelLabel) || 'Cancel', danger: !!(opts && opts.danger), hideCancel: false })
+      .then(v => v !== null);
+  window.schAlert = (title, message) =>
+    schDialog({ title, message: message || '', okLabel: 'OK', hideCancel: true }).then(() => true);
 
   // ── API helpers ─────────────────────────────────────────────────────
   async function api(path, opts) {
@@ -1366,64 +1506,187 @@ const PAGE_JS: &str = r##"
   window.schPickColor = function(el) {
     document.querySelectorAll('.sch-swatch').forEach(s => s.classList.remove('selected'));
     el.classList.add('selected');
+    const custom = document.getElementById('ev-color-custom');
+    if (custom && el !== custom) custom.value = el.dataset.color || '#84a98c';
+  };
+  window.schPickCustomColor = function(input) {
+    document.querySelectorAll('.sch-swatch').forEach(s => s.classList.remove('selected'));
+    input.dataset.color = input.value;
+    input.classList.add('selected');
   };
   window.schEventSave = async function() {
     const ev = S.editEvent || {};
     const picked = document.querySelector('.sch-swatch.selected');
+    const custom = document.getElementById('ev-color-custom');
+    const pickedColor = picked
+      ? (picked === custom ? custom.value : picked.dataset.color)
+      : '';
     const payload = {
       title: document.getElementById('ev-title').value.trim() || '(untitled)',
       start_time: document.getElementById('ev-start').value,
       end_time:   document.getElementById('ev-end').value,
       location:   document.getElementById('ev-loc').value,
-      color:      picked ? picked.dataset.color : '',
+      color:      pickedColor,
     };
     try {
-      if (ev.id) await api(`/api/calendar/${ev.id}`, { method: 'PUT',  body: JSON.stringify(payload) });
-      else       await api('/api/calendar',           { method: 'POST', body: JSON.stringify(payload) });
+      if (ev.id) {
+        const prev = { title: ev.title, start_time: ev.start_time || ev.start, end_time: ev.end_time || ev.end, location: ev.location || '', color: ev.color || '' };
+        await api(`/api/calendar/${ev.id}`, { method: 'PUT',  body: JSON.stringify(payload) });
+        pushUndo({ op: 'update-event', id: ev.id, prev });
+      } else {
+        const r = await api('/api/calendar', { method: 'POST', body: JSON.stringify(payload) });
+        if (r && r.id) pushUndo({ op: 'create-event', id: r.id });
+      }
       schCloseEventModal(); await loadAll();
-    } catch(e) { alert('Save failed: ' + e.message); }
+    } catch(e) { schToast('Save failed: ' + e.message, 3000); }
   };
   window.schEventDelete = async function() {
     if (!S.editEvent || !S.editEvent.id) return;
-    if (!confirm('Delete this event?')) return;
-    try { await api(`/api/calendar/${S.editEvent.id}`, { method: 'DELETE' }); schCloseEventModal(); await loadAll(); }
-    catch(e) { alert('Delete failed: ' + e.message); }
+    if (!(await schConfirm('Delete this event?', S.editEvent.title || '(untitled)', { okLabel: 'Delete', danger: true }))) return;
+    const prev = {
+      title: S.editEvent.title, start_time: S.editEvent.start_time, end_time: S.editEvent.end_time,
+      location: S.editEvent.location || '', color: S.editEvent.color || ''
+    };
+    try {
+      await api(`/api/calendar/${S.editEvent.id}`, { method: 'DELETE' });
+      pushUndo({ op: 'delete-event', prev });
+      schCloseEventModal(); await loadAll();
+    } catch(e) { schToast('Delete failed: ' + e.message, 3000); }
   };
   window.schEventDuplicate = async function() {
     const ev = S.editEvent;
     if (!ev || !ev.id) return;
-    const next = prompt('Duplicate to date (YYYY-MM-DD):', fmtDate(addDays(new Date(ev.start_time||ev.start), 1)));
+    const defaultDate = fmtDate(addDays(new Date(ev.start_time||ev.start), 1));
+    const next = await schPrompt('Duplicate to date', 'YYYY-MM-DD', defaultDate);
     if (!next) return;
-    const shift = (t) => t ? next + t.slice(10,16).padStart(6, 'T') : '';
     const payload = {
       title: ev.title, location: ev.location || '', color: ev.color || '',
       start_time: next + 'T' + (ev.start_time || ev.start || '').slice(11,16),
       end_time:   next + 'T' + (ev.end_time   || ev.end   || '').slice(11,16),
     };
-    try { await api('/api/calendar', { method: 'POST', body: JSON.stringify(payload) }); schCloseEventModal(); await loadAll(); }
-    catch(e) { alert('Duplicate failed: ' + e.message); }
+    try {
+      const r = await api('/api/calendar', { method: 'POST', body: JSON.stringify(payload) });
+      if (r && r.id) pushUndo({ op: 'create-event', id: r.id });
+      schCloseEventModal(); await loadAll();
+    } catch(e) { schToast('Duplicate failed: ' + e.message, 3000); }
   };
 
-  // ── Lists + habits (minimal for now) ───────────────────────────────
+  // ── Lists + habits ─────────────────────────────────────────────────
+  // Lists now expand INLINE below their row via a caret — no more
+  // popup-into-another-window flow for the common case of glancing at /
+  // adding to a list. Per-list expansion state lives in
+  // S.listExpand (Set of list IDs currently open) and per-list items in
+  // S.listItems (map of list_id → array of {id, text, checked}).
+  if (!S.listExpand) S.listExpand = new Set();
+  if (!S.listItems)  S.listItems  = {};
+
   function renderLists() {
     const el = document.getElementById('sch-lists');
     if (!el) return;
-    const rows = [
-      `<li class="sch-list-row sch-list-active" data-list-id="todos"><span class="sch-list-icon">☐</span><span class="sch-list-name">Todos</span></li>`,
-    ].concat(S.lists.map(l =>
-      `<li class="sch-list-row" data-list-id="${l.id}" onclick="schSelectList(${l.id})"><span class="sch-list-icon" style="color:${l.color||'#94a3b8'}">${escHtml(l.icon||'•')}</span><span class="sch-list-name">${escHtml(l.name)}</span></li>`
-    ));
-    el.innerHTML = rows.join('');
+    const todosRow = `
+      <li class="sch-list-row sch-list-active" data-list-id="todos" onclick="schSelectList('todos')">
+        <span class="sch-list-caret"></span>
+        <span class="sch-list-icon">☐</span>
+        <span class="sch-list-name">Todos</span>
+      </li>`;
+    const customRows = S.lists.map(l => {
+      const open = S.listExpand.has(l.id);
+      const items = S.listItems[l.id] || [];
+      const itemsHtml = open ? `
+        <li class="sch-list-items" data-for="${l.id}">
+          ${items.length === 0 ? '<div class="sch-list-empty">No items yet.</div>' : ''}
+          <ul class="sch-inline-items">
+            ${items.map(it => `
+              <li class="sch-inline-item${it.checked ? ' checked' : ''}">
+                <button class="sch-listitem-check" onclick="schListItemsToggle(${it.id})" title="Toggle">${it.checked ? '✓' : ''}</button>
+                <span class="sch-inline-text">${escHtml(it.text)}</span>
+                <button class="sch-listitem-del" onclick="schListItemsDelete(${it.id})" title="Remove">×</button>
+              </li>
+            `).join('')}
+          </ul>
+          <div class="sch-inline-add">
+            <input type="text" class="sch-input" placeholder="${schListAddPlaceholder(l.id)}" onkeydown="schInlineListKey(event, ${l.id})">
+            <button class="sch-btn-primary" onclick="schInlineListAdd(${l.id}, this.previousElementSibling)">Add</button>
+          </div>
+        </li>` : '';
+      return `
+        <li class="sch-list-row ${open ? 'open' : ''}" data-list-id="${l.id}" onclick="schToggleList(event, ${l.id})">
+          <span class="sch-list-caret">${open ? '▾' : '▸'}</span>
+          <span class="sch-list-icon" style="color:${l.color||'#94a3b8'}">${escHtml(l.icon||'•')}</span>
+          <span class="sch-list-name">${escHtml(l.name)}</span>
+          <button class="sch-list-open-modal" onclick="event.stopPropagation(); schOpenListItems(${l.id})" title="Open full">↗</button>
+        </li>
+        ${itemsHtml}`;
+    }).join('');
+    el.innerHTML = todosRow + customRows;
   }
+  function schListAddPlaceholder(listId) {
+    if (MEAL_LINK && MEAL_LINK.linked && MEAL_LINK.meal_list_id === listId) return 'Add a meal (auto-extracts ingredients)…';
+    if (MEAL_LINK && MEAL_LINK.linked && MEAL_LINK.grocery_list_id === listId) return 'Add a grocery item…';
+    return 'Add an item…';
+  }
+  window.schToggleList = async function(ev, listId) {
+    ev.stopPropagation();
+    if (S.listExpand.has(listId)) {
+      S.listExpand.delete(listId);
+    } else {
+      S.listExpand.add(listId);
+      await loadInlineListItems(listId);
+    }
+    renderLists();
+  };
+  async function loadInlineListItems(listId) {
+    try {
+      const r = await api(`/api/scheduler/lists/${listId}/items`);
+      S.listItems[listId] = (r && r.items) || [];
+    } catch(e) { S.listItems[listId] = []; }
+  }
+  window.schInlineListKey = function(ev, listId) {
+    if (ev.key === 'Enter') { ev.preventDefault(); schInlineListAdd(listId, ev.target); }
+  };
+  window.schInlineListAdd = async function(listId, inputEl) {
+    const text = (inputEl.value || '').trim();
+    if (!text) return;
+    inputEl.disabled = true;
+    await loadMealLink();
+    try {
+      let createdId = null;
+      let groceryIds = [];
+      let groceryListId = null;
+      if (MEAL_LINK && MEAL_LINK.linked && MEAL_LINK.meal_list_id === listId) {
+        schToast('Thaddeus is extracting ingredients…', 2500);
+        const r = await api('/api/scheduler/meal_add', { method: 'POST', body: JSON.stringify({ meal: text }) });
+        createdId = r.meal_item_id || null;
+        const n = r.added_to_groceries || 0;
+        groceryListId = MEAL_LINK.grocery_list_id;
+        // Re-read the grocery list and capture the IDs of items that weren't
+        // there before — those are the ones this meal added.
+        const before = (S.listItems[groceryListId] || []).map(i => i.id);
+        await loadInlineListItems(groceryListId);
+        groceryIds = (S.listItems[groceryListId] || []).map(i => i.id).filter(i => !before.includes(i));
+        schToast(n > 0 ? `Added "${text}" + ${n} ingredient${n===1?'':'s'}` : `Added "${text}"`, 3500);
+      } else {
+        const r = await api(`/api/scheduler/lists/${listId}/items`, { method: 'POST', body: JSON.stringify({ text }) });
+        createdId = r && r.id ? r.id : null;
+      }
+      inputEl.value = '';
+      pushUndo({ op: 'create-list-item', id: createdId, listId, text, grocery_ids: groceryIds, grocery_list_id: groceryListId });
+      await loadInlineListItems(listId);
+      renderLists();
+    } catch(e) { schToast('Add failed: ' + e.message, 2500); }
+    finally { inputEl.disabled = false; inputEl.focus(); }
+  };
+  // Keep modal-based flow available for power users (opened via the ↗ button).
+  window.schSelectList = function(id) { /* caret-expand handles default interaction */ };
   window.schSelectList = function(id) {
     if (id === 'todos') { /* todos handled by the dedicated todos view */ return; }
     schOpenListItems(id);
   };
   window.schNewList = async function() {
-    const name = prompt('New list name:');
+    const name = await schPrompt('New list', 'List name (e.g. Grocery, Bucket, Packing)');
     if (!name) return;
     try { await api('/api/scheduler/lists', { method: 'POST', body: JSON.stringify({ name, icon: '📋', color: '#94a3b8' }) }); await loadAll(); }
-    catch(e) { alert('Create failed: ' + e.message); }
+    catch(e) { schToast('Create failed: ' + e.message, 2500); }
   };
 
   // ── T3 #17 — Meal planner → auto-grocery linking ─────────────────
@@ -1533,12 +1796,19 @@ const PAGE_JS: &str = r##"
     }
   };
   window.schListItemsToggle = async function(id) {
-    try { await api(`/api/scheduler/list_items/${id}/toggle`, { method: 'POST', body: JSON.stringify({}) }); await loadListItems(); }
-    catch(e) { schToast('Toggle failed', 1500); }
+    try { await api(`/api/scheduler/list_items/${id}/toggle`, { method: 'POST', body: JSON.stringify({}) }); }
+    catch(e) { schToast('Toggle failed', 1500); return; }
+    // Refresh both the modal view (if open) and every expanded inline list.
+    if (CURRENT_LIST) await loadListItems();
+    for (const lid of S.listExpand) await loadInlineListItems(lid);
+    renderLists();
   };
   window.schListItemsDelete = async function(id) {
-    try { await api(`/api/scheduler/list_items/${id}`, { method: 'DELETE' }); await loadListItems(); }
-    catch(e) { schToast('Delete failed', 1500); }
+    try { await api(`/api/scheduler/list_items/${id}`, { method: 'DELETE' }); }
+    catch(e) { schToast('Delete failed', 1500); return; }
+    if (CURRENT_LIST) await loadListItems();
+    for (const lid of S.listExpand) await loadInlineListItems(lid);
+    renderLists();
   };
 
   // ── T3 #20 — School ICS feeds ─────────────────────────────────────
@@ -1568,10 +1838,18 @@ const PAGE_JS: &str = r##"
     }).join('');
   }
   window.schNewSchoolFeed = async function() {
-    const label = prompt('School / calendar label (e.g., "Jamie\'s 4th grade"):');
-    if (!label || !label.trim()) return;
-    const feed_url = prompt('ICS feed URL:\n(Paste the "Subscribe / iCal" link from the school portal. webcal:// is fine.)');
-    if (!feed_url || !feed_url.trim()) return;
+    const result = await schDialog({
+      title: 'Add school ICS feed',
+      fields: [
+        { name: 'label',    label: 'Label',    placeholder: "e.g. Jamie's 4th grade" },
+        { name: 'feed_url', label: 'ICS URL',  placeholder: 'https:// or webcal://' },
+      ],
+      okLabel: 'Add',
+    });
+    if (!result) return;
+    const label = (result.label || '').trim();
+    const feed_url = (result.feed_url || '').trim();
+    if (!label || !feed_url) return;
     schToast('Fetching feed…', 3000);
     try {
       const r = await api('/api/scheduler/school_feeds', { method: 'POST', body: JSON.stringify({ label: label.trim(), feed_url: feed_url.trim() }) });
@@ -1590,7 +1868,7 @@ const PAGE_JS: &str = r##"
     } catch(e) { schToast('Sync failed', 2000); }
   };
   window.schSchoolFeedDelete = async function(id) {
-    if (!confirm('Remove this feed? Its imported events will be deleted.')) return;
+    if (!(await schConfirm('Remove this school feed?', 'Its imported events will be deleted.', { okLabel: 'Remove', danger: true }))) return;
     try { await api(`/api/scheduler/school_feeds/${id}`, { method: 'DELETE' }); await loadSchoolFeeds(); await loadAll(); }
     catch(e) { schToast('Delete failed', 1500); }
   };
@@ -1628,10 +1906,10 @@ const PAGE_JS: &str = r##"
     }).join('');
   }
   window.schNewHabit = async function() {
-    const name = prompt('New habit name:');
+    const name = await schPrompt('New habit', 'e.g. Drink water, Morning walk');
     if (!name) return;
     try { await api('/api/scheduler/habits', { method: 'POST', body: JSON.stringify({ name, icon: '●', color: '#84cc16' }) }); await loadAll(); }
-    catch(e) { alert('Create failed: ' + e.message); }
+    catch(e) { schToast('Create failed: ' + e.message, 2500); }
   };
 
   function renderHabits() {
@@ -1652,7 +1930,7 @@ const PAGE_JS: &str = r##"
   }
   window.schHabitToggle = async function(id, date) {
     try { await api(`/api/scheduler/habits/${id}/toggle`, { method: 'POST', body: JSON.stringify({ date }) }); await loadAll(); }
-    catch(e) { alert('Toggle failed: ' + e.message); }
+    catch(e) { schToast('Toggle failed: ' + e.message, 2000); }
   };
 
   // ── Proposals ──────────────────────────────────────────────────────
@@ -1675,14 +1953,21 @@ const PAGE_JS: &str = r##"
     `).join('');
   }
   window.schApprove = async function(id) {
-    try { await api(`/api/approvals/${id}/resolve`, { method: 'POST', body: JSON.stringify({ approved: true }) }); await loadAll(); }
-    catch(e) { alert('Approve failed: ' + e.message); }
+    // Snapshot current event IDs so we can identify which event the
+    // approval turned into, then make THAT event undo-able.
+    const before = new Set((S.events || []).map(e => e.id));
+    try {
+      await api(`/api/approvals/${id}/resolve`, { method: 'POST', body: JSON.stringify({ approved: true }) });
+      await loadAll();
+      const newIds = (S.events || []).map(e => e.id).filter(x => !before.has(x));
+      if (newIds.length === 1) pushUndo({ op: 'approve-event', id: newIds[0] });
+    } catch(e) { schToast('Approve failed: ' + e.message, 2500); }
   };
   window.schReject = async function(id) {
     try { await api(`/api/approvals/${id}/resolve`, { method: 'POST', body: JSON.stringify({ approved: false }) }); await loadAll(); }
-    catch(e) { alert('Reject failed: ' + e.message); }
+    catch(e) { schToast('Reject failed: ' + e.message, 2500); }
   };
-  window.schDraftReply = function(id) { alert('Email reply drafting — ships with the Gmail connector pass.'); };
+  window.schDraftReply = function(id) { schAlert('Email reply drafting', 'Ships with the Gmail connector pass.'); };
 
   // ── Bottom timeline ────────────────────────────────────────────────
   function renderTimeline() {
@@ -1809,8 +2094,9 @@ const PAGE_JS: &str = r##"
 
   // ── T1 #1 — Natural-language text create ──────────────────────────
   function schNlCreatePrompt() {
-    const text = prompt("What's the event?\n(e.g., \"Dentist Tuesday at 3pm\")");
-    if (text && text.trim()) schCreateFromText(text.trim());
+    schPrompt("New event", 'e.g. "Dentist Tuesday at 3pm"').then(text => {
+      if (text && text.trim()) schCreateFromText(text.trim());
+    });
   }
   async function schCreateFromText(text) {
     schToast('Thaddeus is parsing…', 1500);
@@ -1822,22 +2108,51 @@ const PAGE_JS: &str = r##"
     } catch(e) { schToast(`Parse failed: ${e.message}`, 3500); }
   }
 
-  // ── T1 #2 — Undo stack ────────────────────────────────────────────
-  const UNDO = [];  // stack of {op, prev, next}
-  function pushUndo(entry) { UNDO.push(entry); if (UNDO.length > 20) UNDO.shift(); }
+  // ── T1 #2 — Undo stack (extended 2026-04-19) ─────────────────────
+  // Covers: calendar event create/update/delete, drag-move/resize, list-item
+  // add, schedule-todos bulk proposals, habit adds. Ops carry the minimum
+  // state needed to rebuild or remove. Stack caps at 30 — plenty for a
+  // typical session without leaking memory if Sean leaves the tab open.
+  const UNDO = [];
+  function pushUndo(entry) { UNDO.push(entry); if (UNDO.length > 30) UNDO.shift(); }
   window.schUndo = async function() {
     const e = UNDO.pop();
     if (!e) return schToast('Nothing to undo', 1500);
     try {
-      if (e.op === 'delete') {
-        await api('/api/calendar', { method: 'POST', body: JSON.stringify(e.prev) });
-      } else if (e.op === 'update') {
-        await api(`/api/calendar/${e.id}`, { method: 'PUT', body: JSON.stringify(e.prev) });
-      } else if (e.op === 'create') {
-        await api(`/api/calendar/${e.id}`, { method: 'DELETE' });
+      switch (e.op) {
+        case 'delete-event':
+          await api('/api/calendar', { method: 'POST', body: JSON.stringify(e.prev) });
+          break;
+        case 'update-event':
+          await api(`/api/calendar/${e.id}`, { method: 'PUT', body: JSON.stringify(e.prev) });
+          break;
+        case 'create-event':
+          await api(`/api/calendar/${e.id}`, { method: 'DELETE' });
+          break;
+        case 'create-list-item':
+          if (e.id) await api(`/api/scheduler/list_items/${e.id}`, { method: 'DELETE' });
+          // Also revoke any grocery items added alongside a meal-add.
+          if (e.grocery_ids) for (const gid of e.grocery_ids) await api(`/api/scheduler/list_items/${gid}`, { method: 'DELETE' });
+          if (S.listExpand && S.listExpand.has(e.listId)) await loadInlineListItems(e.listId);
+          if (S.listExpand && e.grocery_list_id && S.listExpand.has(e.grocery_list_id)) await loadInlineListItems(e.grocery_list_id);
+          break;
+        case 'create-approvals':
+          // schedule-todos created a batch of approvals; decline each.
+          for (const aid of (e.ids || [])) {
+            await api(`/api/approvals/${aid}/resolve`, { method: 'POST', body: JSON.stringify({ approved: false }) });
+          }
+          break;
+        case 'approve-event':
+          await api(`/api/calendar/${e.id}`, { method: 'DELETE' });
+          break;
+        // Legacy op names (kept for safety — clears if any still on stack)
+        case 'delete': if (e.prev) await api('/api/calendar', { method: 'POST', body: JSON.stringify(e.prev) }); break;
+        case 'update': if (e.id && e.prev) await api(`/api/calendar/${e.id}`, { method: 'PUT', body: JSON.stringify(e.prev) }); break;
+        case 'create': if (e.id) await api(`/api/calendar/${e.id}`, { method: 'DELETE' }); break;
       }
       schToast('Undone', 1200);
       await loadAll();
+      renderLists();
     } catch(err) { schToast(`Undo failed: ${err.message}`, 3000); }
   };
 
@@ -1912,29 +2227,62 @@ const PAGE_JS: &str = r##"
   };
 
   // ── T1 #7 — Location autocomplete via OSM Nominatim ──────────────
+  // Biases to a ~55-mile box around the user's cached geo (reused from the
+  // weather chip's localStorage) so "Starbucks" doesn't dump 20 international
+  // hits. Only goes wide when the user types a long or multi-word query,
+  // signalling they want a distant place by name.
   let LOC_TIMER = null;
+  async function locGeoBias() {
+    try { const s = localStorage.getItem('syntaur_geo'); if (s) return JSON.parse(s); } catch(_) {}
+    return null;
+  }
   function wireLocationAutocomplete() {
     const input = document.getElementById('ev-loc');
     if (!input || input._wired) return;
     input._wired = true;
+    // Wrap the input in a positioned container so the dropdown can
+    // top:100%-anchor to it.
     const ac = document.createElement('div');
     ac.className = 'sch-loc-ac'; ac.hidden = true;
-    input.parentElement.appendChild(ac);
+    // Label is the parent; make sure it's position:relative.
+    const wrap = input.parentElement;
+    if (wrap) wrap.style.position = 'relative';
+    if (wrap) wrap.appendChild(ac);
     input.addEventListener('input', function() {
       clearTimeout(LOC_TIMER);
       const q = input.value.trim();
       if (q.length < 3) { ac.hidden = true; return; }
       LOC_TIMER = setTimeout(async () => {
         try {
-          const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&limit=5&addressdetails=1`;
+          const geo = await locGeoBias();
+          const qWords = q.split(/\s+/).length;
+          // Wide query = 4+ words OR 25+ chars OR contains a US state/"state"
+          // keyword. Otherwise, keep strictly local.
+          const looksDistant = /\b(state|country|[A-Z]{2}\b|\d{5})\b/.test(q);
+          const wide = qWords >= 4 || q.length >= 25 || looksDistant;
+          let params = `q=${encodeURIComponent(q)}&format=json&limit=4&addressdetails=1&countrycodes=us`;
+          let bounded = false;
+          if (geo) {
+            const d = 0.8; // ~55 mi
+            params += `&viewbox=${geo.lon-d},${geo.lat+d},${geo.lon+d},${geo.lat-d}`;
+            if (!wide) { params += '&bounded=1'; bounded = true; }
+          }
+          const url = `https://nominatim.openstreetmap.org/search?${params}`;
           const r = await fetch(url, { headers: { 'Accept': 'application/json' } });
           const d = await r.json();
           if (!Array.isArray(d) || !d.length) { ac.hidden = true; return; }
-          ac.innerHTML = d.map(h => `<button class="sch-loc-row" type="button" onclick="schPickLoc(${JSON.stringify(h.display_name).replace(/"/g,'&quot;')})">${escHtml(h.display_name)}</button>`).join('');
+          const rows = d.slice(0, 4).map(h =>
+            `<button class="sch-loc-row" type="button" onclick="schPickLoc(${JSON.stringify(h.display_name).replace(/"/g,'&quot;')})">${escHtml(h.display_name)}</button>`
+          ).join('');
+          const hint = bounded
+            ? `<span class="sch-loc-hint">Showing local matches. Type more (e.g. state name) to widen.</span>`
+            : '';
+          ac.innerHTML = rows + hint;
           ac.hidden = false;
         } catch(e) { ac.hidden = true; }
       }, 350);
     });
+    input.addEventListener('blur', () => setTimeout(() => { ac.hidden = true; }, 180));
   }
   window.schPickLoc = function(name) {
     const i = document.getElementById('ev-loc'); if (i) i.value = name;
@@ -1944,11 +2292,15 @@ const PAGE_JS: &str = r##"
   // ── T2 #9 — "Schedule my todos" ───────────────────────────────────
   window.schScheduleTodos = async function() {
     schToast('Thaddeus is finding free time for your todos…', 3000);
+    // Snapshot pending approval IDs so we know which are new after the call.
+    const before = new Set((S.approvals || []).map(a => a.id));
     try {
       const r = await api('/api/scheduler/schedule_todos', { method: 'POST', body: JSON.stringify({}) });
       const n = r.proposed || 0;
-      schToast(n > 0 ? `Proposed ${n} time-blocks for approval` : 'Nothing to schedule', 3000);
+      schToast(n > 0 ? `Proposed ${n} time-blocks — approve in the right rail or ⌘Z to revoke` : 'Nothing to schedule', 3500);
       await loadAll();
+      const created = (S.approvals || []).filter(a => !before.has(a.id)).map(a => a.id);
+      if (created.length) pushUndo({ op: 'create-approvals', ids: created });
     } catch(e) { schToast('Auto-schedule failed', 2500); }
   };
 
@@ -2151,8 +2503,11 @@ const PAGE_JS: &str = r##"
     const toISO = (k, m) => `${k}T${String(Math.floor(m/60)).padStart(2,'0')}:${String(m%60).padStart(2,'0')}`;
     const payload = { title: evt.title, location: evt.location || '', color: evt.color || '',
       start_time: toISO(dayKey, startMin), end_time: toISO(dayKey, endMin) };
+    const prev = { title: evt.title, location: evt.location || '', color: evt.color || '',
+      start_time: evt.start_time || evt.start, end_time: evt.end_time || evt.end };
     try {
       await api(`/api/calendar/${evt.id}`, { method: 'PUT', body: JSON.stringify(payload) });
+      pushUndo({ op: 'update-event', id: evt.id, prev });
       await loadAll();
     } catch(e) { console.warn('[sch] commit drag:', e); await loadAll(); }
   });
