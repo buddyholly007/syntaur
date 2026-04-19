@@ -5,7 +5,7 @@
 use axum::response::Html;
 use maud::{html, PreEscaped};
 
-use super::shared::{shell, Page};
+use super::shared::{shell, top_bar, ModuleStatus, Page};
 
 pub async fn render() -> Html<String> {
     let page = Page {
@@ -13,7 +13,10 @@ pub async fn render() -> Html<String> {
         authed: false,
         extra_style: Some(EXTRA_STYLE),
     };
+    // Bridge-live status is JS-driven; start absent. A small inline script
+    // at the end of the page updates it when the local Media Bridge pings in.
     let body = html! {
+        (top_bar("Music", None))
         (PreEscaped(BODY_HTML))
         script { (PreEscaped(MUSIC_JS)) }
     };
@@ -148,6 +151,14 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
     box-shadow: 0 0 8px rgba(194,255,0,0.2);
   }
 
+  /* ── Music sub-bar (below shared top bar) ──────────────────────── */
+  .music-subbar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 18px;
+    border-bottom: 1px solid rgb(31,41,55);
+    background: rgba(17,24,39,0.4);
+    font-size: 12px;
+  }
   /* ── Top bar tweaks ──────────────────────────────────────────────── */
   .top-brand { font-size: 1rem; font-weight: 600; letter-spacing: 0.06em; }
   .breadcrumb {
@@ -515,27 +526,14 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   .border-r.border-gray-800 { border-right-color: var(--c-line) !important; box-shadow: 1px 0 12px rgba(0,240,255,0.04); }
   .border-b.border-gray-800 { border-bottom-color: var(--c-line) !important; }"##;
 
-const BODY_HTML: &str = r##"<!-- Top bar — matches the dashboard so the music page feels like
-     part of Syntaur, not a different app dropped onto the same domain. -->
-<div class="border-b border-gray-800 bg-gray-900/50 backdrop-blur sticky top-0 z-40">
-  <div class="px-4 py-2.5 flex items-center justify-between">
-    <div class="flex items-center gap-3 min-w-0">
-      <a href="/" class="flex items-center gap-2 hover:opacity-80 flex-shrink-0">
-        <img src="/app-icon.jpg" class="h-8 w-8 rounded-lg" alt="">
-        <span class="top-brand">Syntaur</span>
-      </a>
-      <span class="breadcrumb">Music</span>
-      <span id="media-bridge-pill" class="hidden ml-1" title="Local Media Bridge is running — playback bypasses popups">Bridge live</span>
-    </div>
-    <div class="flex items-center gap-3 text-sm">
-      <a href="/" class="text-gray-400 hover:text-white transition-colors">Home</a>
-      <a href="/settings" class="text-gray-400 hover:text-gray-300">Settings</a>
-      <a href="/profile" class="text-gray-400 hover:text-gray-300" title="Profile">Profile</a>
-      <button onclick="refreshAll()" class="text-gray-500 hover:text-gray-300" title="Refresh">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
-      </button>
-    </div>
-  </div>
+const BODY_HTML: &str = r##"<!-- Module sub-bar — "Bridge live" indicator + refresh. Global nav
+     now lives in the shared top bar rendered above this HTML. -->
+<div class="music-subbar">
+  <span id="media-bridge-pill" class="hidden" title="Local Media Bridge is running — playback bypasses popups">Bridge live</span>
+  <div style="flex:1"></div>
+  <button onclick="refreshAll()" class="text-gray-500 hover:text-gray-300" title="Refresh">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
+  </button>
 </div>
 
 <!-- Hidden player containers — audio plays through browser's audio output -->
@@ -2073,11 +2071,35 @@ async function loadLocalTracks() {
   } catch(e) { console.warn('[local-lib] load tracks failed', e); el.innerHTML = ''; }
 }
 
-function playLocalTrack(trackId, title, artist) {
+// Guard against the double-click freeze. Two rapid clicks used to
+// overlap two play() promises on the same <audio> element; WebKitGTK
+// (viewer) deadlocks when a second src+play fires while the first is
+// still buffering. Fix: serialize through a single busy flag, pause +
+// load + await play() so the previous request resolves cleanly, and
+// swallow AbortError (normal when src changes mid-load).
+let localPlayBusy = false;
+let localPlayCurrent = null;
+async function playLocalTrack(trackId, title, artist) {
+  if (localPlayBusy) return;
+  if (localPlayCurrent === trackId) return;
+  localPlayBusy = true;
+  localPlayCurrent = trackId;
   const a = document.getElementById('local-audio');
+  try { a.pause(); } catch(e) {}
   a.src = '/api/music/local/file/' + trackId + '?token=' + encodeURIComponent(token);
-  a.play().catch(e => console.warn('[local-play]', e));
+  a.load();
   showMusicNotice('▶ ' + (title || 'Track ' + trackId) + (artist ? ' — ' + artist : ''), false);
+  try {
+    await a.play();
+  } catch(e) {
+    if (e && e.name !== 'AbortError') {
+      console.warn('[local-play]', e);
+      showMusicNotice("Couldn't play that track. " + (e.message || ''), true);
+      localPlayCurrent = null;
+    }
+  } finally {
+    localPlayBusy = false;
+  }
 }
 
 // Load on page ready

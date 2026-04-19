@@ -20,8 +20,30 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use crate::AppState;
 
-// Supported extensions. Aligned with what `lofty` reliably decodes.
-const AUDIO_EXT: &[&str] = &["mp3", "flac", "m4a", "aac", "ogg", "oga", "opus", "wav", "wma", "aiff", "aif"];
+// Supported extensions — anything that's plausibly an audio file gets
+// indexed. Browser-native HTML5 <audio> plays mp3/m4a/aac/mp4/ogg/oga/
+// opus/wav/flac/webm/weba directly. Formats like WMA/APE/DSD get
+// indexed with correct Content-Type; playback depends on the browser —
+// WebKitGTK will reject those and surface a play error (which the UI
+// now shows plainly instead of freezing).
+const AUDIO_EXT: &[&str] = &[
+    // Everyday lossy
+    "mp3", "aac", "m4a", "m4b", "m4p", "m4r", "mp4", "3gp", "3gpp",
+    // Ogg family
+    "ogg", "oga", "opus",
+    // WebM / Matroska
+    "webm", "weba", "mka",
+    // Lossless / PCM
+    "flac", "alac", "wav", "wave", "aiff", "aif", "aifc",
+    // Windows / older
+    "wma",
+    // Specialty lossless
+    "ape", "tak", "shn", "tta",
+    // DSD (SACD rips)
+    "dsf", "dff",
+    // Other
+    "amr", "awb", "ac3", "dts",
+];
 const MAX_FOLDER_DEPTH: usize = 12;
 
 fn extract_token(h: &HeaderMap, q: Option<&str>) -> String {
@@ -537,14 +559,30 @@ fn parse_range(header_val: &Option<String>, total: u64) -> Option<(u64, u64)> {
 
 fn content_type_for_path(p: &Path) -> &'static str {
     match p.extension().and_then(|x| x.to_str()).map(|s| s.to_ascii_lowercase()).as_deref() {
-        Some("mp3") => "audio/mpeg",
-        Some("flac") => "audio/flac",
-        Some("m4a") | Some("aac") => "audio/mp4",
-        Some("ogg") | Some("oga") => "audio/ogg",
-        Some("opus") => "audio/opus",
-        Some("wav") => "audio/wav",
-        Some("wma") => "audio/x-ms-wma",
-        Some("aiff") | Some("aif") => "audio/aiff",
+        Some("mp3")                              => "audio/mpeg",
+        Some("flac")                             => "audio/flac",
+        Some("m4a") | Some("m4b") | Some("m4p")
+            | Some("m4r") | Some("mp4")          => "audio/mp4",
+        Some("aac")                              => "audio/aac",
+        Some("3gp") | Some("3gpp")               => "audio/3gpp",
+        Some("ogg") | Some("oga")                => "audio/ogg",
+        Some("opus")                             => "audio/opus",
+        Some("webm") | Some("weba")              => "audio/webm",
+        Some("mka")                              => "audio/x-matroska",
+        Some("wav") | Some("wave")               => "audio/wav",
+        Some("aiff") | Some("aif") | Some("aifc") => "audio/aiff",
+        Some("alac")                             => "audio/alac",
+        Some("wma")                              => "audio/x-ms-wma",
+        Some("ape")                              => "audio/x-ape",
+        Some("tak")                              => "audio/x-tak",
+        Some("shn")                              => "audio/x-shn",
+        Some("tta")                              => "audio/x-tta",
+        Some("dsf")                              => "audio/dsf",
+        Some("dff")                              => "audio/dff",
+        Some("amr")                              => "audio/amr",
+        Some("awb")                              => "audio/amr-wb",
+        Some("ac3")                              => "audio/ac3",
+        Some("dts")                              => "audio/vnd.dts",
         _ => "application/octet-stream",
     }
 }
