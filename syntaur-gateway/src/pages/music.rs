@@ -2481,23 +2481,34 @@ function startRealEqualizer() {
     const barW = Math.max(2, (W - gap * (BAR_COUNT + 1)) / BAR_COUNT);
 
     // Compute HALF heights. Index 0 = bass (center), HALF-1 = treble
-    // (edges). Logarithmic bin mapping so bass gets more resolution.
+    // (edges). Two compensations for how real music spreads energy:
     //
-    // Per-bar weighting compensates for the pink-noise distribution
-    // of real music: bass FFT bins carry roughly 20 dB more energy
-    // than treble bins on typical pop/rock content. Without this
-    // curve, bass constantly pegs the ceiling while highs never
-    // register. The curve (0.42 → 2.35 from center to edge) flattens
-    // the average response so the whole spectrum moves with the music.
+    // 1. Cap the max bin at 45 % of the FFT — most consumer music has
+    //    negligible energy above ~10 kHz. Letting the edge bars reach
+    //    into the ultra-high 15–22 kHz band just made them stay at
+    //    the floor. Capping means the OUTERMOST bars land in the
+    //    hi-hat / cymbal / sibilance range (6–10 kHz) which actually
+    //    moves with most tracks.
+    //
+    // 2. Per-bar weighting curve (0.5 → 2.8) flattens the response.
+    //    Real music has ~20 dB more energy in bass than treble; this
+    //    curve scales bass down and treble up so the whole spectrum
+    //    moves together.
     const heights = new Array(HALF);
+    const MAX_BIN = Math.floor(bins.length * 0.45);
     for (let i = 0; i < HALF; i++) {
-      const lo = Math.floor(Math.pow(i / HALF, 2.3) * bins.length);
-      const hi = Math.floor(Math.pow((i + 1) / HALF, 2.3) * bins.length);
-      let peak = 0;
-      for (let b = lo; b <= hi && b < bins.length; b++) { if (bins[b] > peak) peak = bins[b]; }
+      const lo = Math.floor(Math.pow(i / HALF, 1.9) * MAX_BIN);
+      const hi = Math.max(lo + 1, Math.floor(Math.pow((i + 1) / HALF, 1.9) * MAX_BIN));
+      // Average the bins in this range rather than peak — peak was
+      // making low-bin bars (where each bar is a single high-energy
+      // bass bin) overshoot compared to high-bin bars (which average
+      // many quieter bins).
+      let sum = 0, count = 0;
+      for (let b = lo; b < hi && b < bins.length; b++) { sum += bins[b]; count++; }
+      const avg = count > 0 ? sum / count : 0;
       const t = i / (HALF - 1);                    // 0 = bass, 1 = treble
-      const weight = 0.42 + Math.pow(t, 0.55) * 1.93;
-      const v = Math.min(1, (peak / 255) * weight);
+      const weight = 0.5 + Math.pow(t, 0.45) * 2.3;
+      const v = Math.min(1, (avg / 255) * weight);
       heights[i] = Math.max(2, v * H * CEILING);
     }
 
