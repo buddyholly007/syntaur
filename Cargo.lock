@@ -6536,6 +6536,7 @@ dependencies = [
  "tokio-tungstenite 0.24.0",
  "tokio-util",
  "tower-http",
+ "url",
  "uuid",
  "webpki-roots 1.0.6",
  "zip",
