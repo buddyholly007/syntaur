@@ -513,9 +513,9 @@ mod tests {
     fn multiple_vars() {
         let out = substitute(
             "Hi {{first}} {{last}}",
-            &ctx(&[("first", "Uncle"), ("last", "Iroh")]),
+            &ctx(&[("first", "Jane"), ("last", "Doe")]),
         );
-        assert_eq!(out, "Hi Uncle Iroh");
+        assert_eq!(out, "Hi Jane Doe");
     }
 
     #[test]

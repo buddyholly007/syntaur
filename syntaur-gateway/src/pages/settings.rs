@@ -604,19 +604,19 @@ fn agents_personas_body() -> Markup {
     html! {
         div class="ss-card" {
             p class="ss-help" {
-                "Syntaur seeds eight personas on first run. Each has a distinct role, tone, "
-                "and memory scope. You can rename them during onboarding or any time from "
-                "the individual agent's detail page."
+                "Syntaur comes with eight helper styles. Each has its own voice, role, "
+                "and memory. You can rename any of them during setup or from a helper's "
+                "detail page."
             }
             div class="ss-persona-grid" {
-                (persona_tile("🕷", "Peter", "Personal main agent", "Quiet-apartment Peter Parker — Sean's personal deployment"))
-                (persona_tile("🧭", "Kyron", "Product-default main agent", "TARS + EDI + Ghost — loyal companion AI"))
-                (persona_tile("🤖", "Positron", "Ledger / Tax", "Data (TNG) + C-3PO — analytical, formal"))
-                (persona_tile("🔬", "Cortex", "Knowledge + Research", "Walter Bishop + Doc Brown — eccentric genius"))
-                (persona_tile("🎸", "Silvr", "Music", "Johnny Silverhand + Creed Bratton — one-line picks"))
-                (persona_tile("🎩", "Thaddeus", "Calendar + Todos", "Alfred + Jeeves + Carson — warm-British-butler"))
-                (persona_tile("💻", "Maurice", "Coders", "Moss + Jared + Frink — earnest nerd pair programmer"))
-                (persona_tile("🍃", "Mushi", "Journal", "Iroh + Mister Rogers + Troi — isolated, gentle wisdom"))
+                (persona_tile("🕷", "Peter", "Personal main helper", "Friendly and warm. Helps with anything you ask."))
+                (persona_tile("🧭", "Kyron", "Default main helper", "Calm, competent, always here."))
+                (persona_tile("🤖", "Positron", "Ledger + tax", "Precise and formal. Never guesses at numbers."))
+                (persona_tile("🔬", "Cortex", "Knowledge + research", "Curious and deep-diving. Loves a tangent."))
+                (persona_tile("🎸", "Silvr", "Music", "Picks the next song in one line. No explanation."))
+                (persona_tile("🎩", "Thaddeus", "Calendar + todos", "Warm butler energy. Quietly devoted."))
+                (persona_tile("💻", "Maurice", "Coders", "Earnest pair programmer. Shows his work."))
+                (persona_tile("🍃", "Mushi", "Journal", "Gentle presence. Doesn't rush you."))
             }
         }
     }

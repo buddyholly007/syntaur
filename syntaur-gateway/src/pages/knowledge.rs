@@ -7,7 +7,7 @@
 use axum::response::Html;
 use maud::{html, Markup, PreEscaped};
 
-use super::shared::{shell, Page};
+use super::shared::{shell, top_bar, Page};
 
 pub async fn render() -> Html<String> {
     let page = Page {
@@ -15,9 +15,8 @@ pub async fn render() -> Html<String> {
         authed: true,
         extra_style: Some(EXTRA_STYLE),
     };
-    // Custom in-page top bar instead of the shared one — the library
-    // theme needs parchment + sepia tones, not the standard gray.
     let body = html! {
+        (top_bar("Knowledge", None))
         (page_body())
         script { (PreEscaped(PAGE_JS)) }
     };
@@ -31,25 +30,17 @@ fn page_body() -> Markup {
         // watermark was removed when we got the photographic backdrop
         // — kept the const around in source comments for reference.
 
-        // ── Top bar — leather-bound spine ──────────────────────────────
-        div class="lib-topbar" {
-            div class="lib-topbar-inner" {
-                div class="flex items-center gap-3 min-w-0" {
-                    a href="/" class="flex items-center gap-2 hover:opacity-80 flex-shrink-0" {
-                        img src="/app-icon.jpg" class="h-8 w-8 rounded" alt="";
-                        span class="lib-brand" { "Syntaur" }
-                    }
-                    span class="lib-fleuron" aria-hidden="true" { "❦" }
-                    span class="lib-section-label" { "Codex Knowledge" }
-                }
-                div class="flex items-center gap-4 text-sm" {
-                    a href="/" class="lib-link" { "Home" }
-                    a href="/settings" class="lib-link" { "Settings" }
-                    a href="/profile" class="lib-link" { "Profile" }
-                    label class="lib-inline-label" { "Agent" }
-                    select id="agent-filter" class="lib-select" onchange="onAgentChange()" {
-                        option value="" { "All agents" }
-                    }
+        // ── Knowledge hero — fleuron + theme identity. Global nav lives
+        //     in the shared top bar above; this strip carries the library
+        //     parchment treatment and the agent filter. ─────────────────
+        div class="lib-hero" {
+            div class="lib-hero-inner" {
+                span class="lib-fleuron" aria-hidden="true" { "❦" }
+                span class="lib-section-label" { "Codex" }
+                div style="flex:1" {}
+                label class="lib-inline-label" { "Agent" }
+                select id="agent-filter" class="lib-select" onchange="onAgentChange()" {
+                    option value="" { "All agents" }
                 }
             }
         }
@@ -357,20 +348,20 @@ const EXTRA_STYLE: &str = r##"
     background: radial-gradient(ellipse 100% 80% at center, transparent 0%, transparent 40%, rgba(7,4,1,0.5) 100%);
   }
 
-  /* ── Top bar — leather spine with gold tooling ──────────────────── */
-  .lib-topbar {
+  /* ── Knowledge hero — leather spine with gold tooling. Rides below
+     the shared top bar; keeps the parchment identity inside the canvas. */
+  .lib-hero {
     border-bottom: 1px solid var(--lib-gold);
     background: linear-gradient(180deg, #1d1408 0%, #110a04 100%);
     box-shadow: 0 1px 0 rgba(200,155,60,0.25), 0 4px 12px rgba(0,0,0,0.5);
-    position: sticky; top: 0; z-index: 40;
   }
-  .lib-topbar-inner {
+  .lib-hero-inner {
     max-width: 1280px;
     margin: 0 auto;
-    padding: 12px 24px;
+    padding: 8px 24px;
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    gap: 10px;
     gap: 16px;
   }
   .lib-brand {
@@ -595,13 +586,13 @@ const EXTRA_STYLE: &str = r##"
      Use background-color (longhand) instead of `background:` shorthand —
      the shorthand resets background-repeat to its default (`repeat`),
      which would tile the dropdown's caret SVG across the whole control. */
-  .lib-topbar .lib-select {
+  .lib-hero .lib-select {
     background-color: rgba(244,234,213,0.06) !important;
     color: var(--lib-paper) !important;
     border-color: var(--lib-ink-faint) !important;
     background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10' fill='none' stroke='%23c89b3c' stroke-width='1.5'><path d='M2 4l3 3 3-3'/></svg>") !important;
   }
-  .lib-topbar .lib-select option { background: #1d1408; color: var(--lib-paper); }
+  .lib-hero .lib-select option { background: #1d1408; color: var(--lib-paper); }
 
   .lib-inline-label {
     font-family: 'EB Garamond', serif;
@@ -609,7 +600,7 @@ const EXTRA_STYLE: &str = r##"
     font-size: 13px;
     color: var(--lib-ink-mute);
   }
-  .lib-topbar .lib-inline-label { color: var(--lib-paper-edge); }
+  .lib-hero .lib-inline-label { color: var(--lib-paper-edge); }
 
   /* ── Buttons — wax-seal primary, ghost secondary ──────────────── */
   .lib-btn-primary {
@@ -719,7 +710,7 @@ const EXTRA_STYLE: &str = r##"
 
   /* All real content sits above the photographic background image
      (see body::before / body::after rules) and its darkening overlays. */
-  .lib-topbar, .lib-tab-bar, .lib-body, .lib-research-body, .lib-shell { position: relative; z-index: 1; }
+  .lib-hero, .lib-tab-bar, .lib-body, .lib-research-body, .lib-shell { position: relative; z-index: 1; }
 
   /* ── Shell: main content (tab bodies) + persistent Cortex rail ──────── */
   .lib-shell {
@@ -1568,7 +1559,7 @@ async function reopenResearchSession(id) {
 // Cortex chat (persistent right rail, SSE streaming)
 // ═══════════════════════════════════════════════════════════════════════
 
-const CORTEX_SYSTEM = "You are Cortex, the scholar-researcher persona inside the Syntaur Knowledge module. Your inspirations are Walter Bishop (Fringe) and Doc Brown (Back to the Future) — eccentric, curious, generous with context. Persona dials: warmth 8, formality 2, verbosity 5, curiosity 10, humor 5, tangent tolerance 6. Lead with 'Ooh, interesting—' or 'I have thoughts on this.' on real intellectual questions. Tangents are allowed if they land back in 2–3 sentences. ALWAYS cite (doc path, page, URL) when drawing from the user's library or the web. Delight in contradictions between sources. Ask the user's intuition collaboratively. Data scope: the knowledge-base index (uploaded documents, RAG search), research sessions, web search. You NEVER read the journal, even if the user opts in.";
+const CORTEX_SYSTEM = "You are Cortex, the scholar-researcher persona inside the Syntaur Knowledge module. You are eccentric, deeply curious, and generous with context — the kind of helper who lights up at an unusual question. Persona dials: warmth 8, formality 2, verbosity 5, curiosity 10, humor 5, tangent tolerance 6. Lead with 'Ooh, interesting—' or 'I have thoughts on this.' on real intellectual questions. Tangents are allowed if they land back in 2–3 sentences. ALWAYS cite (doc path, page, URL) when drawing from the user's library or the web. Delight in contradictions between sources. Ask the user's intuition collaboratively. Data scope: the knowledge-base index (uploaded documents, RAG search), research sessions, web search. You NEVER read the journal, even if the user opts in.";
 
 let cortexConvId = null;
 let cortexSending = false;
