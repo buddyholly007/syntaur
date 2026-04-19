@@ -464,17 +464,45 @@ fn run_vault(args: &[String]) {
         "path" => {
             println!("{}", vault.path().display());
         }
+        "export" => {
+            let format = it.next().cloned().unwrap_or_else(|| "env".to_string());
+            let entries = match vault.dump_plaintext() {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!("error: dump: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let body = match format.as_str() {
+                "env"           => vault::export_env_file(&entries),
+                "csv"           => vault::export_csv(&entries),
+                "json"          => vault::export_json(&entries),
+                "bitwarden"     => vault::export_bitwarden_json(&entries),
+                "1password"     => vault::export_1password_csv(&entries),
+                "keepass"       => vault::export_keepass_csv(&entries),
+                other => {
+                    eprintln!("unknown format: {other}");
+                    eprintln!("formats: env csv json bitwarden 1password keepass");
+                    std::process::exit(2);
+                }
+            };
+            print!("{body}");
+            eprintln!("\n(✓ exported {} secrets as {})", entries.len(), format);
+            eprintln!("  Values are PLAINTEXT. Pipe to a file with > <path>, then `shred -u <path>` after import.");
+        }
         _ => {
             eprintln!("syntaur-gateway vault — encrypted secrets store");
             eprintln!();
             eprintln!("commands:");
-            eprintln!("  set <name> [value]   set a secret (reads stdin if value omitted)");
-            eprintln!("  get <name>           print decrypted value");
-            eprintln!("  list                 list secret names");
-            eprintln!("  delete <name>        remove a secret");
-            eprintln!("  import <env-file>    bulk-load KEY=VALUE lines");
-            eprintln!("  rotate               re-encrypt all under current master key");
-            eprintln!("  path                 print the vault file path");
+            eprintln!("  set <name> [value]    set a secret (reads stdin if value omitted)");
+            eprintln!("  get <name>            print decrypted value");
+            eprintln!("  list                  list secret names");
+            eprintln!("  delete <name>         remove a secret");
+            eprintln!("  import <env-file>     bulk-load KEY=VALUE lines");
+            eprintln!("  export <format>       dump plaintext to stdout");
+            eprintln!("                          formats: env csv json bitwarden 1password keepass");
+            eprintln!("  rotate                re-encrypt all under current master key");
+            eprintln!("  path                  print the vault file path");
             eprintln!();
             eprintln!("Secrets are referenced in config as {{{{vault.NAME}}}}.");
             std::process::exit(2);

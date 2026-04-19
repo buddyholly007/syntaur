@@ -594,7 +594,7 @@ pub struct ConfigLoadResult {
 pub fn load_config(path: &Path) -> ConfigLoadResult {
     let mut warnings = Vec::new();
 
-    let content = match std::fs::read_to_string(path) {
+    let mut content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) => {
             warnings.push(format!("Cannot read config {}: {}. Using defaults.", path.display(), e));
@@ -604,6 +604,30 @@ pub fn load_config(path: &Path) -> ConfigLoadResult {
             };
         }
     };
+
+    // Phase 3.1 of the security plan: resolve `{{vault.NAME}}` references
+    // in config values to decrypted secrets from ~/.syntaur/vault.json.
+    // Keeps plaintext API keys out of openclaw.json entirely.
+    //
+    // Done BEFORE serde parsing so every string field in the whole
+    // config tree gets the substitution, with zero per-field plumbing.
+    if content.contains("{{vault.") {
+        let data_dir = {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/sean".to_string());
+            std::path::PathBuf::from(home).join(".syntaur")
+        };
+        match crate::vault::Vault::open(&data_dir) {
+            Ok(v) => {
+                content = crate::vault::resolve_refs(&content, &v);
+            }
+            Err(e) => {
+                warnings.push(format!(
+                    "Config references {{{{vault.…}}}} but vault could not be opened: {}. Config values will remain as literal placeholders.",
+                    e
+                ));
+            }
+        }
+    }
 
     let config: Config = match serde_json::from_str(&content) {
         Ok(c) => c,
