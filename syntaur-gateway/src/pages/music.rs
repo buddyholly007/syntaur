@@ -171,19 +171,37 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   .breadcrumb::after  { content: ']'; color: var(--c-mag); margin-left:  6px; }
 
   /* ── Now-playing spectrum (canvas, AnalyserNode-driven) ─────────── */
-  /* Replaces the old 4×28 px bar strip that was visually invisible.
-     Full-width canvas, 64px tall, cyberpunk mag→cyan gradient bars
-     drawn 60fps from Web Audio frequency data when local playback is
-     active. Falls back to a dim static pattern when nothing is live
-     so the space doesn't look broken. */
+  /* Seven selectable visualizer styles drawn from AnalyserNode.
+     Canvas height bumps to 120px for styles that need the vertical
+     real estate (pixels-mirror, synthwave). See setVizStyle(). */
+  .np-viz-wrap {
+    position: relative;
+    margin-top: 14px;
+  }
   .np-spectrum {
     display: block;
     width: 100%;
-    height: 64px;
-    margin-top: 14px;
+    height: 96px;
     border-radius: 6px;
     background: linear-gradient(180deg, rgba(255,44,223,0.03), rgba(0,255,255,0.02));
     border: 1px solid rgba(255,44,223,0.15);
+  }
+  .np-spectrum.viz-tall { height: 140px; }
+  .np-viz-cycle {
+    position: absolute; top: 6px; right: 8px;
+    background: rgba(0,0,0,0.55); backdrop-filter: blur(6px);
+    border: 1px solid rgba(255,255,255,0.1);
+    color: rgba(255,255,255,0.75);
+    font-size: 10.5px; font-family: inherit;
+    padding: 3px 9px; border-radius: 999px;
+    display: inline-flex; align-items: center; gap: 5px;
+    cursor: pointer; line-height: 1;
+    transition: border-color 0.12s, color 0.12s, background 0.12s;
+  }
+  .np-viz-cycle:hover {
+    color: #fff;
+    border-color: rgba(255,44,223,0.5);
+    background: rgba(255,44,223,0.1);
   }
   /* Progress bar under the title, scrub to seek. */
   .np-progress-row {
@@ -622,11 +640,16 @@ const BODY_HTML: &str = r##"<!-- Module sub-bar — "Bridge live" indicator + re
             <p class="text-xs text-gray-500" id="np-source"></p>
             <span id="np-format-badge" class="hidden text-[10px] tracking-wider uppercase px-1.5 py-0.5 rounded border border-cyan-700/60 text-cyan-400 bg-cyan-950/40 font-mono"></span>
           </div>
-          <!-- Audio-reactive spectrum. Replaces the previous 4px-bar
-               viz with a canvas that fills the remaining width and is
-               64px tall; drawn from an AnalyserNode 60fps while local
-               audio plays, dark fallback while nothing plays. -->
-          <canvas id="np-spectrum" class="np-spectrum" aria-hidden="true" width="800" height="64"></canvas>
+          <!-- Audio-reactive spectrum. Six selectable styles, click
+               the cycle button to swap. Drawn from an AnalyserNode
+               every animation frame while local audio plays. -->
+          <div class="np-viz-wrap">
+            <canvas id="np-spectrum" class="np-spectrum" aria-hidden="true" width="800" height="64"></canvas>
+            <button class="np-viz-cycle" onclick="cycleVizStyle()" title="Change visualizer style" id="np-viz-cycle-btn" aria-label="Cycle visualizer">
+              <span id="np-viz-label">Mirror</span>
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
+            </button>
+          </div>
           <!-- Progress bar — clickable to seek, currentTime / duration. -->
           <div class="np-progress-row" id="np-progress-row">
             <span id="np-time-cur" class="np-time">0:00</span>
@@ -2468,6 +2491,364 @@ function ensureRealEqualizer(audioEl) {
   startRealEqualizer();
 }
 
+// Persisted style choice.
+let vizStyle = (function(){
+  try { return localStorage.getItem('syntaurVizStyle') || 'mirror'; } catch(_e) { return 'mirror'; }
+})();
+const VIZ_ORDER = ['mirror', 'pixels', 'wave', 'dual', 'radial', 'spikes', 'synthwave'];
+const VIZ_LABELS = {
+  mirror:    'Mirror',
+  pixels:    'Pixels',
+  wave:      'Wave',
+  dual:      'Dual',
+  radial:    'Radial',
+  spikes:    'Spikes',
+  synthwave: '80s',
+};
+
+function setVizStyle(style) {
+  vizStyle = style;
+  try { localStorage.setItem('syntaurVizStyle', style); } catch(_e) {}
+  const label = document.getElementById('np-viz-label');
+  if (label) label.textContent = VIZ_LABELS[style] || style;
+  // Some styles want a taller canvas. Add/remove the viz-tall class.
+  const canvas = document.getElementById('np-spectrum');
+  if (canvas) {
+    const tall = (style === 'synthwave');
+    canvas.classList.toggle('viz-tall', tall);
+    canvas.height = tall ? 140 : 96;
+  }
+}
+function cycleVizStyle() {
+  const i = VIZ_ORDER.indexOf(vizStyle);
+  const next = VIZ_ORDER[(i + 1) % VIZ_ORDER.length];
+  setVizStyle(next);
+}
+// Apply the saved choice as soon as the DOM exists.
+(function applyInitialVizStyle() {
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => setVizStyle(vizStyle));
+  } else {
+    setVizStyle(vizStyle);
+  }
+})();
+
+// Shared gradient helper — cyan → magenta top-to-bottom for bar styles.
+function vizGrad(ctx, y0, y1) {
+  const g = ctx.createLinearGradient(0, y0, 0, y1);
+  g.addColorStop(0, '#0cf8f0');
+  g.addColorStop(1, '#ff2cdf');
+  return g;
+}
+// HSL tile color by height-fraction for the pixels style.
+function tileColor(amount) {
+  // 0 = deep purple, 1 = cyan. Smooth hue shift.
+  const h = 260 + amount * 160;      // 260° purple → 420° == 60° cyan (wraps)
+  const s = 78;
+  const l = 44 + amount * 16;
+  return `hsl(${h % 360}, ${s}%, ${l}%)`;
+}
+
+// ─── Drawers ────────────────────────────────────────────────────
+// Each drawer takes (ctx, W, H, bins, waveform). Runs inside the
+// animation loop that `startRealEqualizer` owns.
+
+const VIZ_DRAWERS = {};
+
+VIZ_DRAWERS.mirror = function(ctx, W, H, bins, waveform) {
+  const BAR_COUNT = 38;
+  const HALF = Math.floor(BAR_COUNT / 2);
+  const CEILING = 0.98;
+  const MAX_BIN = Math.floor(bins.length * 0.45);
+  const BIN_START = 1;
+  const BIN_AVAIL = MAX_BIN - BIN_START;
+  const heights = new Array(HALF);
+  for (let i = 0; i < HALF; i++) {
+    const lo = BIN_START + Math.floor(Math.pow(i / HALF, 1.7) * BIN_AVAIL);
+    const hi = Math.max(lo + 1, BIN_START + Math.floor(Math.pow((i + 1) / HALF, 1.7) * BIN_AVAIL));
+    let sum = 0, count = 0;
+    for (let b = lo; b < hi && b < bins.length; b++) { sum += bins[b]; count++; }
+    const avg = count > 0 ? sum / count : 0;
+    const dome = 1.0 - Math.pow(i / HALF, 1.3) * 0.60;
+    const tl = 1.0 + (i / HALF) * 0.55;
+    const v = Math.min(1, (avg / 255) * dome * tl);
+    heights[i] = Math.max(2, v * H * CEILING);
+  }
+  let tallest = 0;
+  for (let i = 1; i < HALF; i++) { if (heights[i] > tallest) tallest = heights[i]; }
+  if (heights[0] < tallest + 1) heights[0] = Math.min(H * CEILING, tallest + 1);
+  const gap = 2;
+  const barW = Math.max(2, (W - gap * (BAR_COUNT + 1)) / BAR_COUNT);
+  for (let i = 0; i < HALF; i++) {
+    const h = heights[i];
+    const y = H - h;
+    const xR = gap + (HALF + i) * (barW + gap);
+    const xL = gap + (HALF - 1 - i) * (barW + gap);
+    ctx.fillStyle = vizGrad(ctx, y, H);
+    ctx.fillRect(xR, y, barW, h);
+    ctx.fillRect(xL, y, barW, h);
+  }
+};
+
+// Pixels — stacked tile-blocks mirrored above/below a center line.
+// Matches the retro LED-tile look in Sean's reference (VisualizerOptions 3).
+VIZ_DRAWERS.pixels = function(ctx, W, H, bins, waveform) {
+  const BAR_COUNT = 42;
+  const TILE_H = 5;
+  const TILE_GAP = 1;
+  const TILES_PER_SIDE = Math.floor((H / 2 - 2) / (TILE_H + TILE_GAP));
+  const MAX_BIN = Math.floor(bins.length * 0.5);
+  const BIN_START = 1;
+  const hgap = 1;
+  const barW = Math.max(3, (W - hgap * (BAR_COUNT + 1)) / BAR_COUNT) - hgap;
+  const mid = H / 2;
+  for (let i = 0; i < BAR_COUNT; i++) {
+    const lo = BIN_START + Math.floor(Math.pow(i / BAR_COUNT, 1.7) * (MAX_BIN - BIN_START));
+    const hi = Math.max(lo + 1, BIN_START + Math.floor(Math.pow((i + 1) / BAR_COUNT, 1.7) * (MAX_BIN - BIN_START)));
+    let sum = 0, count = 0;
+    for (let b = lo; b < hi && b < bins.length; b++) { sum += bins[b]; count++; }
+    const avg = count > 0 ? sum / count : 0;
+    const treble_lift = 1.0 + (i / BAR_COUNT) * 0.9;
+    const v = Math.min(1, (avg / 255) * treble_lift);
+    const tiles = Math.round(v * TILES_PER_SIDE);
+    const x = hgap + i * (barW + hgap);
+    for (let t = 0; t < tiles; t++) {
+      const amount = t / TILES_PER_SIDE;
+      ctx.fillStyle = tileColor(amount);
+      const yUp = mid - (t + 1) * (TILE_H + TILE_GAP);
+      const yDn = mid + t * (TILE_H + TILE_GAP) + TILE_GAP;
+      ctx.fillRect(x, yUp, barW, TILE_H);
+      ctx.fillRect(x, yDn, barW, TILE_H);
+    }
+  }
+};
+
+// Wave — thick oscilloscope ribbon, stacked top + bottom mirror with
+// amplitude-driven thickness. Matches the chunky solid blobs in ref-1.
+VIZ_DRAWERS.wave = function(ctx, W, H, bins, waveform) {
+  const mid = H / 2;
+  ctx.save();
+  ctx.beginPath();
+  const step = waveform.length / W;
+  for (let x = 0; x < W; x++) {
+    const i = Math.floor(x * step);
+    const v = (waveform[i] - 128) / 128;           // -1..1
+    const y = mid + v * (H * 0.46);
+    if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  // Trace back the mirrored bottom to form a closed blob.
+  for (let x = W - 1; x >= 0; x--) {
+    const i = Math.floor(x * step);
+    const v = (waveform[i] - 128) / 128;
+    const y = mid - v * (H * 0.46);
+    ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  const g = ctx.createLinearGradient(0, 0, W, 0);
+  g.addColorStop(0, '#ff2cdf');
+  g.addColorStop(0.5, '#a852ff');
+  g.addColorStop(1, '#0cf8f0');
+  ctx.fillStyle = g;
+  ctx.globalAlpha = 0.88;
+  ctx.fill();
+  ctx.restore();
+};
+
+// Dual — two filled area charts stacked. Spectrum top in cyan,
+// waveform bottom in pink — the "teal top / pink bottom" look from
+// ref-1 right-middle.
+VIZ_DRAWERS.dual = function(ctx, W, H, bins, waveform) {
+  const halfH = H / 2;
+
+  // Top: spectrum area (cyan, hanging down from top)
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  const BAR_COUNT = 64;
+  const MAX_BIN = Math.floor(bins.length * 0.5);
+  const pts = [];
+  for (let i = 0; i <= BAR_COUNT; i++) {
+    const lo = Math.floor(Math.pow(i / BAR_COUNT, 1.6) * MAX_BIN);
+    const hi = Math.max(lo + 1, Math.floor(Math.pow((i + 1) / BAR_COUNT, 1.6) * MAX_BIN));
+    let peak = 0;
+    for (let b = lo; b < hi && b < bins.length; b++) { if (bins[b] > peak) peak = bins[b]; }
+    const v = peak / 255;
+    const x = (i / BAR_COUNT) * W;
+    const y = v * halfH * 0.95;
+    pts.push([x, y]);
+  }
+  pts.forEach(([x, y], i) => { if (i === 0) ctx.lineTo(x, y); else ctx.lineTo(x, y); });
+  ctx.lineTo(W, 0);
+  ctx.closePath();
+  const g1 = ctx.createLinearGradient(0, 0, 0, halfH);
+  g1.addColorStop(0, '#0cf8f0');
+  g1.addColorStop(1, 'rgba(12, 248, 240, 0.25)');
+  ctx.fillStyle = g1;
+  ctx.fill();
+  ctx.restore();
+
+  // Bottom: waveform area (pink, hanging up from bottom)
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(0, H);
+  const step = waveform.length / W;
+  for (let x = 0; x < W; x++) {
+    const i = Math.floor(x * step);
+    const v = Math.abs(waveform[i] - 128) / 128;
+    const y = H - v * halfH * 0.95;
+    ctx.lineTo(x, y);
+  }
+  ctx.lineTo(W, H);
+  ctx.closePath();
+  const g2 = ctx.createLinearGradient(0, halfH, 0, H);
+  g2.addColorStop(0, 'rgba(255, 44, 223, 0.25)');
+  g2.addColorStop(1, '#ff2cdf');
+  ctx.fillStyle = g2;
+  ctx.fill();
+  ctx.restore();
+};
+
+// Radial — concentric bars around a center point. Matches the flower/
+// polar look bottom-right of ref-1.
+VIZ_DRAWERS.radial = function(ctx, W, H, bins, waveform) {
+  const cx = W / 2, cy = H / 2;
+  const innerR = Math.min(W, H) * 0.18;
+  const maxLen = Math.min(W, H) * 0.42;
+  const BARS = 72;
+  const MAX_BIN = Math.floor(bins.length * 0.45);
+  for (let i = 0; i < BARS; i++) {
+    const lo = Math.floor(Math.pow(i / BARS, 1.4) * MAX_BIN);
+    const hi = Math.max(lo + 1, Math.floor(Math.pow((i + 1) / BARS, 1.4) * MAX_BIN));
+    let peak = 0;
+    for (let b = lo; b < hi && b < bins.length; b++) { if (bins[b] > peak) peak = bins[b]; }
+    const v = peak / 255;
+    const len = Math.max(2, v * maxLen);
+    const angle = (i / BARS) * Math.PI * 2 - Math.PI / 2;
+    const x1 = cx + Math.cos(angle) * innerR;
+    const y1 = cy + Math.sin(angle) * innerR;
+    const x2 = cx + Math.cos(angle) * (innerR + len);
+    const y2 = cy + Math.sin(angle) * (innerR + len);
+    const g = ctx.createLinearGradient(x1, y1, x2, y2);
+    g.addColorStop(0, '#0cf8f0');
+    g.addColorStop(1, '#ff2cdf');
+    ctx.strokeStyle = g;
+    ctx.lineWidth = 2.2;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+  }
+};
+
+// Spikes — tall thin uniform-width sharp lines, amplitude drives
+// height. The "picket fence" look from ref-1 bottom middle-right.
+VIZ_DRAWERS.spikes = function(ctx, W, H, bins, waveform) {
+  const BARS = 90;
+  const MAX_BIN = Math.floor(bins.length * 0.6);
+  const spacing = W / BARS;
+  for (let i = 0; i < BARS; i++) {
+    const lo = Math.floor(Math.pow(i / BARS, 1.6) * MAX_BIN);
+    const hi = Math.max(lo + 1, Math.floor(Math.pow((i + 1) / BARS, 1.6) * MAX_BIN));
+    let sum = 0, count = 0;
+    for (let b = lo; b < hi && b < bins.length; b++) { sum += bins[b]; count++; }
+    const avg = count > 0 ? sum / count : 0;
+    const treble_lift = 1.0 + (i / BARS) * 0.8;
+    const v = Math.min(1, (avg / 255) * treble_lift);
+    const h = Math.max(1, v * H * 0.95);
+    const x = i * spacing + spacing / 2;
+    const y = H - h;
+    ctx.strokeStyle = vizGrad(ctx, y, H);
+    ctx.lineWidth = 1.5;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(x, H - 1);
+    ctx.lineTo(x, y);
+    ctx.stroke();
+  }
+};
+
+// Synthwave — 80s-styled retro: sunset glow, perspective grid floor,
+// cyan waveform line sitting on the horizon. Needs taller canvas,
+// which setVizStyle() sets via .viz-tall class.
+VIZ_DRAWERS.synthwave = function(ctx, W, H, bins, waveform) {
+  // Sunset background
+  const sky = ctx.createLinearGradient(0, 0, 0, H * 0.55);
+  sky.addColorStop(0, '#231030');
+  sky.addColorStop(0.5, '#621c5a');
+  sky.addColorStop(1, '#ff6b3d');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, W, H * 0.55);
+
+  // Sun half-disc
+  const sunR = H * 0.28;
+  const sunCx = W / 2;
+  const sunCy = H * 0.55;
+  const sunGrad = ctx.createLinearGradient(0, sunCy - sunR, 0, sunCy);
+  sunGrad.addColorStop(0, '#ffcf40');
+  sunGrad.addColorStop(0.6, '#ff4a8a');
+  sunGrad.addColorStop(1, '#a02060');
+  ctx.fillStyle = sunGrad;
+  ctx.beginPath();
+  ctx.arc(sunCx, sunCy, sunR, Math.PI, 2 * Math.PI);
+  ctx.fill();
+  // Sun stripes (cutouts)
+  ctx.fillStyle = '#231030';
+  const stripeGap = 4;
+  for (let y = sunCy - sunR * 0.7; y < sunCy; y += stripeGap * 2) {
+    ctx.fillRect(sunCx - sunR, y, sunR * 2, stripeGap);
+  }
+
+  // Ground gradient
+  const grd = ctx.createLinearGradient(0, H * 0.55, 0, H);
+  grd.addColorStop(0, '#180620');
+  grd.addColorStop(1, '#050014');
+  ctx.fillStyle = grd;
+  ctx.fillRect(0, H * 0.55, W, H * 0.45);
+
+  // Perspective grid floor
+  ctx.strokeStyle = 'rgba(255, 44, 223, 0.55)';
+  ctx.lineWidth = 1;
+  const horizonY = H * 0.55;
+  const vanishX = W / 2;
+  // Horizontal grid lines (perspective — closer spacing near horizon)
+  for (let r = 0; r < 10; r++) {
+    const t = Math.pow(r / 10, 2.4);
+    const y = horizonY + t * (H - horizonY);
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(W, y);
+    ctx.globalAlpha = 0.5 - r * 0.03;
+    ctx.stroke();
+  }
+  // Vertical perspective lines
+  for (let c = -6; c <= 6; c++) {
+    const x = vanishX + c * (W / 6);
+    ctx.beginPath();
+    ctx.moveTo(vanishX, horizonY);
+    ctx.lineTo(x, H);
+    ctx.globalAlpha = 0.55;
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  // Cyan waveform line along the horizon, rising with amplitude
+  ctx.strokeStyle = '#0cf8f0';
+  ctx.shadowColor = '#0cf8f0';
+  ctx.shadowBlur = 8;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  const step = waveform.length / W;
+  for (let x = 0; x < W; x++) {
+    const i = Math.floor(x * step);
+    const v = (waveform[i] - 128) / 128;
+    const y = horizonY - 3 + v * (H * 0.22);
+    if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+};
+
 function startRealEqualizer() {
   if (!webAudioAnalyser) return;
   if (vizFrameId) cancelAnimationFrame(vizFrameId);
@@ -2475,94 +2856,17 @@ function startRealEqualizer() {
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
   const bins = new Uint8Array(webAudioAnalyser.frequencyBinCount);
-
-  // Mirrored spectrum — classic car-stereo / Winamp look. The left
-  // and right halves are a reflection of each other: bass in the
-  // center, mids + highs radiating outward to both edges. We compute
-  // heights for the inner half only (HALF bars) then paint them
-  // twice, once walking outward-right from center and once
-  // outward-left.
-  const BAR_COUNT = 38;                  // total across the full width
-  const HALF = Math.floor(BAR_COUNT / 2);
-  // Peak ceiling: 98 % of canvas. Kick-drum transients SHOULD pop
-  // into the top band — that's what gives classic spectrum vizzes
-  // their rhythmic punch. The other 2 % is just a 1-px gutter so
-  // bars don't visually kiss the canvas frame.
-  const CEILING = 0.98;
+  const waveform = new Uint8Array(webAudioAnalyser.fftSize);
 
   const loop = () => {
     const cssW = canvas.clientWidth;
     if (cssW > 0 && canvas.width !== cssW) canvas.width = cssW;
     const W = canvas.width, H = canvas.height;
     webAudioAnalyser.getByteFrequencyData(bins);
+    webAudioAnalyser.getByteTimeDomainData(waveform);
     ctx.clearRect(0, 0, W, H);
-    const gap = 2;
-    const barW = Math.max(2, (W - gap * (BAR_COUNT + 1)) / BAR_COUNT);
-
-    // Compute HALF heights. Index 0 = bass (center), HALF-1 = treble
-    // (edges). Two compensations for how real music spreads energy:
-    //
-    // 1. Cap the max bin at 45 % of the FFT — most consumer music has
-    //    negligible energy above ~10 kHz. Letting the edge bars reach
-    //    into the ultra-high 15–22 kHz band just made them stay at
-    //    the floor. Capping means the OUTERMOST bars land in the
-    //    hi-hat / cymbal / sibilance range (6–10 kHz) which actually
-    //    moves with most tracks.
-    //
-    // 2. Per-bar weighting curve (0.5 → 2.8) flattens the response.
-    //    Real music has ~20 dB more energy in bass than treble; this
-    //    curve scales bass down and treble up so the whole spectrum
-    //    moves together.
-    // Shape = dome. The center is always the peak, edges always
-    // taper. A positional envelope multiplier (dome) scales bar
-    // heights down as i increases so the spectrum reads as a
-    // mountain rather than a flat equalizer-style line. Combined
-    // with the natural bass-heaviness of real music, the middle
-    // two bars always dominate visually — which is the classic
-    // car-stereo / Winamp look Sean is describing.
-    const heights = new Array(HALF);
-    const MAX_BIN = Math.floor(bins.length * 0.45);
-    const BIN_START = 1;
-    const BIN_AVAIL = MAX_BIN - BIN_START;
-    for (let i = 0; i < HALF; i++) {
-      const lo = BIN_START + Math.floor(Math.pow(i / HALF, 1.7) * BIN_AVAIL);
-      const hi = Math.max(lo + 1, BIN_START + Math.floor(Math.pow((i + 1) / HALF, 1.7) * BIN_AVAIL));
-      let sum = 0, count = 0;
-      for (let b = lo; b < hi && b < bins.length; b++) { sum += bins[b]; count++; }
-      const avg = count > 0 ? sum / count : 0;
-      // Dome envelope. i=0 (center) → 1.0; i=HALF-1 (edge) → 0.40.
-      // Pow(i/HALF, 1.3) gives a smooth round dome rather than a
-      // pointy triangle.
-      const dome = 1.0 - Math.pow(i / HALF, 1.3) * 0.60;
-      // Small treble lift so high-end bars don't vanish — but tiny
-      // enough that bass always wins the height race.
-      const treble_lift = 1.0 + (i / HALF) * 0.55;
-      const v = Math.min(1, (avg / 255) * dome * treble_lift);
-      heights[i] = Math.max(2, v * H * CEILING);
-    }
-    // Belt-and-braces guarantee: the center bar must be at least
-    // 1 px taller than any other bar. On occasional treble-heavy
-    // frames (high-hat splashes with zero bass content), this keeps
-    // the dome shape intact.
-    let tallest_other = 0;
-    for (let i = 1; i < HALF; i++) { if (heights[i] > tallest_other) tallest_other = heights[i]; }
-    if (heights[0] < tallest_other + 1) heights[0] = Math.min(H * CEILING, tallest_other + 1);
-
-    // Paint bars[HALF..BAR_COUNT] going right from center (low→high freq).
-    for (let i = 0; i < HALF; i++) {
-      const rightIdx = HALF + i;         // HALF, HALF+1, ..., BAR_COUNT-1
-      const leftIdx  = HALF - 1 - i;     // HALF-1, HALF-2, ..., 0
-      const h = heights[i];
-      const y = H - h;
-      const xR = gap + rightIdx * (barW + gap);
-      const xL = gap + leftIdx  * (barW + gap);
-      const grad = ctx.createLinearGradient(0, y, 0, H);
-      grad.addColorStop(0, '#0cf8f0');
-      grad.addColorStop(1, '#ff2cdf');
-      ctx.fillStyle = grad;
-      ctx.fillRect(xR, y, barW, h);
-      ctx.fillRect(xL, y, barW, h);
-    }
+    const drawer = VIZ_DRAWERS[vizStyle] || VIZ_DRAWERS.mirror;
+    drawer(ctx, W, H, bins, waveform);
     vizFrameId = requestAnimationFrame(loop);
   };
   loop();
