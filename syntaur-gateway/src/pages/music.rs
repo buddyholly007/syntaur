@@ -2889,9 +2889,59 @@ function renderLocalDetails() {
        +    '<input id="local-edit-title" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 outline-none focus:border-oc-500" placeholder="Title" value="' + escapeHtml(cur.title || '') + '">'
        +    '<input id="local-edit-artist" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 outline-none focus:border-oc-500" placeholder="Artist" value="' + escapeHtml(cur.artist || '') + '">'
        +    '<input id="local-edit-album" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 outline-none focus:border-oc-500" placeholder="Album" value="' + escapeHtml(cur.album || '') + '">'
-       +    '<button onclick="saveLocalEdit()" class="bg-oc-600 hover:bg-oc-700 text-white px-4 py-1.5 rounded-lg text-sm">Save my edits</button>'
+       +    '<div class="flex gap-2 items-center">'
+       +      '<button onclick="saveLocalEdit()" class="bg-oc-600 hover:bg-oc-700 text-white px-4 py-1.5 rounded-lg text-sm">Save my edits</button>'
+       +      '<button onclick="revertLocal()" class="text-xs text-gray-400 hover:text-pink-400 underline">Revert to file tags</button>'
+       +    '</div>'
+       + '</div>';
+  html += '<hr class="border-gray-800 my-4">';
+  html += '<div class="flex items-center justify-between mb-2">'
+       +    '<p class="text-[10px] text-gray-500 uppercase tracking-wider">Lyrics</p>'
+       +    '<button onclick="fetchLyrics()" class="text-xs text-cyan-400 hover:text-cyan-300">Fetch from LRCLIB →</button>'
+       + '</div>';
+  html += '<div id="local-lyrics-panel" class="lyrics-scroll">'
+       +    '<p class="text-xs text-gray-500 italic">Click fetch to look this up.</p>'
        + '</div>';
   body.innerHTML = html;
+}
+
+async function revertLocal() {
+  if (!localDetailsState.trackId) return;
+  if (!confirm('Revert this track to its original file tags? Any LLM / MusicBrainz edits will be discarded.')) return;
+  try {
+    const r = await fetch('/api/music/local/revert/' + localDetailsState.trackId, { method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ token }) });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    showMusicNotice('Reverted to file tags', false);
+    closeLocalDetails();
+    if (currentLibView === 'tracks') loadLocalTracks();
+  } catch(e) {
+    showMusicNotice('Revert failed: ' + (e.message || ''), true);
+  }
+}
+
+async function fetchLyrics() {
+  if (!localDetailsState.trackId) return;
+  const panel = document.getElementById('local-lyrics-panel');
+  if (panel) panel.innerHTML = '<p class="text-xs text-gray-500 italic">Looking up…</p>';
+  try {
+    const r = await fetch('/api/music/local/lyrics/' + localDetailsState.trackId + '?token=' + encodeURIComponent(token));
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    if (panel) {
+      const text = d.synced_lrc
+        // Synced LRC is one line per timestamp — strip the [mm:ss.xx] prefix for display; karaoke sync comes in T3+.
+        ? d.synced_lrc.split('\n').map(l => l.replace(/^\[\d{1,2}:\d{1,2}(?:\.\d+)?\]\s*/,'')).filter(Boolean).join('\n')
+        : (d.plain_text || '');
+      if (text) {
+        panel.innerHTML = text.split('\n').map(l => '<div class="line">' + escapeHtml(l) + '</div>').join('');
+      } else {
+        panel.innerHTML = '<p class="text-xs text-gray-500 italic">' + escapeHtml(d.reason || 'No lyrics found for this track.') + '</p>';
+      }
+    }
+  } catch(e) {
+    if (panel) panel.innerHTML = '<p class="text-xs text-red-400">Lookup failed: ' + escapeHtml(e.message || '') + '</p>';
+  }
 }
 
 async function applyLocalMatch(idx) {
