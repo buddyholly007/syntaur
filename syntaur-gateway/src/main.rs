@@ -3019,7 +3019,18 @@ async fn handle_admin_create_user(
     let principal = resolve_principal(&state, &req.token).await?;
     require_admin(&principal)?;
     match state.users.create_user(&req.name).await {
-        Ok(u) => Ok(Json(serde_json::to_value(u).unwrap_or_default())),
+        Ok(u) => {
+            crate::security::audit_log(
+                &state,
+                Some(principal.user_id()),
+                "admin.user.create",
+                Some(&format!("user:{}", u.id)),
+                serde_json::json!({"name": req.name}),
+                None,
+                None,
+            ).await;
+            Ok(Json(serde_json::to_value(u).unwrap_or_default()))
+        }
         Err(e) => Ok(Json(serde_json::json!({"error": e}))),
     }
 }
@@ -3051,11 +3062,22 @@ async fn handle_admin_mint_token(
     let principal = resolve_principal(&state, &req.token).await?;
     require_admin(&principal)?;
     match state.users.mint_token(user_id, &req.name).await {
-        Ok(raw) => Ok(Json(serde_json::json!({
-            "user_id": user_id,
-            "token": raw,
-            "note": "shown once — save this value"
-        }))),
+        Ok(raw) => {
+            crate::security::audit_log(
+                &state,
+                Some(principal.user_id()),
+                "admin.token.mint",
+                Some(&format!("user:{user_id}")),
+                serde_json::json!({"label": req.name}),
+                None,
+                None,
+            ).await;
+            Ok(Json(serde_json::json!({
+                "user_id": user_id,
+                "token": raw,
+                "note": "shown once — save this value"
+            })))
+        }
         Err(e) => Ok(Json(serde_json::json!({"error": e}))),
     }
 }
@@ -3402,7 +3424,18 @@ async fn handle_admin_delete_user(
     let principal = resolve_principal(&state, token).await?;
     require_admin(&principal)?;
     match state.users.delete_user(user_id).await {
-        Ok(()) => Ok(Json(serde_json::json!({"ok": true}))),
+        Ok(()) => {
+            crate::security::audit_log(
+                &state,
+                Some(principal.user_id()),
+                "admin.user.delete",
+                Some(&format!("user:{user_id}")),
+                serde_json::json!({}),
+                None,
+                None,
+            ).await;
+            Ok(Json(serde_json::json!({"ok": true})))
+        }
         Err(e) => Ok(Json(serde_json::json!({"error": e}))),
     }
 }
@@ -3454,7 +3487,18 @@ async fn handle_change_password(
         }
     }
     match state.users.set_password(user_id, &req.new_password).await {
-        Ok(()) => Ok(Json(serde_json::json!({"ok": true}))),
+        Ok(()) => {
+            crate::security::audit_log(
+                &state,
+                Some(user_id),
+                "user.password.change",
+                Some(&format!("user:{user_id}")),
+                serde_json::json!({}),
+                None,
+                None,
+            ).await;
+            Ok(Json(serde_json::json!({"ok": true})))
+        }
         Err(e) => Ok(Json(serde_json::json!({"ok": false, "error": e}))),
     }
 }
@@ -3488,6 +3532,15 @@ async fn handle_admin_set_sharing(
         return Ok(Json(serde_json::json!({"error": e})));
     }
     *state.sharing_mode.write().await = req.mode.clone();
+    crate::security::audit_log(
+        &state,
+        Some(principal.user_id()),
+        "admin.sharing.set",
+        None,
+        serde_json::json!({"mode": req.mode}),
+        None,
+        None,
+    ).await;
     Ok(Json(serde_json::json!({"ok": true, "mode": req.mode})))
 }
 
@@ -7119,6 +7172,15 @@ async fn handle_scheduler_approval_resolve(
         }
         Ok(())
     }).await.ok();
+    crate::security::audit_log(
+        &state,
+        Some(uid),
+        "scheduler.approval.resolve",
+        Some(&format!("approval:{id}")),
+        serde_json::json!({"resolution": resolution}),
+        None,
+        None,
+    ).await;
     Ok(Json(serde_json::json!({"ok": true, "resolution": resolution})))
 }
 
