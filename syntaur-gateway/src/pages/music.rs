@@ -170,42 +170,99 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   .breadcrumb::before { content: '['; color: var(--c-mag); margin-right: 6px; }
   .breadcrumb::after  { content: ']'; color: var(--c-mag); margin-left:  6px; }
 
-  /* ── Now-playing visualizer ─────────────────────────────────────── */
-  /* 8-bar pure-CSS equalizer. We don't have real audio data on this
-     page (DRM streams stay client-side), but a subtle motion makes
-     the card feel alive without faking precision. Pauses when no
-     track is playing via the .viz-paused class toggled by JS. */
-  .np-viz {
-    display: flex;
-    align-items: flex-end;
-    gap: 3px;
-    height: 28px;
-    margin-top: 12px;
-    opacity: 0.85;
+  /* ── Now-playing spectrum (canvas, AnalyserNode-driven) ─────────── */
+  /* Replaces the old 4×28 px bar strip that was visually invisible.
+     Full-width canvas, 64px tall, cyberpunk mag→cyan gradient bars
+     drawn 60fps from Web Audio frequency data when local playback is
+     active. Falls back to a dim static pattern when nothing is live
+     so the space doesn't look broken. */
+  .np-spectrum {
+    display: block;
+    width: 100%;
+    height: 64px;
+    margin-top: 14px;
+    border-radius: 6px;
+    background: linear-gradient(180deg, rgba(255,44,223,0.03), rgba(0,255,255,0.02));
+    border: 1px solid rgba(255,44,223,0.15);
   }
-  .np-viz span {
-    width: 4px;
-    background: linear-gradient(to top, var(--c-mag) 0%, var(--c-cy) 100%);
-    box-shadow: 0 0 4px rgba(255,44,223,0.5);
-    transform-origin: bottom;
-    animation: viz-bar 1.1s ease-in-out infinite;
+  /* Progress bar under the title, scrub to seek. */
+  .np-progress-row {
+    display: flex; align-items: center; gap: 10px;
+    margin-top: 10px;
   }
-  .np-viz.viz-paused span { animation-play-state: paused; transform: scaleY(0.15); }
-  .np-viz span:nth-child(1) { animation-delay: -0.0s; }
-  .np-viz span:nth-child(2) { animation-delay: -0.2s; }
-  .np-viz span:nth-child(3) { animation-delay: -0.4s; }
-  .np-viz span:nth-child(4) { animation-delay: -0.6s; }
-  .np-viz span:nth-child(5) { animation-delay: -0.1s; }
-  .np-viz span:nth-child(6) { animation-delay: -0.3s; }
-  .np-viz span:nth-child(7) { animation-delay: -0.5s; }
-  .np-viz span:nth-child(8) { animation-delay: -0.7s; }
-  @keyframes viz-bar {
-    0%, 100% { transform: scaleY(0.25); }
-    20%      { transform: scaleY(0.9); }
-    40%      { transform: scaleY(0.45); }
-    60%      { transform: scaleY(1.0); }
-    80%      { transform: scaleY(0.35); }
+  .np-time {
+    font-size: 11px; color: var(--c-text-dim, #8a94a3);
+    font-variant-numeric: tabular-nums;
+    min-width: 36px; text-align: center;
   }
+  .np-progress {
+    flex: 1; appearance: none; height: 4px; border-radius: 2px;
+    background: linear-gradient(to right, var(--c-mag) var(--progress, 0%), rgba(255,44,223,0.2) var(--progress, 0%));
+    outline: none; cursor: pointer;
+  }
+  .np-progress::-webkit-slider-thumb {
+    appearance: none; width: 12px; height: 12px; border-radius: 50%;
+    background: var(--c-cy); box-shadow: 0 0 8px var(--c-cy); cursor: pointer;
+  }
+  .np-progress::-moz-range-thumb {
+    width: 12px; height: 12px; border-radius: 50%;
+    background: var(--c-cy); border: none; box-shadow: 0 0 8px var(--c-cy); cursor: pointer;
+  }
+  /* Love / shuffle / repeat active state */
+  .ctrl-btn.active { color: var(--c-mag); border-color: rgba(255,44,223,0.6); }
+
+  /* Library tab pills above the track list */
+  .lib-tabs { display: flex; gap: 6px; margin: 10px 0 8px; flex-wrap: wrap; }
+  .lib-tab {
+    padding: 4px 12px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--c-text-dim, #9ba6b6); background: transparent; border: 1px solid var(--c-line, #2a3340);
+    border-radius: 999px; cursor: pointer; font-family: inherit;
+  }
+  .lib-tab.active { color: var(--c-mag); border-color: rgba(255,44,223,0.5); background: rgba(255,44,223,0.08); }
+
+  /* Album grid */
+  .alb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; }
+  .alb-tile { background: rgba(0,0,0,0.15); border: 1px solid var(--c-line, #2a3340); border-radius: 6px; padding: 8px; cursor: pointer; transition: border-color 0.15s; }
+  .alb-tile:hover { border-color: var(--c-mag); }
+  .alb-art { width: 100%; aspect-ratio: 1/1; background: #0b0f17 url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="%23333" d="M9 18V5l12-2v13"/></svg>') center/40% no-repeat; border-radius: 4px; overflow: hidden; }
+  .alb-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .alb-name { font-size: 12px; color: #e0e5ec; margin-top: 6px; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .alb-artist { font-size: 10.5px; color: #8a94a3; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* Row-thumbnail album art (track list) */
+  .row-art {
+    width: 28px; height: 28px; flex-shrink: 0; border-radius: 3px;
+    background: #0b0f17 center/cover no-repeat; display: block;
+  }
+  .row-art.placeholder::after {
+    content: '♪'; display: flex; align-items: center; justify-content: center;
+    width: 100%; height: 100%; color: #3a4250; font-size: 14px;
+  }
+
+  /* Artist row */
+  .artist-row { padding: 8px 10px; border-bottom: 1px dashed rgba(255,255,255,0.06); cursor: pointer; display: flex; align-items: center; justify-content: space-between; }
+  .artist-row:hover { background: rgba(255,255,255,0.03); }
+  .artist-name { font-size: 13px; color: #e0e5ec; }
+  .artist-count { font-size: 11px; color: #8a94a3; }
+  /* Duplicate group */
+  .dup-row { padding: 8px 10px; border: 1px solid var(--c-line, #2a3340); border-radius: 6px; margin-bottom: 6px; }
+  .dup-meta { font-size: 11px; color: #8a94a3; margin-top: 2px; }
+
+  /* Lyrics panel (shows under Details modal) */
+  .lyrics-scroll { max-height: 240px; overflow-y: auto; font-size: 13px; line-height: 1.8; color: #c2cbd6; padding: 8px; background: rgba(0,0,0,0.2); border-radius: 4px; }
+  .lyrics-scroll .line.active { color: var(--c-mag); font-weight: 500; }
+
+  /* Natural-language search bar atop the library */
+  .nl-search {
+    display: flex; gap: 8px; padding: 10px; background: rgba(255,44,223,0.05);
+    border: 1px solid rgba(255,44,223,0.2); border-radius: 6px; margin-bottom: 10px;
+  }
+  .nl-search input {
+    flex: 1; background: transparent; color: #e0e5ec; border: none; outline: none;
+    font-size: 13px; font-family: inherit;
+  }
+  .nl-search input::placeholder { color: #6a7380; font-style: italic; }
+  .nl-search button { background: var(--c-mag); color: #0a0a0a; border: none; padding: 4px 12px; border-radius: 4px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; cursor: pointer; }
 
   /* ── Play / control buttons ──────────────────────────────────────── */
   .ctrl-btn {
@@ -552,7 +609,7 @@ const BODY_HTML: &str = r##"<!-- Module sub-bar — "Bridge live" indicator + re
     <!-- Hero Now Playing -->
     <div class="card p-6">
       <div class="flex items-start gap-5">
-        <div class="w-40 h-40 flex-shrink-0 flex items-center justify-center overflow-hidden" id="np-art">
+        <div class="w-40 h-40 flex-shrink-0 flex items-center justify-center overflow-hidden relative rounded-md bg-gray-900/60" id="np-art">
           <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.25" class="text-gray-700"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
         </div>
         <div class="flex-1 min-w-0 flex flex-col">
@@ -561,23 +618,40 @@ const BODY_HTML: &str = r##"<!-- Module sub-bar — "Bridge live" indicator + re
             <span id="np-song">Nothing playing</span>
           </div>
           <p class="text-sm text-gray-400 mt-1 truncate" id="np-artist">—</p>
-          <p class="text-xs text-gray-500 mt-2" id="np-source"></p>
-          <!-- Pure-CSS audio visualizer — pauses when nothing is playing
-               (JS toggles .viz-paused on the container based on np-play state). -->
-          <div class="np-viz viz-paused" id="np-viz" aria-hidden="true">
-            <span></span><span></span><span></span><span></span>
-            <span></span><span></span><span></span><span></span>
+          <div class="flex items-center gap-2 mt-2">
+            <p class="text-xs text-gray-500" id="np-source"></p>
+            <span id="np-format-badge" class="hidden text-[10px] tracking-wider uppercase px-1.5 py-0.5 rounded border border-cyan-700/60 text-cyan-400 bg-cyan-950/40 font-mono"></span>
+          </div>
+          <!-- Audio-reactive spectrum. Replaces the previous 4px-bar
+               viz with a canvas that fills the remaining width and is
+               64px tall; drawn from an AnalyserNode 60fps while local
+               audio plays, dark fallback while nothing plays. -->
+          <canvas id="np-spectrum" class="np-spectrum" aria-hidden="true" width="800" height="64"></canvas>
+          <!-- Progress bar — clickable to seek, currentTime / duration. -->
+          <div class="np-progress-row" id="np-progress-row">
+            <span id="np-time-cur" class="np-time">0:00</span>
+            <input id="np-progress" type="range" min="0" max="1000" value="0" step="1" class="np-progress">
+            <span id="np-time-dur" class="np-time">0:00</span>
           </div>
           <!-- Controls -->
-          <div class="flex items-center gap-3 mt-auto pt-5">
-            <button onclick="control('prev')" class="ctrl-btn" title="Previous">
+          <div class="flex items-center gap-3 mt-auto pt-3">
+            <button onclick="control('prev')" class="ctrl-btn" title="Previous (Shift+Left)">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="19,20 9,12 19,4"/><rect x="5" y="4" width="2" height="16"/></svg>
             </button>
-            <button onclick="control('play_pause')" id="np-play" class="ctrl-play" title="Play/Pause">
+            <button onclick="control('play_pause')" id="np-play" class="ctrl-play" title="Play/Pause (Space)">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
             </button>
-            <button onclick="control('next')" class="ctrl-btn" title="Next">
+            <button onclick="control('next')" class="ctrl-btn" title="Next (Shift+Right)">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,4 15,12 5,20"/><rect x="17" y="4" width="2" height="16"/></svg>
+            </button>
+            <button onclick="toggleShuffle()" id="np-shuffle" class="ctrl-btn" title="Shuffle (S)">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
+            </button>
+            <button onclick="toggleRepeat()" id="np-repeat" class="ctrl-btn" title="Repeat (R)">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+            </button>
+            <button onclick="toggleFavorite()" id="np-favorite" class="ctrl-btn" title="Love (L)">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
             </button>
           </div>
         </div>
@@ -724,15 +798,34 @@ const BODY_HTML: &str = r##"<!-- Module sub-bar — "Bridge live" indicator + re
         </div>
       </div>
 
-      <!-- Search -->
+      <!-- Natural-language search bar — asks the LLM to translate a
+           plain-English query ("post-rock from my library I played
+           last winter") into a filter and returns matching tracks. -->
+      <div class="nl-search mt-3">
+        <input type="text" id="local-lib-nl" placeholder="Ask for anything — try: 'jazz I haven't heard recently'"
+          onkeydown="if(event.key==='Enter') runNLSearch()">
+        <button onclick="runNLSearch()">Ask</button>
+      </div>
+
+      <!-- Filter (exact-match) + library tabs -->
       <div class="mt-3 flex gap-2">
         <input type="text" id="local-lib-search" placeholder="filter: artist, album, or title…"
           class="flex-1 min-w-0 bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-gray-200 placeholder-gray-500 outline-none focus:border-oc-500"
           oninput="debouncedLocalSearch()">
       </div>
 
-      <!-- Track list -->
-      <div id="local-lib-tracks" class="mt-3 max-h-80 overflow-y-auto border-t border-gray-800 pt-2 text-xs"></div>
+      <div class="lib-tabs" id="lib-tabs">
+        <button class="lib-tab active" data-view="tracks" onclick="switchLibView('tracks')">Tracks</button>
+        <button class="lib-tab" data-view="albums" onclick="switchLibView('albums')">Albums</button>
+        <button class="lib-tab" data-view="artists" onclick="switchLibView('artists')">Artists</button>
+        <button class="lib-tab" data-view="favorites" onclick="switchLibView('favorites')">Favorites</button>
+        <button class="lib-tab" data-view="recent" onclick="switchLibView('recent')">Recent</button>
+        <button class="lib-tab" data-view="playlists" onclick="switchLibView('playlists')">Playlists</button>
+        <button class="lib-tab" data-view="duplicates" onclick="switchLibView('duplicates')">Duplicates</button>
+      </div>
+
+      <!-- Track list / active-view container -->
+      <div id="local-lib-tracks" class="mt-1 max-h-80 overflow-y-auto border-t border-gray-800 pt-2 text-xs"></div>
 
       <!-- Hidden <audio> used for playback of local files -->
       <audio id="local-audio" style="display:none" preload="none"></audio>
@@ -988,18 +1081,21 @@ function applyMarquee(wrapId, textId) {
 
 async function control(action) {
   // If local audio is active, drive it directly instead of asking the
-  // server to command a cloud player. Prev/next for local isn't wired
-  // yet (no queue yet), so those fall through to the server path.
-  if (localPlaybackActive && (action === 'play_pause' || action === 'pause' || action === 'play')) {
+  // server to command a cloud player.
+  if (localPlaybackActive) {
     const a = document.getElementById('local-audio');
-    if (a) {
-      if (a.paused) {
-        try { await a.play(); } catch(e) { console.warn('[local-control] play', e); }
-      } else {
-        try { a.pause(); } catch(e) {}
+    if (action === 'play_pause' || action === 'pause' || action === 'play') {
+      if (a) {
+        if (a.paused) { try { await a.play(); } catch(e) { console.warn('[local-control] play', e); } }
+        else { try { a.pause(); } catch(e) {} }
       }
+      return;
     }
-    return;
+    if (action === 'next') { playRelativeTo(1); return; }
+    if (action === 'prev') {
+      if (a && a.currentTime > 3) { a.currentTime = 0; return; }
+      playRelativeTo(-1); return;
+    }
   }
   try {
     const entity_id = lastNowPlaying?.entity_id || null;
@@ -2087,29 +2183,7 @@ async function loadLocalTracks() {
       return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
     };
     el.innerHTML = '<p class="text-[10px] text-gray-600 px-1 pb-1">' + d.total + ' track(s)</p>'
-      + tracks.map(t => {
-        const title = escapeHtml(t.title || '(untitled)');
-        const artist = escapeHtml(t.artist || '');
-        const album = escapeHtml(t.album || '');
-        const srcBadge = t.metadata_source === 'llm'
-          ? '<span title="Tags inferred by AI" class="text-[9px] text-amber-400 font-mono uppercase tracking-wider">auto</span>'
-          : t.metadata_source === 'musicbrainz'
-            ? '<span title="Canonical tags from MusicBrainz" class="text-[9px] text-emerald-400 font-mono uppercase tracking-wider">MB</span>'
-            : '';
-        return '<div class="flex items-center gap-2 px-2 py-1 rounded hover:bg-gray-900 group" data-track-row="' + t.id + '" style="user-select:none;-webkit-user-select:none;">'
-          + '<button class="flex-1 min-w-0 text-left local-play-btn"'
-          + ' data-track-id="' + t.id + '"'
-          + ' data-track-title="' + title + '"'
-          + ' data-track-artist="' + artist + '">'
-          + '<p class="text-xs text-gray-200 truncate">' + title + (srcBadge ? ' ' + srcBadge : '') + '</p>'
-          + (artist || album
-            ? '<p class="text-[10px] text-gray-500 truncate">' + [artist, album].filter(Boolean).join(' · ') + '</p>'
-            : '')
-          + '</button>'
-          + '<span class="text-[10px] text-gray-600 font-mono flex-shrink-0">' + minutes(t.duration_ms) + '</span>'
-          + '<button class="text-[10px] text-gray-600 hover:text-oc-400 opacity-0 group-hover:opacity-100 transition-opacity local-details-btn flex-shrink-0" title="Look up canonical info + edit" data-track-id="' + t.id + '">Details</button>'
-          + '</div>';
-      }).join('');
+      + tracks.map(renderTrackRow).join('');
   } catch(e) { console.warn('[local-lib] load tracks failed', e); el.innerHTML = ''; }
 }
 
@@ -2143,23 +2217,19 @@ let webAudioSource = null;
 let webAudioAnalyser = null;
 let vizFrameId = null;
 
-function playLocalTrack(trackId, title, artist) {
+function playLocalTrack(trackId, title, artist, extra) {
   const now = Date.now();
-  if (now - lastLocalPlayAt < 400) return;   // lockout window
+  if (now - lastLocalPlayAt < 400) return;
   lastLocalPlayAt = now;
+  localPlaybackCurrent = trackId;
   const myGen = ++localPlayGeneration;
   const a = document.getElementById('local-audio');
-  // Hard reset — covers in-flight fetches, pending play() promises,
-  // and WebKit's internal media-element state machine.
   try { a.pause(); } catch(e) {}
   try { a.removeAttribute('src'); } catch(e) {}
   try { a.load(); } catch(e) {}
-  // Reflect the new track on the big player immediately so the UI
-  // changes with the click even before the bytes arrive.
-  setLocalNowPlaying(title, artist, trackId);
-  // Yield one tick before re-arming so the element fully settles.
+  setLocalNowPlaying(title, artist, trackId, extra || lookupRowMeta(trackId));
   setTimeout(() => {
-    if (myGen !== localPlayGeneration) return;  // superseded
+    if (myGen !== localPlayGeneration) return;
     a.src = '/api/music/local/file/' + trackId + '?token=' + encodeURIComponent(token);
     a.load();
     const p = a.play();
@@ -2175,11 +2245,74 @@ function playLocalTrack(trackId, title, artist) {
   }, 50);
 }
 
+// Walk the currently-rendered rows to find extra metadata for a click
+// so the Now Playing header gets album + bit depth + favorite state
+// even though the button's data-* attrs only carry title/artist.
+function lookupRowMeta(trackId) {
+  const row = document.querySelector('[data-track-row="' + trackId + '"]');
+  if (!row) return {};
+  const album = row.querySelector('p.text-\\[10px\\]')?.textContent.split(' · ')[1] || '';
+  const fav = !!row.querySelector('.local-fav-btn.text-pink-400, .local-fav-btn[title="Unlove"]');
+  // We don't try to reconstruct bit_depth/sample_rate from the DOM;
+  // the format badge in the hero stays hidden unless we have them.
+  return { album, favorite: fav };
+}
+
+// Queue state (minimal — shuffle-within-current-view support).
+let npShuffle = false;
+let npRepeat = 'off';  // off | all | one
+function toggleShuffle() {
+  npShuffle = !npShuffle;
+  document.getElementById('np-shuffle')?.classList.toggle('active', npShuffle);
+}
+function toggleRepeat() {
+  npRepeat = npRepeat === 'off' ? 'all' : (npRepeat === 'all' ? 'one' : 'off');
+  const btn = document.getElementById('np-repeat');
+  if (btn) {
+    btn.classList.toggle('active', npRepeat !== 'off');
+    btn.title = 'Repeat: ' + npRepeat;
+  }
+}
+async function toggleFavorite() {
+  if (!localPlaybackCurrent) return;
+  const btn = document.getElementById('np-favorite');
+  const isLoved = btn && btn.classList.contains('active');
+  try {
+    await fetch('/api/music/local/favorite/' + localPlaybackCurrent, { method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ token, favorite: !isLoved }) });
+    btn?.classList.toggle('active', !isLoved);
+  } catch(e) {}
+}
+
+// Next / prev playback across the current on-screen track rows.
+// Rough cut: siblings in the rendered list. Respects shuffle + repeat.
+function currentRowList() {
+  return Array.from(document.querySelectorAll('.local-play-btn'));
+}
+function playRelativeTo(offset) {
+  const rows = currentRowList();
+  if (!rows.length) return;
+  const ids = rows.map(b => parseInt(b.dataset.trackId, 10));
+  let idx = ids.indexOf(localPlaybackCurrent);
+  if (idx < 0) idx = 0;
+  let next = offset > 0 ? idx + 1 : idx - 1;
+  if (npRepeat === 'one') next = idx;
+  if (npShuffle) next = Math.floor(Math.random() * ids.length);
+  if (next < 0) next = npRepeat === 'all' ? ids.length - 1 : 0;
+  if (next >= ids.length) next = npRepeat === 'all' ? 0 : ids.length - 1;
+  const btn = rows[next];
+  if (!btn) return;
+  playLocalTrack(parseInt(btn.dataset.trackId, 10), btn.dataset.trackTitle || '', btn.dataset.trackArtist || '');
+}
+
 // ── Mirror local playback into the big Now Playing card ─────────────
-// Updates title / artist / source / play-button icon, and swaps the
-// CSS-pulse visualizer out for the real audio-reactive one.
-function setLocalNowPlaying(title, artist, trackId) {
+// Paints title / artist / source / album art / play-button icon /
+// format badge, and swaps the static viz out for the canvas-driven
+// AnalyserNode spectrum. Also sets MediaSession metadata so OS media
+// keys + iOS lock screen reflect what's actually playing.
+function setLocalNowPlaying(title, artist, trackId, extra) {
   localPlaybackActive = true;
+  const row = extra || {};
   const songEl = document.getElementById('np-song');
   if (songEl) {
     songEl.textContent = title || 'Track ' + trackId;
@@ -2188,46 +2321,100 @@ function setLocalNowPlaying(title, artist, trackId) {
   const artistEl = document.getElementById('np-artist');
   if (artistEl) artistEl.textContent = artist || '—';
   const srcEl = document.getElementById('np-source');
-  if (srcEl) srcEl.textContent = '💾 Your library';
+  if (srcEl) srcEl.textContent = 'Your library' + (row.album ? ' · ' + row.album : '');
+
+  // Format badge (FLAC 24/96 etc.)
+  const badge = document.getElementById('np-format-badge');
+  if (badge) {
+    const parts = [];
+    if (row.bit_depth) parts.push(row.bit_depth + '-bit');
+    if (row.sample_rate) parts.push((row.sample_rate/1000).toFixed(1).replace(/\.0$/,'') + 'kHz');
+    if (parts.length) { badge.textContent = parts.join(' · '); badge.classList.remove('hidden'); }
+    else { badge.classList.add('hidden'); }
+  }
+
   const playBtn = document.getElementById('np-play');
   if (playBtn) playBtn.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
-  const viz = document.getElementById('np-viz');
-  if (viz) viz.classList.remove('viz-paused');
-  // Clear artwork — local tracks don't have art in the current schema.
-  // Still show the neutral placeholder so the big tile isn't empty.
+
+  // Album art — always try the /art endpoint; server handles the three-
+  // tier fallback (embedded → folder.jpg → MB Cover Art Archive). If
+  // the response is a 404 we fall back to the music-note placeholder.
   const artEl = document.getElementById('np-art');
-  if (artEl && !artEl.querySelector('svg')) {
-    artEl.innerHTML = '<svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.25" class="text-gray-700"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>';
+  if (artEl) {
+    const url = '/api/music/local/art/' + trackId + '?token=' + encodeURIComponent(token);
+    artEl.innerHTML = '<img src="' + url + '" style="width:100%;height:100%;object-fit:cover;display:block;" onerror="this.remove();">'
+      + '<svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.25" class="text-gray-700" style="position:absolute;z-index:-1"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>';
   }
+
+  // Love button reflects the track's favorite state.
+  const loveBtn = document.getElementById('np-favorite');
+  if (loveBtn) loveBtn.classList.toggle('active', !!row.favorite);
+
   // Hide the HA volume row — we control volume via the <audio> element.
   const volRow = document.getElementById('volume-row');
   if (volRow) volRow.classList.add('hidden');
+
+  // OS-level media controls. Set metadata + position + action handlers
+  // so Play/Pause/Next keys on the keyboard, remotes, and iOS lock
+  // screens all work.
+  if ('mediaSession' in navigator) {
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: title || 'Track ' + trackId,
+        artist: artist || '',
+        album: row.album || '',
+        artwork: [{ src: '/api/music/local/art/' + trackId + '?token=' + encodeURIComponent(token), sizes: '512x512', type: 'image/jpeg' }],
+      });
+      navigator.mediaSession.playbackState = 'playing';
+      navigator.mediaSession.setActionHandler('play', () => { const a = document.getElementById('local-audio'); if (a && a.paused) a.play(); });
+      navigator.mediaSession.setActionHandler('pause', () => { const a = document.getElementById('local-audio'); if (a && !a.paused) a.pause(); });
+      navigator.mediaSession.setActionHandler('nexttrack', () => control('next'));
+      navigator.mediaSession.setActionHandler('previoustrack', () => control('prev'));
+      navigator.mediaSession.setActionHandler('seekto', (e) => { const a = document.getElementById('local-audio'); if (a && e.seekTime != null) a.currentTime = e.seekTime; });
+      navigator.mediaSession.setActionHandler('seekforward', () => { const a = document.getElementById('local-audio'); if (a) a.currentTime = Math.min(a.duration || 1e9, a.currentTime + 10); });
+      navigator.mediaSession.setActionHandler('seekbackward', () => { const a = document.getElementById('local-audio'); if (a) a.currentTime = Math.max(0, a.currentTime - 10); });
+    } catch(e) {}
+  }
+
+  // Log the play after a couple of seconds (skip scrubbing bounces).
+  setTimeout(() => {
+    if (localPlaybackCurrent === trackId) {
+      fetch('/api/music/local/played/' + trackId + '?token=' + encodeURIComponent(token), { method: 'POST' }).catch(()=>{});
+    }
+  }, 2500);
 }
+
+let localPlaybackCurrent = null;
 
 function clearLocalNowPlaying() {
   localPlaybackActive = false;
+  localPlaybackCurrent = null;
   const songEl = document.getElementById('np-song');
   if (songEl) songEl.textContent = 'Nothing playing';
   const artistEl = document.getElementById('np-artist');
   if (artistEl) artistEl.textContent = '—';
   const srcEl = document.getElementById('np-source');
   if (srcEl) srcEl.textContent = '';
+  const badge = document.getElementById('np-format-badge');
+  if (badge) badge.classList.add('hidden');
   const playBtn = document.getElementById('np-play');
   if (playBtn) playBtn.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>';
-  const viz = document.getElementById('np-viz');
-  if (viz) {
-    viz.classList.add('viz-paused');
-    // Reset any inline transforms the analyser loop may have set.
-    viz.querySelectorAll('span').forEach(s => s.style.transform = '');
+  const timeCur = document.getElementById('np-time-cur');
+  if (timeCur) timeCur.textContent = '0:00';
+  const timeDur = document.getElementById('np-time-dur');
+  if (timeDur) timeDur.textContent = '0:00';
+  const prog = document.getElementById('np-progress');
+  if (prog) { prog.value = 0; prog.style.setProperty('--progress', '0%'); }
+  if ('mediaSession' in navigator) {
+    try { navigator.mediaSession.metadata = null; navigator.mediaSession.playbackState = 'none'; } catch(e) {}
   }
   stopRealEqualizer();
 }
 
-// ── Real audio-reactive equalizer ───────────────────────────────────
-// On the first successful local play, wire the <audio> element through
-// a Web Audio AnalyserNode and drive the 8 .np-viz bars off its
-// frequency bins every animation frame. Bar height = normalised log-
-// scaled amplitude; scaleY range [0.15, 1.0] matches the CSS fallback.
+// ── Real audio-reactive spectrum (canvas) ────────────────────────────
+// Replaces the old 8-bar scaleY strip. Bigger (full width × 64px),
+// more bars (32), logarithmic frequency mapping, mag→cyan gradient.
+// Drawn from AnalyserNode 60fps.
 function ensureRealEqualizer(audioEl) {
   try {
     if (!webAudioCtx) {
@@ -2235,15 +2422,13 @@ function ensureRealEqualizer(audioEl) {
       if (!AC) return;
       webAudioCtx = new AC();
     }
-    if (webAudioCtx.state === 'suspended') {
-      webAudioCtx.resume().catch(()=>{});
-    }
+    if (webAudioCtx.state === 'suspended') webAudioCtx.resume().catch(()=>{});
     if (!webAudioSource || webAudioSource.mediaElement !== audioEl) {
       try {
         webAudioSource = webAudioCtx.createMediaElementSource(audioEl);
         webAudioAnalyser = webAudioCtx.createAnalyser();
-        webAudioAnalyser.fftSize = 64;
-        webAudioAnalyser.smoothingTimeConstant = 0.82;
+        webAudioAnalyser.fftSize = 256;
+        webAudioAnalyser.smoothingTimeConstant = 0.76;
         webAudioSource.connect(webAudioAnalyser);
         webAudioAnalyser.connect(webAudioCtx.destination);
       } catch(e) {
@@ -2261,20 +2446,35 @@ function ensureRealEqualizer(audioEl) {
 function startRealEqualizer() {
   if (!webAudioAnalyser) return;
   if (vizFrameId) cancelAnimationFrame(vizFrameId);
-  const viz = document.getElementById('np-viz');
-  if (!viz) return;
-  // Kill CSS keyframe animation so our transforms aren't fighting it.
-  viz.querySelectorAll('span').forEach(s => s.style.animation = 'none');
-  const bars = Array.from(viz.querySelectorAll('span'));
+  const canvas = document.getElementById('np-spectrum');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
   const bins = new Uint8Array(webAudioAnalyser.frequencyBinCount);
-  // Map 8 bars across the low-to-mid range where musical energy lives.
-  const binIdx = bars.map((_, i) => Math.floor(Math.pow(i / bars.length, 1.2) * bins.length));
+  const barCount = 40;
   const loop = () => {
+    // Resize canvas to its CSS width each frame — cheap because only set if changed.
+    const cssW = canvas.clientWidth;
+    if (cssW > 0 && canvas.width !== cssW) canvas.width = cssW;
+    const W = canvas.width, H = canvas.height;
     webAudioAnalyser.getByteFrequencyData(bins);
-    for (let i = 0; i < bars.length; i++) {
-      const v = bins[binIdx[i]] / 255;
-      const h = 0.15 + v * 0.85;   // 0.15 floor so silent bars still register
-      bars[i].style.transform = 'scaleY(' + h.toFixed(3) + ')';
+    ctx.clearRect(0, 0, W, H);
+    const gap = 2;
+    const barW = Math.max(2, (W - gap * (barCount + 1)) / barCount);
+    for (let i = 0; i < barCount; i++) {
+      // Logarithmic bin mapping — low frequencies get more bars than highs.
+      const lo = Math.floor(Math.pow(i / barCount, 2.3) * bins.length);
+      const hi = Math.floor(Math.pow((i + 1) / barCount, 2.3) * bins.length);
+      let peak = 0;
+      for (let b = lo; b <= hi && b < bins.length; b++) { if (bins[b] > peak) peak = bins[b]; }
+      const v = peak / 255;
+      const h = Math.max(2, v * H);
+      const x = gap + i * (barW + gap);
+      const y = H - h;
+      const grad = ctx.createLinearGradient(0, y, 0, H);
+      grad.addColorStop(0, '#0cf8f0');
+      grad.addColorStop(1, '#ff2cdf');
+      ctx.fillStyle = grad;
+      ctx.fillRect(x, y, barW, h);
     }
     vizFrameId = requestAnimationFrame(loop);
   };
@@ -2283,13 +2483,10 @@ function startRealEqualizer() {
 
 function stopRealEqualizer() {
   if (vizFrameId) { cancelAnimationFrame(vizFrameId); vizFrameId = null; }
-  // Let CSS take over again for the cloud-playback pulse fallback.
-  const viz = document.getElementById('np-viz');
-  if (viz) {
-    viz.querySelectorAll('span').forEach(s => {
-      s.style.animation = '';
-      s.style.transform = '';
-    });
+  const canvas = document.getElementById('np-spectrum');
+  if (canvas) {
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
   }
 }
 
@@ -2315,10 +2512,49 @@ function stopRealEqualizer() {
       const playBtn = document.getElementById('np-play');
       if (playBtn) playBtn.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>';
     });
-    a.addEventListener('ended', clearLocalNowPlaying);
+    a.addEventListener('ended', () => {
+      // Advance in queue rather than clearing the card — that's what
+      // every other player does. If repeat is off and we're at the end
+      // of the list, clear gracefully.
+      if (localPlaybackActive) {
+        const rows = currentRowList();
+        const ids = rows.map(b => parseInt(b.dataset.trackId, 10));
+        const idx = ids.indexOf(localPlaybackCurrent);
+        if (npRepeat === 'all' || idx < ids.length - 1 || npShuffle) {
+          playRelativeTo(1);
+          return;
+        }
+      }
+      clearLocalNowPlaying();
+    });
     a.addEventListener('error', () => {
       if (a.error) console.warn('[local-audio] error', a.error.code, a.error.message);
       clearLocalNowPlaying();
+    });
+    // Progress bar + time labels. timeupdate fires ~4/sec during
+    // playback — cheap enough to just read currentTime directly.
+    a.addEventListener('timeupdate', () => {
+      const prog = document.getElementById('np-progress');
+      const cur = document.getElementById('np-time-cur');
+      const dur = document.getElementById('np-time-dur');
+      if (a.duration && isFinite(a.duration)) {
+        const pct = (a.currentTime / a.duration) * 1000;
+        if (prog && !prog.dataset.scrubbing) {
+          prog.value = pct;
+          prog.style.setProperty('--progress', (pct/10).toFixed(1) + '%');
+        }
+        if (dur) dur.textContent = fmtMs(a.duration * 1000);
+        if ('mediaSession' in navigator && navigator.mediaSession.setPositionState) {
+          try {
+            navigator.mediaSession.setPositionState({
+              duration: a.duration,
+              playbackRate: a.playbackRate || 1,
+              position: a.currentTime,
+            });
+          } catch(e) {}
+        }
+      }
+      if (cur) cur.textContent = fmtMs(a.currentTime * 1000);
     });
   };
   bind();
@@ -2329,11 +2565,217 @@ function stopRealEqualizer() {
   if (root) obs.observe(root, { childList: true, subtree: true });
 })();
 
-// Top-level click delegation on the local track list. Two classes:
-// .local-play-btn (row-play) and .local-details-btn (opens the MB
-// lookup + edit drawer). Using data attributes + delegation avoids the
-// escape bugs of inlined onclick="..." strings and survives track list
-// re-renders without rewiring.
+// Render one track row. Shared across the Tracks / Favorites / Recent
+// / Search-result / Playlist-detail views so every list gets the same
+// row affordances: art thumb, title+artist, heart, lossless badge,
+// details drawer, auto/MB source badge.
+function renderTrackRow(t) {
+  const title = escapeHtml(t.title || '(untitled)');
+  const artist = escapeHtml(t.artist || '');
+  const album = escapeHtml(t.album || '');
+  const srcBadge = t.metadata_source === 'llm'
+    ? ' <span title="AI-inferred tags" class="text-[9px] text-amber-400 font-mono uppercase">auto</span>'
+    : t.metadata_source === 'musicbrainz'
+      ? ' <span title="Canonical MusicBrainz" class="text-[9px] text-emerald-400 font-mono uppercase">MB</span>'
+      : '';
+  const fmtBadge = (t.bit_depth >= 24 || t.sample_rate > 48000)
+    ? ' <span class="text-[9px] font-mono uppercase text-cyan-300 border border-cyan-700/50 px-1 rounded">' + (t.bit_depth || '') + (t.bit_depth && t.sample_rate ? '/' : '') + (t.sample_rate ? Math.round(t.sample_rate/1000) : '') + '</span>'
+    : '';
+  const minutes = (ms) => { if (!ms) return ''; const s = Math.round(ms/1000); return Math.floor(s/60) + ':' + String(s%60).padStart(2,'0'); };
+  const heart = t.favorite
+    ? '<button class="text-[11px] text-pink-400 flex-shrink-0 local-fav-btn" data-track-id="' + t.id + '" title="Unlove">♥</button>'
+    : '<button class="text-[11px] text-gray-600 hover:text-pink-400 opacity-0 group-hover:opacity-100 transition-opacity local-fav-btn flex-shrink-0" data-track-id="' + t.id + '" title="Love">♡</button>';
+  const art = t.has_art
+    ? '<span class="row-art" style="background-image:url(/api/music/local/art/' + t.id + '?token=' + encodeURIComponent(token) + ')"></span>'
+    : '<span class="row-art placeholder"></span>';
+  return '<div class="flex items-center gap-2 px-2 py-1 rounded hover:bg-gray-900 group" data-track-row="' + t.id + '" style="user-select:none;-webkit-user-select:none;">'
+    + art
+    + '<button class="flex-1 min-w-0 text-left local-play-btn"'
+    + ' data-track-id="' + t.id + '"'
+    + ' data-track-title="' + title + '"'
+    + ' data-track-artist="' + artist + '">'
+    + '<p class="text-xs text-gray-200 truncate">' + title + srcBadge + fmtBadge + '</p>'
+    + (artist || album
+      ? '<p class="text-[10px] text-gray-500 truncate">' + [artist, album].filter(Boolean).join(' · ') + '</p>'
+      : '')
+    + '</button>'
+    + heart
+    + '<span class="text-[10px] text-gray-600 font-mono flex-shrink-0">' + minutes(t.duration_ms) + '</span>'
+    + '<button class="text-[10px] text-gray-600 hover:text-oc-400 opacity-0 group-hover:opacity-100 transition-opacity local-details-btn flex-shrink-0" title="Details + edit + lyrics" data-track-id="' + t.id + '">Details</button>'
+    + '</div>';
+}
+
+// Library view switcher — Tracks / Albums / Artists / Favorites / Recent / Playlists / Duplicates.
+let currentLibView = 'tracks';
+function switchLibView(view) {
+  currentLibView = view;
+  document.querySelectorAll('.lib-tab').forEach(b => b.classList.toggle('active', b.dataset.view === view));
+  const el = document.getElementById('local-lib-tracks');
+  el.innerHTML = '<p class="text-[10px] text-gray-500 italic p-2">Loading…</p>';
+  if (view === 'tracks')       loadLocalTracks();
+  else if (view === 'favorites') loadFavoritesView();
+  else if (view === 'recent')    loadRecentView();
+  else if (view === 'albums')    loadAlbumsView();
+  else if (view === 'artists')   loadArtistsView();
+  else if (view === 'playlists') loadPlaylistsView();
+  else if (view === 'duplicates') loadDuplicatesView();
+}
+async function loadFavoritesView() {
+  try {
+    const r = await fetch('/api/music/local/tracks?token=' + encodeURIComponent(token) + '&limit=200');
+    if (!r.ok) return;
+    const d = await r.json();
+    const favs = (d.tracks || []).filter(t => t.favorite);
+    const el = document.getElementById('local-lib-tracks');
+    if (!favs.length) { el.innerHTML = '<p class="text-xs text-gray-500 italic p-4 text-center">Love a track to see it here. Tap ♡ on any row.</p>'; return; }
+    el.innerHTML = '<p class="text-[10px] text-gray-600 px-1 pb-1">' + favs.length + ' favorite(s)</p>' + favs.map(renderTrackRow).join('');
+  } catch(e) {}
+}
+async function loadRecentView() {
+  // Use tracks endpoint sorted by last_played_at via a simple NL call
+  try {
+    const r = await fetch('/api/music/local/nl_search', { method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ token, query: 'most recently played' }) });
+    const d = await r.json();
+    const el = document.getElementById('local-lib-tracks');
+    const rows = d.tracks || [];
+    if (!rows.length) { el.innerHTML = '<p class="text-xs text-gray-500 italic p-4 text-center">No plays logged yet.</p>'; return; }
+    el.innerHTML = '<p class="text-[10px] text-gray-600 px-1 pb-1">' + rows.length + ' recently played</p>' + rows.map(renderTrackRow).join('');
+  } catch(e) {}
+}
+async function loadAlbumsView() {
+  try {
+    const r = await fetch('/api/music/local/albums?token=' + encodeURIComponent(token));
+    const d = await r.json();
+    const el = document.getElementById('local-lib-tracks');
+    const albums = d.albums || [];
+    if (!albums.length) { el.innerHTML = '<p class="text-xs text-gray-500 italic p-4 text-center">No albums yet — scan a folder first.</p>'; return; }
+    el.innerHTML = '<div class="alb-grid">' + albums.map(a => {
+      const art = a.art_track_id
+        ? '<img src="/api/music/local/art/' + a.art_track_id + '?token=' + encodeURIComponent(token) + '" onerror="this.remove()">'
+        : '';
+      return '<div class="alb-tile" onclick="openAlbum(' + JSON.stringify(a.album).replace(/"/g,'&quot;') + ',' + JSON.stringify(a.artist).replace(/"/g,'&quot;') + ')">'
+        + '<div class="alb-art">' + art + '</div>'
+        + '<div class="alb-name">' + escapeHtml(a.album) + '</div>'
+        + '<div class="alb-artist">' + escapeHtml(a.artist) + (a.year ? ' · ' + a.year : '') + '</div>'
+        + '</div>';
+    }).join('') + '</div>';
+  } catch(e) {}
+}
+async function openAlbum(album, artist) {
+  const q = document.getElementById('local-lib-search');
+  q.value = album;
+  currentLibView = 'tracks';
+  document.querySelectorAll('.lib-tab').forEach(b => b.classList.toggle('active', b.dataset.view === 'tracks'));
+  await loadLocalTracks();
+  // Load liner notes in the background for this album
+  try {
+    const r = await fetch('/api/music/local/album_notes?token=' + encodeURIComponent(token) + '&artist=' + encodeURIComponent(artist) + '&album=' + encodeURIComponent(album));
+    if (r.ok) {
+      const d = await r.json();
+      const notice = document.getElementById('music-notice');
+      if (notice && d.body) {
+        // Just drop it at the top of the track list as a quote
+        const el = document.getElementById('local-lib-tracks');
+        el.innerHTML = '<blockquote class="text-[11px] text-gray-400 italic p-3 border-l-2 border-pink-700/40 mb-2">' + escapeHtml(d.body) + '</blockquote>' + el.innerHTML;
+      }
+    }
+  } catch(e) {}
+}
+async function loadArtistsView() {
+  try {
+    const r = await fetch('/api/music/local/artists?token=' + encodeURIComponent(token));
+    const d = await r.json();
+    const el = document.getElementById('local-lib-tracks');
+    const artists = d.artists || [];
+    if (!artists.length) { el.innerHTML = '<p class="text-xs text-gray-500 italic p-4 text-center">No artists yet.</p>'; return; }
+    el.innerHTML = artists.map(a =>
+      '<div class="artist-row" onclick="openArtist(' + JSON.stringify(a.name).replace(/"/g,'&quot;') + ')">'
+      + '<div class="artist-name">' + escapeHtml(a.name) + '</div>'
+      + '<div class="artist-count">' + a.album_count + ' album' + (a.album_count !== 1 ? 's' : '') + ' · ' + a.track_count + ' track' + (a.track_count !== 1 ? 's' : '') + '</div>'
+      + '</div>').join('');
+  } catch(e) {}
+}
+async function openArtist(name) {
+  const q = document.getElementById('local-lib-search');
+  q.value = name;
+  currentLibView = 'tracks';
+  document.querySelectorAll('.lib-tab').forEach(b => b.classList.toggle('active', b.dataset.view === 'tracks'));
+  await loadLocalTracks();
+}
+async function loadPlaylistsView() {
+  try {
+    const r = await fetch('/api/music/local/playlists?token=' + encodeURIComponent(token));
+    const d = await r.json();
+    const el = document.getElementById('local-lib-tracks');
+    const pls = d.playlists || [];
+    let html = '<div class="flex gap-2 mb-2"><input id="new-pl-name" placeholder="New playlist name" class="flex-1 bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-gray-200 outline-none"><button onclick="createPlaylistFromUI()" class="bg-oc-600 hover:bg-oc-700 text-white px-3 rounded-lg text-xs">Create</button></div>';
+    if (!pls.length) html += '<p class="text-xs text-gray-500 italic p-2">No playlists yet. Create one above.</p>';
+    else html += pls.map(p =>
+      '<div class="artist-row" onclick="openPlaylist(' + p.id + ')">'
+      + '<div class="artist-name">' + escapeHtml(p.name) + '</div>'
+      + '<div class="artist-count">' + p.track_count + ' track' + (p.track_count !== 1 ? 's' : '') + '</div>'
+      + '</div>').join('');
+    el.innerHTML = html;
+  } catch(e) {}
+}
+async function createPlaylistFromUI() {
+  const name = document.getElementById('new-pl-name').value.trim();
+  if (!name) return;
+  try {
+    const r = await fetch('/api/music/local/playlists', { method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ token, name }) });
+    if (r.ok) loadPlaylistsView();
+  } catch(e) {}
+}
+async function openPlaylist(id) {
+  try {
+    const r = await fetch('/api/music/local/playlists/' + id + '?token=' + encodeURIComponent(token));
+    const d = await r.json();
+    const el = document.getElementById('local-lib-tracks');
+    const tracks = d.tracks || [];
+    el.innerHTML = '<p class="text-[10px] text-gray-600 px-1 pb-1">' + tracks.length + ' track(s) in this playlist</p>'
+      + tracks.map(renderTrackRow).join('');
+  } catch(e) {}
+}
+async function loadDuplicatesView() {
+  try {
+    const r = await fetch('/api/music/local/duplicates?token=' + encodeURIComponent(token));
+    const d = await r.json();
+    const el = document.getElementById('local-lib-tracks');
+    const groups = d.groups || [];
+    if (!groups.length) { el.innerHTML = '<p class="text-xs text-gray-500 italic p-4 text-center">No duplicates — your library is clean.</p>'; return; }
+    el.innerHTML = groups.map(g =>
+      '<div class="dup-row">'
+      + '<div class="text-xs text-gray-200">' + escapeHtml(g.title) + ' — ' + escapeHtml(g.artist) + '</div>'
+      + '<div class="dup-meta">' + g.count + ' copies · ids ' + g.ids.join(', ') + '</div>'
+      + '</div>').join('');
+  } catch(e) {}
+}
+async function runNLSearch() {
+  const input = document.getElementById('local-lib-nl');
+  const q = input.value.trim();
+  if (!q) return;
+  const el = document.getElementById('local-lib-tracks');
+  el.innerHTML = '<p class="text-xs text-gray-500 italic p-4 text-center">Thinking…</p>';
+  try {
+    const r = await fetch('/api/music/local/nl_search', { method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ token, query: q }) });
+    const d = await r.json();
+    const tracks = d.tracks || [];
+    if (!tracks.length) { el.innerHTML = '<p class="text-xs text-gray-500 italic p-4 text-center">Couldn\'t match that query. Try different words.</p>'; return; }
+    el.innerHTML = '<p class="text-[10px] text-gray-600 px-1 pb-1">' + tracks.length + ' match(es) for "' + escapeHtml(q) + '"</p>'
+      + tracks.map(renderTrackRow).join('');
+  } catch(e) {
+    el.innerHTML = '<p class="text-xs text-red-400 p-4 text-center">Search failed.</p>';
+  }
+}
+
+// Top-level click delegation on the local track list. Three classes:
+// .local-play-btn (row-play), .local-details-btn (MB + lyrics + edit),
+// .local-fav-btn (love toggle). Using data attributes + delegation
+// avoids the escape bugs of inlined onclick strings and survives track
+// list re-renders without rewiring.
 //
 // Double-click guards — layered defence so WebKitGTK can't freeze:
 //   • swallow the native dblclick event (no text selection, no UA hook)
@@ -2350,8 +2792,23 @@ function stopRealEqualizer() {
       ev.stopPropagation();
     }
   });
-  listEl.addEventListener('click', (ev) => {
-    if (ev.detail > 1) { ev.preventDefault(); return; }  // ignore 2nd+ of a multi-click burst
+  listEl.addEventListener('click', async (ev) => {
+    if (ev.detail > 1) { ev.preventDefault(); return; }
+    const favBtn = ev.target.closest('.local-fav-btn');
+    if (favBtn) {
+      ev.stopPropagation();
+      const id = parseInt(favBtn.dataset.trackId, 10);
+      const isLoved = favBtn.textContent.trim() === '♥';
+      try {
+        await fetch('/api/music/local/favorite/' + id, { method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ token, favorite: !isLoved }) });
+        favBtn.textContent = isLoved ? '♡' : '♥';
+        favBtn.className = isLoved
+          ? 'text-[11px] text-gray-600 hover:text-pink-400 opacity-0 group-hover:opacity-100 transition-opacity local-fav-btn flex-shrink-0'
+          : 'text-[11px] text-pink-400 flex-shrink-0 local-fav-btn';
+      } catch(e) {}
+      return;
+    }
     const playBtn = ev.target.closest('.local-play-btn');
     if (playBtn) {
       const id = parseInt(playBtn.dataset.trackId, 10);
@@ -2500,6 +2957,68 @@ async function cleanUpTags() {
     if (btn) { btn.textContent = orig; btn.disabled = false; }
   }
 }
+
+// Format millis as mm:ss or h:mm:ss, used by progress + row durations.
+function fmtMs(ms) {
+  if (!ms || ms < 0) return '0:00';
+  const s = Math.floor(ms / 1000);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const ss = s % 60;
+  if (h > 0) return h + ':' + String(m).padStart(2,'0') + ':' + String(ss).padStart(2,'0');
+  return m + ':' + String(ss).padStart(2,'0');
+}
+
+// Wire progress bar scrubbing. Mark .dataset.scrubbing while held so
+// timeupdate doesn't fight the user's finger.
+(function wireProgress() {
+  const prog = document.getElementById('np-progress');
+  if (!prog) return;
+  prog.addEventListener('input', (e) => {
+    prog.dataset.scrubbing = '1';
+    prog.style.setProperty('--progress', (e.target.value / 10).toFixed(1) + '%');
+  });
+  prog.addEventListener('change', (e) => {
+    const a = document.getElementById('local-audio');
+    if (a && a.duration && isFinite(a.duration)) {
+      a.currentTime = (e.target.value / 1000) * a.duration;
+    }
+    delete prog.dataset.scrubbing;
+  });
+})();
+
+// Keyboard shortcuts — only active while /music is the active page and
+// the user isn't typing in an input/textarea.
+(function wireKeyboard() {
+  document.addEventListener('keydown', (ev) => {
+    const tag = (ev.target.tagName || '').toUpperCase();
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+    const a = document.getElementById('local-audio');
+    switch (ev.key) {
+      case ' ':
+        ev.preventDefault();
+        if (a) { if (a.paused) a.play().catch(()=>{}); else a.pause(); }
+        break;
+      case 'ArrowRight':
+        if (ev.shiftKey) { ev.preventDefault(); control('next'); }
+        else if (a && a.duration) { ev.preventDefault(); a.currentTime = Math.min(a.duration, a.currentTime + 5); }
+        break;
+      case 'ArrowLeft':
+        if (ev.shiftKey) { ev.preventDefault(); control('prev'); }
+        else if (a) { ev.preventDefault(); a.currentTime = Math.max(0, a.currentTime - 5); }
+        break;
+      case 's': case 'S': toggleShuffle(); break;
+      case 'r': case 'R': toggleRepeat(); break;
+      case 'l': case 'L': toggleFavorite(); break;
+      case 'q': case 'Q': switchLibView(currentLibView === 'playlists' ? 'tracks' : 'playlists'); break;
+      case '/':
+        ev.preventDefault();
+        document.getElementById('local-lib-nl')?.focus();
+        break;
+    }
+  });
+})();
 
 // Load on page ready
 loadLocalFolders();
