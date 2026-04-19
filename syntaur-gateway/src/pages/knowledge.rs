@@ -1031,15 +1031,18 @@ const fmtRelative = (iso) => {
 
 function getAgent() { return q('#agent-filter').value; }
 
+// Phase 1.1: session token sent via Authorization: Bearer only. Server
+// middleware (security::lift_bearer_to_body_and_query) copies it back into
+// query + body for handlers that still read those positions.
 async function apiGet(path) {
-  let url = path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(token);
+  let url = path;
   // Agent filter only applies to /api/knowledge/* endpoints — research endpoints
   // ignore or don't accept an agent query parameter.
   if (path.startsWith('/api/knowledge/')) {
     const agent = getAgent();
-    if (agent) url += '&agent=' + encodeURIComponent(agent);
+    if (agent) url += (url.includes('?') ? '&' : '?') + 'agent=' + encodeURIComponent(agent);
   }
-  const r = await fetch(url);
+  const r = await fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
   if (r.status === 401) { sessionStorage.removeItem('syntaur_token'); window.location.href = '/'; return null; }
   return r.json();
 }
@@ -1047,8 +1050,8 @@ async function apiGet(path) {
 async function apiPost(path, body) {
   const r = await fetch(path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token, ...body }),
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+    body: JSON.stringify(body || {}),
   });
   return r.json();
 }
@@ -1199,11 +1202,14 @@ async function handleFiles(files) {
     </div>`);
     status.prepend(row);
     const fd = new FormData();
-    fd.append('token', token);
     fd.append('agent_id', q('#upload-agent').value || 'shared');
     fd.append('file', file);
     try {
-      const r = await fetch('/api/knowledge/upload', { method: 'POST', body: fd });
+      const r = await fetch('/api/knowledge/upload', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + token },
+        body: fd,
+      });
       const data = await r.json();
       if (data.ok) {
         row.lastElementChild.textContent = `✓ ${data.chunks || 0} chunks`;
@@ -1382,6 +1388,10 @@ async function launchResearch(clarification_answers) {
 
 function streamResearchSession(sessionId) {
   if (researchActiveStream) { try { researchActiveStream.close(); } catch(e) {} }
+  // EventSource's native API can't set Authorization headers; token in query
+  // is the standard workaround. SSE URLs aren't sent as navigations so they
+  // don't hit the browser history bar, and `cache-control: no-store` on
+  // /api/* (set by security::security_headers) keeps them out of disk cache.
   const url = `/api/research/${encodeURIComponent(sessionId)}/stream?token=${encodeURIComponent(token)}`;
   const es = new EventSource(url);
   researchActiveStream = es;
@@ -1659,8 +1669,9 @@ async function sendCortex() {
     if (!cortexConvId) {
       try {
         const cr = await fetch('/api/conversations', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token, agent: 'main', title: 'Cortex — library inquiry' }),
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+          body: JSON.stringify({ agent: 'main', title: 'Cortex — library inquiry' }),
         });
         if (cr.ok) { const d = await cr.json(); cortexConvId = d.conversation_id || d.id || null; }
       } catch(e) {}
@@ -1669,9 +1680,9 @@ async function sendCortex() {
     // Fire the message. Backend returns an SSE stream of phase events
     // terminating in `complete` with the final response text.
     const r = await fetch('/api/message', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
       body: JSON.stringify({
-        token,
         agent: 'main',
         conversation_id: cortexConvId,
         message: CORTEX_SYSTEM + '\n\n' + text,

@@ -79,13 +79,24 @@ const PAGE_JS: &str = r#"
 const token = sessionStorage.getItem('syntaur_token') || '';
 if (!token) { window.location.href = '/'; }
 
+// Phase 1.1: session token sent via Authorization: Bearer only. Server
+// middleware (security::lift_bearer_to_body_and_query) copies it back into
+// query + body for handlers that still read those positions.
+async function api(path, opts) {
+  opts = opts || {};
+  opts.headers = Object.assign({ 'Authorization': 'Bearer ' + token }, opts.headers || {});
+  const r = await fetch(path, opts);
+  if (r.status === 401) { sessionStorage.removeItem('syntaur_token'); window.location.href = '/'; return null; }
+  return r.json();
+}
+
 let allConversations = [];
 let currentConvId = null;
 
 async function loadConversations() {
   try {
-    const resp = await fetch(`/api/conversations?token=${token}&limit=50`);
-    const data = await resp.json();
+    const data = await api('/api/conversations?limit=50');
+    if (!data) return;
     allConversations = data.conversations || [];
     if (allConversations.length === 0) {
       document.getElementById('conv-list').classList.add('hidden');
@@ -134,8 +145,8 @@ async function openConversation(id) {
   const messagesEl = document.getElementById('modal-messages');
   messagesEl.innerHTML = '<p class="text-gray-500 text-sm text-center py-4">Loading...</p>';
   try {
-    const resp = await fetch(`/api/conversations/${id}?token=${token}`);
-    const data = await resp.json();
+    const data = await api(`/api/conversations/${id}`);
+    if (!data) return;
     const conv = data.conversation || {};
     const msgs = data.messages || [];
     document.getElementById('modal-title').textContent = conv.title || 'Conversation';

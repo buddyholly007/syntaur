@@ -1114,7 +1114,7 @@ async function toggleStar(btn, date, time, source, text) {
       const list = await loadMomentsForDate(date);
       const mm = list.find(m => m.text === text);
       if (mm) {
-        await api('/api/journal/moments/' + mm.id + '?token=' + encodeURIComponent(token), { method: 'DELETE' });
+        await api('/api/journal/moments/' + mm.id, { method: 'DELETE' });
         btn.classList.remove('starred');
         btn.title = 'Keep this moment';
       }
@@ -1123,7 +1123,7 @@ async function toggleStar(btn, date, time, source, text) {
     try {
       await api('/api/journal/moments', {
         method: 'POST',
-        body: { token, date, text, source: source || null, time_of_day: time || null }
+        body: { date, text, source: source || null, time_of_day: time || null }
       });
       btn.classList.add('starred');
       btn.title = 'Unstar';
@@ -1133,7 +1133,7 @@ async function toggleStar(btn, date, time, source, text) {
 
 async function unstarMoment(id) {
   try {
-    await api('/api/journal/moments/' + id + '?token=' + encodeURIComponent(token), { method: 'DELETE' });
+    await api('/api/journal/moments/' + id, { method: 'DELETE' });
     loadMoments();
   } catch(e) {}
 }
@@ -1165,7 +1165,7 @@ async function loadTraining() {
 async function removeClip(kind, name) {
   if (!confirm('Remove ' + name + '?')) return;
   try {
-    await api('/api/journal/training/delete', { method: 'POST', body: { token, kind, name } });
+    await api('/api/journal/training/delete', { method: 'POST', body: { kind, name } });
     loadTraining();
   } catch(e) { alert('Remove failed.'); }
 }
@@ -1217,8 +1217,8 @@ async function ensureMushiConv() {
   try {
     const r = await fetch('/api/conversations', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, agent: 'journal' })
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body: JSON.stringify({ agent: 'journal' })
     });
     const d = await r.json();
     if (d.id) { mushiConvId = d.id; return d.id; }
@@ -1239,8 +1239,8 @@ async function mushiSend() {
   try {
     const r = await fetch('/api/message', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, message: msg, agent: 'journal', conversation_id: convId })
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body: JSON.stringify({ message: msg, agent: 'journal', conversation_id: convId })
     });
     const d = await r.json();
     thinking.querySelector('.j-mushi-msg-body').innerHTML = d.response ? renderInline(d.response) : '<em>(no reply)</em>';
@@ -1276,8 +1276,8 @@ async function offerTaskReview(convId) {
   try {
     const r = await fetch('/api/journal/extract_tasks', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, conversation_id: convId })
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body: JSON.stringify({ conversation_id: convId })
     });
     const d = await r.json();
     const tasks = d.tasks || [];
@@ -1312,8 +1312,8 @@ async function approveTasks() {
   try {
     const r = await fetch('/api/journal/route_tasks', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, tasks: selected })
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body: JSON.stringify({ tasks: selected })
     });
     const d = await r.json();
     box.innerHTML = '<p class="j-subtle" style="margin:0">' + (d.routed || 0) + ' sent along. The rest stayed here.</p>';
