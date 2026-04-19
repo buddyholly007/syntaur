@@ -107,6 +107,15 @@ pub fn top_bar(crumb: &str, status: Option<ModuleStatus>) -> Markup {
                     span.txt { (s.text.as_str()) }
                 }
             }
+            // Persistent music pipeline: this hidden <audio> element
+            // is in the top-bar so it lives on every page. On every
+            // page load, the init script below reads localStorage and
+            // resumes playback from the saved trackId + currentTime,
+            // which is what gives the cross-module "music keeps
+            // playing" behaviour. The existing floating mini-player
+            // pill (rendered after this top-bar via
+            // GLOBAL_MINI_PLAYER_HTML) drives play/pause/next on it.
+            audio id="global-audio" preload="auto" style="display:none" {}
             div.spacer {}
             button.modules-btn type="button" onclick="openModulesPalette()" aria-label="Jump to module" {
                 span { "Modules" }
@@ -517,54 +526,171 @@ const TOP_BAR_SCRIPT: &str = r##"
     }
   });
 
-  // ── Global mini-player (bottom-right pill, every authed page) ──
-  // Polls /api/music/now_playing once a page loads and every 6s. Hidden
-  // when nothing is playing. Never noisy.
-  let _smpLastEntity = null;
-  async function smpPoll() {
-    const token = (function(){
-      try { return localStorage.getItem('syntaur_token') || sessionStorage.getItem('syntaur_token') || ''; } catch(_e){ return ''; }
-    })();
-    if (!token) return;
+  // ── Persistent music: global-audio + floating pill ────────────
+  // Single source of truth is localStorage.syntaurMusic — a JSON blob
+  // {trackId, title, artist, album, position, playing} that every page
+  // reads at mount and every state change writes to. The <audio
+  // id="global-audio"> element in the top bar auto-resumes from this
+  // on page load, which means music keeps going while Sean navigates
+  // Syntaur. The floating pill (#syntaur-mini-player) shows the track
+  // + drives play/pause/next.
+  //
+  // Cloud playback (HA / Apple / Spotify) still falls back to the
+  // /api/music/now_playing poll — we only override when a LOCAL
+  // session is active.
+
+  const MUSIC_KEY = 'syntaurMusic';
+  function readMusic() {
+    try { return JSON.parse(localStorage.getItem(MUSIC_KEY) || 'null'); } catch(_e) { return null; }
+  }
+  function writeMusic(s) {
+    try { if (s) localStorage.setItem(MUSIC_KEY, JSON.stringify(s)); else localStorage.removeItem(MUSIC_KEY); } catch(_e) {}
+  }
+  function token() {
+    try { return localStorage.getItem('syntaur_token') || sessionStorage.getItem('syntaur_token') || ''; } catch(_e) { return ''; }
+  }
+
+  const ga = document.getElementById('global-audio');
+
+  // Resume saved playback on page load. Skips on /music because that
+  // page mounts its own playback via playLocalTrack (the global-audio
+  // element is the SAME DOM node, so /music's UI hooks into it
+  // directly — see ensureRealEqualizer / wireLocalAudioEvents there).
+  function resumeSavedMusic() {
+    if (!ga) return;
+    const s = readMusic();
+    if (!s || !s.trackId) return;
+    try {
+      ga.src = '/api/music/local/file/' + s.trackId + '?token=' + encodeURIComponent(token());
+      ga.load();
+      ga.addEventListener('loadedmetadata', function once() {
+        ga.removeEventListener('loadedmetadata', once);
+        if (s.position && s.position > 0 && s.position < ga.duration) {
+          try { ga.currentTime = s.position; } catch(_e) {}
+        }
+        if (s.playing) {
+          ga.play().catch(() => {});
+        }
+      }, { once: true });
+    } catch(_e) {}
+  }
+
+  // Persist position + playing flag on every state change.
+  if (ga) {
+    ga.addEventListener('timeupdate', () => {
+      const s = readMusic();
+      if (!s) return;
+      s.position = ga.currentTime;
+      s.playing = !ga.paused;
+      writeMusic(s);
+    });
+    ga.addEventListener('pause', () => {
+      const s = readMusic();
+      if (s) { s.playing = false; writeMusic(s); }
+      updatePill();
+    });
+    ga.addEventListener('play', () => {
+      const s = readMusic();
+      if (s) { s.playing = true; writeMusic(s); }
+      updatePill();
+    });
+    ga.addEventListener('ended', () => {
+      writeMusic(null);
+      updatePill();
+    });
+    ga.addEventListener('error', () => {
+      writeMusic(null);
+      updatePill();
+    });
+  }
+
+  // Repaint the floating pill from either local state (preferred) or
+  // a cloud now_playing poll (fallback).
+  let _lastCloudEntity = null;
+  async function updatePill() {
     const pill = document.getElementById('syntaur-mini-player');
     if (!pill) return;
+
+    // Prefer local state.
+    const s = readMusic();
+    if (s && s.trackId) {
+      pill.hidden = false;
+      pill.style.opacity = '1';
+      pill.dataset.source = 'local';
+      const title = document.getElementById('smp-title');
+      const sub = document.getElementById('smp-sub');
+      if (title) title.textContent = s.title || 'Track ' + s.trackId;
+      if (sub) sub.textContent = (s.artist || '') + (s.album ? ' · ' + s.album : '');
+      const pb = document.getElementById('smp-play');
+      if (pb) {
+        const playing = ga && !ga.paused;
+        pb.innerHTML = playing
+          ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>'
+          : '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>';
+      }
+      return;
+    }
+
+    // No local — try cloud.
+    const tk = token();
+    if (!tk) { pill.hidden = true; return; }
     try {
-      const r = await fetch('/api/music/now_playing?token=' + encodeURIComponent(token));
+      const r = await fetch('/api/music/now_playing?token=' + encodeURIComponent(tk));
       if (!r.ok) { pill.hidden = true; return; }
       const d = await r.json();
       const state = d.state || 'off';
-      const song = d.song || '';
-      const artist = d.artist || '';
-      _smpLastEntity = d.entity_id || null;
-      if (state === 'off' || !song) { pill.hidden = true; return; }
+      _lastCloudEntity = d.entity_id || null;
+      if (state === 'off' || !d.song) { pill.hidden = true; return; }
       pill.hidden = false;
+      pill.dataset.source = 'cloud';
       pill.style.opacity = d.ducking ? '0.55' : '1';
-      const titleEl = document.getElementById('smp-title');
-      const subEl = document.getElementById('smp-sub');
-      if (titleEl) titleEl.textContent = song;
-      if (subEl) subEl.textContent = artist || (d.source || '');
+      const title = document.getElementById('smp-title');
+      const sub = document.getElementById('smp-sub');
+      if (title) title.textContent = d.song;
+      if (sub) sub.textContent = d.artist || d.source || '';
       const pb = document.getElementById('smp-play');
       if (pb) {
         pb.innerHTML = state === 'playing'
           ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>'
           : '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>';
       }
-    } catch(_e) { /* silent — mini-player never alerts */ }
+    } catch(_e) {}
   }
+
   window.syntaurMpControl = async function(action) {
-    const token = (function(){ try { return localStorage.getItem('syntaur_token') || sessionStorage.getItem('syntaur_token') || ''; } catch(_e){ return ''; } })();
-    if (!token) return;
+    // Local path (global-audio) takes priority when a local session
+    // is active. Falls through to cloud control only for cloud sessions.
+    const pill = document.getElementById('syntaur-mini-player');
+    if (pill && pill.dataset.source === 'local' && ga) {
+      if (action === 'play_pause') {
+        if (ga.paused) ga.play().catch(()=>{}); else ga.pause();
+      } else if (action === 'next' || action === 'prev') {
+        // Next/prev for local require a queue — surfaced on /music.
+        if (action === 'next') window.location.href = '/music';
+      }
+      return;
+    }
+    const tk = token();
+    if (!tk) return;
     try {
-      await fetch('/api/music/control', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token, action, entity_id: _smpLastEntity }) });
-      setTimeout(smpPoll, 400);
+      await fetch('/api/music/control', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: tk, action, entity_id: _lastCloudEntity }),
+      });
+      setTimeout(updatePill, 400);
     } catch(_e) {}
   };
-  // Skip on /music (dashboard's own player surface is richer there).
-  if (!location.pathname.startsWith('/music')) {
-    smpPoll();
-    setInterval(smpPoll, 6000);
-  }
+
+  // Bootstrap: resume any saved session + paint the pill on every
+  // page load. The /music page uses the same global-audio element —
+  // when the user clicks a new track there, playLocalTrack stops the
+  // resumed audio cleanly before starting the new one.
+  resumeSavedMusic();
+  updatePill();
+  // Cloud poll stays on its old cadence for pages where local isn't active.
+  setInterval(() => { if (!readMusic()) updatePill(); }, 6000);
+  // Local-pill icon updates on timer so pause/play stays in sync.
+  setInterval(() => { if (readMusic()) updatePill(); }, 1000);
 })();
 </script>
 "##;

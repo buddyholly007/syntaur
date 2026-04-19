@@ -827,8 +827,9 @@ const BODY_HTML: &str = r##"<!-- Module sub-bar — "Bridge live" indicator + re
       <!-- Track list / active-view container -->
       <div id="local-lib-tracks" class="mt-1 max-h-80 overflow-y-auto border-t border-gray-800 pt-2 text-xs"></div>
 
-      <!-- Hidden <audio> used for playback of local files -->
-      <audio id="local-audio" style="display:none" preload="none"></audio>
+      <!-- Audio playback is served by <audio id="global-audio"> in
+           the shared top bar (see pages/shared.rs) so playback
+           persists when the user navigates between modules. -->
     </div>
 
     <!-- Local track details drawer — MusicBrainz lookup + manual edit.
@@ -1083,7 +1084,7 @@ async function control(action) {
   // If local audio is active, drive it directly instead of asking the
   // server to command a cloud player.
   if (localPlaybackActive) {
-    const a = document.getElementById('local-audio');
+    const a = document.getElementById('global-audio');
     if (action === 'play_pause' || action === 'pause' || action === 'play') {
       if (a) {
         if (a.paused) { try { await a.play(); } catch(e) { console.warn('[local-control] play', e); } }
@@ -2223,11 +2224,27 @@ function playLocalTrack(trackId, title, artist, extra) {
   lastLocalPlayAt = now;
   localPlaybackCurrent = trackId;
   const myGen = ++localPlayGeneration;
-  const a = document.getElementById('local-audio');
+  const row = extra || lookupRowMeta(trackId);
+  // Write persistent state up-front so if the user navigates away
+  // mid-click, the destination page still picks up and resumes.
+  try {
+    localStorage.setItem('syntaurMusic', JSON.stringify({
+      trackId,
+      title: title || '',
+      artist: artist || '',
+      album: (row && row.album) || '',
+      position: 0,
+      playing: true,
+    }));
+  } catch(e) {}
+  // Prefer the persistent top-bar audio element (shared.rs). Falls
+  // back to the in-page #local-audio for legacy code paths that may
+  // not have the top-bar yet.
+  const a = document.getElementById('global-audio');
   try { a.pause(); } catch(e) {}
   try { a.removeAttribute('src'); } catch(e) {}
   try { a.load(); } catch(e) {}
-  setLocalNowPlaying(title, artist, trackId, extra || lookupRowMeta(trackId));
+  setLocalNowPlaying(title, artist, trackId, row);
   setTimeout(() => {
     if (myGen !== localPlayGeneration) return;
     a.src = '/api/music/local/file/' + trackId + '?token=' + encodeURIComponent(token);
@@ -2239,6 +2256,7 @@ function playLocalTrack(trackId, title, artist, extra) {
           console.warn('[local-play]', e);
           showMusicNotice("Couldn't play that track. " + (e.message || ''), true);
           clearLocalNowPlaying();
+          try { localStorage.removeItem('syntaurMusic'); } catch(_e) {}
         }
       });
     }
@@ -2366,13 +2384,13 @@ function setLocalNowPlaying(title, artist, trackId, extra) {
         artwork: [{ src: '/api/music/local/art/' + trackId + '?token=' + encodeURIComponent(token), sizes: '512x512', type: 'image/jpeg' }],
       });
       navigator.mediaSession.playbackState = 'playing';
-      navigator.mediaSession.setActionHandler('play', () => { const a = document.getElementById('local-audio'); if (a && a.paused) a.play(); });
-      navigator.mediaSession.setActionHandler('pause', () => { const a = document.getElementById('local-audio'); if (a && !a.paused) a.pause(); });
+      navigator.mediaSession.setActionHandler('play', () => { const a = document.getElementById('global-audio'); if (a && a.paused) a.play(); });
+      navigator.mediaSession.setActionHandler('pause', () => { const a = document.getElementById('global-audio'); if (a && !a.paused) a.pause(); });
       navigator.mediaSession.setActionHandler('nexttrack', () => control('next'));
       navigator.mediaSession.setActionHandler('previoustrack', () => control('prev'));
-      navigator.mediaSession.setActionHandler('seekto', (e) => { const a = document.getElementById('local-audio'); if (a && e.seekTime != null) a.currentTime = e.seekTime; });
-      navigator.mediaSession.setActionHandler('seekforward', () => { const a = document.getElementById('local-audio'); if (a) a.currentTime = Math.min(a.duration || 1e9, a.currentTime + 10); });
-      navigator.mediaSession.setActionHandler('seekbackward', () => { const a = document.getElementById('local-audio'); if (a) a.currentTime = Math.max(0, a.currentTime - 10); });
+      navigator.mediaSession.setActionHandler('seekto', (e) => { const a = document.getElementById('global-audio'); if (a && e.seekTime != null) a.currentTime = e.seekTime; });
+      navigator.mediaSession.setActionHandler('seekforward', () => { const a = document.getElementById('global-audio'); if (a) a.currentTime = Math.min(a.duration || 1e9, a.currentTime + 10); });
+      navigator.mediaSession.setActionHandler('seekbackward', () => { const a = document.getElementById('global-audio'); if (a) a.currentTime = Math.max(0, a.currentTime - 10); });
     } catch(e) {}
   }
 
@@ -2495,11 +2513,13 @@ function startRealEqualizer() {
     //    Real music has ~20 dB more energy in bass than treble; this
     //    curve scales bass down and treble up so the whole spectrum
     //    moves together.
-    // Skip the DC bin (bin 0, always near zero) so the center-most bar
-    // — which Sean sees as the two mirrored middle bars — lands on the
-    // real kick-drum / bass-guitar range (≈ 40-170 Hz) instead of a
-    // dead bin. Exponent 1.7 (was 1.9) spreads the bars more evenly so
-    // bar 0 actually spans a usable 4-bin range.
+    // Shape = dome. The center is always the peak, edges always
+    // taper. A positional envelope multiplier (dome) scales bar
+    // heights down as i increases so the spectrum reads as a
+    // mountain rather than a flat equalizer-style line. Combined
+    // with the natural bass-heaviness of real music, the middle
+    // two bars always dominate visually — which is the classic
+    // car-stereo / Winamp look Sean is describing.
     const heights = new Array(HALF);
     const MAX_BIN = Math.floor(bins.length * 0.45);
     const BIN_START = 1;
@@ -2510,16 +2530,23 @@ function startRealEqualizer() {
       let sum = 0, count = 0;
       for (let b = lo; b < hi && b < bins.length; b++) { sum += bins[b]; count++; }
       const avg = count > 0 ? sum / count : 0;
-      const t = i / (HALF - 1);                    // 0 = bass, 1 = treble
-      // Let bass pop on transients (weight 1.05 at the center) while
-      // treble still gets a strong lift (2.8 at the edges). 1.05 × a
-      // loud kick bin reliably reaches the ceiling; quieter sustains
-      // come in around 60 %, giving the center the punch-and-breathe
-      // rhythm classic visualizers have.
-      const weight = 1.05 + Math.pow(t, 0.5) * 1.75;
-      const v = Math.min(1, (avg / 255) * weight);
+      // Dome envelope. i=0 (center) → 1.0; i=HALF-1 (edge) → 0.40.
+      // Pow(i/HALF, 1.3) gives a smooth round dome rather than a
+      // pointy triangle.
+      const dome = 1.0 - Math.pow(i / HALF, 1.3) * 0.60;
+      // Small treble lift so high-end bars don't vanish — but tiny
+      // enough that bass always wins the height race.
+      const treble_lift = 1.0 + (i / HALF) * 0.55;
+      const v = Math.min(1, (avg / 255) * dome * treble_lift);
       heights[i] = Math.max(2, v * H * CEILING);
     }
+    // Belt-and-braces guarantee: the center bar must be at least
+    // 1 px taller than any other bar. On occasional treble-heavy
+    // frames (high-hat splashes with zero bass content), this keeps
+    // the dome shape intact.
+    let tallest_other = 0;
+    for (let i = 1; i < HALF; i++) { if (heights[i] > tallest_other) tallest_other = heights[i]; }
+    if (heights[0] < tallest_other + 1) heights[0] = Math.min(H * CEILING, tallest_other + 1);
 
     // Paint bars[HALF..BAR_COUNT] going right from center (low→high freq).
     for (let i = 0; i < HALF; i++) {
@@ -2555,7 +2582,7 @@ function stopRealEqualizer() {
 // stream ends naturally, or an error fires mid-playback.
 (function wireLocalAudioEvents() {
   const bind = () => {
-    const a = document.getElementById('local-audio');
+    const a = document.getElementById('global-audio');
     if (!a || a.dataset.wired === '1') return;
     a.dataset.wired = '1';
     a.addEventListener('play', () => {
@@ -2618,11 +2645,10 @@ function stopRealEqualizer() {
     });
   };
   bind();
-  // Also re-bind whenever loadLocalFolders re-renders (in case the
-  // <audio> element ever gets replaced).
-  const obs = new MutationObserver(bind);
-  const root = document.getElementById('local-library-card');
-  if (root) obs.observe(root, { childList: true, subtree: true });
+  // The <audio> element now lives in the stable top bar so we don't
+  // need to re-bind on library re-renders like we did when it lived
+  // inside #local-library-card. If the top bar is ever replaced, bind
+  // will no-op thanks to the `data-wired` guard.
 })();
 
 // Render one track row. Shared across the Tracks / Favorites / Recent
@@ -3089,7 +3115,7 @@ function fmtMs(ms) {
     prog.style.setProperty('--progress', (e.target.value / 10).toFixed(1) + '%');
   });
   prog.addEventListener('change', (e) => {
-    const a = document.getElementById('local-audio');
+    const a = document.getElementById('global-audio');
     if (a && a.duration && isFinite(a.duration)) {
       a.currentTime = (e.target.value / 1000) * a.duration;
     }
@@ -3104,7 +3130,7 @@ function fmtMs(ms) {
     const tag = (ev.target.tagName || '').toUpperCase();
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
     if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
-    const a = document.getElementById('local-audio');
+    const a = document.getElementById('global-audio');
     switch (ev.key) {
       case ' ':
         ev.preventDefault();
