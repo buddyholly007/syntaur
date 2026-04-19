@@ -182,6 +182,9 @@ fn content_area() -> Markup {
         (page_wrap("account", "security", "Password",
             "Change your password, sign out of other browsers.",
             account_security_body()))
+        (page_wrap("account", "api-tokens", "API tokens",
+            "Long-lived tokens for scripts, CLIs, and third-party integrations. Never paste these into the login form — use your password instead.",
+            account_api_tokens_body()))
         (page_wrap("account", "users", "Other people on this Syntaur",
             "Invite, enable, or remove users. Admin only.",
             tab_users()))
@@ -572,6 +575,69 @@ fn account_security_body() -> Markup {
             div id="ss-sessions-list" class="ss-list" {}
             div class="ss-actions" {
                 button class="ss-btn-secondary" onclick="ssSignOutOthers()" { "Sign out everywhere else" }
+            }
+        }
+    }
+}
+
+// ── API tokens (per-user) ──────────────────────────────────
+// List + create + revoke flow wired to GET/POST/DELETE /api/me/tokens. JS
+// in LEGACY_JS exposes the ssTokensLoad / ssTokensCreate / ssTokensRevoke
+// functions that hit those endpoints.
+fn account_api_tokens_body() -> Markup {
+    html! {
+        div class="ss-card" {
+            h3 class="ss-card-title" { "What these are" }
+            p class="ss-help" {
+                "API tokens let scripts and command-line tools talk to Syntaur on your behalf. "
+                "They start with "
+                code { "ocp_" }
+                " and don't expire unless you give them a lifetime or revoke them. "
+                "They are NOT meant for logging into the web dashboard — use your password there."
+            }
+        }
+
+        div class="ss-card" {
+            h3 class="ss-card-title" { "Create a new token" }
+            div class="ss-field" {
+                label class="ss-label" for="tok-name" { "Name" }
+                input id="tok-name" class="ss-input" type="text" placeholder="laptop-cli, home-script, …" maxlength="64" {}
+                p class="ss-help" { "A label you'll recognize later. 1–64 characters." }
+            }
+            div class="ss-field" {
+                label class="ss-label" for="tok-ttl" { "Lifetime" }
+                select id="tok-ttl" class="ss-input" {
+                    option value="" { "Never expires" }
+                    option value="24" { "1 day" }
+                    option value="168" { "1 week" }
+                    option value="720" selected { "30 days" }
+                    option value="8760" { "1 year" }
+                }
+            }
+            div class="ss-actions" {
+                button class="ss-btn-primary" onclick="ssTokensCreate()" { "Create token" }
+            }
+            // The one-time display. JS unhides this row after a successful
+            // mint. Copy-to-clipboard button + revoke-now escape hatch are
+            // part of the block so users don't need to hunt for them.
+            div id="tok-reveal" class="ss-card" style="display:none;border:1px solid var(--ss-accent, #3b82f6);margin-top:12px" {
+                p class="ss-help" style="color:var(--ss-accent,#3b82f6)" {
+                    "Copy this token now. It will not be shown again."
+                }
+                div style="display:flex;gap:8px;align-items:center" {
+                    code id="tok-reveal-value" style="flex:1;padding:8px;background:var(--ss-panel-2,#141a24);border-radius:6px;word-break:break-all;font-size:12px" { "" }
+                    button class="ss-btn-secondary" onclick="ssTokensCopy()" { "Copy" }
+                }
+            }
+        }
+
+        div class="ss-card" {
+            div class="ss-card-head" {
+                h3 class="ss-card-title" { "Your tokens" }
+                button class="ss-btn-secondary" onclick="ssTokensLoad()" { "Refresh" }
+            }
+            div id="tok-list" class="ss-list" {
+                p class="ss-help" id="tok-list-empty" { "Loading…" }
             }
         }
     }
@@ -1022,6 +1088,7 @@ const SECTIONS: &[SectionDef] = &[
     SectionDef { slug: "account", title: "Account", pages: &[
         PageDef { slug: "profile", title: "Profile", badge: None, scope: "per-user", keywords: "name email username display", description: "Your identity and personal info" },
         PageDef { slug: "security", title: "Password & security", badge: None, scope: "per-user", keywords: "password login sessions signout logout 2fa", description: "Change password, active sessions" },
+        PageDef { slug: "api-tokens", title: "API tokens", badge: None, scope: "per-user", keywords: "api token integration cli ocp bearer authorization scripts", description: "Long-lived tokens for scripts and CLI integrations. Not for login." },
         PageDef { slug: "users", title: "Users", badge: Some("admin"), scope: "admin", keywords: "invite team members users roles admin", description: "Invite and manage users (admin only)" },
     ]},
     SectionDef { slug: "agents", title: "Agents", pages: &[

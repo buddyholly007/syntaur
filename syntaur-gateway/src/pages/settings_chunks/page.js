@@ -523,3 +523,111 @@ async function installShortcut(target) {
   btn.disabled = false;
   btn.textContent = target === 'desktop' ? 'Add to Desktop' : 'Install App Shortcut';
 }
+
+// ── API tokens (per-user) ────────────────────────────────────────────────
+// Backs the /settings#account/api-tokens page. List + create + revoke
+// against /api/me/tokens. Uses authFetch which already attaches the
+// Authorization: Bearer header from localStorage.
+
+async function ssTokensLoad() {
+  const list = document.getElementById('tok-list');
+  const empty = document.getElementById('tok-list-empty');
+  if (!list) return;
+  try {
+    const data = await authFetch('/api/me/tokens').then(r => r.json());
+    const toks = (data.tokens || []).filter(t => !t.revoked_at);
+    if (toks.length === 0) {
+      list.innerHTML = '<p class="ss-help" id="tok-list-empty">No tokens yet. Create one above.</p>';
+      return;
+    }
+    list.innerHTML = toks.map(t => {
+      const created = t.created_at ? new Date(t.created_at * 1000).toLocaleString() : '—';
+      const used    = t.last_used_at ? new Date(t.last_used_at * 1000).toLocaleString() : 'never';
+      return `
+        <div class="ss-list-row" style="display:flex;justify-content:space-between;align-items:center;padding:10px;border-bottom:1px solid var(--ss-line,#1d242f)">
+          <div>
+            <div style="font-weight:600">${esc(t.name)}</div>
+            <div class="ss-help" style="margin-top:2px">Created ${esc(created)} · last used ${esc(used)}</div>
+          </div>
+          <button class="ss-btn-secondary" onclick="ssTokensRevoke(${t.id}, '${esc(t.name)}')">Revoke</button>
+        </div>`;
+    }).join('');
+  } catch (e) {
+    list.innerHTML = `<p class="ss-help" style="color:#f87171">Could not load tokens: ${esc(String(e))}</p>`;
+  }
+}
+
+async function ssTokensCreate() {
+  const nameEl = document.getElementById('tok-name');
+  const ttlEl  = document.getElementById('tok-ttl');
+  const name = (nameEl?.value || '').trim();
+  if (!name) {
+    if (typeof ssToast === 'function') ssToast('Give the token a name first', 'warn');
+    else alert('Give the token a name first');
+    return;
+  }
+  const ttl = ttlEl?.value ? parseInt(ttlEl.value, 10) : null;
+  const body = { token: token, name: name };
+  if (ttl) body.ttl_hours = ttl;
+  try {
+    const resp = await authFetch('/api/me/tokens', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const data = await resp.json();
+    if (!data.ok) {
+      if (typeof ssToast === 'function') ssToast(data.error || 'Could not create token', 'error');
+      else alert(data.error || 'Could not create token');
+      return;
+    }
+    const box = document.getElementById('tok-reveal');
+    const val = document.getElementById('tok-reveal-value');
+    if (val) val.textContent = data.token;
+    if (box) box.style.display = 'block';
+    if (nameEl) nameEl.value = '';
+    ssTokensLoad();
+  } catch (e) {
+    if (typeof ssToast === 'function') ssToast('Network error creating token', 'error');
+    else alert('Network error creating token');
+  }
+}
+
+function ssTokensCopy() {
+  const val = document.getElementById('tok-reveal-value');
+  if (!val) return;
+  try {
+    navigator.clipboard.writeText(val.textContent || '');
+    if (typeof ssToast === 'function') ssToast('Copied to clipboard', 'ok');
+  } catch (e) { /* clipboard blocked; leave visible */ }
+}
+
+async function ssTokensRevoke(id, name) {
+  if (!confirm(`Revoke token "${name}"? Scripts using it will stop working immediately.`)) return;
+  try {
+    const resp = await authFetch(`/api/me/tokens/${id}`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: token })
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      if (typeof ssToast === 'function') ssToast('Token revoked', 'ok');
+      ssTokensLoad();
+    } else {
+      if (typeof ssToast === 'function') ssToast(data.error || 'Could not revoke', 'error');
+      else alert(data.error || 'Could not revoke');
+    }
+  } catch (e) {
+    if (typeof ssToast === 'function') ssToast('Network error revoking token', 'error');
+  }
+}
+
+// Lazy-load the list when the api-tokens sub-page is activated.
+window.addEventListener('hashchange', () => {
+  if (location.hash === '#account/api-tokens') ssTokensLoad();
+});
+if (location.hash === '#account/api-tokens') {
+  // First load — wait a tick for token to be available.
+  setTimeout(ssTokensLoad, 100);
+}
