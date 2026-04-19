@@ -3016,7 +3016,7 @@ async fn handle_admin_create_user(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AdminCreateUserRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let principal = resolve_principal(&state, &req.token).await?;
+    let principal = resolve_principal_scoped(&state, &req.token, "admin").await?;
     require_admin(&principal)?;
     match state.users.create_user(&req.name).await {
         Ok(u) => {
@@ -3040,7 +3040,7 @@ async fn handle_admin_list_users(
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
-    let principal = resolve_principal(&state, token).await?;
+    let principal = resolve_principal_scoped(&state, token, "admin").await?;
     require_admin(&principal)?;
     match state.users.list_users().await {
         Ok(users) => Ok(Json(serde_json::json!({"users": users}))),
@@ -3052,6 +3052,16 @@ async fn handle_admin_list_users(
 struct AdminMintTokenRequest {
     token: String,
     name: String,
+    /// Optional Phase 4.2 module scopes (e.g. `["tax"]`, `["admin"]`,
+    /// `["ha_control"]`). Empty / absent mints an unscoped full-session
+    /// token. A scoped token can only reach endpoints that opt into one
+    /// of its scopes via `resolve_principal_scoped` / `require_scope`.
+    #[serde(default)]
+    scopes: Vec<String>,
+    /// Optional TTL in hours. Unset = never expires (legacy default).
+    /// Scoped tokens default to 720h (30d) if the caller doesn't pick one.
+    #[serde(default)]
+    ttl_hours: Option<u64>,
 }
 
 async fn handle_admin_mint_token(
@@ -3059,22 +3069,54 @@ async fn handle_admin_mint_token(
     axum::extract::Path(user_id): axum::extract::Path<i64>,
     Json(req): Json<AdminMintTokenRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let principal = resolve_principal(&state, &req.token).await?;
+    let principal = resolve_principal_scoped(&state, &req.token, "admin").await?;
     require_admin(&principal)?;
-    match state.users.mint_token(user_id, &req.name).await {
+
+    // Scrub + dedupe scopes. Only accept lowercase alphanumeric + underscore
+    // to keep the token-scope DB column predictable.
+    let scopes: Vec<String> = req
+        .scopes
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let scopes_str = scopes.join(",");
+
+    // Scoped tokens default to 30-day TTL; unscoped mirror the legacy
+    // never-expires behavior unless the caller specifies otherwise.
+    let ttl_hours = match (req.ttl_hours, scopes.is_empty()) {
+        (Some(h), _) => Some(h),
+        (None, false) => Some(720),
+        (None, true) => None,
+    };
+
+    let mint_res = state
+        .users
+        .mint_token_scoped(user_id, &req.name, &scopes_str, ttl_hours)
+        .await;
+
+    match mint_res {
         Ok(raw) => {
             crate::security::audit_log(
                 &state,
                 Some(principal.user_id()),
                 "admin.token.mint",
                 Some(&format!("user:{user_id}")),
-                serde_json::json!({"label": req.name}),
+                serde_json::json!({
+                    "label": req.name,
+                    "scopes": scopes,
+                    "ttl_hours": ttl_hours,
+                }),
                 None,
                 None,
             ).await;
             Ok(Json(serde_json::json!({
                 "user_id": user_id,
                 "token": raw,
+                "scopes": scopes,
+                "ttl_hours": ttl_hours,
                 "note": "shown once — save this value"
             })))
         }
@@ -3421,7 +3463,7 @@ async fn handle_admin_delete_user(
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
-    let principal = resolve_principal(&state, token).await?;
+    let principal = resolve_principal_scoped(&state, token, "admin").await?;
     require_admin(&principal)?;
     match state.users.delete_user(user_id).await {
         Ok(()) => {
@@ -3510,7 +3552,7 @@ async fn handle_admin_get_sharing(
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
-    let principal = resolve_principal(&state, token).await?;
+    let principal = resolve_principal_scoped(&state, token, "admin").await?;
     require_admin(&principal)?;
     let mode = state.sharing_mode.read().await.clone();
     Ok(Json(serde_json::json!({"mode": mode})))
@@ -3526,7 +3568,7 @@ async fn handle_admin_set_sharing(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AdminSetSharingRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let principal = resolve_principal(&state, &req.token).await?;
+    let principal = resolve_principal_scoped(&state, &req.token, "admin").await?;
     require_admin(&principal)?;
     if let Err(e) = state.users.set_sharing_mode(&req.mode, principal.user_id()).await {
         return Ok(Json(serde_json::json!({"error": e})));
