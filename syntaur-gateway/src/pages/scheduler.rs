@@ -1423,13 +1423,11 @@ const PAGE_JS: &str = r##"
   }
 
   const BORDERS = [
-    // Painted frames — commissioned artworks. Winner is the default.
-    { key: 'garden-notebook', name: 'Garden Notebook', painted: true },
-    { key: 'heirloom',        name: 'Heirloom',        painted: true },
-    { key: 'woodland',        name: 'Woodland',        painted: true },
-    { key: 'cosmos',          name: 'Cosmos',          painted: true },
-    { key: 'field-journal',   name: 'Field Journal',   painted: true },
-    // CSS-only minimal frames
+    // Painted frames are behind a WIP flag while the aspect-mismatch
+    // between painted 16:10 canvas and the scheduler's taller content
+    // is resolved. Keep the assets shipped (they're embedded in the
+    // binary) but hidden from the picker until the layout redesign
+    // that compacts content to fit the painted paper area.
     { key: 'notebook',        name: 'Spiral notebook' },
     { key: 'disc',            name: 'Disc-bound' },
     { key: 'moleskine',       name: 'Moleskine' },
@@ -1441,8 +1439,8 @@ const PAGE_JS: &str = r##"
     { key: 'none',            name: 'Clean' },
   ];
   function applyBorder(key) {
-    document.body.setAttribute('data-sch-border', key || 'garden-notebook');
-    S.prefs.border = key || 'garden-notebook';
+    document.body.setAttribute('data-sch-border', key || 'notebook');
+    S.prefs.border = key || 'notebook';
   }
 
   // ── Modal UX: backdrop click dismisses, ESC closes top modal ──────
@@ -1547,10 +1545,10 @@ const PAGE_JS: &str = r##"
       const prefs = await api('/api/scheduler/prefs');
       if (prefs && prefs.theme) applyTheme(prefs.theme);
       if (prefs && prefs.border) applyBorder(prefs.border);
-      else applyBorder('garden-notebook');
+      else applyBorder('notebook');
       if (prefs && prefs.default_view && window.innerWidth > 900) { S.view = prefs.default_view; }
       S.prefs = Object.assign(S.prefs, prefs || {});
-    } catch(e) { console.warn('[sch] prefs load:', e); applyBorder('garden-notebook'); }
+    } catch(e) { console.warn('[sch] prefs load:', e); applyBorder('notebook'); }
     if (window.innerWidth <= 900) S.view = 'day';
 
     try {
