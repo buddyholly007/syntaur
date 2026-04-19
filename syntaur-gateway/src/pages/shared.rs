@@ -78,6 +78,7 @@ pub fn shell(page: Page, body_content: Markup) -> Markup {
             body class="bg-gray-950 text-gray-100 min-h-screen" {
                 (body_content)
                 @if page.authed {
+                    (PreEscaped(GLOBAL_MINI_PLAYER_HTML))
                     (PreEscaped(TOP_BAR_SCRIPT))
                     (bug_report_overlay())
                 }
@@ -311,6 +312,65 @@ const TOP_BAR_STYLES: &str = r#"
     padding: 4px; border-radius: 4px; display: inline-flex; align-items: center;
 }
 .syntaur-topbar .bugrpt-btn:hover { color: rgb(209,213,219); background: rgba(55,65,81,0.4); }
+
+/* Global mini-player pill — fixed bottom-right, visible on every authed page */
+#syntaur-mini-player {
+    position: fixed; right: 16px; bottom: 16px; z-index: 55;
+    background: rgba(15, 23, 42, 0.92); backdrop-filter: blur(14px);
+    border: 1px solid rgb(55, 65, 81); border-radius: 999px;
+    padding: 6px 12px 6px 8px;
+    display: inline-flex; align-items: center; gap: 10px;
+    color: rgb(229, 231, 235); font-family: Inter, system-ui, sans-serif; font-size: 12px;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+    max-width: 420px;
+    transition: opacity 0.25s;
+}
+#syntaur-mini-player[hidden] { display: none; }
+#syntaur-mini-player .smp-cover {
+    width: 28px; height: 28px; border-radius: 50%;
+    background: rgb(31, 41, 55); display: inline-flex; align-items: center; justify-content: center;
+    color: rgb(156, 163, 175); text-decoration: none; flex-shrink: 0;
+}
+#syntaur-mini-player .smp-cover:hover { color: rgb(229, 231, 235); background: rgb(55, 65, 81); }
+#syntaur-mini-player .smp-meta { min-width: 0; display: flex; flex-direction: column; max-width: 240px; }
+#syntaur-mini-player .smp-title {
+    font-weight: 600; color: rgb(229, 231, 235);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    line-height: 1.25;
+}
+#syntaur-mini-player .smp-sub   {
+    color: rgb(156, 163, 175); font-size: 11px; line-height: 1.2;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#syntaur-mini-player .smp-btn {
+    background: transparent; border: none; cursor: pointer;
+    color: rgb(156, 163, 175); padding: 4px; border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 24px; height: 24px; flex-shrink: 0;
+}
+#syntaur-mini-player .smp-btn:hover { color: rgb(229, 231, 235); background: rgba(55, 65, 81, 0.6); }
+@media (max-width: 640px) {
+    #syntaur-mini-player { right: 8px; bottom: 8px; max-width: calc(100vw - 16px); }
+    #syntaur-mini-player .smp-meta { max-width: 160px; }
+}
+"#;
+
+const GLOBAL_MINI_PLAYER_HTML: &str = r#"
+<div id="syntaur-mini-player" hidden aria-label="Now playing">
+  <a href="/music" class="smp-cover" title="Open music module" aria-label="Music">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+  </a>
+  <div class="smp-meta">
+    <div class="smp-title" id="smp-title">—</div>
+    <div class="smp-sub"   id="smp-sub">—</div>
+  </div>
+  <button class="smp-btn" id="smp-play" onclick="syntaurMpControl('play_pause')" aria-label="Play / pause">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
+  </button>
+  <button class="smp-btn" onclick="syntaurMpControl('next')" aria-label="Next track">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,4 15,12 5,20"/><rect x="16" y="4" width="2" height="16"/></svg>
+  </button>
+</div>
 "#;
 
 const MODULES_PALETTE_HTML: &str = r#"
@@ -449,6 +509,55 @@ const TOP_BAR_SCRIPT: &str = r##"
       window.closeModulesPalette();
     }
   });
+
+  // ── Global mini-player (bottom-right pill, every authed page) ──
+  // Polls /api/music/now_playing once a page loads and every 6s. Hidden
+  // when nothing is playing. Never noisy.
+  let _smpLastEntity = null;
+  async function smpPoll() {
+    const token = (function(){
+      try { return localStorage.getItem('syntaur_token') || sessionStorage.getItem('syntaur_token') || ''; } catch(_e){ return ''; }
+    })();
+    if (!token) return;
+    const pill = document.getElementById('syntaur-mini-player');
+    if (!pill) return;
+    try {
+      const r = await fetch('/api/music/now_playing?token=' + encodeURIComponent(token));
+      if (!r.ok) { pill.hidden = true; return; }
+      const d = await r.json();
+      const state = d.state || 'off';
+      const song = d.song || '';
+      const artist = d.artist || '';
+      _smpLastEntity = d.entity_id || null;
+      if (state === 'off' || !song) { pill.hidden = true; return; }
+      pill.hidden = false;
+      pill.style.opacity = d.ducking ? '0.55' : '1';
+      const titleEl = document.getElementById('smp-title');
+      const subEl = document.getElementById('smp-sub');
+      if (titleEl) titleEl.textContent = song;
+      if (subEl) subEl.textContent = artist || (d.source || '');
+      const pb = document.getElementById('smp-play');
+      if (pb) {
+        pb.innerHTML = state === 'playing'
+          ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>'
+          : '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>';
+      }
+    } catch(_e) { /* silent — mini-player never alerts */ }
+  }
+  window.syntaurMpControl = async function(action) {
+    const token = (function(){ try { return localStorage.getItem('syntaur_token') || sessionStorage.getItem('syntaur_token') || ''; } catch(_e){ return ''; } })();
+    if (!token) return;
+    try {
+      await fetch('/api/music/control', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, action, entity_id: _smpLastEntity }) });
+      setTimeout(smpPoll, 400);
+    } catch(_e) {}
+  };
+  // Skip on /music (dashboard's own player surface is richer there).
+  if (!location.pathname.startsWith('/music')) {
+    smpPoll();
+    setInterval(smpPoll, 6000);
+  }
 })();
 </script>
 "##;
