@@ -661,7 +661,10 @@ const BODY_HTML: &str = r##"<!-- Module sub-bar — "Bridge live" indicator + re
           <h3 class="font-medium text-gray-200 text-sm">Local library</h3>
           <p id="local-lib-summary" class="text-xs text-gray-500 mt-0.5">Point at a folder of audio files on this host.</p>
         </div>
-        <button id="local-lib-scan" onclick="scanLocalLibrary()" class="text-[10px] text-gray-500 hover:text-oc-400 font-mono uppercase tracking-wider hidden">Rescan</button>
+        <div class="flex items-center gap-3">
+          <button id="local-lib-cleanup" onclick="cleanUpTags()" title="Find tracks with missing or messy tags and let the AI clean them up" class="text-[10px] text-gray-500 hover:text-oc-400 font-mono uppercase tracking-wider hidden">Clean up tags</button>
+          <button id="local-lib-scan" onclick="scanLocalLibrary()" class="text-[10px] text-gray-500 hover:text-oc-400 font-mono uppercase tracking-wider hidden">Rescan</button>
+        </div>
       </div>
 
       <!-- Folder list -->
@@ -733,6 +736,18 @@ const BODY_HTML: &str = r##"<!-- Module sub-bar — "Bridge live" indicator + re
 
       <!-- Hidden <audio> used for playback of local files -->
       <audio id="local-audio" style="display:none" preload="none"></audio>
+    </div>
+
+    <!-- Local track details drawer — MusicBrainz lookup + manual edit.
+         Hidden by default; openLocalDetails(trackId) pops it open. -->
+    <div id="local-details-modal" class="hidden" style="position:fixed;inset:0;z-index:9998;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);padding:16px;box-sizing:border-box;">
+      <div style="background:#111827;border:1px solid #374151;border-radius:12px;width:100%;max-width:560px;max-height:85vh;display:flex;flex-direction:column;overflow:hidden;box-sizing:border-box;">
+        <div style="padding:14px 16px;border-bottom:1px solid #1f2937;display:flex;align-items:center;gap:12px;flex-shrink:0;">
+          <h3 style="font-weight:500;color:#e5e7eb;flex:1;margin:0;font-size:14px;">Track details</h3>
+          <button onclick="closeLocalDetails()" style="color:#6b7280;background:none;border:none;font-size:22px;line-height:1;cursor:pointer;padding:0 6px;">&times;</button>
+        </div>
+        <div id="local-details-body" style="flex:1;overflow-y:auto;padding:16px;"></div>
+      </div>
     </div>
 
     <!-- AI DJ — chat-style transcript above input. Each turn = your prompt
@@ -1810,12 +1825,16 @@ async function loadLocalFolders() {
     if (!folders.length) {
       el.innerHTML = '<p class="text-xs text-gray-500 italic">No folders added yet.</p>';
       document.getElementById('local-lib-scan').classList.add('hidden');
+      const cleanupBtn = document.getElementById('local-lib-cleanup');
+      if (cleanupBtn) cleanupBtn.classList.add('hidden');
       document.getElementById('local-lib-summary').textContent = 'Point at a folder of audio files on this host.';
     } else {
       const total = folders.reduce((s, f) => s + (f.track_count || 0), 0);
       document.getElementById('local-lib-summary').textContent =
         folders.length + ' folder(s) · ' + total + ' track(s) indexed';
       document.getElementById('local-lib-scan').classList.remove('hidden');
+      const cleanupBtn = document.getElementById('local-lib-cleanup');
+      if (cleanupBtn && total > 0) cleanupBtn.classList.remove('hidden');
       el.innerHTML = folders.map(f => {
         const lastScan = f.last_scan_at
           ? new Date(f.last_scan_at * 1000).toLocaleDateString()
@@ -2055,17 +2074,23 @@ async function loadLocalTracks() {
         const title = escapeHtml(t.title || '(untitled)');
         const artist = escapeHtml(t.artist || '');
         const album = escapeHtml(t.album || '');
-        return '<div class="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-gray-900 group">'
-          + '<button onclick="playLocalTrack(' + t.id + ', \''
-            + (t.title || '').replace(/'/g, "\\'") + '\', \''
-            + (t.artist || '').replace(/'/g, "\\'") + '\')"'
-            + ' class="flex-1 min-w-0 text-left">'
-          + '<p class="text-xs text-gray-200 truncate">' + title + '</p>'
+        const srcBadge = t.metadata_source === 'llm'
+          ? '<span title="Tags inferred by AI" class="text-[9px] text-amber-400 font-mono uppercase tracking-wider">auto</span>'
+          : t.metadata_source === 'musicbrainz'
+            ? '<span title="Canonical tags from MusicBrainz" class="text-[9px] text-emerald-400 font-mono uppercase tracking-wider">MB</span>'
+            : '';
+        return '<div class="flex items-center gap-2 px-2 py-1 rounded hover:bg-gray-900 group" data-track-row="' + t.id + '">'
+          + '<button class="flex-1 min-w-0 text-left local-play-btn"'
+          + ' data-track-id="' + t.id + '"'
+          + ' data-track-title="' + title + '"'
+          + ' data-track-artist="' + artist + '">'
+          + '<p class="text-xs text-gray-200 truncate">' + title + (srcBadge ? ' ' + srcBadge : '') + '</p>'
           + (artist || album
             ? '<p class="text-[10px] text-gray-500 truncate">' + [artist, album].filter(Boolean).join(' · ') + '</p>'
             : '')
           + '</button>'
           + '<span class="text-[10px] text-gray-600 font-mono flex-shrink-0">' + minutes(t.duration_ms) + '</span>'
+          + '<button class="text-[10px] text-gray-600 hover:text-oc-400 opacity-0 group-hover:opacity-100 transition-opacity local-details-btn flex-shrink-0" title="Look up canonical info + edit" data-track-id="' + t.id + '">Details</button>'
           + '</div>';
       }).join('');
   } catch(e) { console.warn('[local-lib] load tracks failed', e); el.innerHTML = ''; }
@@ -2099,6 +2124,164 @@ async function playLocalTrack(trackId, title, artist) {
     }
   } finally {
     localPlayBusy = false;
+  }
+}
+
+// Top-level click delegation on the local track list. Two classes:
+// .local-play-btn (row-play) and .local-details-btn (opens the MB
+// lookup + edit drawer). Using data attributes + delegation avoids the
+// escape bugs of inlined onclick="..." strings and survives track list
+// re-renders without rewiring.
+(function() {
+  const listEl = document.getElementById('local-lib-tracks');
+  if (!listEl) return;
+  listEl.addEventListener('click', (ev) => {
+    const playBtn = ev.target.closest('.local-play-btn');
+    if (playBtn) {
+      const id = parseInt(playBtn.dataset.trackId, 10);
+      playLocalTrack(id, playBtn.dataset.trackTitle || '', playBtn.dataset.trackArtist || '');
+      return;
+    }
+    const detailsBtn = ev.target.closest('.local-details-btn');
+    if (detailsBtn) {
+      const id = parseInt(detailsBtn.dataset.trackId, 10);
+      openLocalDetails(id);
+      return;
+    }
+  });
+})();
+
+// ── Local track details drawer (MusicBrainz lookup + manual edit) ────
+const localDetailsState = { trackId: null, current: null, matches: [] };
+
+async function openLocalDetails(trackId) {
+  localDetailsState.trackId = trackId;
+  const modal = document.getElementById('local-details-modal');
+  const body = document.getElementById('local-details-body');
+  if (!modal || !body) return;
+  modal.classList.remove('hidden');
+  modal.style.display = 'flex';
+  body.innerHTML = '<p class="text-xs text-gray-500 italic">Looking this up on MusicBrainz…</p>';
+  try {
+    const r = await fetch('/api/music/local/lookup/' + trackId + '?token=' + encodeURIComponent(token));
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    localDetailsState.current = data.current || {};
+    localDetailsState.matches = data.matches || [];
+    renderLocalDetails();
+  } catch(e) {
+    body.innerHTML = '<p class="text-xs text-red-400">Lookup failed: ' + escapeHtml(e.message || '') + '</p>';
+  }
+}
+
+function closeLocalDetails() {
+  const modal = document.getElementById('local-details-modal');
+  if (modal) { modal.classList.add('hidden'); modal.style.display = 'none'; }
+  localDetailsState.trackId = null;
+}
+
+function renderLocalDetails() {
+  const body = document.getElementById('local-details-body');
+  if (!body) return;
+  const cur = localDetailsState.current || {};
+  const matches = localDetailsState.matches || [];
+  let html = '';
+  html += '<div class="mb-4 p-3 rounded-lg bg-gray-900 border border-gray-800">'
+       +    '<p class="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Current</p>'
+       +    '<p class="text-sm text-gray-200">' + escapeHtml(cur.title || '(no title)') + '</p>'
+       +    '<p class="text-xs text-gray-500">' + escapeHtml(cur.artist || '(no artist)') + (cur.album ? ' · ' + escapeHtml(cur.album) : '') + '</p>'
+       + '</div>';
+  if (matches.length === 0) {
+    html += '<p class="text-xs text-gray-500 italic">No MusicBrainz matches found. You can edit the tags manually below.</p>';
+  } else {
+    html += '<p class="text-[10px] text-gray-500 uppercase tracking-wider mb-2">Matches on MusicBrainz</p>';
+    html += '<div class="space-y-2">' + matches.map((m, i) =>
+      '<div class="p-3 rounded-lg bg-gray-900 border border-gray-800 hover:border-oc-600 transition-colors">'
+      +   '<div class="flex items-start justify-between gap-3">'
+      +     '<div class="flex-1 min-w-0">'
+      +       '<p class="text-sm text-gray-200 truncate">' + escapeHtml(m.title || '(unknown)') + '</p>'
+      +       '<p class="text-xs text-gray-500 truncate">' + escapeHtml(m.artist || '') + (m.album ? ' · ' + escapeHtml(m.album) : '') + (m.year ? ' · ' + escapeHtml(m.year) : '') + '</p>'
+      +     '</div>'
+      +     '<div class="flex items-center gap-2 flex-shrink-0">'
+      +       '<span class="text-[10px] text-gray-600 font-mono">' + (m.score || '') + '</span>'
+      +       '<button onclick="applyLocalMatch(' + i + ')" class="text-xs bg-oc-600 hover:bg-oc-700 text-white px-3 py-1 rounded-lg">Use this</button>'
+      +     '</div>'
+      +   '</div>'
+      + '</div>'
+    ).join('') + '</div>';
+  }
+  html += '<hr class="border-gray-800 my-4">';
+  html += '<p class="text-[10px] text-gray-500 uppercase tracking-wider mb-2">Or edit by hand</p>';
+  html += '<div class="space-y-2">'
+       +    '<input id="local-edit-title" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 outline-none focus:border-oc-500" placeholder="Title" value="' + escapeHtml(cur.title || '') + '">'
+       +    '<input id="local-edit-artist" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 outline-none focus:border-oc-500" placeholder="Artist" value="' + escapeHtml(cur.artist || '') + '">'
+       +    '<input id="local-edit-album" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 outline-none focus:border-oc-500" placeholder="Album" value="' + escapeHtml(cur.album || '') + '">'
+       +    '<button onclick="saveLocalEdit()" class="bg-oc-600 hover:bg-oc-700 text-white px-4 py-1.5 rounded-lg text-sm">Save my edits</button>'
+       + '</div>';
+  body.innerHTML = html;
+}
+
+async function applyLocalMatch(idx) {
+  const m = localDetailsState.matches[idx];
+  if (!m || !localDetailsState.trackId) return;
+  try {
+    const r = await fetch('/api/music/local/match/' + localDetailsState.trackId, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        token, mbid: m.mbid,
+        title: m.title || '', artist: m.artist || '',
+        album: m.album || null, source: 'musicbrainz',
+      }),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    showMusicNotice('\u2713 Updated from MusicBrainz', false);
+    closeLocalDetails();
+    loadLocalTracks();
+  } catch(e) {
+    showMusicNotice('Update failed: ' + (e.message || ''), true);
+  }
+}
+
+async function saveLocalEdit() {
+  const t = document.getElementById('local-edit-title').value.trim();
+  const a = document.getElementById('local-edit-artist').value.trim();
+  const al = document.getElementById('local-edit-album').value.trim();
+  if (!t && !a) { showMusicNotice('Need at least a title or artist.', true); return; }
+  try {
+    const r = await fetch('/api/music/local/match/' + localDetailsState.trackId, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, title: t, artist: a, album: al || null, source: 'user_edit' }),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    showMusicNotice('\u2713 Saved', false);
+    closeLocalDetails();
+    loadLocalTracks();
+  } catch(e) {
+    showMusicNotice('Save failed: ' + (e.message || ''), true);
+  }
+}
+
+// ── Bulk LLM tag cleanup ─────────────────────────────────────────────
+async function cleanUpTags() {
+  const btn = document.getElementById('local-lib-cleanup');
+  const orig = btn ? btn.textContent : '';
+  if (btn) { btn.textContent = 'Cleaning…'; btn.disabled = true; }
+  try {
+    const r = await fetch('/api/music/local/retag_all', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, limit: 100 }),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    showMusicNotice(d.message || ('Updated ' + (d.updated || 0) + ' tracks'), false);
+    loadLocalTracks();
+  } catch(e) {
+    showMusicNotice("Couldn't clean up tags: " + (e.message || ''), true);
+  } finally {
+    if (btn) { btn.textContent = orig; btn.disabled = false; }
   }
 }
 

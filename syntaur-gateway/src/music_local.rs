@@ -413,26 +413,26 @@ pub async fn list_tracks(
 
         let list_sql = if search.is_some() {
             if folder_filter.is_some() {
-                "SELECT id, title, artist, album, duration_ms, track_no, year
+                "SELECT id, title, artist, album, duration_ms, track_no, year, metadata_source
                  FROM local_music_tracks
                  WHERE user_id = ? AND folder_id = ? AND (LOWER(COALESCE(title,'')) LIKE ?3 OR LOWER(COALESCE(artist,'')) LIKE ?3 OR LOWER(COALESCE(album,'')) LIKE ?3)
                  ORDER BY COALESCE(artist,''), COALESCE(album,''), COALESCE(track_no,0), COALESCE(title,'')
                  LIMIT ?4 OFFSET ?5"
             } else {
-                "SELECT id, title, artist, album, duration_ms, track_no, year
+                "SELECT id, title, artist, album, duration_ms, track_no, year, metadata_source
                  FROM local_music_tracks
                  WHERE user_id = ? AND (LOWER(COALESCE(title,'')) LIKE ?2 OR LOWER(COALESCE(artist,'')) LIKE ?2 OR LOWER(COALESCE(album,'')) LIKE ?2)
                  ORDER BY COALESCE(artist,''), COALESCE(album,''), COALESCE(track_no,0), COALESCE(title,'')
                  LIMIT ?3 OFFSET ?4"
             }
         } else if folder_filter.is_some() {
-            "SELECT id, title, artist, album, duration_ms, track_no, year
+            "SELECT id, title, artist, album, duration_ms, track_no, year, metadata_source
              FROM local_music_tracks
              WHERE user_id = ? AND folder_id = ?
              ORDER BY COALESCE(artist,''), COALESCE(album,''), COALESCE(track_no,0), COALESCE(title,'')
              LIMIT ? OFFSET ?"
         } else {
-            "SELECT id, title, artist, album, duration_ms, track_no, year
+            "SELECT id, title, artist, album, duration_ms, track_no, year, metadata_source
              FROM local_music_tracks
              WHERE user_id = ?
              ORDER BY COALESCE(artist,''), COALESCE(album,''), COALESCE(track_no,0), COALESCE(title,'')
@@ -450,6 +450,7 @@ pub async fn list_tracks(
                 "duration_ms": r.get::<_, Option<i64>>(4)?,
                 "track_no": r.get::<_, Option<i64>>(5)?,
                 "year":     r.get::<_, Option<i64>>(6)?,
+                "metadata_source": r.get::<_, Option<String>>(7)?,
             }))
         };
         match (folder_filter, &search_pat) {
@@ -585,5 +586,351 @@ fn content_type_for_path(p: &Path) -> &'static str {
         Some("dts")                              => "audio/vnd.dts",
         _ => "application/octet-stream",
     }
+}
+
+// ── MusicBrainz lookup + apply-match ─────────────────────────────────
+// Sean's ask: "see information that perhaps is labeled in a different
+// way" and "auto name and categorize music tool for items not labeled
+// correctly." MusicBrainz is the community's canonical metadata
+// registry — free, no API key, generous rate limit (1 req/sec).
+//
+// The lookup endpoint (GET /api/music/local/lookup/:id) takes a track,
+// reads its current artist + title, and returns the top MB recording
+// matches with canonical title, artist-credit, release name, year, and
+// MBID. The UI shows those side-by-side with the file's current tags
+// and lets the user pick the right one.
+//
+// The apply endpoint (POST /api/music/local/match/:id) writes the
+// chosen canonical values back into the row + sets metadata_source =
+// 'musicbrainz' so we can badge the entry as canonically-tagged.
+//
+// Rate limiting: MusicBrainz policy is 1 req/sec across the whole
+// application. We serialize calls with a global mutex + a sleep. That's
+// fine for a small-family deployment; if this scales, swap for a
+// proper leaky-bucket.
+
+static MB_LAST_CALL: tokio::sync::Mutex<Option<std::time::Instant>> =
+    tokio::sync::Mutex::const_new(None);
+
+/// User-Agent string required by MusicBrainz. Includes project name,
+/// version, and a contact path (their policy page specifically asks
+/// for a contact). Keep under ~80 chars.
+fn mb_user_agent() -> String {
+    format!("Syntaur/{} ( https://github.com/buddyholly007/syntaur )",
+            env!("CARGO_PKG_VERSION"))
+}
+
+/// Sleep just long enough that no two MB calls are made within 1 second.
+async fn mb_rate_limit() {
+    let mut last = MB_LAST_CALL.lock().await;
+    if let Some(prev) = *last {
+        let since = prev.elapsed();
+        if since < std::time::Duration::from_millis(1100) {
+            let wait = std::time::Duration::from_millis(1100) - since;
+            tokio::time::sleep(wait).await;
+        }
+    }
+    *last = Some(std::time::Instant::now());
+}
+
+#[derive(Deserialize)]
+pub struct TrackIdPath {
+    #[serde(rename = "id")]
+    pub _id: i64,
+}
+
+/// GET /api/music/local/lookup/:id — ask MusicBrainz for canonical
+/// metadata matching this track's current artist + title.
+pub async fn lookup(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<i64>,
+    Query(q): Query<TokenQuery>,
+) -> Result<Json<Value>, StatusCode> {
+    let token = extract_token(&headers, q.token.as_deref());
+    let principal = crate::resolve_principal(&state, &token).await?;
+    let uid = principal.user_id();
+
+    // Read current tags for this user's track.
+    let db = state.db_path.clone();
+    let row: Option<(Option<String>, Option<String>, Option<String>)> =
+        tokio::task::spawn_blocking(move || -> rusqlite::Result<_> {
+            let conn = rusqlite::Connection::open(&db)?;
+            let mut stmt = conn.prepare(
+                "SELECT title, artist, album FROM local_music_tracks WHERE id = ? AND user_id = ?"
+            )?;
+            Ok(stmt.query_row(rusqlite::params![id, uid], |r| Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))).ok())
+        }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+          .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let (title, artist, album) = row.ok_or(StatusCode::NOT_FOUND)?;
+
+    // Build MB search. Unquoted queries are less precise; Lucene-style
+    // field queries (`recording:"x" AND artist:"y"`) work best.
+    let mut terms: Vec<String> = Vec::new();
+    if let Some(t) = title.as_ref().filter(|s| !s.is_empty()) {
+        terms.push(format!(r#"recording:"{}""#, t.replace('"', "")));
+    }
+    if let Some(a) = artist.as_ref().filter(|s| !s.is_empty()) {
+        terms.push(format!(r#"artist:"{}""#, a.replace('"', "")));
+    }
+    if terms.is_empty() {
+        return Ok(Json(json!({
+            "current": { "title": title, "artist": artist, "album": album },
+            "matches": [],
+            "reason": "This track has no title or artist tag to look up. Use Clean up tags to let the AI infer them first."
+        })));
+    }
+    let query = terms.join(" AND ");
+
+    mb_rate_limit().await;
+    let resp = state.client.get("https://musicbrainz.org/ws/2/recording/")
+        .query(&[("query", query.as_str()), ("fmt", "json"), ("limit", "5")])
+        .header("User-Agent", mb_user_agent())
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(10))
+        .send().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+    if !resp.status().is_success() {
+        return Err(StatusCode::BAD_GATEWAY);
+    }
+    let j: Value = resp.json().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+
+    // Shape the MB response into something the UI can render without
+    // knowing MB's schema.
+    let recordings = j.get("recordings").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let matches: Vec<Value> = recordings.into_iter().take(5).map(|rec| {
+        let mbid = rec.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let title = rec.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let score = rec.get("score").and_then(|v| v.as_i64()).unwrap_or(0);
+        let length_ms = rec.get("length").and_then(|v| v.as_i64());
+        // artist-credit is an array of {name, artist: {...}} — join by space.
+        let artist_credit = rec.get("artist-credit")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|ac| {
+                ac.get("name").and_then(|n| n.as_str()).map(|s| s.to_string())
+            }).collect::<Vec<_>>().join(" "))
+            .unwrap_or_default();
+        // Try to pull a release name + year from the first official release.
+        let (release, year) = rec.get("releases")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .map(|rel| {
+                let r_name = rel.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let r_date = rel.get("date").and_then(|v| v.as_str()).unwrap_or("");
+                let y = r_date.split('-').next().unwrap_or("").to_string();
+                (r_name, y)
+            })
+            .unwrap_or_default();
+        json!({
+            "mbid": mbid,
+            "title": title,
+            "artist": artist_credit,
+            "album": release,
+            "year": year,
+            "duration_ms": length_ms,
+            "score": score,
+        })
+    }).collect();
+
+    Ok(Json(json!({
+        "current": { "title": title, "artist": artist, "album": album },
+        "matches": matches,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct ApplyMatchBody {
+    pub token: Option<String>,
+    pub mbid: Option<String>,
+    pub title: String,
+    pub artist: String,
+    pub album: Option<String>,
+    pub source: Option<String>,   // defaults to "musicbrainz"
+}
+
+/// POST /api/music/local/match/:id — write the user-chosen canonical
+/// metadata back to the row. Also accepts plain user-edits when `source`
+/// is explicitly "user_edit".
+pub async fn apply_match(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<i64>,
+    Json(body): Json<ApplyMatchBody>,
+) -> Result<Json<Value>, StatusCode> {
+    let token = extract_token(&headers, body.token.as_deref());
+    let principal = crate::resolve_principal(&state, &token).await?;
+    let uid = principal.user_id();
+    let source = body.source.clone().unwrap_or_else(|| "musicbrainz".to_string());
+    let source_for_sql = source.clone();
+    let db = state.db_path.clone();
+    let mbid = body.mbid.clone();
+    let title = body.title.clone();
+    let artist = body.artist.clone();
+    let album = body.album.clone();
+    let updated: usize = tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
+        let conn = rusqlite::Connection::open(&db)?;
+        conn.execute(
+            "UPDATE local_music_tracks \
+             SET title = ?, artist = ?, album = ?, mbid = ?, metadata_source = ? \
+             WHERE id = ? AND user_id = ?",
+            rusqlite::params![title, artist, album, mbid, source_for_sql, id, uid],
+        )
+    }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+      .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if updated == 0 {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok(Json(json!({ "ok": true, "source": source })))
+}
+
+// ── LLM bulk auto-tag ────────────────────────────────────────────────
+// Finds tracks with empty or suspicious metadata (no title, or title
+// that looks like a filename: "track01", "01 - audio", etc.) and asks
+// the LLM to parse artist/title/album from the file path. Fast,
+// dependency-free, handles the common "wrong casing / missing album
+// tag / foreign characters" case. Acoustic-fingerprint identification
+// is the follow-up for tracks with no recoverable text at all.
+
+#[derive(Deserialize)]
+pub struct RetagBody {
+    pub token: Option<String>,
+    pub limit: Option<usize>,   // cap how many rows to process (default 50)
+}
+
+/// Returns true if a title looks like it came from a filename instead
+/// of a real tag. These are the rows we want the LLM to clean up.
+fn looks_like_filename_title(t: &str) -> bool {
+    let lower = t.trim().to_lowercase();
+    if lower.is_empty() { return true; }
+    if lower.starts_with("track") && lower.len() < 10 { return true; }
+    // "01", "01 - audio", "audio 01", etc.
+    if lower.chars().filter(|c| c.is_ascii_digit()).count() >= lower.chars().count() / 2 { return true; }
+    // Contains a file extension — real tags never do
+    if lower.ends_with(".mp3") || lower.ends_with(".flac") || lower.ends_with(".m4a")
+       || lower.ends_with(".wav") || lower.ends_with(".ogg") || lower.ends_with(".opus") {
+        return true;
+    }
+    false
+}
+
+/// POST /api/music/local/retag_all — bulk auto-tag untagged or
+/// mistagged tracks. Batches 20 rows per LLM call for throughput.
+pub async fn retag_all(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<RetagBody>,
+) -> Result<Json<Value>, StatusCode> {
+    let token = extract_token(&headers, body.token.as_deref());
+    let principal = crate::resolve_principal(&state, &token).await?;
+    let uid = principal.user_id();
+    let limit = body.limit.unwrap_or(50).min(200);
+
+    // Find candidates — either NULL/empty title or looks-like-filename title.
+    let db = state.db_path.clone();
+    let candidates: Vec<(i64, String, Option<String>, Option<String>, Option<String>)> =
+        tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<_>> {
+            let conn = rusqlite::Connection::open(&db)?;
+            let mut stmt = conn.prepare(
+                "SELECT id, path, title, artist, album \
+                 FROM local_music_tracks \
+                 WHERE user_id = ? AND metadata_source != 'user_edit' \
+                 ORDER BY id"
+            )?;
+            let rows: Vec<_> = stmt.query_map(rusqlite::params![uid], |r| Ok((
+                r.get::<_, i64>(0)?, r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?, r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+            )))?.filter_map(|x| x.ok()).collect();
+            Ok(rows)
+        }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+          .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let filtered: Vec<_> = candidates.into_iter().filter(|(_, _path, title, artist, _album)| {
+        let t_suspicious = title.as_ref().map(|t| looks_like_filename_title(t)).unwrap_or(true);
+        let a_missing = artist.as_ref().map(|a| a.trim().is_empty()).unwrap_or(true);
+        t_suspicious || a_missing
+    }).take(limit).collect();
+
+    if filtered.is_empty() {
+        return Ok(Json(json!({
+            "ok": true, "updated": 0, "scanned": 0,
+            "message": "Nothing to clean up — all tags look good."
+        })));
+    }
+
+    // LLM batches of 20.
+    let chain = crate::llm::LlmChain::from_config_fast(&state.config, "main", state.client.clone());
+    let mut updated = 0usize;
+    let total = filtered.len();
+
+    for batch in filtered.chunks(20) {
+        let numbered: String = batch.iter().enumerate().map(|(i, (_, path, t, a, al))| {
+            format!("{}. path={} | current_title={} | current_artist={} | current_album={}",
+                i + 1,
+                path,
+                t.as_deref().unwrap_or(""),
+                a.as_deref().unwrap_or(""),
+                al.as_deref().unwrap_or(""),
+            )
+        }).collect::<Vec<_>>().join("\n");
+        let user_msg = format!(
+"Parse the real song title, artist, and album for each track below from its file path and any existing tags. Return ONLY a JSON array, one object per input, in the same order, shape: [{{\"title\":\"...\",\"artist\":\"...\",\"album\":\"...\"}}]. If a field is genuinely unknown, return an empty string for that field. Normalize capitalization (title case for titles, artist names as commonly written). Strip track numbers, file extensions, 'cd1/disc1' markers, scene release tags, and URLs. Do NOT invent information — if the path has no clue about the album, return empty string for album.
+
+Tracks:
+{}",
+            numbered,
+        );
+        let messages = vec![
+            crate::llm::ChatMessage::system("You are a music-metadata parser. Respond ONLY with a JSON array — no prose, no markdown fences, no explanations."),
+            crate::llm::ChatMessage::user(&user_msg),
+        ];
+        let llm_reply = match chain.call(&messages).await {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let cleaned = llm_reply.trim()
+            .trim_start_matches("```json").trim_start_matches("```")
+            .trim_end_matches("```").trim();
+        let parsed: Vec<Value> = serde_json::from_str(cleaned).unwrap_or_default();
+        if parsed.is_empty() { continue; }
+
+        // Write each parsed row back.
+        for (input, out) in batch.iter().zip(parsed.iter()) {
+            let (track_id, _path, _t, _a, _al) = input;
+            let new_title = out.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let new_artist = out.get("artist").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let new_album = out.get("album").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if new_title.trim().is_empty() && new_artist.trim().is_empty() {
+                continue;
+            }
+            let db = state.db_path.clone();
+            let id = *track_id;
+            let u = uid;
+            let nt = new_title;
+            let na = new_artist;
+            let nal = if new_album.is_empty() { None } else { Some(new_album) };
+            let ok = tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
+                let conn = rusqlite::Connection::open(&db)?;
+                conn.execute(
+                    "UPDATE local_music_tracks \
+                     SET title = ?, artist = ?, album = COALESCE(?, album), metadata_source = 'llm' \
+                     WHERE id = ? AND user_id = ?",
+                    rusqlite::params![nt, na, nal, id, u],
+                )
+            }).await.ok().and_then(|r| r.ok()).unwrap_or(0);
+            if ok > 0 { updated += 1; }
+        }
+    }
+
+    info!("[music-local] retag_all uid={} scanned={} updated={}", uid, total, updated);
+    Ok(Json(json!({
+        "ok": true,
+        "scanned": total,
+        "updated": updated,
+        "message": format!("Cleaned up {} of {} flagged tracks.", updated, total),
+    })))
 }
 

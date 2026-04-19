@@ -563,24 +563,32 @@ pub async fn handle_music_dj(
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let principal = crate::resolve_principal(&state, &req.token).await?;
     let uid = principal.user_id();
-    // Pick which music provider to search through (user preference)
+    // Pick which music provider to search through. preferred_music_provider
+    // now returns "local" first when the user has any local tracks indexed,
+    // so the DJ works without a streaming subscription. Cloud providers are
+    // used as a fallback if local has no matches for the prompt (see the
+    // local search loop below).
     let provider = match preferred_music_provider(&state, uid).await {
         Some(p) => p,
         None => return Ok(Json(serde_json::json!({
-            "error":"No music provider connected",
-            "hint":"Connect Apple Music, Spotify, YouTube Music, or Tidal in Sync settings to enable DJ mode."
+            "error": "No music source yet",
+            "hint": "Add a folder in Local library, or connect Apple Music / Spotify / YouTube Music / Tidal in Sync."
         }))),
     };
 
-    // Load auth credentials for the chosen provider
-    let apple_creds = if provider == "apple_music" { load_apple_music(&state, uid).await } else { None };
-    let spotify_token = if provider == "spotify" { load_oauth_access_token(&state, uid, "spotify").await } else { None };
-    let ytm_token = if provider == "youtube_music" { load_oauth_access_token(&state, uid, "youtube_music").await } else { None };
+    // Load auth credentials for whichever cloud provider might be used —
+    // either as the primary (if no local tracks) or as a fallback after
+    // local runs dry. Cheap no-ops when not needed.
+    let cloud_fallback = preferred_cloud_music_provider(&state, uid).await;
+    let cloud_for_load = if provider == "local" { cloud_fallback.clone() } else { Some(provider.clone()) };
+    let apple_creds = if cloud_for_load.as_deref() == Some("apple_music") { load_apple_music(&state, uid).await } else { None };
+    let spotify_token = if cloud_for_load.as_deref() == Some("spotify") { load_oauth_access_token(&state, uid, "spotify").await } else { None };
+    let ytm_token = if cloud_for_load.as_deref() == Some("youtube_music") { load_oauth_access_token(&state, uid, "youtube_music").await } else { None };
 
+    // Cloud-auth checks only apply when cloud is the primary provider.
     if provider == "youtube_music" && ytm_token.is_none() {
         return Ok(Json(serde_json::json!({"error":"YouTube Music not authorized","hint":"Complete the OAuth flow in Sync. Requires Google OAuth with the youtube scope."})));
     }
-
     if provider == "apple_music" && apple_creds.is_none() {
         return Ok(Json(serde_json::json!({"error":"Apple Music credentials expired","hint":"Reconnect in Sync"})));
     }
@@ -646,38 +654,38 @@ pub async fn handle_music_dj(
         let apple = apple_creds.clone();
         let sp_tok = spotify_token.clone();
         let ytm_tok = ytm_token.clone();
+        let state_clone = Arc::clone(&state);
+        let cloud_fb = cloud_fallback.clone();
         search_handles.push(tokio::spawn(async move {
+            // When the primary is local, try the library first. Fall
+            // through to whichever cloud provider the user has configured
+            // so a local miss doesn't leave the playlist short.
+            if prov == "local" {
+                if let Some(track) = search_local_track(&state_clone, uid, &q).await {
+                    return Some((q.clone(), track));
+                }
+                match cloud_fb.as_deref() {
+                    Some("apple_music") => {
+                        let (dev, mut_, sf) = apple?;
+                        return do_apple_search(&cli, &dev, &mut_, &sf, &q).await.map(|t| (q.clone(), t));
+                    }
+                    Some("spotify") => {
+                        let tok = sp_tok?;
+                        let results = spotify_search(&cli, &tok, &q, 1).await.ok()?;
+                        return results.into_iter().next().map(|t| (q.clone(), t));
+                    }
+                    Some("youtube_music") => {
+                        let tok = ytm_tok?;
+                        let results = youtube_music_search(&cli, &tok, &q, 1).await.ok()?;
+                        return results.into_iter().next().map(|t| (q.clone(), t));
+                    }
+                    _ => return None,
+                }
+            }
             match prov.as_str() {
                 "apple_music" => {
                     let (dev, mut_, sf) = apple?;
-                    let url = format!(
-                        "https://api.music.apple.com/v1/catalog/{}/search?types=songs&limit=1&term={}",
-                        sf, url_encode_local(&q)
-                    );
-                    let resp = cli.get(&url)
-                        .header("Authorization", format!("Bearer {}", dev))
-                        .header("Music-User-Token", mut_)
-                        .header("Origin", "https://music.apple.com")
-                        .timeout(Duration::from_secs(10))
-                        .send().await.ok()?;
-                    if !resp.status().is_success() { return None; }
-                    let j: serde_json::Value = resp.json().await.ok()?;
-                    let song = j.get("results")?.get("songs")?.get("data")?
-                        .as_array()?.first()?.clone();
-                    let attrs = song.get("attributes").cloned().unwrap_or(serde_json::Value::Null);
-                    let id = song.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let q_clone = q.clone();
-                    Some((q, serde_json::json!({
-                        "query": q_clone,
-                        "id": id,
-                        "name": attrs.get("name"),
-                        "artist": attrs.get("artistName"),
-                        "album": attrs.get("albumName"),
-                        "url": attrs.get("url"),
-                        "play_url": build_play_url("apple_music", song.get("id").and_then(|v| v.as_str()).unwrap_or(""), attrs.get("url").and_then(|u| u.as_str())),
-                        "artwork": attrs.get("artwork").and_then(|a| a.get("url")),
-                        "provider": "apple_music",
-                    })))
+                    do_apple_search(&cli, &dev, &mut_, &sf, &q).await.map(|t| (q.clone(), t))
                 }
                 "spotify" => {
                     let tok = sp_tok?;
@@ -904,10 +912,42 @@ pub async fn load_preferred_target(state: &Arc<AppState>, uid: i64) -> Option<(S
 
 // ── Multi-provider music catalog helpers ────────────────────────────────────
 
-/// Returns the preferred music provider id for this user, preferring Apple
-/// Music → Spotify → YouTube Music → Tidal in that order. Only returns a
-/// provider whose credentials are actually in sync_connections.
+/// Returns the preferred music provider id for this user. Priority: local
+/// library first (if the user has scanned any tracks), then Apple Music →
+/// Spotify → YouTube Music → Tidal from sync_connections. The DJ endpoint
+/// treats "local" as a first-class provider and falls through to cloud
+/// only if no local tracks match an LLM-generated query.
 pub async fn preferred_music_provider(state: &Arc<AppState>, uid: i64) -> Option<String> {
+    let db = state.db_path.clone();
+    tokio::task::spawn_blocking(move || -> Option<String> {
+        let conn = rusqlite::Connection::open(&db).ok()?;
+        // Local library takes priority — free, zero-latency, no auth.
+        let local_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM local_music_tracks WHERE user_id = ?",
+            rusqlite::params![uid],
+            |r| r.get(0)
+        ).unwrap_or(0);
+        if local_count > 0 {
+            return Some("local".to_string());
+        }
+        for pid in &["apple_music", "spotify", "youtube_music", "tidal"] {
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM sync_connections WHERE user_id = ? AND provider = ? AND status = 'active'",
+                rusqlite::params![uid, pid],
+                |r| r.get(0)
+            ).unwrap_or(0);
+            if count > 0 {
+                return Some(pid.to_string());
+            }
+        }
+        None
+    }).await.ok().flatten()
+}
+
+/// Returns the FIRST cloud provider fallback for this user (ignoring
+/// local). Used when local has no matches for the DJ prompt and we want
+/// to reach into a streaming service before giving up.
+pub async fn preferred_cloud_music_provider(state: &Arc<AppState>, uid: i64) -> Option<String> {
     let db = state.db_path.clone();
     tokio::task::spawn_blocking(move || -> Option<String> {
         let conn = rusqlite::Connection::open(&db).ok()?;
@@ -925,6 +965,82 @@ pub async fn preferred_music_provider(state: &Arc<AppState>, uid: i64) -> Option
     }).await.ok().flatten()
 }
 
+/// Fuzzy-match one "Song - Artist" query against this user's local
+/// library. Returns a single best-scoring track in the same JSON shape
+/// as the cloud search results so the DJ endpoint can hand them back
+/// uniformly. Scoring: title-match > artist-match > album-match, with
+/// bonus points when BOTH halves of the query appear in the row.
+pub async fn search_local_track(state: &Arc<AppState>, uid: i64, query: &str) -> Option<serde_json::Value> {
+    let db = state.db_path.clone();
+    let q = query.to_string();
+
+    // Split "Song - Artist" or "Artist - Song" — try both halves as soft filters.
+    let (q_song, q_artist) = match q.split_once(" - ") {
+        Some((a, b)) => (a.trim().to_string(), b.trim().to_string()),
+        None => (q.clone(), String::new()),
+    };
+    let q_full_low = q.to_lowercase();
+    let q_song_low = q_song.to_lowercase();
+    let q_artist_low = q_artist.to_lowercase();
+
+    tokio::task::spawn_blocking(move || -> Option<serde_json::Value> {
+        let conn = rusqlite::Connection::open(&db).ok()?;
+        // Broad candidate fetch: any row that contains either half of the
+        // query in title / artist / album. Scoring happens in Rust.
+        let like_song = format!("%{}%", q_song_low);
+        let like_artist = if q_artist_low.is_empty() { "%".to_string() } else { format!("%{}%", q_artist_low) };
+        let like_full = format!("%{}%", q_full_low);
+        let mut stmt = conn.prepare(
+            "SELECT id, title, artist, album, duration_ms \
+             FROM local_music_tracks \
+             WHERE user_id = ? AND ( \
+               LOWER(COALESCE(title,'')) LIKE ?2 OR \
+               LOWER(COALESCE(artist,'')) LIKE ?3 OR \
+               LOWER(COALESCE(album,'')) LIKE ?2 OR \
+               LOWER(COALESCE(title,'')) LIKE ?4 \
+             ) LIMIT 40"
+        ).ok()?;
+        let rows: Vec<(i64, Option<String>, Option<String>, Option<String>, Option<i64>)> =
+            stmt.query_map(
+                rusqlite::params![uid, like_song, like_artist, like_full],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            ).ok()?
+             .filter_map(|x| x.ok())
+             .collect();
+
+        // Score each candidate — favor exact token hits, reward both halves
+        // matching, penalize near-empty titles.
+        let mut best: Option<(i32, (i64, Option<String>, Option<String>, Option<String>, Option<i64>))> = None;
+        for row in rows {
+            let t = row.1.clone().unwrap_or_default().to_lowercase();
+            let a = row.2.clone().unwrap_or_default().to_lowercase();
+            let al = row.3.clone().unwrap_or_default().to_lowercase();
+            let mut score: i32 = 0;
+            if !q_song_low.is_empty() && t.contains(&q_song_low) { score += 10; }
+            if !q_artist_low.is_empty() && a.contains(&q_artist_low) { score += 8; }
+            if !q_song_low.is_empty() && al.contains(&q_song_low) { score += 3; }
+            if t == q_song_low { score += 5; }
+            if a == q_artist_low && !q_artist_low.is_empty() { score += 5; }
+            if t.is_empty() { score -= 5; }
+            if score <= 0 { continue; }
+            if best.as_ref().map(|(s, _)| score > *s).unwrap_or(true) {
+                best = Some((score, row));
+            }
+        }
+        let (_, (id, title, artist, album, dur)) = best?;
+        Some(serde_json::json!({
+            "query": q,
+            "id": id,
+            "name": title,
+            "artist": artist,
+            "album": album,
+            "duration_ms": dur,
+            "play_url": format!("/api/music/local/file/{}", id),
+            "provider": "local",
+        }))
+    }).await.ok().flatten()
+}
+
 /// Load OAuth access_token for a user+provider from the oauth_tokens table.
 async fn load_oauth_access_token(state: &Arc<AppState>, uid: i64, provider: &str) -> Option<String> {
     let db = state.db_path.clone();
@@ -937,6 +1053,45 @@ async fn load_oauth_access_token(state: &Arc<AppState>, uid: i64, provider: &str
             |r| r.get::<_, String>(0),
         ).ok().filter(|s| !s.is_empty())
     }).await.ok().flatten()
+}
+
+/// Apple Music single-hit search — extracted from the DJ inline loop so
+/// both the "primary apple_music" path and the "local → apple fallback"
+/// path share the same request shape.
+async fn do_apple_search(
+    client: &reqwest::Client,
+    developer_token: &str,
+    music_user_token: &str,
+    storefront: &str,
+    query: &str,
+) -> Option<serde_json::Value> {
+    let url = format!(
+        "https://api.music.apple.com/v1/catalog/{}/search?types=songs&limit=1&term={}",
+        storefront, url_encode_local(query)
+    );
+    let resp = client.get(&url)
+        .header("Authorization", format!("Bearer {}", developer_token))
+        .header("Music-User-Token", music_user_token)
+        .header("Origin", "https://music.apple.com")
+        .timeout(Duration::from_secs(10))
+        .send().await.ok()?;
+    if !resp.status().is_success() { return None; }
+    let j: serde_json::Value = resp.json().await.ok()?;
+    let song = j.get("results")?.get("songs")?.get("data")?
+        .as_array()?.first()?.clone();
+    let attrs = song.get("attributes").cloned().unwrap_or(serde_json::Value::Null);
+    let id = song.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    Some(serde_json::json!({
+        "query": query,
+        "id": id,
+        "name": attrs.get("name"),
+        "artist": attrs.get("artistName"),
+        "album": attrs.get("albumName"),
+        "url": attrs.get("url"),
+        "play_url": build_play_url("apple_music", song.get("id").and_then(|v| v.as_str()).unwrap_or(""), attrs.get("url").and_then(|u| u.as_str())),
+        "artwork": attrs.get("artwork").and_then(|a| a.get("url")),
+        "provider": "apple_music",
+    }))
 }
 
 /// Spotify search — returns list of Track objects similar to Apple Music's format.

@@ -327,7 +327,10 @@ async fn run_mint_token(args: &[String]) {
 /// `?`-propagate straight into an HTTP response.
 ///
 /// v5 Item 3 Stage 3.
-pub async fn resolve_principal(
+/// Resolves a raw bearer token with NO scope filtering — every other
+/// caller should use `resolve_principal` (deny-by-default for scoped
+/// tokens) or `resolve_principal_scoped` (allowlist one scope).
+async fn resolve_principal_any(
     state: &AppState,
     raw: &str,
 ) -> Result<auth::Principal, axum::http::StatusCode> {
@@ -338,6 +341,12 @@ pub async fn resolve_principal(
             id: resolved.user_id,
             name: resolved.user_name,
             role: resolved.user_role,
+            scopes: resolved
+                .scopes
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
         });
     }
     if auth::legacy_admin_enabled(&state.users).await {
@@ -356,6 +365,34 @@ pub async fn resolve_principal(
         }
     }
     Err(StatusCode::UNAUTHORIZED)
+}
+
+/// Default principal resolver. Rejects scoped tokens so downstream endpoints
+/// don't have to remember to add a scope check — if a token carries any
+/// scopes, it can only reach endpoints that explicitly opt in via
+/// `resolve_principal_scoped`. Web-session tokens are unscoped and pass.
+pub async fn resolve_principal(
+    state: &AppState,
+    raw: &str,
+) -> Result<auth::Principal, axum::http::StatusCode> {
+    let principal = resolve_principal_any(state, raw).await?;
+    if !principal.is_unscoped() {
+        return Err(axum::http::StatusCode::UNAUTHORIZED);
+    }
+    Ok(principal)
+}
+
+/// Scope-aware resolver. Accepts unscoped tokens (backward compat) AND
+/// scoped tokens that include the named scope (or `*`). Used on the four
+/// endpoints MACE needs.
+pub async fn resolve_principal_scoped(
+    state: &AppState,
+    raw: &str,
+    scope: &str,
+) -> Result<auth::Principal, axum::http::StatusCode> {
+    let principal = resolve_principal_any(state, raw).await?;
+    principal.require_scope(scope)?;
+    Ok(principal)
 }
 
 /// Streaming event emitted during a /api/message turn so SSE clients can
@@ -1757,7 +1794,10 @@ async fn handle_conv_get(
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
-    let principal = resolve_principal(&state, token).await?;
+    // MACE scoped tokens may GET their own specialist conversation (for
+    // interjection polling + banner topic). Full web-session tokens are
+    // unscoped and pass via the same resolver.
+    let principal = resolve_principal_scoped(&state, token, "mace").await?;
     let mgr = match &state.conversations {
         Some(m) => m,
         None => return Ok(Json(serde_json::json!({"error": "conversations not available"}))),
@@ -5279,6 +5319,7 @@ async fn main() {
         .route("/api/llm/complete", post(handle_api_llm_complete))
         .route("/api/llm/complete/stream", post(handle_api_llm_complete_stream))
         .route("/api/conversations/{id}/append", post(handle_api_conversation_append))
+        .route("/api/tokens/mint_scoped", post(handle_api_mint_scoped_token))
         .route("/api/conversations", post(handle_conv_create))
         .route("/api/conversations", get(handle_conv_list))
         .route("/api/conversations/{id}", get(handle_conv_get))
@@ -5378,6 +5419,9 @@ async fn main() {
         .route("/api/music/local/scan", post(music_local::scan))
         .route("/api/music/local/tracks", get(music_local::list_tracks))
         .route("/api/music/local/file/{id}", get(music_local::stream_file))
+        .route("/api/music/local/lookup/{id}", get(music_local::lookup))
+        .route("/api/music/local/match/{id}", post(music_local::apply_match))
+        .route("/api/music/local/retag_all", post(music_local::retag_all))
         // Terminal / Coders module routes
         .route("/coders", get(pages::coders::render))
         .route("/ws/terminal/{session_id}", get(terminal::ws::ws_terminal_handler))
@@ -6169,7 +6213,7 @@ async fn llm_complete_inner(
     body: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let token = body["token"].as_str().ok_or("missing token".to_string())?;
-    let principal = resolve_principal(&state, token)
+    let principal = resolve_principal_scoped(&state, token, "mace")
         .await
         .map_err(|s| format!("auth failed: {}", s.as_u16()))?;
     let agent_id = body["agent"].as_str().unwrap_or("main").to_string();
@@ -6307,6 +6351,53 @@ async fn handle_api_llm_complete_stream(
         .into_response())
 }
 
+/// POST /api/tokens/mint_scoped — mint a short-TTL scoped token for a sub-
+/// session (MACE is the only current caller). The caller must present an
+/// unscoped token — a scoped token can't spawn further scoped tokens.
+///
+/// Body: `{ scope: "mace", ttl_secs: 86400, name?: "mace-session" }`
+/// Response: `{ token: "ocp_...", expires_at: <unix secs> }`
+async fn handle_api_mint_scoped_token(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"]
+        .as_str()
+        .or_else(|| body["authorization"].as_str())
+        .unwrap_or("");
+    // axum normally pulls the token from the Authorization header via the
+    // extractor; this endpoint sticks with the body-style to match the rest
+    // of the /api/* surface.
+    let principal = resolve_principal(&state, token).await?;
+    // Refuse to mint scoped tokens from an already-scoped token. Keeps the
+    // trust boundary one-way.
+    if !principal.is_unscoped() {
+        return Err(axum::http::StatusCode::FORBIDDEN);
+    }
+    let uid = principal.user_id();
+    if uid <= 0 {
+        return Err(axum::http::StatusCode::FORBIDDEN);
+    }
+    let scope = body["scope"].as_str().unwrap_or("").trim().to_string();
+    if scope.is_empty() {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+    let ttl_secs = body["ttl_secs"].as_u64().unwrap_or(86400).min(7 * 24 * 3600);
+    let ttl_hours = Some(((ttl_secs + 3599) / 3600).max(1));
+    let name = body["name"].as_str().unwrap_or("scoped-token").to_string();
+    match state.users.mint_token_scoped(uid, &name, &scope, ttl_hours).await {
+        Ok(raw) => Ok(Json(serde_json::json!({
+            "token": raw,
+            "scope": scope,
+            "expires_in_secs": ttl_secs,
+        }))),
+        Err(e) => {
+            log::error!("[mint_scoped] {e}");
+            Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
 /// POST /api/conversations/{id}/append — append a message to a conversation.
 ///
 /// Lets out-of-band clients (MACE) persist their own turns into a conversation
@@ -6318,7 +6409,7 @@ async fn handle_api_conversation_append(
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let token = body["token"].as_str().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
-    let _principal = resolve_principal(&state, token).await?;
+    let _principal = resolve_principal_scoped(&state, token, "mace").await?;
     let role = body["role"].as_str().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
     let content = body["content"].as_str().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
     let mgr = state

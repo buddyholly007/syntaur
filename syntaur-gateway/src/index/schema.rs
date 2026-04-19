@@ -1747,6 +1747,26 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX IF NOT EXISTS idx_social_alerts_open ON social_alerts(user_id, acknowledged);
     "#,
+
+    // MACE scoped tokens — narrow the blast radius of MAURICE_TOKEN so a
+    // leaked env only grants the four endpoints MACE actually needs.
+    // `scopes` is a comma-separated list; empty string = unscoped (legacy
+    // web-session tokens keep working without change).
+    r#"
+    ALTER TABLE user_api_tokens ADD COLUMN scopes TEXT NOT NULL DEFAULT '';
+    "#,
+
+    // Local music library — tag-cleanup support. `mbid` stores a
+    // MusicBrainz recording ID once the user confirms a canonical match;
+    // `metadata_source` records where the current title/artist/album
+    // came from ('file_tags' = lofty read from file, 'llm' = auto-tag,
+    // 'musicbrainz' = user accepted an MB match, 'user_edit' = manual
+    // edit). Lets us surface "this was AI-inferred" badges + revert to
+    // file tags.
+    r#"
+    ALTER TABLE local_music_tracks ADD COLUMN mbid TEXT;
+    ALTER TABLE local_music_tracks ADD COLUMN metadata_source TEXT NOT NULL DEFAULT 'file_tags';
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
