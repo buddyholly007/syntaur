@@ -1,0 +1,146 @@
+name: Release — Sign Artifacts
+
+# Phase 2.1 of the security plan. Every tag push builds release binaries,
+# signs them with Sigstore cosign (keyless, OIDC identity from the
+# Actions workflow itself — no long-lived signing keys to rotate), emits
+# a `checksums.txt` + `*.cosign.bundle` alongside each binary, and
+# publishes a SLSA v1.0 provenance attestation.
+#
+# Verify a downloaded artifact:
+#
+#   cosign verify-blob \
+#     --bundle syntaur-gateway-linux-x86_64.cosign.bundle \
+#     --certificate-identity "https://github.com/buddyholly007/syntaur/.github/workflows/release-sign.yml@refs/tags/vX.Y.Z" \
+#     --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+#     syntaur-gateway-linux-x86_64
+#
+#   sha256sum -c checksums.txt
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write       # upload release assets
+  id-token: write       # OIDC token for cosign keyless
+  attestations: write   # SLSA provenance
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            artifact_name: syntaur-gateway-linux-x86_64
+            binary: syntaur-gateway
+          - os: macos-14
+            target: aarch64-apple-darwin
+            artifact_name: syntaur-gateway-macos-arm64
+            binary: syntaur-gateway
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build release
+        run: cargo build --release --target ${{ matrix.target }} -p syntaur-gateway
+
+      - name: Rename binary
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/${{ matrix.binary }} dist/${{ matrix.artifact_name }}
+
+      - name: Upload built binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/${{ matrix.artifact_name }}
+          retention-days: 7
+
+  sign-and-release:
+    name: Sign + publish release
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all built binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List dist
+        run: ls -la dist/
+
+      - name: Compute checksums
+        working-directory: dist
+        run: |
+          sha256sum syntaur-gateway-* > checksums.txt
+          cat checksums.txt
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign each artifact
+        working-directory: dist
+        run: |
+          for f in syntaur-gateway-*; do
+            cosign sign-blob \
+              --yes \
+              --bundle "${f}.cosign.bundle" \
+              "${f}"
+          done
+          cosign sign-blob \
+            --yes \
+            --bundle checksums.txt.cosign.bundle \
+            checksums.txt
+
+      - name: Attest SLSA provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'dist/syntaur-gateway-*'
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/syntaur-gateway-*
+            dist/checksums.txt
+            dist/*.cosign.bundle
+          body: |
+            ## Verified release
+
+            Every binary is signed with Sigstore cosign (keyless OIDC) and
+            accompanied by `.cosign.bundle`. Verify before running:
+
+            ```bash
+            # SHA-256 verification (fast)
+            sha256sum -c checksums.txt
+
+            # Cosign signature verification (authoritative)
+            cosign verify-blob \
+              --bundle syntaur-gateway-linux-x86_64.cosign.bundle \
+              --certificate-identity "https://github.com/buddyholly007/syntaur/.github/workflows/release-sign.yml@${{ github.ref }}" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              syntaur-gateway-linux-x86_64
+            ```
+
+            See `SECURITY.md` for the rolling disclosure policy.

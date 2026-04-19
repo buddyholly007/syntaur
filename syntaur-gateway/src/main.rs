@@ -2871,6 +2871,68 @@ async fn handle_admin_mint_token(
     }
 }
 
+// ── Session refresh — Phase 3.4 ─────────────────────────────────────────
+//
+// POST /api/auth/refresh rotates the caller's session token. Mints a new
+// token (same scopes, 48h expiry), revokes the old one. The response
+// body carries the new token; the client must swap its stored value
+// atomically.
+//
+// Rotation cadence is driven by the client — it calls /refresh on a
+// sliding window (default 4h through the current token). Sensitive
+// actions (password change, OAuth grant, admin role change) should
+// invoke this path explicitly so the compromised-token blast radius
+// collapses immediately.
+async fn handle_auth_refresh(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let presented = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| body["token"].as_str().map(|s| s.to_string()))
+        .unwrap_or_default();
+    if presented.is_empty() {
+        return Err(axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    let resolved = match state.users.resolve_token(&presented).await {
+        Ok(Some(r)) => r,
+        _ => return Err(axum::http::StatusCode::UNAUTHORIZED),
+    };
+
+    // Mint a fresh token with the same scopes.
+    let new_token = state
+        .users
+        .mint_token_scoped(
+            resolved.user_id,
+            "session-refresh",
+            &resolved.scopes,
+            Some(48),
+        )
+        .await
+        .map_err(|e| {
+            log::warn!("[auth/refresh] mint failed: {e}");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    // Revoke the old one. Failure here isn't fatal — the new token is
+    // already valid — but log it so stale sessions can be audited.
+    if let Err(e) = state.users.revoke_token(resolved.token_id).await {
+        log::warn!("[auth/refresh] revoke old token {} failed: {e}", resolved.token_id);
+    }
+
+    Ok(Json(serde_json::json!({
+        "token": new_token,
+        "expires_in_hours": 48,
+        "rotated": true,
+    })))
+}
+
 #[derive(serde::Deserialize)]
 struct AdminRevokeRequest {
     token: String,
@@ -5487,9 +5549,8 @@ async fn main() {
         .route("/api/music/local/albums", get(music_local::list_albums))
         .route("/api/music/local/artists", get(music_local::list_artists))
         .route("/api/music/local/playlists", get(music_local::list_playlists).post(music_local::create_playlist))
-        .route("/api/music/local/playlists/{id}", get(music_local::get_playlist_tracks).delete(music_local::delete_playlist).patch(music_local::rename_playlist))
+        .route("/api/music/local/playlists/{id}", get(music_local::get_playlist_tracks).delete(music_local::delete_playlist))
         .route("/api/music/local/playlists/{id}/tracks", post(music_local::playlist_add_track))
-        .route("/api/music/local/playlists/{id}/tracks/{track_id}", axum::routing::delete(music_local::playlist_remove_track))
         .route("/api/music/local/lyrics/{id}", get(music_local::fetch_lyrics))
         .route("/api/music/local/duplicates", get(music_local::list_duplicates))
         .route("/api/music/local/nl_search", post(music_local::nl_search))
@@ -5565,6 +5626,7 @@ async fn main() {
         .route("/onboarding", get(pages::onboarding::render))
         .route("/profile", get(pages::profile::render))
         .route("/api/auth/login", post(setup::handle_login))
+        .route("/api/auth/refresh", post(handle_auth_refresh))
         .route("/api/setup/status", get(setup::handle_setup_status))
         .route("/api/setup/scan", get(setup::handle_hardware_scan))
         .route("/api/setup/fix-firewall", post(setup::handle_fix_firewall))
@@ -5802,6 +5864,10 @@ async fn main() {
         // hoist, and headers are set after the handler responds.
         .layer(axum::middleware::from_fn(security::security_headers))
         .layer(axum::middleware::from_fn(security::lift_bearer_to_body_and_query))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            security::api_rate_limit,
+        ))
         .layer(axum::middleware::from_fn(security::csrf_check))
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),

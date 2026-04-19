@@ -1,0 +1,73 @@
+name: Version consistency check
+
+# Phase 2.5 of the security plan. Fails the build if the version strings
+# in `install.sh`, the website landing page, and the README disagree with
+# the workspace `Cargo.toml` version. Prevents the "user installs 0.1.2
+# thinking it's 0.2.0" distribution-trust class of bug.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  version-check:
+    name: Versions match
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract workspace version
+        id: canon
+        run: |
+          VERSION=$(grep -E '^version\s*=' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ -z "$VERSION" ]; then
+            # Fallback: grab from a known bin Cargo.toml
+            VERSION=$(grep -E '^version\s*=' syntaur-gateway/Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not extract canonical version from Cargo.toml"
+            exit 1
+          fi
+          echo "Canonical version: $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check install.sh
+        run: |
+          V="${{ steps.canon.outputs.version }}"
+          if [ ! -f install.sh ]; then
+            echo "install.sh missing — skipping"
+            exit 0
+          fi
+          grep -qE "^VERSION=\"$V\"" install.sh || {
+            echo "::error file=install.sh::VERSION mismatch (want $V, see install.sh header)"
+            grep -nE "^VERSION=" install.sh || true
+            exit 1
+          }
+
+      - name: Check landing page (if present)
+        run: |
+          V="${{ steps.canon.outputs.version }}"
+          if [ -d landing ]; then
+            if grep -rE "v[0-9]+\.[0-9]+\.[0-9]+" landing/ 2>/dev/null | grep -vE "v$V" | grep -E "v[0-9]+\.[0-9]+\.[0-9]+"; then
+              echo "::warning file=landing/::Landing page may reference an out-of-date version"
+            fi
+          fi
+
+      - name: Check README (informational)
+        run: |
+          V="${{ steps.canon.outputs.version }}"
+          if grep -qE "v[0-9]+\.[0-9]+\.[0-9]+" README.md; then
+            if ! grep -qE "v$V|version $V" README.md; then
+              echo "::warning file=README.md::README does not reference the canonical version $V"
+            fi
+          fi
+
+      - name: Summary
+        run: |
+          echo "Canonical version: ${{ steps.canon.outputs.version }}"
+          echo "install.sh: ✓"

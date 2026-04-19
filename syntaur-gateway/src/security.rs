@@ -1,4 +1,4 @@
-//! Security middleware — phase 1 of the 2026-04-19 remediation plan.
+//! Security middleware — phases 1 + 3 of the 2026-04-19 remediation plan.
 //!
 //! Four middleware layers, applied from outermost to innermost in `main.rs`:
 //!
@@ -352,4 +352,82 @@ pub async fn security_headers(req: Request, next: Next) -> Response {
     }
 
     res
+}
+
+// ── 5. api_rate_limit ──────────────────────────────────────────────────────
+
+/// Phase 3.5: per-token + per-IP rate limiting on every `/api/*` and
+/// `/v1/*` endpoint. Default 300 requests per 60s. Uses the existing
+/// `state.tool_rate_limiter` token-bucket limiter.
+///
+/// Key selection (most specific wins):
+///   1. `Authorization: Bearer <token>` → `api:tok:<sha8(token)>`
+///   2. Peer IP → `api:ip:<addr>`
+///
+/// Exempt paths (no throttle):
+///   - `/health` (used by container orchestrator)
+///   - `/api/external-callbacks` (drained continuously by rust-social-manager)
+///   - `/api/scheduler/meeting_prep` (precompute loop pulls aggressively)
+///
+/// On overflow: HTTP 429 with a `Retry-After` header in seconds.
+pub async fn api_rate_limit(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    req: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let path = req.uri().path();
+    let is_api = path.starts_with("/api/") || path.starts_with("/v1/");
+    if !is_api {
+        return Ok(next.run(req).await);
+    }
+    let exempt = path == "/health"
+        || path == "/api/external-callbacks"
+        || path == "/api/scheduler/meeting_prep";
+    if exempt {
+        return Ok(next.run(req).await);
+    }
+
+    // Key: token hash if bearer present, else peer IP.
+    let key = match req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+    {
+        Some(tok) if !tok.is_empty() => {
+            // Short SHA-ish digest so the key doesn't carry the raw token in
+            // the in-memory map (defense in depth — the map shouldn't leak,
+            // but if it ever does via debug logging, digests leak less).
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(&tok, &mut h);
+            format!(
+                "api:tok:{:x}",
+                std::hash::Hasher::finish(&h)
+            )
+        }
+        _ => format!("api:ip:{}", addr.ip()),
+    };
+
+    let wait_opt = {
+        let mut rl = state.tool_rate_limiter.lock().await;
+        // 300 req / 60s. Tune via config.security.api_rate_per_minute later.
+        rl.check(&key, 300, 60).err()
+    };
+
+    if let Some(wait_secs) = wait_opt {
+        log::warn!(
+            "[security] rate-limit exceeded: key={} path={} wait={:.1}s",
+            key, path, wait_secs
+        );
+        let retry_after = wait_secs.ceil().max(1.0) as u64;
+        return Ok(Response::builder()
+            .status(StatusCode::TOO_MANY_REQUESTS)
+            .header("Retry-After", retry_after.to_string())
+            .header("X-RateLimit-Key", &key)
+            .body(Body::empty())
+            .unwrap_or_else(|_| Response::new(Body::empty())));
+    }
+
+    Ok(next.run(req).await)
 }

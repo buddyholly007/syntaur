@@ -1,0 +1,89 @@
+name: Docker — Nightly Base Refresh
+
+# Phase 2.6 of the security plan. Rebuilds the Syntaur container image
+# against the freshest `ubuntu:24.04` digest every night so base-image
+# CVE patches reach production without a manual release. The TrueNAS
+# compose deployment pins to the `@sha256:…` digest of the latest
+# successful build, with automatic pull-through from GHCR.
+#
+# Manual run: workflow_dispatch button on the Actions tab.
+
+on:
+  schedule:
+    # 04:00 UTC daily — after most upstream package mirrors have settled.
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - 'syntaur-gateway/Cargo.toml'
+      - '.github/workflows/docker-nightly.yml'
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write       # for cosign image signing
+  attestations: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    name: Build + push + sign
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=schedule,pattern=nightly
+            type=sha,prefix=sha-
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build + push image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image by digest
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          cosign sign --yes \
+            "${REGISTRY}/${IMAGE_NAME}@${DIGEST}"
+
+      - name: Attest image provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
