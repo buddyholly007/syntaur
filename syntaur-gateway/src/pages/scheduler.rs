@@ -43,6 +43,10 @@ pub async fn render() -> Html<String> {
                     span class="sch-theme-swatch" {}
                     span { "Theme" }
                 }
+                button class="sch-theme-btn" onclick="schOpenBorders()" title="Change notebook frame" {
+                    span class="sch-border-swatch" {}
+                    span { "Frame" }
+                }
             }
         }
         div class="sch-shell" {
@@ -223,6 +227,16 @@ fn theme_picker_modal() -> Markup {
                     button class="sch-modal-close" onclick="schCloseThemes()" { "×" }
                 }
                 div class="sch-theme-grid" id="sch-theme-grid" {}
+            }
+        }
+        div id="sch-border-modal" class="sch-modal" hidden {
+            div class="sch-modal-box sch-theme-box" {
+                div class="sch-modal-head" {
+                    h2 { "Notebook frame" }
+                    button class="sch-modal-close" onclick="schCloseBorders()" { "×" }
+                }
+                p class="sch-border-hint" { "Dresses the calendar in a notebook-style binding. Matches the theme underneath." }
+                div class="sch-theme-grid" id="sch-border-grid" {}
             }
         }
     }
@@ -767,6 +781,155 @@ body.sch-print-mode .sch-subbar { display: none !important; }
 .sch-meetprep-email { display: block; padding: 3px 0; color: var(--sch-ink); font-size: 11px; }
 .sch-meetprep-email em { color: var(--sch-ink-faint); font-style: normal; }
 
+/* ══ Notebook frames (Artful Agenda parity — the wife-pleaser) ══ */
+/* All six styles paint decorative pseudo-elements around .sch-shell so
+   they frame the whole scheduler regardless of which view is active.
+   Each uses pure CSS + inline-SVG data URLs — zero external assets, so
+   deploys stay a single binary. Swap via [data-sch-border="<key>"]. */
+
+.sch-border-swatch {
+  display: inline-block; width: 14px; height: 14px; border-radius: 2px;
+  background: var(--sch-paper);
+  border: 2px solid var(--sch-ink-dim);
+  box-shadow: inset 0 0 0 1px var(--sch-paper);
+}
+.sch-border-hint {
+  font-size: 12px; color: var(--sch-ink-dim);
+  padding: 10px 14px 0; margin: 0;
+}
+.sch-shell { position: relative; }
+
+/* none — no decoration (explicit rule so switching TO none clears SVGs) */
+[data-sch-border="none"] .sch-shell::before,
+[data-sch-border="none"] .sch-shell::after,
+[data-sch-border="none"] .sch-main::before,
+[data-sch-border="none"] .sch-main::after { content: none !important; display: none !important; }
+
+/* notebook (default) — three binder rings on the left edge + subtle
+   cream paper tint. The rings are a single repeating radial-gradient
+   offset up the paper edge, so they scale with the module height. */
+[data-sch-border="notebook"] .sch-shell,
+body:not([data-sch-border]) .sch-shell {
+  background:
+    radial-gradient(circle at 14px 7%, var(--sch-ink-dim) 0 2px, transparent 3px 6px, var(--sch-ink-dim) 6.5px 8.5px, transparent 9px),
+    radial-gradient(circle at 14px 50%, var(--sch-ink-dim) 0 2px, transparent 3px 6px, var(--sch-ink-dim) 6.5px 8.5px, transparent 9px),
+    radial-gradient(circle at 14px 93%, var(--sch-ink-dim) 0 2px, transparent 3px 6px, var(--sch-ink-dim) 6.5px 8.5px, transparent 9px);
+  background-repeat: no-repeat;
+  padding-left: 28px;
+  border-radius: 4px;
+  box-shadow: inset 0 0 0 1px var(--sch-border), 2px 2px 0 var(--sch-border), 4px 4px 12px rgba(0,0,0,0.04);
+}
+[data-sch-border="notebook"] .sch-main,
+body:not([data-sch-border]) .sch-main {
+  background-image:
+    linear-gradient(to bottom, transparent 0, transparent 31px, rgba(90,100,110,0.10) 31px, rgba(90,100,110,0.10) 32px);
+  background-size: 100% 32px;
+}
+
+/* washi — four colored tape strips at the corners, tilted */
+[data-sch-border="washi"] .sch-shell::before,
+[data-sch-border="washi"] .sch-shell::after {
+  content: ''; position: absolute; width: 90px; height: 26px; z-index: 5;
+  background: #f8b4c4; opacity: 0.78;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.15);
+  background-image: repeating-linear-gradient(90deg, transparent 0 4px, rgba(255,255,255,0.3) 4px 5px);
+}
+[data-sch-border="washi"] .sch-shell::before { top: -10px; left: 40px; transform: rotate(-6deg); }
+[data-sch-border="washi"] .sch-shell::after  { top: -10px; right: 40px; transform: rotate(5deg); background: #9dd4c5; }
+[data-sch-border="washi"] .sch-left::before,
+[data-sch-border="washi"] .sch-right::after {
+  content: ''; position: absolute; width: 90px; height: 26px; z-index: 5;
+  bottom: -10px;
+  background-image: repeating-linear-gradient(90deg, transparent 0 4px, rgba(255,255,255,0.3) 4px 5px);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.15); opacity: 0.78;
+}
+[data-sch-border="washi"] .sch-left::before { left: 40px; transform: rotate(7deg); background: #f6dd95; }
+[data-sch-border="washi"] .sch-right::after { right: 40px; transform: rotate(-7deg); background: #b7bde8; }
+
+/* ruled — horizontal ruled lines + red margin line (legal pad look) */
+[data-sch-border="ruled"] .sch-main {
+  background-image:
+    linear-gradient(to bottom, transparent 0, transparent 33px, rgba(60,110,180,0.25) 33px, rgba(60,110,180,0.25) 34px),
+    linear-gradient(to right, transparent 0, transparent 54px, rgba(200,60,60,0.45) 54px, rgba(200,60,60,0.45) 55px, transparent 55px);
+  background-size: 100% 34px, 100% 100%;
+  padding-left: 64px !important;
+}
+
+/* gold-corners — ornate gold fleur in each corner */
+[data-sch-border="gold-corners"] .sch-shell::before {
+  content: ''; position: absolute; top: -12px; left: -12px; width: 72px; height: 72px; z-index: 5;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='72' height='72' viewBox='0 0 72 72'><g fill='none' stroke='%23b8860b' stroke-width='1.6'><path d='M4 4 L24 4 M4 4 L4 24'/><path d='M4 4 C 14 4, 18 8, 20 18 C 18 14, 14 12, 8 12 Z' fill='%23d4af37'/><circle cx='20' cy='20' r='2' fill='%23b8860b'/></g></svg>");
+  background-size: contain; background-repeat: no-repeat;
+}
+[data-sch-border="gold-corners"] .sch-shell::after {
+  content: ''; position: absolute; top: -12px; right: -12px; width: 72px; height: 72px; z-index: 5;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='72' height='72' viewBox='0 0 72 72'><g fill='none' stroke='%23b8860b' stroke-width='1.6'><path d='M68 4 L48 4 M68 4 L68 24'/><path d='M68 4 C 58 4, 54 8, 52 18 C 54 14, 58 12, 64 12 Z' fill='%23d4af37'/><circle cx='52' cy='20' r='2' fill='%23b8860b'/></g></svg>");
+  background-size: contain; background-repeat: no-repeat;
+}
+[data-sch-border="gold-corners"] .sch-left::before {
+  content: ''; position: absolute; bottom: -12px; left: -12px; width: 72px; height: 72px; z-index: 5;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='72' height='72' viewBox='0 0 72 72'><g fill='none' stroke='%23b8860b' stroke-width='1.6'><path d='M4 68 L24 68 M4 68 L4 48'/><path d='M4 68 C 14 68, 18 64, 20 54 C 18 58, 14 60, 8 60 Z' fill='%23d4af37'/><circle cx='20' cy='52' r='2' fill='%23b8860b'/></g></svg>");
+  background-size: contain; background-repeat: no-repeat;
+}
+[data-sch-border="gold-corners"] .sch-right::after {
+  content: ''; position: absolute; bottom: -12px; right: -12px; width: 72px; height: 72px; z-index: 5;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='72' height='72' viewBox='0 0 72 72'><g fill='none' stroke='%23b8860b' stroke-width='1.6'><path d='M68 68 L48 68 M68 68 L68 48'/><path d='M68 68 C 58 68, 54 64, 52 54 C 54 58, 58 60, 64 60 Z' fill='%23d4af37'/><circle cx='52' cy='52' r='2' fill='%23b8860b'/></g></svg>");
+  background-size: contain; background-repeat: no-repeat;
+}
+
+/* pressed-flowers — botanical sprigs in corners, green & sage */
+[data-sch-border="pressed-flowers"] .sch-shell::before {
+  content: ''; position: absolute; top: -6px; left: -6px; width: 84px; height: 84px; z-index: 5;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='84' height='84' viewBox='0 0 84 84'><g fill='none' stroke='%235f7a56' stroke-width='1.2' stroke-linecap='round'><path d='M8 8 Q 30 18 50 34'/><circle cx='18' cy='14' r='2.5' fill='%23b5a97a'/><circle cx='30' cy='22' r='3' fill='%23e08f6d'/><circle cx='42' cy='28' r='2.5' fill='%23b5a97a'/><path d='M14 10 L 10 6 M 20 14 L 18 8 M 32 24 L 32 16 M 28 20 L 24 14'/></g></svg>");
+  background-size: contain; background-repeat: no-repeat;
+}
+[data-sch-border="pressed-flowers"] .sch-shell::after {
+  content: ''; position: absolute; top: -6px; right: -6px; width: 84px; height: 84px; z-index: 5;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='84' height='84' viewBox='0 0 84 84'><g fill='none' stroke='%235f7a56' stroke-width='1.2' stroke-linecap='round'><path d='M76 8 Q 54 18 34 34'/><circle cx='66' cy='14' r='2.5' fill='%23b5a97a'/><circle cx='54' cy='22' r='3' fill='%23c47fa3'/><circle cx='42' cy='28' r='2.5' fill='%23b5a97a'/><path d='M70 10 L 74 6 M 64 14 L 66 8 M 52 24 L 52 16 M 56 20 L 60 14'/></g></svg>");
+  background-size: contain; background-repeat: no-repeat;
+  transform: scaleX(-1);
+}
+[data-sch-border="pressed-flowers"] .sch-left::before {
+  content: ''; position: absolute; bottom: -6px; left: -6px; width: 84px; height: 84px; z-index: 5;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='84' height='84' viewBox='0 0 84 84'><g fill='none' stroke='%235f7a56' stroke-width='1.2' stroke-linecap='round'><path d='M8 76 Q 30 66 50 50'/><circle cx='18' cy='70' r='2.5' fill='%23b5a97a'/><circle cx='30' cy='62' r='3' fill='%23e08f6d'/><circle cx='42' cy='56' r='2.5' fill='%23b5a97a'/></g></svg>");
+  background-size: contain; background-repeat: no-repeat;
+}
+[data-sch-border="pressed-flowers"] .sch-right::after {
+  content: ''; position: absolute; bottom: -6px; right: -6px; width: 84px; height: 84px; z-index: 5;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='84' height='84' viewBox='0 0 84 84'><g fill='none' stroke='%235f7a56' stroke-width='1.2' stroke-linecap='round'><path d='M76 76 Q 54 66 34 50'/><circle cx='66' cy='70' r='2.5' fill='%23b5a97a'/><circle cx='54' cy='62' r='3' fill='%23c47fa3'/><circle cx='42' cy='56' r='2.5' fill='%23b5a97a'/></g></svg>");
+  background-size: contain; background-repeat: no-repeat;
+}
+
+/* vintage — Victorian ornate corner brackets */
+[data-sch-border="vintage"] .sch-shell {
+  box-shadow: inset 0 0 0 2px var(--sch-ink-dim), inset 0 0 0 4px var(--sch-paper), inset 0 0 0 5px var(--sch-ink-dim);
+}
+[data-sch-border="vintage"] .sch-shell::before {
+  content: ''; position: absolute; top: -2px; left: -2px; width: 80px; height: 80px; z-index: 5;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='80' height='80' viewBox='0 0 80 80'><g fill='none' stroke='%234a3426' stroke-width='1.4'><path d='M4 20 Q 4 4 20 4'/><path d='M12 20 Q 12 12 20 12'/><circle cx='20' cy='20' r='3' fill='%234a3426'/><path d='M4 30 L 14 30 M 30 4 L 30 14'/></g></svg>");
+  background-size: contain; background-repeat: no-repeat;
+}
+[data-sch-border="vintage"] .sch-shell::after {
+  content: ''; position: absolute; top: -2px; right: -2px; width: 80px; height: 80px; z-index: 5;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='80' height='80' viewBox='0 0 80 80'><g fill='none' stroke='%234a3426' stroke-width='1.4'><path d='M76 20 Q 76 4 60 4'/><path d='M68 20 Q 68 12 60 12'/><circle cx='60' cy='20' r='3' fill='%234a3426'/><path d='M76 30 L 66 30 M 50 4 L 50 14'/></g></svg>");
+  background-size: contain; background-repeat: no-repeat;
+}
+
+/* Preview tiles in the border picker modal */
+.sch-border-tile {
+  background: var(--sch-paper); border: 1px solid var(--sch-border);
+  border-radius: 6px; padding: 0; cursor: pointer;
+  font-family: inherit; overflow: hidden;
+  display: flex; flex-direction: column; align-items: stretch; gap: 0;
+}
+.sch-border-tile.active { outline: 2px solid var(--sch-accent); outline-offset: 2px; }
+.sch-border-tile:hover { border-color: var(--sch-accent); }
+.sch-border-preview {
+  height: 92px; position: relative; background: var(--sch-bg);
+  border-bottom: 1px solid var(--sch-border);
+}
+.sch-border-label { padding: 8px 10px; font-size: 13px; color: var(--sch-ink); font-family: var(--sch-font-heading); }
+
 /* ══ List-items modal (meal planner + any list) ══ */
 .sch-listitems-hint {
   background: color-mix(in srgb, var(--sch-accent) 8%, transparent);
@@ -825,7 +988,7 @@ const PAGE_JS: &str = r##"
     patterns: [],
     schoolFeeds: [],
     meetingPrep: [],
-    prefs: { theme: 'garden', default_view: 'month', week_starts_on: 1 },
+    prefs: { theme: 'garden', default_view: 'month', week_starts_on: 1, border: 'notebook' },
     editEvent: null,       // event being edited in the modal
   };
 
@@ -846,11 +1009,38 @@ const PAGE_JS: &str = r##"
     S.prefs.theme = key;
   }
 
+  const BORDERS = [
+    { key: 'notebook',        name: 'Notebook rings' },
+    { key: 'washi',           name: 'Washi tape' },
+    { key: 'ruled',           name: 'Legal pad' },
+    { key: 'gold-corners',    name: 'Gold flourish' },
+    { key: 'pressed-flowers', name: 'Pressed flowers' },
+    { key: 'vintage',         name: 'Vintage frame' },
+    { key: 'none',            name: 'Clean' },
+  ];
+  function applyBorder(key) {
+    document.body.setAttribute('data-sch-border', key || 'notebook');
+    S.prefs.border = key || 'notebook';
+  }
+
   // ── API helpers ─────────────────────────────────────────────────────
   async function api(path, opts) {
     opts = opts || {};
     const url = path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(TOKEN);
     opts.headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
+    // Server-side POST handlers read `body["token"]` — the URL query alone
+    // leaves `Json<>` blind, which is why earlier wiring 401'd. Inject the
+    // token into any JSON body so both extraction paths succeed.
+    const method = (opts.method || 'GET').toUpperCase();
+    if (method !== 'GET' && method !== 'DELETE' && opts.body && typeof opts.body === 'string') {
+      try {
+        const parsed = JSON.parse(opts.body);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && !('token' in parsed)) {
+          parsed.token = TOKEN;
+          opts.body = JSON.stringify(parsed);
+        }
+      } catch(_) { /* non-JSON body — leave as-is */ }
+    }
     const r = await fetch(url, opts);
     if (!r.ok) throw new Error('HTTP ' + r.status);
     return r.json();
@@ -861,9 +1051,11 @@ const PAGE_JS: &str = r##"
     try {
       const prefs = await api('/api/scheduler/prefs');
       if (prefs && prefs.theme) applyTheme(prefs.theme);
+      if (prefs && prefs.border) applyBorder(prefs.border);
+      else applyBorder('notebook');
       if (prefs && prefs.default_view && window.innerWidth > 900) { S.view = prefs.default_view; }
       S.prefs = Object.assign(S.prefs, prefs || {});
-    } catch(e) { console.warn('[sch] prefs load:', e); }
+    } catch(e) { console.warn('[sch] prefs load:', e); applyBorder('notebook'); }
     if (window.innerWidth <= 900) S.view = 'day';
 
     try {
@@ -1529,6 +1721,29 @@ const PAGE_JS: &str = r##"
     applyTheme(key);
     try { await api('/api/scheduler/prefs', { method: 'POST', body: JSON.stringify({ theme: key }) }); } catch(e) {}
     schCloseThemes();
+  };
+
+  // ── Border picker (Artful Agenda parity) ──────────────────────────
+  window.schOpenBorders = function() {
+    const grid = document.getElementById('sch-border-grid');
+    grid.innerHTML = BORDERS.map(b => `
+      <button class="sch-border-tile${b.key === (S.prefs.border || 'notebook') ? ' active' : ''}" onclick="schPickBorder('${b.key}')" data-border="${b.key}">
+        <div class="sch-border-preview" data-sch-border-preview="${b.key}"></div>
+        <div class="sch-border-label">${escHtml(b.name)}</div>
+      </button>
+    `).join('');
+    // Paint each preview by cloning the border rules onto a scoped wrapper.
+    grid.querySelectorAll('.sch-border-preview').forEach(el => {
+      const key = el.getAttribute('data-sch-border-preview');
+      el.innerHTML = `<div class="sch-shell" data-sch-border="${key}" style="position:relative;width:100%;height:100%;background:var(--sch-bg);padding:0"><div class="sch-left" style="position:absolute;inset:0"></div><div class="sch-right" style="position:absolute;inset:0"></div><div class="sch-main" style="position:absolute;inset:10px;padding:0;border:1px dashed var(--sch-border);background:var(--sch-paper)"></div></div>`;
+    });
+    document.getElementById('sch-border-modal').hidden = false;
+  };
+  window.schCloseBorders = function() { document.getElementById('sch-border-modal').hidden = true; };
+  window.schPickBorder = async function(key) {
+    applyBorder(key);
+    try { await api('/api/scheduler/prefs', { method: 'POST', body: JSON.stringify({ border: key }) }); } catch(e) {}
+    schCloseBorders();
   };
 
   // ── Intake — now wired to real endpoints ───────────────────────────

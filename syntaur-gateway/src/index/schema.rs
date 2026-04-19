@@ -2003,6 +2003,15 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX IF NOT EXISTS idx_meeting_prep_user ON meeting_prep_cards(user_id);
     "#,
+
+    // Scheduler Tier 4: notebook-style frame/border system. Sean's wife
+    // called out the Artful Agenda notebook feel by name — matching it
+    // (and then some) is a standing mandate. `border` is applied via
+    // `body[data-sch-border="<key>"]` the same way `data-sch-theme` is,
+    // so new styles are pure-CSS additions.
+    r#"
+    ALTER TABLE scheduler_prefs ADD COLUMN border TEXT NOT NULL DEFAULT 'notebook';
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

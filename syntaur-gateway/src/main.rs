@@ -6436,7 +6436,7 @@ async fn handle_scheduler_prefs_get(
     let row = tokio::task::spawn_blocking(move || -> Option<serde_json::Value> {
         let conn = rusqlite::Connection::open(&db).ok()?;
         conn.query_row(
-            "SELECT theme, default_view, week_starts_on, show_weekends, work_hours_start, work_hours_end \
+            "SELECT theme, default_view, week_starts_on, show_weekends, work_hours_start, work_hours_end, border \
              FROM scheduler_prefs WHERE user_id = ?",
             rusqlite::params![uid],
             |r| Ok(serde_json::json!({
@@ -6446,15 +6446,21 @@ async fn handle_scheduler_prefs_get(
                 "show_weekends":    r.get::<_, i64>(3)? != 0,
                 "work_hours_start": r.get::<_, String>(4)?,
                 "work_hours_end":   r.get::<_, String>(5)?,
+                "border":           r.get::<_, String>(6)?,
             })),
         ).ok()
     }).await.ok().flatten();
     Ok(Json(row.unwrap_or_else(|| serde_json::json!({
         "theme": "garden", "default_view": "month", "week_starts_on": 1,
-        "show_weekends": true, "work_hours_start": "08:00", "work_hours_end": "18:00"
+        "show_weekends": true, "work_hours_start": "08:00", "work_hours_end": "18:00",
+        "border": "notebook",
     }))))
 }
 
+// Merge-style PUT. Only fields the caller explicitly sends are updated;
+// everything else is preserved. Prior implementation was full-replace, so
+// calls like `schPickTheme({theme:'garden'})` silently clobbered border,
+// work_hours, etc back to their defaults.
 async fn handle_scheduler_prefs_put(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
@@ -6462,24 +6468,47 @@ async fn handle_scheduler_prefs_put(
     let token = body["token"].as_str().unwrap_or("");
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
-    let theme = body["theme"].as_str().unwrap_or("garden").to_string();
-    let default_view = body["default_view"].as_str().unwrap_or("month").to_string();
-    let week_starts = body["week_starts_on"].as_i64().unwrap_or(1);
-    let show_weekends = body["show_weekends"].as_bool().unwrap_or(true) as i64;
-    let whs = body["work_hours_start"].as_str().unwrap_or("08:00").to_string();
-    let whe = body["work_hours_end"].as_str().unwrap_or("18:00").to_string();
     let db = state.db_path.clone();
     tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
         let conn = rusqlite::Connection::open(&db)?;
+        let now = chrono::Utc::now().timestamp();
+        // Ensure a row exists so per-field UPDATEs bite.
         conn.execute(
-            "INSERT INTO scheduler_prefs (user_id, theme, default_view, week_starts_on, show_weekends, work_hours_start, work_hours_end, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
-             ON CONFLICT(user_id) DO UPDATE SET \
-               theme=excluded.theme, default_view=excluded.default_view, week_starts_on=excluded.week_starts_on, \
-               show_weekends=excluded.show_weekends, work_hours_start=excluded.work_hours_start, \
-               work_hours_end=excluded.work_hours_end, updated_at=excluded.updated_at",
-            rusqlite::params![uid, theme, default_view, week_starts, show_weekends, whs, whe, chrono::Utc::now().timestamp()],
+            "INSERT OR IGNORE INTO scheduler_prefs (user_id, updated_at) VALUES (?, ?)",
+            rusqlite::params![uid, now],
         )?;
+        let mut sets: Vec<&str> = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        if let Some(v) = body.get("theme").and_then(|v| v.as_str()) {
+            sets.push("theme = ?"); params.push(Box::new(v.to_string()));
+        }
+        if let Some(v) = body.get("default_view").and_then(|v| v.as_str()) {
+            sets.push("default_view = ?"); params.push(Box::new(v.to_string()));
+        }
+        if let Some(v) = body.get("week_starts_on").and_then(|v| v.as_i64()) {
+            sets.push("week_starts_on = ?"); params.push(Box::new(v));
+        }
+        if let Some(v) = body.get("show_weekends").and_then(|v| v.as_bool()) {
+            sets.push("show_weekends = ?"); params.push(Box::new(v as i64));
+        }
+        if let Some(v) = body.get("work_hours_start").and_then(|v| v.as_str()) {
+            sets.push("work_hours_start = ?"); params.push(Box::new(v.to_string()));
+        }
+        if let Some(v) = body.get("work_hours_end").and_then(|v| v.as_str()) {
+            sets.push("work_hours_end = ?"); params.push(Box::new(v.to_string()));
+        }
+        if let Some(v) = body.get("border").and_then(|v| v.as_str()) {
+            sets.push("border = ?"); params.push(Box::new(v.to_string()));
+        }
+        if sets.is_empty() {
+            return Ok(());
+        }
+        sets.push("updated_at = ?");
+        params.push(Box::new(now));
+        params.push(Box::new(uid));
+        let sql = format!("UPDATE scheduler_prefs SET {} WHERE user_id = ?", sets.join(", "));
+        let refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        conn.execute(&sql, refs.as_slice())?;
         Ok(())
     }).await.ok();
     Ok(Json(serde_json::json!({"ok": true})))
@@ -7693,11 +7722,14 @@ async fn sync_one_school_feed(state: &Arc<AppState>, uid: i64, feed_id: i64) -> 
         let mut end_time: Option<String> = None;
         let mut all_day = false;
         let mut location: Option<String> = None;
+        let mut rrule_freq: Option<String> = None;
+        let mut rrule_until: Option<String> = None;
         for line in &lines {
             if line == "BEGIN:VEVENT" {
                 in_event = true;
                 uid_str.clear(); title.clear(); desc = None; start_time.clear();
                 end_time = None; all_day = false; location = None;
+                rrule_freq = None; rrule_until = None;
             } else if line == "END:VEVENT" {
                 if in_event && !title.is_empty() && !start_time.is_empty() {
                     let ext_id = if uid_str.is_empty() {
@@ -7716,9 +7748,9 @@ async fn sync_one_school_feed(state: &Arc<AppState>, uid: i64, feed_id: i64) -> 
                         full_desc.push_str(&format!("Location: {loc}"));
                     }
                     let res = conn.execute(
-                        "INSERT INTO calendar_events (user_id, title, description, start_time, end_time, all_day, source, created_at, updated_at, source_calendar_id, color, external_id) \
-                         VALUES (?, ?, ?, ?, ?, ?, 'ics:school', ?, ?, ?, ?, ?)",
-                        rusqlite::params![uid, &title, &full_desc, &start_time, &end_time, all_day as i64, now, now, feed_id.to_string(), &color_c, &ext_id],
+                        "INSERT INTO calendar_events (user_id, title, description, start_time, end_time, all_day, source, created_at, updated_at, source_calendar_id, color, external_id, recurrence_rule, recurrence_end_date) \
+                         VALUES (?, ?, ?, ?, ?, ?, 'ics:school', ?, ?, ?, ?, ?, ?, ?)",
+                        rusqlite::params![uid, &title, &full_desc, &start_time, &end_time, all_day as i64, now, now, feed_id.to_string(), &color_c, &ext_id, &rrule_freq, &rrule_until],
                     );
                     if res.is_ok() { imported += 1; }
                 }
@@ -7741,6 +7773,26 @@ async fn sync_one_school_feed(state: &Arc<AppState>, uid: i64, feed_id: i64) -> 
                         "DTEND" => {
                             if let Some((t, _)) = parse_ics_date(val) {
                                 end_time = Some(t);
+                            }
+                        }
+                        "RRULE" => {
+                            // Parse FREQ=WEEKLY;UNTIL=20271231T235959Z;BYDAY=MO,WE,FR
+                            // Mirror the logic in handle_calendar_ics_import so the
+                            // existing recurrence expander (expand_recurrence) picks
+                            // these up without changes.
+                            for part in val.split(';') {
+                                let mut kv = part.splitn(2, '=');
+                                let k = kv.next().unwrap_or("");
+                                let v = kv.next().unwrap_or("");
+                                match k {
+                                    "FREQ" => rrule_freq = Some(v.to_ascii_lowercase()),
+                                    "UNTIL" => {
+                                        if let Some((t, _)) = parse_ics_date(v) {
+                                            rrule_until = Some(t.chars().take(10).collect());
+                                        }
+                                    }
+                                    _ => {}
+                                }
                             }
                         }
                         _ => {}
@@ -8025,8 +8077,11 @@ async fn handle_scheduler_meeting_prep_event(
 
 // Background task: every 2 min, precompute prep cards for events
 // starting in 3-60 min. Skips events whose cached card is less than
-// 10 min old.
+// 10 min old. Gmail fetches are bounded to concurrency=2 via a
+// semaphore so a cluster of meetings can't flood the Gmail quota.
 pub fn spawn_meeting_prep_precompute_task(state: Arc<AppState>) {
+    use std::sync::Arc as StdArc;
+    let gate = StdArc::new(tokio::sync::Semaphore::new(2));
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(45)).await;
         loop {
@@ -8055,13 +8110,25 @@ pub fn spawn_meeting_prep_precompute_task(state: Arc<AppState>) {
                 ))) else { return Vec::new(); };
                 rs.filter_map(Result::ok).collect()
             }).await.unwrap_or_default();
+            // Bound concurrency to 2. JoinSet collects results and drops
+            // permits automatically when each future completes.
+            let mut set = tokio::task::JoinSet::new();
             for (event_id, user_id, title, desc, start) in candidates {
-                let ev = serde_json::json!({
-                    "id": event_id, "title": title, "description": desc, "start_time": start,
+                let state_c = Arc::clone(&state);
+                let gate_c  = StdArc::clone(&gate);
+                set.spawn(async move {
+                    let _permit = match gate_c.acquire_owned().await {
+                        Ok(p) => p,
+                        Err(_) => return,
+                    };
+                    let ev = serde_json::json!({
+                        "id": event_id, "title": title, "description": desc, "start_time": start,
+                    });
+                    let card = build_meeting_prep_card(&state_c, user_id, &ev).await;
+                    cache_meeting_prep_card(&state_c, user_id, event_id, &card).await;
                 });
-                let card = build_meeting_prep_card(&state, user_id, &ev).await;
-                cache_meeting_prep_card(&state, user_id, event_id, &card).await;
             }
+            while set.join_next().await.is_some() {}
             tokio::time::sleep(std::time::Duration::from_secs(120)).await;
         }
     });
@@ -8079,12 +8146,20 @@ async fn handle_voice_transcribe(
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let mut token: Option<String> = None;
     let mut audio_bytes: Option<Vec<u8>> = None;
+    let mut audio_mime: String = "audio/webm".to_string();
+    let mut audio_filename: String = "audio.webm".to_string();
     while let Ok(Some(mut field)) = multipart.next_field().await {
         let name = field.name().unwrap_or("").to_string();
         if name == "token" {
             let t = field.text().await.unwrap_or_default();
             token = Some(t);
         } else if name == "audio" {
+            if let Some(ct) = field.content_type() {
+                audio_mime = ct.to_string();
+            }
+            if let Some(fname) = field.file_name() {
+                audio_filename = fname.to_string();
+            }
             let mut buf = Vec::new();
             while let Ok(Some(chunk)) = field.chunk().await {
                 buf.extend_from_slice(&chunk);
@@ -8097,12 +8172,55 @@ async fn handle_voice_transcribe(
     }
     let token = token.unwrap_or_default();
     let _principal = resolve_principal(&state, &token).await?;
-    let Some(_audio) = audio_bytes else { return Err(axum::http::StatusCode::BAD_REQUEST); };
-    // Placeholder — hook to voice pipeline STT when available. For now,
-    // return empty-text so the caller falls back to the manual prompt.
+    let Some(audio) = audio_bytes else { return Err(axum::http::StatusCode::BAD_REQUEST); };
+
+    // Route 1 — Groq Whisper (free tier, fast). Uses the same API key
+    // already configured for LLM chat. Falls through silently to the
+    // empty-text path so the browser UI's manual-prompt fallback still runs.
+    if let Some(groq) = state.config.models.providers.get("groq") {
+        if !groq.api_key.is_empty() {
+            let base = if groq.base_url.is_empty() {
+                "https://api.groq.com/openai/v1".to_string()
+            } else {
+                groq.base_url.trim_end_matches('/').to_string()
+            };
+            let url = format!("{base}/audio/transcriptions");
+            let part = reqwest::multipart::Part::bytes(audio.clone())
+                .file_name(audio_filename.clone())
+                .mime_str(&audio_mime).unwrap_or_else(|_|
+                    reqwest::multipart::Part::bytes(audio.clone()).file_name(audio_filename.clone())
+                );
+            let form = reqwest::multipart::Form::new()
+                .text("model", "whisper-large-v3-turbo")
+                .text("response_format", "json")
+                .part("file", part);
+            match state.client.post(&url)
+                .bearer_auth(&groq.api_key)
+                .multipart(form)
+                .timeout(std::time::Duration::from_secs(30))
+                .send().await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    if let Ok(v) = resp.json::<serde_json::Value>().await {
+                        let text = v.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                        return Ok(Json(serde_json::json!({ "text": text, "engine": "groq:whisper-large-v3-turbo" })));
+                    }
+                }
+                Ok(resp) => {
+                    log::warn!("[stt/groq] HTTP {}", resp.status());
+                }
+                Err(e) => {
+                    log::warn!("[stt/groq] request failed: {e}");
+                }
+            }
+        }
+    }
+
+    // No STT backend reachable. Return empty-text so the caller falls
+    // back to the manual text prompt.
     Ok(Json(serde_json::json!({
         "text": "",
-        "note": "STT pipe not yet wired for /api/voice/transcribe — use text prompt fallback",
+        "note": "STT upstream unavailable — falling back to text prompt",
     })))
 }
 
