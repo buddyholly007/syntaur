@@ -417,6 +417,14 @@ pub async fn handle_login(
             }
             if state.users.verify_password(user.id, &req.password).await.unwrap_or(false) {
                 if let Ok(token) = state.users.mint_token_with_expiry(user.id, "dashboard-session", Some(48)).await {
+                    crate::security::audit_log(
+                        &state,
+                        Some(user.id),
+                        "auth.login.success",
+                        Some(&format!("user:{}", user.id)),
+                        serde_json::json!({ "method": "password" }),
+                        None, None,
+                    ).await;
                     return Ok(Json(LoginResponse {
                         success: true,
                         token: Some(token),
@@ -424,12 +432,28 @@ pub async fn handle_login(
                     }));
                 }
             }
+            crate::security::audit_log(
+                &state,
+                Some(user.id),
+                "auth.login.fail",
+                Some(&format!("user:{}", user.id)),
+                serde_json::json!({ "reason": "bad_password", "username": username }),
+                None, None,
+            ).await;
             return Ok(Json(LoginResponse {
                 success: false,
                 token: None,
                 error: Some("Invalid username or password".to_string()),
             }));
         }
+        crate::security::audit_log(
+            &state,
+            None,
+            "auth.login.fail",
+            None,
+            serde_json::json!({ "reason": "unknown_username", "username": username }),
+            None, None,
+        ).await;
         return Ok(Json(LoginResponse {
             success: false,
             token: None,

@@ -1,9 +1,18 @@
 #!/bin/sh
 # Syntaur installer — https://syntaur.dev
-# Usage:
-#   curl -sSL https://get.syntaur.dev | sh              # interactive
-#   curl -sSL https://get.syntaur.dev | sh -s -- --server   # server mode
-#   curl -sSL https://get.syntaur.dev | sh -s -- --connect  # viewer only
+#
+# Recommended install (verified):
+#   wget https://github.com/buddyholly007/syntaur/releases/latest/download/install.sh
+#   sh install.sh --server           # reads signed checksums + cosign bundle from release
+#
+# Alternative (developer convenience, *not* verified — warns you loudly):
+#   curl -sSL https://get.syntaur.dev | sh
+#
+# Flags:
+#   --server          install the gateway + service unit
+#   --connect         install only the viewer (points at an existing server)
+#   --skip-verify     bypass checksum + signature verification (developer use; WARNS)
+#   --no-sudo         skip the package-manager step that installs GStreamer plugins
 set -e
 
 BRAND="Syntaur"
@@ -11,14 +20,113 @@ VERSION="0.1.0"
 BINARY="syntaur"
 INSTALL_DIR="$HOME/.local/bin"
 MODE=""
+VERIFY="1"
+AUTOSUDO="1"
 
 # Parse flags
 for arg in "$@"; do
   case "$arg" in
-    --server)  MODE="server" ;;
-    --connect) MODE="connect" ;;
+    --server)       MODE="server" ;;
+    --connect)      MODE="connect" ;;
+    --skip-verify)  VERIFY="0" ;;
+    --no-sudo)      AUTOSUDO="0" ;;
   esac
 done
+
+# ── Release-integrity helpers (Phase 2.2 of the security plan) ──────────────
+#
+# download_verified <binary-url> <target-path>
+#   Downloads the binary, alongside its sibling `checksums.txt` +
+#   `checksums.txt.cosign.bundle` from the same release directory.
+#   Verifies:
+#     1. sha256 against checksums.txt
+#     2. cosign signature of checksums.txt (if cosign is installed)
+#   Aborts with a loud error on any mismatch. `--skip-verify` bypasses
+#   everything and prints a RED WARNING so it can't happen silently.
+#
+# The release signing workflow at .github/workflows/release-sign.yml
+# publishes checksums.txt + *.cosign.bundle alongside every tagged
+# release; this function assumes that layout.
+
+REPO_URL="https://github.com/buddyholly007/syntaur"
+COSIGN_IDENT="https://github.com/buddyholly007/syntaur/.github/workflows/release-sign.yml@refs/tags/v${VERSION}"
+COSIGN_ISSUER="https://token.actions.githubusercontent.com"
+
+_fetch() {
+  # $1 url, $2 out
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$1" -o "$2"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q "$1" -O "$2"
+  else
+    echo "Error: need curl or wget"
+    return 1
+  fi
+}
+
+download_verified() {
+  BIN_URL="$1"
+  OUT="$2"
+  BASE_URL=$(dirname "$BIN_URL")
+  BIN_NAME=$(basename "$BIN_URL")
+  TMP=$(mktemp -d)
+  trap "rm -rf '$TMP'" EXIT INT TERM
+
+  echo "  → Downloading $BIN_NAME"
+  _fetch "$BIN_URL" "$TMP/$BIN_NAME" || return 1
+
+  if [ "$VERIFY" = "0" ]; then
+    printf "  \033[1;31m!!!\033[0m \033[1m--skip-verify:\033[0m installing unverified binary. DO NOT use in production.\n"
+    mv "$TMP/$BIN_NAME" "$OUT"
+    chmod +x "$OUT"
+    return 0
+  fi
+
+  # Fetch checksums.txt + its cosign bundle.
+  if ! _fetch "$BASE_URL/checksums.txt" "$TMP/checksums.txt" 2>/dev/null; then
+    echo ""
+    echo "  ✗ checksums.txt missing on this release — cannot verify."
+    echo "    Re-run with --skip-verify only if you accept the risk."
+    return 1
+  fi
+  _fetch "$BASE_URL/checksums.txt.cosign.bundle" "$TMP/checksums.txt.cosign.bundle" 2>/dev/null || true
+
+  # Step 1: SHA-256 match.
+  (cd "$TMP" && grep " $BIN_NAME\$" checksums.txt | sha256sum -c --quiet) || {
+    echo ""
+    echo "  ✗ SHA-256 mismatch for $BIN_NAME — ABORT."
+    echo "    Expected hash in checksums.txt did not match the downloaded binary."
+    echo "    This could mean: a corrupted download, a malicious proxy, OR a"
+    echo "    compromised release asset. Report to security@syntaur.dev."
+    return 1
+  }
+  echo "  ✓ SHA-256 verified"
+
+  # Step 2: cosign signature (best-effort — install cosign if missing).
+  if ! command -v cosign >/dev/null 2>&1; then
+    echo "  ⚠ cosign not installed — signature not verified (hash OK)."
+    echo "    For strongest verification: https://docs.sigstore.dev/system_config/installation/"
+  else
+    if [ -f "$TMP/checksums.txt.cosign.bundle" ]; then
+      cosign verify-blob \
+        --bundle "$TMP/checksums.txt.cosign.bundle" \
+        --certificate-identity "$COSIGN_IDENT" \
+        --certificate-oidc-issuer "$COSIGN_ISSUER" \
+        "$TMP/checksums.txt" >/dev/null 2>&1 && echo "  ✓ cosign signature verified" || {
+        echo ""
+        echo "  ✗ cosign signature verification FAILED — ABORT."
+        echo "    The release artifact could not be cryptographically tied to the"
+        echo "    Syntaur GitHub Actions signing identity. DO NOT run this binary."
+        return 1
+      }
+    else
+      echo "  ⚠ No cosign bundle on this release — signature not verified."
+    fi
+  fi
+
+  mv "$TMP/$BIN_NAME" "$OUT"
+  chmod +x "$OUT"
+}
 
 echo ""
 echo "  ♞ $BRAND v$VERSION"
@@ -67,45 +175,27 @@ echo ""
 # Create install directory
 mkdir -p "$INSTALL_DIR"
 
-# Download gateway binary (server mode only)
+# Download gateway binary (server mode only) — verified by default.
 if [ "$MODE" = "server" ]; then
-  DOWNLOAD_URL="https://github.com/buddyholly007/syntaur/releases/download/v${VERSION}/syntaur-${PLATFORM}-${ARCH}"
-  echo "  Downloading $BRAND server..."
+  DOWNLOAD_URL="${REPO_URL}/releases/download/v${VERSION}/syntaur-${PLATFORM}-${ARCH}"
+  echo "  Installing $BRAND server..."
 
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$DOWNLOAD_URL" -o "$INSTALL_DIR/$BINARY" 2>/dev/null || {
-      echo ""
-      echo "  Note: Download server not yet available."
-      echo "  For now, copy the binary manually to $INSTALL_DIR/$BINARY"
-      echo "  Then run: $BINARY"
-      echo ""
-      exit 0
-    }
-  elif command -v wget >/dev/null 2>&1; then
-    wget -q "$DOWNLOAD_URL" -O "$INSTALL_DIR/$BINARY" 2>/dev/null || {
-      echo "  Note: Download server not yet available."
-      exit 0
-    }
-  else
-    echo "Error: curl or wget required"
+  download_verified "$DOWNLOAD_URL" "$INSTALL_DIR/$BINARY" || {
+    echo ""
+    echo "  ✗ Could not install a verified server binary."
+    echo "    If the release doesn't carry signed checksums yet, re-run with"
+    echo "    --skip-verify to proceed at your own risk."
     exit 1
-  fi
-
-  chmod +x "$INSTALL_DIR/$BINARY"
+  }
 fi
 
-# Download viewer (lightweight dashboard window — no full browser needed)
+# Download viewer — verified too when available.
 VIEWER_BINARY="syntaur-viewer"
-VIEWER_URL="https://github.com/buddyholly007/syntaur/releases/download/v${VERSION}/syntaur-viewer-${PLATFORM}-${ARCH}"
-echo "  Downloading dashboard viewer..."
-if command -v curl >/dev/null 2>&1; then
-  curl -fsSL "$VIEWER_URL" -o "$INSTALL_DIR/$VIEWER_BINARY" 2>/dev/null || true
-elif command -v wget >/dev/null 2>&1; then
-  wget -q "$VIEWER_URL" -O "$INSTALL_DIR/$VIEWER_BINARY" 2>/dev/null || true
-fi
-if [ -f "$INSTALL_DIR/$VIEWER_BINARY" ]; then
-  chmod +x "$INSTALL_DIR/$VIEWER_BINARY"
-fi
+VIEWER_URL="${REPO_URL}/releases/download/v${VERSION}/syntaur-viewer-${PLATFORM}-${ARCH}"
+echo "  Installing dashboard viewer..."
+download_verified "$VIEWER_URL" "$INSTALL_DIR/$VIEWER_BINARY" 2>/dev/null || {
+  echo "  (viewer download skipped — not yet published for this platform)"
+}
 
 # Ensure the WebKitGTK viewer can actually decode audio. On many distros
 # the base `webkit2gtk` / `webkitgtk-6.0` package does NOT pull in
@@ -162,13 +252,34 @@ if [ "$PLATFORM" = "linux" ]; then
 
   if [ -n "$NEED_PKGS" ] && [ -n "$MGR" ]; then
     echo "  Missing audio plugins:$NEED_PKGS"
-    echo "  Installing so music playback works out of the box…"
-    case "$MGR" in
-      pacman) sudo pacman -S --needed --noconfirm $NEED_PKGS 2>&1 | tail -3 || INSTALL_FAILED=1 ;;
-      apt)    sudo apt-get install -y $NEED_PKGS 2>&1 | tail -3 || INSTALL_FAILED=1 ;;
-      dnf)    sudo dnf install -y $NEED_PKGS 2>&1 | tail -3 || INSTALL_FAILED=1 ;;
-      zypper) sudo zypper install -y $NEED_PKGS 2>&1 | tail -3 || INSTALL_FAILED=1 ;;
-    esac
+    if [ "$AUTOSUDO" = "0" ]; then
+      echo "  --no-sudo was passed; skipping installation. Run this manually:"
+      case "$MGR" in
+        pacman) echo "    sudo pacman -S $NEED_PKGS" ;;
+        apt)    echo "    sudo apt-get install $NEED_PKGS" ;;
+        dnf)    echo "    sudo dnf install $NEED_PKGS" ;;
+        zypper) echo "    sudo zypper install $NEED_PKGS" ;;
+      esac
+      INSTALL_FAILED=1
+    else
+      printf "  Install now with sudo? [Y/n] "
+      read -r CONFIRM
+      case "$CONFIRM" in
+        n|N|no|No)
+          echo "  Skipped. Install manually if music playback crashes the viewer."
+          INSTALL_FAILED=1
+          ;;
+        *)
+          echo "  Installing so music playback works out of the box…"
+          case "$MGR" in
+            pacman) sudo pacman -S --needed --noconfirm $NEED_PKGS 2>&1 | tail -3 || INSTALL_FAILED=1 ;;
+            apt)    sudo apt-get install -y $NEED_PKGS 2>&1 | tail -3 || INSTALL_FAILED=1 ;;
+            dnf)    sudo dnf install -y $NEED_PKGS 2>&1 | tail -3 || INSTALL_FAILED=1 ;;
+            zypper) sudo zypper install -y $NEED_PKGS 2>&1 | tail -3 || INSTALL_FAILED=1 ;;
+          esac
+          ;;
+      esac
+    fi
     if [ -n "$INSTALL_FAILED" ]; then
       echo ""
       echo "  Couldn't install audio plugins automatically."

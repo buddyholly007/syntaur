@@ -2926,11 +2926,86 @@ async fn handle_auth_refresh(
         log::warn!("[auth/refresh] revoke old token {} failed: {e}", resolved.token_id);
     }
 
+    // Audit log: one row for the refresh event (captures both mint + revoke).
+    security::audit_log(
+        &state,
+        Some(resolved.user_id),
+        "token.refresh",
+        Some(&format!("token:{}", resolved.token_id)),
+        serde_json::json!({ "scopes": resolved.scopes, "ttl_hours": 48 }),
+        None,
+        None,
+    ).await;
+
     Ok(Json(serde_json::json!({
         "token": new_token,
         "expires_in_hours": 48,
         "rotated": true,
     })))
+}
+
+/// GET /api/audit — return the caller's audit log entries. Admin role
+/// sees all entries. Supports `limit` (default 100, max 500) and
+/// `since` (unix seconds) query params for pagination.
+async fn handle_audit_log_get(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let is_admin = principal.is_admin();
+
+    let limit: i64 = params
+        .get("limit")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(100)
+        .clamp(1, 500);
+    let since: Option<i64> = params.get("since").and_then(|s| s.parse::<i64>().ok());
+
+    let db = state.db_path.clone();
+    let rows = tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<serde_json::Value>> {
+        let conn = rusqlite::Connection::open(&db)?;
+        let sql = if is_admin {
+            if since.is_some() {
+                "SELECT id, ts, user_id, action, target, metadata, ip, user_agent \
+                 FROM audit_log WHERE ts >= ? ORDER BY ts DESC LIMIT ?"
+            } else {
+                "SELECT id, ts, user_id, action, target, metadata, ip, user_agent \
+                 FROM audit_log ORDER BY ts DESC LIMIT ?"
+            }
+        } else {
+            if since.is_some() {
+                "SELECT id, ts, user_id, action, target, metadata, ip, user_agent \
+                 FROM audit_log WHERE user_id = ? AND ts >= ? ORDER BY ts DESC LIMIT ?"
+            } else {
+                "SELECT id, ts, user_id, action, target, metadata, ip, user_agent \
+                 FROM audit_log WHERE user_id = ? ORDER BY ts DESC LIMIT ?"
+            }
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let mapper = |r: &rusqlite::Row| -> rusqlite::Result<serde_json::Value> {
+            Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?,
+                "ts": r.get::<_, i64>(1)?,
+                "user_id": r.get::<_, Option<i64>>(2)?,
+                "action": r.get::<_, String>(3)?,
+                "target": r.get::<_, Option<String>>(4)?,
+                "metadata": serde_json::from_str::<serde_json::Value>(&r.get::<_, String>(5)?).unwrap_or(serde_json::json!({})),
+                "ip": r.get::<_, Option<String>>(6)?,
+                "user_agent": r.get::<_, Option<String>>(7)?,
+            }))
+        };
+        let iter: Vec<serde_json::Value> = match (is_admin, since) {
+            (true, Some(s))  => stmt.query_map(rusqlite::params![s, limit], mapper)?.filter_map(Result::ok).collect(),
+            (true, None)     => stmt.query_map(rusqlite::params![limit], mapper)?.filter_map(Result::ok).collect(),
+            (false, Some(s)) => stmt.query_map(rusqlite::params![uid, s, limit], mapper)?.filter_map(Result::ok).collect(),
+            (false, None)    => stmt.query_map(rusqlite::params![uid, limit], mapper)?.filter_map(Result::ok).collect(),
+        };
+        Ok(iter)
+    }).await.ok().and_then(|r| r.ok()).unwrap_or_default();
+
+    Ok(Json(serde_json::json!({ "events": rows, "scope": if is_admin { "all" } else { "self" } })))
 }
 
 #[derive(serde::Deserialize)]
@@ -2946,7 +3021,17 @@ async fn handle_admin_revoke_token(
     let principal = resolve_principal(&state, &req.token).await?;
     require_admin(&principal)?;
     match state.users.revoke_token(token_id).await {
-        Ok(()) => Ok(Json(serde_json::json!({"revoked": token_id}))),
+        Ok(()) => {
+            security::audit_log(
+                &state,
+                Some(principal.user_id()),
+                "token.revoke",
+                Some(&format!("token:{token_id}")),
+                serde_json::json!({ "revoked_by_admin": true }),
+                None, None,
+            ).await;
+            Ok(Json(serde_json::json!({"revoked": token_id})))
+        }
         Err(e) => Ok(Json(serde_json::json!({"error": e}))),
     }
 }
@@ -5627,6 +5712,7 @@ async fn main() {
         .route("/profile", get(pages::profile::render))
         .route("/api/auth/login", post(setup::handle_login))
         .route("/api/auth/refresh", post(handle_auth_refresh))
+        .route("/api/audit", get(handle_audit_log_get))
         .route("/api/setup/status", get(setup::handle_setup_status))
         .route("/api/setup/scan", get(setup::handle_hardware_scan))
         .route("/api/setup/fix-firewall", post(setup::handle_fix_firewall))

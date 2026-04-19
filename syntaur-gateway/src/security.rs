@@ -431,3 +431,58 @@ pub async fn api_rate_limit(
 
     Ok(next.run(req).await)
 }
+
+// ── 6. audit_log helpers — Phase 3.3 ───────────────────────────────────────
+
+/// Write a row to the `audit_log` table. Failures are logged but not
+/// propagated — a missing audit row must never break the primary
+/// action. Calls are fire-and-forget via tokio::spawn_blocking.
+///
+/// `action` uses dotted namespacing (e.g. `auth.login.success`, `token.mint`).
+/// `target` identifies the resource acted on (e.g. `user:42`, `token:9`).
+/// `metadata` is free-form JSON (empty object by default).
+/// `request` is optional; if provided, the peer IP + user-agent are captured.
+pub async fn audit_log(
+    state: &Arc<AppState>,
+    user_id: Option<i64>,
+    action: &str,
+    target: Option<&str>,
+    metadata: serde_json::Value,
+    ip: Option<String>,
+    user_agent: Option<String>,
+) {
+    let db = state.db_path.clone();
+    let action = action.to_string();
+    let target = target.map(|s| s.to_string());
+    let metadata_s = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
+    tokio::task::spawn_blocking(move || {
+        if let Ok(conn) = rusqlite::Connection::open(&db) {
+            let _ = conn.execute(
+                "INSERT INTO audit_log (ts, user_id, action, target, metadata, ip, user_agent) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                rusqlite::params![
+                    chrono::Utc::now().timestamp(),
+                    user_id,
+                    action,
+                    target,
+                    metadata_s,
+                    ip,
+                    user_agent
+                ],
+            );
+        }
+    }).await.ok();
+}
+
+/// Extract peer IP + user-agent from request metadata. Convenience wrapper
+/// around `audit_log` for callers that have an axum Request in hand.
+pub fn request_audit_fields(
+    headers: &axum::http::HeaderMap,
+    peer: Option<SocketAddr>,
+) -> (Option<String>, Option<String>) {
+    let ip = peer.map(|a| a.ip().to_string());
+    let ua = headers
+        .get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.chars().take(200).collect::<String>());
+    (ip, ua)
+}

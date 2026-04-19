@@ -2012,6 +2012,41 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE scheduler_prefs ADD COLUMN border TEXT NOT NULL DEFAULT 'notebook';
     "#,
+
+    // Phase 3.3 of the security remediation plan. Append-only audit log
+    // for sensitive actions. The file-based `audit::AuditLogger` in
+    // ~/.syntaur/audit-YYYY-MM-DD.jsonl keeps its role for system-
+    // diagnostic events; this table is the user-queryable surface
+    // (/api/audit returns per-user log, admin role sees all).
+    //
+    // Instrumented actions (namespaced):
+    //   auth.login.success, auth.login.fail, auth.register,
+    //   token.mint, token.refresh, token.revoke,
+    //   admin.user_delete, admin.user_disable, admin.role_change,
+    //   oauth.authorize, oauth.grant, oauth.revoke,
+    //   approval.approve, approval.reject,
+    //   settings.secret_change
+    //
+    // `metadata` is free-form JSON; keep fields stable within an action
+    // namespace so log consumers (future syslog shipping, SIEM) can parse.
+    //
+    // Retention: trim rows older than 90 days via a nightly background
+    // task (tracked separately; table stays append-only for now).
+    r#"
+    CREATE TABLE IF NOT EXISTS audit_log (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts          INTEGER NOT NULL,
+        user_id     INTEGER,
+        action      TEXT NOT NULL,
+        target      TEXT,
+        metadata    TEXT NOT NULL DEFAULT '{}',
+        ip          TEXT,
+        user_agent  TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_audit_log_user_ts ON audit_log(user_id, ts DESC);
+    CREATE INDEX IF NOT EXISTS idx_audit_log_action_ts ON audit_log(action, ts DESC);
+    CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts DESC);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
