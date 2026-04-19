@@ -114,7 +114,7 @@ pub async fn handle_drafts_list(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Vec<Draft>>, StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
-    let principal = crate::resolve_principal(&state, token).await?;
+    let principal = crate::resolve_principal_scoped(&state, token, "social").await?;
     let uid = principal.user_id();
     let filter_status = params.get("status").cloned();
     let db = state.db_path.clone();
@@ -158,7 +158,7 @@ pub async fn handle_drafts_create(
     Json(req): Json<CreateDraftRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let err = |code: StatusCode, msg: String| (code, Json(serde_json::json!({ "ok": false, "error": msg })));
-    let principal = crate::resolve_principal(&state, &req.token).await
+    let principal = crate::resolve_principal_scoped(&state, &req.token, "social").await
         .map_err(|s| err(s, "Sign in again.".to_string()))?;
     let uid = principal.user_id();
 
@@ -224,7 +224,7 @@ pub async fn handle_draft_approve(
     Json(req): Json<ApproveRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let err = |code: StatusCode, msg: String| (code, Json(serde_json::json!({ "ok": false, "error": msg })));
-    let principal = crate::resolve_principal(&state, &req.token).await
+    let principal = crate::resolve_principal_scoped(&state, &req.token, "social").await
         .map_err(|s| err(s, "Sign in again.".to_string()))?;
     let uid = principal.user_id();
 
@@ -256,7 +256,7 @@ pub async fn handle_draft_redraft(
     Json(req): Json<RedraftRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let err = |code: StatusCode, msg: String| (code, Json(serde_json::json!({ "ok": false, "error": msg })));
-    let principal = crate::resolve_principal(&state, &req.token).await
+    let principal = crate::resolve_principal_scoped(&state, &req.token, "social").await
         .map_err(|s| err(s, "Sign in again.".to_string()))?;
     let uid = principal.user_id();
 
@@ -299,7 +299,7 @@ pub async fn handle_draft_reject(
     Path(id): Path<i64>,
     Json(req): Json<TokenOnly>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let principal = crate::resolve_principal(&state, &req.token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &req.token, "social").await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
     let n = tokio::task::spawn_blocking(move || -> usize {
@@ -320,7 +320,7 @@ pub async fn handle_replies_list(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Vec<ReplyDraft>>, StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
-    let principal = crate::resolve_principal(&state, token).await?;
+    let principal = crate::resolve_principal_scoped(&state, token, "social").await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
     let out = tokio::task::spawn_blocking(move || -> Vec<ReplyDraft> {
@@ -346,7 +346,7 @@ pub async fn handle_reply_approve(
     Json(req): Json<ApproveRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let err = |code: StatusCode, msg: String| (code, Json(serde_json::json!({ "ok": false, "error": msg })));
-    let principal = crate::resolve_principal(&state, &req.token).await
+    let principal = crate::resolve_principal_scoped(&state, &req.token, "social").await
         .map_err(|s| err(s, "Sign in again.".to_string()))?;
     let uid = principal.user_id();
 
@@ -402,7 +402,7 @@ pub async fn handle_reply_reject(
     Path(id): Path<i64>,
     Json(req): Json<TokenOnly>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let principal = crate::resolve_principal(&state, &req.token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &req.token, "social").await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
     let n = tokio::task::spawn_blocking(move || -> usize {
@@ -423,7 +423,7 @@ pub async fn handle_stats_list(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
-    let principal = crate::resolve_principal(&state, token).await?;
+    let principal = crate::resolve_principal_scoped(&state, token, "social").await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
     let out = tokio::task::spawn_blocking(move || -> Vec<serde_json::Value> {
@@ -449,7 +449,7 @@ pub async fn handle_alerts_list(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
-    let principal = crate::resolve_principal(&state, token).await?;
+    let principal = crate::resolve_principal_scoped(&state, token, "social").await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
     let out = tokio::task::spawn_blocking(move || -> Vec<serde_json::Value> {

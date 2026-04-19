@@ -96,7 +96,7 @@ pub async fn handle_list(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Vec<SocialConnection>>, StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
-    let principal = crate::resolve_principal(&state, token).await?;
+    let principal = crate::resolve_principal_scoped(&state, token, "social").await?;
     let uid = principal.user_id();
     let agent_filter = params.get("agent_id").cloned();
     let db = state.db_path.clone();
@@ -149,7 +149,7 @@ pub async fn handle_create(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateConnectionRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let principal = crate::resolve_principal(&state, &req.token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &req.token, "social").await?;
     let uid = principal.user_id();
 
     if req.platform.trim().is_empty() {
@@ -221,7 +221,7 @@ pub async fn handle_delete(
     Path(id): Path<i64>,
     Json(req): Json<DeleteConnectionRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let principal = crate::resolve_principal(&state, &req.token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &req.token, "social").await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
 
@@ -255,7 +255,7 @@ pub async fn handle_nyota_assist(
     Json(req): Json<NyotaAssistRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let err = |code: StatusCode, msg: &str| (code, Json(serde_json::json!({ "ok": false, "error": msg })));
-    let principal = crate::resolve_principal(&state, &req.token).await
+    let principal = crate::resolve_principal_scoped(&state, &req.token, "social").await
         .map_err(|s| err(s, "Sign in again."))?;
     let _uid = principal.user_id();
 
@@ -334,7 +334,7 @@ pub async fn handle_platforms(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
-    let _principal = crate::resolve_principal(&state, token).await?;
+    let _principal = crate::resolve_principal_scoped(&state, token, "social").await?;
     let descriptors = platforms::all_descriptors();
     Ok(Json(serde_json::json!({ "platforms": descriptors })))
 }
@@ -357,7 +357,7 @@ pub async fn handle_reconnect(
         (status, Json(serde_json::json!({ "ok": false, "error": msg })))
     };
 
-    let principal = crate::resolve_principal(&state, &req.token).await
+    let principal = crate::resolve_principal_scoped(&state, &req.token, "social").await
         .map_err(|s| err_json(s, "Sign in again to reconnect a platform.".to_string()))?;
     let uid = principal.user_id();
 

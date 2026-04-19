@@ -308,7 +308,7 @@ pub async fn create_moment(
     State(state): State<Arc<AppState>>,
     Json(body): Json<MomentCreate>,
 ) -> Result<Json<Value>, StatusCode> {
-    let principal = crate::resolve_principal(&state, &body.token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &body.token, "voice_ingest").await?;
     let uid = principal.user_id();
     let text = body.text.trim().to_string();
     if text.is_empty() || text.len() > 2000 { return Err(StatusCode::BAD_REQUEST); }
@@ -353,7 +353,7 @@ pub async fn list_moments(
     Query(q): Query<MomentsQuery>,
 ) -> Result<Json<Value>, StatusCode> {
     let token = extract_token(&headers, q.token.as_deref());
-    let principal = crate::resolve_principal(&state, &token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &token, "voice_ingest").await?;
     let uid = principal.user_id();
     let limit = q.limit.unwrap_or(100).clamp(1, 500);
     let date_filter = q.date;
@@ -414,7 +414,7 @@ pub async fn delete_moment(
     Query(q): Query<MomentsQuery>,
 ) -> Result<Json<Value>, StatusCode> {
     let token = extract_token(&headers, q.token.as_deref());
-    let principal = crate::resolve_principal(&state, &token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &token, "voice_ingest").await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
 

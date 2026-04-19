@@ -74,7 +74,7 @@ pub async fn add_folder(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AddFolderReq>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let principal = crate::resolve_principal(&state, &req.token).await
+    let principal = crate::resolve_principal_scoped(&state, &req.token, "music").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized".to_string()))?;
     let uid = principal.user_id();
 
@@ -128,7 +128,7 @@ pub async fn list_folders(
     Query(q): Query<TokenQuery>,
 ) -> Result<Json<Value>, StatusCode> {
     let token = extract_token(&headers, q.token.as_deref());
-    let principal = crate::resolve_principal(&state, &token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
     let uid = principal.user_id();
 
     let db = state.db_path.clone();
@@ -163,7 +163,7 @@ pub async fn remove_folder(
     Query(q): Query<TokenQuery>,
 ) -> Result<Json<Value>, StatusCode> {
     let token = extract_token(&headers, q.token.as_deref());
-    let principal = crate::resolve_principal(&state, &token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
     let uid = principal.user_id();
 
     let db = state.db_path.clone();
@@ -196,7 +196,7 @@ pub async fn scan(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ScanReq>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let principal = crate::resolve_principal(&state, &req.token).await
+    let principal = crate::resolve_principal_scoped(&state, &req.token, "music").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized".to_string()))?;
     let uid = principal.user_id();
 
@@ -464,7 +464,7 @@ pub async fn list_tracks(
     Query(q): Query<TracksQuery>,
 ) -> Result<Json<Value>, StatusCode> {
     let token = extract_token(&headers, q.token.as_deref());
-    let principal = crate::resolve_principal(&state, &token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
     let uid = principal.user_id();
     let limit = q.limit.unwrap_or(200).clamp(1, 2000);
     let offset = q.offset.unwrap_or(0).max(0);
@@ -587,7 +587,7 @@ pub async fn stream_file(
     Query(q): Query<TokenQuery>,
 ) -> Result<Response<Body>, StatusCode> {
     let token = extract_token(&headers, q.token.as_deref());
-    let principal = crate::resolve_principal(&state, &token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
     let uid = principal.user_id();
 
     let db = state.db_path.clone();
@@ -710,7 +710,7 @@ pub async fn serve_art(
     Query(q): Query<TokenQuery>,
 ) -> Result<Response<Body>, StatusCode> {
     let token = extract_token(&headers, q.token.as_deref());
-    let principal = crate::resolve_principal(&state, &token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
     let uid = principal.user_id();
 
     let db = state.db_path.clone();
@@ -1011,7 +1011,7 @@ pub async fn revert_to_original(
     Query(q): Query<TokenQuery>,
 ) -> Result<Json<Value>, StatusCode> {
     let token = extract_token(&headers, q.token.as_deref());
-    let principal = crate::resolve_principal(&state, &token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
     let n: usize = tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
@@ -1045,7 +1045,7 @@ pub async fn set_favorite(
     Json(body): Json<FavoriteBody>,
 ) -> Result<Json<Value>, StatusCode> {
     let token = extract_token(&headers, body.token.as_deref());
-    let principal = crate::resolve_principal(&state, &token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
     let fav = if body.favorite { 1 } else { 0 };
@@ -1068,7 +1068,7 @@ pub async fn record_play(
     Query(q): Query<TokenQuery>,
 ) -> Result<Json<Value>, StatusCode> {
     let token = extract_token(&headers, q.token.as_deref());
-    let principal = crate::resolve_principal(&state, &token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
     let uid = principal.user_id();
     let now = chrono::Utc::now().timestamp();
     let db = state.db_path.clone();
@@ -1093,7 +1093,7 @@ pub async fn list_albums(
     Query(q): Query<TokenQuery>,
 ) -> Result<Json<Value>, StatusCode> {
     let token = extract_token(&headers, q.token.as_deref());
-    let principal = crate::resolve_principal(&state, &token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
     let rows: Vec<Value> = tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<Value>> {
@@ -1135,7 +1135,7 @@ pub async fn list_artists(
     Query(q): Query<TokenQuery>,
 ) -> Result<Json<Value>, StatusCode> {
     let token = extract_token(&headers, q.token.as_deref());
-    let principal = crate::resolve_principal(&state, &token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
     let rows: Vec<Value> = tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<Value>> {
@@ -1169,7 +1169,7 @@ pub async fn list_playlists(
     Query(q): Query<TokenQuery>,
 ) -> Result<Json<Value>, StatusCode> {
     let token = extract_token(&headers, q.token.as_deref());
-    let principal = crate::resolve_principal(&state, &token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
     let rows: Vec<Value> = tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<Value>> {
@@ -1205,7 +1205,7 @@ pub async fn create_playlist(
     Json(body): Json<PlaylistCreateBody>,
 ) -> Result<Json<Value>, StatusCode> {
     let token = extract_token(&headers, body.token.as_deref());
-    let principal = crate::resolve_principal(&state, &token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
     let uid = principal.user_id();
     let name = body.name.trim().to_string();
     if name.is_empty() { return Err(StatusCode::BAD_REQUEST); }
@@ -1236,7 +1236,7 @@ pub async fn playlist_add_track(
     Json(body): Json<PlaylistAddBody>,
 ) -> Result<Json<Value>, StatusCode> {
     let token = extract_token(&headers, body.token.as_deref());
-    let principal = crate::resolve_principal(&state, &token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
     let uid = principal.user_id();
     let now = chrono::Utc::now().timestamp();
     let tid = body.track_id;
@@ -1275,7 +1275,7 @@ pub async fn get_playlist_tracks(
     Query(q): Query<TokenQuery>,
 ) -> Result<Json<Value>, StatusCode> {
     let token = extract_token(&headers, q.token.as_deref());
-    let principal = crate::resolve_principal(&state, &token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
     let rows: Vec<Value> = tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<Value>> {
@@ -1311,7 +1311,7 @@ pub async fn delete_playlist(
     Query(q): Query<TokenQuery>,
 ) -> Result<Json<Value>, StatusCode> {
     let token = extract_token(&headers, q.token.as_deref());
-    let principal = crate::resolve_principal(&state, &token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
     let n: usize = tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
@@ -1336,7 +1336,7 @@ pub async fn rename_playlist(
     Json(body): Json<PlaylistRenameBody>,
 ) -> Result<Json<Value>, StatusCode> {
     let token = extract_token(&headers, body.token.as_deref());
-    let principal = crate::resolve_principal(&state, &token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
     let uid = principal.user_id();
     let name = body.name.trim().to_string();
     if name.is_empty() { return Err(StatusCode::BAD_REQUEST); }
@@ -1361,7 +1361,7 @@ pub async fn playlist_remove_track(
     Query(q): Query<TokenQuery>,
 ) -> Result<Json<Value>, StatusCode> {
     let token = extract_token(&headers, q.token.as_deref());
-    let principal = crate::resolve_principal(&state, &token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
     tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
@@ -1395,7 +1395,7 @@ pub async fn fetch_lyrics(
     Query(q): Query<TokenQuery>,
 ) -> Result<Json<Value>, StatusCode> {
     let token = extract_token(&headers, q.token.as_deref());
-    let principal = crate::resolve_principal(&state, &token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
     let uid = principal.user_id();
 
     let db = state.db_path.clone();
@@ -1492,7 +1492,7 @@ pub async fn list_duplicates(
     Query(q): Query<TokenQuery>,
 ) -> Result<Json<Value>, StatusCode> {
     let token = extract_token(&headers, q.token.as_deref());
-    let principal = crate::resolve_principal(&state, &token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
     let rows: Vec<Value> = tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<Value>> {
@@ -1530,7 +1530,7 @@ pub async fn nl_search(
     Json(body): Json<NLSearchBody>,
 ) -> Result<Json<Value>, StatusCode> {
     let token = extract_token(&headers, body.token.as_deref());
-    let principal = crate::resolve_principal(&state, &token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
     let uid = principal.user_id();
     let user_query = body.query.trim().to_string();
     if user_query.is_empty() { return Err(StatusCode::BAD_REQUEST); }
@@ -1643,7 +1643,7 @@ pub async fn album_liner_notes(
     Query(q): Query<LinerNotesQuery>,
 ) -> Result<Json<Value>, StatusCode> {
     let token = extract_token(&headers, q.token.as_deref());
-    let principal = crate::resolve_principal(&state, &token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
     let uid = principal.user_id();
     let artist = q.artist.trim().to_string();
     let album = q.album.trim().to_string();
@@ -1811,7 +1811,7 @@ pub async fn lookup(
     Query(q): Query<TokenQuery>,
 ) -> Result<Json<Value>, StatusCode> {
     let token = extract_token(&headers, q.token.as_deref());
-    let principal = crate::resolve_principal(&state, &token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
     let uid = principal.user_id();
 
     // Read current tags for this user's track.
@@ -1944,7 +1944,7 @@ pub async fn apply_match(
     Json(body): Json<ApplyMatchBody>,
 ) -> Result<Json<Value>, StatusCode> {
     let token = extract_token(&headers, body.token.as_deref());
-    let principal = crate::resolve_principal(&state, &token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
     let uid = principal.user_id();
     let source = body.source.clone().unwrap_or_else(|| "musicbrainz".to_string());
     let source_for_sql = source.clone();
@@ -2007,7 +2007,7 @@ pub async fn retag_all(
     Json(body): Json<RetagBody>,
 ) -> Result<Json<Value>, StatusCode> {
     let token = extract_token(&headers, body.token.as_deref());
-    let principal = crate::resolve_principal(&state, &token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
     let uid = principal.user_id();
     let limit = body.limit.unwrap_or(50).min(200);
 

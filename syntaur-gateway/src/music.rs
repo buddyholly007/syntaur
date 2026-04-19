@@ -106,7 +106,7 @@ pub async fn handle_music_now_playing(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
-    let principal = crate::resolve_principal(&state, token).await?;
+    let principal = crate::resolve_principal_scoped(&state, token, "music").await?;
     let uid = principal.user_id();
 
     // PRIMARY: PWA-reported state. The phone (via the Syntaur Voice PWA) is
@@ -241,7 +241,7 @@ pub async fn handle_music_control(
     State(state): State<Arc<AppState>>,
     Json(req): Json<MusicControlRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let principal = crate::resolve_principal(&state, &req.token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &req.token, "music").await?;
     let uid = principal.user_id();
 
     // PRIMARY: if the user is playing via PWA (phone), route the control there
@@ -340,7 +340,7 @@ pub async fn handle_music_speakers(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
-    let principal = crate::resolve_principal(&state, token).await?;
+    let principal = crate::resolve_principal_scoped(&state, token, "music").await?;
     let uid = principal.user_id();
     let mut speakers: Vec<serde_json::Value> = Vec::new();
 
@@ -484,7 +484,7 @@ pub async fn handle_music_group(
     State(state): State<Arc<AppState>>,
     Json(req): Json<MusicGroupRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let principal = crate::resolve_principal(&state, &req.token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &req.token, "music").await?;
     let Some(ha) = load_ha(&state, principal.user_id()).await else {
         return Err(axum::http::StatusCode::SERVICE_UNAVAILABLE);
     };
@@ -525,7 +525,7 @@ pub async fn handle_music_eq(
     State(state): State<Arc<AppState>>,
     Json(req): Json<MusicEqRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let principal = crate::resolve_principal(&state, &req.token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &req.token, "music").await?;
     let Some(ha) = load_ha(&state, principal.user_id()).await else {
         return Err(axum::http::StatusCode::SERVICE_UNAVAILABLE);
     };
@@ -561,7 +561,7 @@ pub async fn handle_music_dj(
     State(state): State<Arc<AppState>>,
     Json(req): Json<MusicDjRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let principal = crate::resolve_principal(&state, &req.token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &req.token, "music").await?;
     let uid = principal.user_id();
     // Pick which music provider to search through. preferred_music_provider
     // now returns "local" first when the user has any local tracks indexed,
@@ -846,7 +846,7 @@ pub async fn handle_pwa_state(
     State(state): State<Arc<AppState>>,
     Json(req): Json<PwaStateRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let _ = crate::resolve_principal(&state, &req.token).await?;
+    let _ = crate::resolve_principal_scoped(&state, &req.token, "music").await?;
     set_pwa_now(PwaNowPlaying {
         song: req.song,
         artist: req.artist,
@@ -868,7 +868,7 @@ pub async fn handle_set_preferred_target(
     State(state): State<Arc<AppState>>,
     Json(req): Json<PreferredTargetRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let principal = crate::resolve_principal(&state, &req.token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &req.token, "music").await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
     let target = req.entity_id.clone();
@@ -1264,7 +1264,7 @@ pub async fn handle_spotify_play(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SpotifyPlayRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let principal = crate::resolve_principal(&state, &req.token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &req.token, "music").await?;
     let uid = principal.user_id();
     let Some(tok) = load_oauth_access_token(&state, uid, "spotify").await else {
         return Ok(Json(serde_json::json!({
@@ -1353,7 +1353,7 @@ pub async fn handle_spotify_token(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
-    let principal = crate::resolve_principal(&state, token).await?;
+    let principal = crate::resolve_principal_scoped(&state, token, "music").await?;
     let tok = load_oauth_access_token(&state, principal.user_id(), "spotify").await;
     match tok {
         Some(t) => Ok(Json(serde_json::json!({"access_token": t}))),
@@ -1378,7 +1378,7 @@ pub async fn handle_music_pref_save(
     State(state): State<Arc<AppState>>,
     Json(req): Json<MusicPrefSaveRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let principal = crate::resolve_principal(&state, &req.token).await?;
+    let principal = crate::resolve_principal_scoped(&state, &req.token, "music").await?;
     let uid = principal.user_id();
     if req.value.trim().is_empty() { return Err(axum::http::StatusCode::BAD_REQUEST); }
     let db = state.db_path.clone();
@@ -1407,7 +1407,7 @@ pub async fn handle_music_prefs_list(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
-    let principal = crate::resolve_principal(&state, token).await?;
+    let principal = crate::resolve_principal_scoped(&state, token, "music").await?;
     let sharing_mode = state.sharing_mode.read().await.clone();
     let scope = principal.scope_with_sharing(&sharing_mode);
     let limit: i64 = params.get("limit").and_then(|s| s.parse().ok()).unwrap_or(50);
@@ -1451,7 +1451,7 @@ pub async fn handle_music_pref_delete(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
-    let principal = crate::resolve_principal(&state, token).await?;
+    let principal = crate::resolve_principal_scoped(&state, token, "music").await?;
     let sharing_mode = state.sharing_mode.read().await.clone();
     let scope = principal.scope_with_sharing(&sharing_mode);
     let db = state.db_path.clone();
@@ -1550,7 +1550,7 @@ pub async fn handle_music_duck(
     State(state): State<Arc<AppState>>,
     Json(req): Json<DuckRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let _ = crate::resolve_principal(&state, &req.token).await?;
+    let _ = crate::resolve_principal_scoped(&state, &req.token, "music").await?;
     let active = req.state == "on";
     let duration = req.duration_secs.unwrap_or(if active { 30 } else { 0 });
     // This actually lowers volume on Spotify Connect + HA media_players
@@ -1563,7 +1563,7 @@ pub async fn handle_music_duck_state(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
-    let _ = crate::resolve_principal(&state, token).await?;
+    let _ = crate::resolve_principal_scoped(&state, token, "music").await?;
     let ds = get_duck_state().await;
     Ok(Json(serde_json::json!({
         "ducking": ds.active,
@@ -1645,7 +1645,7 @@ pub async fn handle_shortcut_setup_guide(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
-    let _ = crate::resolve_principal(&state, token).await?;
+    let _ = crate::resolve_principal_scoped(&state, token, "music").await?;
     // The "host" from request would be ideal but we infer from config
     let host = std::env::var("SYNTAUR_PUBLIC_HOST").unwrap_or_else(|_| "your-syntaur-host".to_string());
     Ok(Json(serde_json::json!({
@@ -1841,7 +1841,7 @@ pub async fn handle_local_events(
     use axum::response::IntoResponse;
 
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
-    if crate::resolve_principal(&state, token).await.is_err() {
+    if crate::resolve_principal_scoped(&state, token, "music").await.is_err() {
         return (axum::http::StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
 
