@@ -5508,6 +5508,10 @@ async fn main() {
         .route("/api/terminal/forwards/{id}", axum::routing::delete(terminal::forwarding::delete_forward))
         // Setup wizard endpoints (installer + dashboard)
         .route("/", get(pages::dashboard::render))
+        // The top-bar Syntaur logo + avatar menu both link to /dashboard.
+        // Keep / as canonical and alias /dashboard so those links don't
+        // 404 (which showed as a white-out in the viewer).
+        .route("/dashboard", get(pages::dashboard::render))
         .route("/icon.svg", get(setup::handle_icon))
         .route("/favicon.ico", get(setup::handle_favicon))
         .route("/favicon-32.png", get(setup::handle_favicon_png))
