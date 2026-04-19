@@ -1389,24 +1389,18 @@ const PAGE_JS: &str = r##"
     schDialog({ title, message: message || '', okLabel: 'OK', hideCancel: true }).then(() => true);
 
   // ── API helpers ─────────────────────────────────────────────────────
+  // Phase 1.1 of the security plan: send the session token via
+  // Authorization: Bearer only, never in the URL query or body. Server-
+  // side middleware (`security::lift_bearer_to_body_and_query`) lifts it
+  // back into query + body so existing handlers keep reading
+  // `params.get("token")` / `body["token"]` without a refactor.
   async function api(path, opts) {
     opts = opts || {};
-    const url = path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(TOKEN);
-    opts.headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
-    // Server-side POST handlers read `body["token"]` — the URL query alone
-    // leaves `Json<>` blind, which is why earlier wiring 401'd. Inject the
-    // token into any JSON body so both extraction paths succeed.
-    const method = (opts.method || 'GET').toUpperCase();
-    if (method !== 'GET' && method !== 'DELETE' && opts.body && typeof opts.body === 'string') {
-      try {
-        const parsed = JSON.parse(opts.body);
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && !('token' in parsed)) {
-          parsed.token = TOKEN;
-          opts.body = JSON.stringify(parsed);
-        }
-      } catch(_) { /* non-JSON body — leave as-is */ }
-    }
-    const r = await fetch(url, opts);
+    opts.headers = Object.assign({
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + TOKEN,
+    }, opts.headers || {});
+    const r = await fetch(path, opts);
     if (!r.ok) throw new Error('HTTP ' + r.status);
     return r.json();
   }

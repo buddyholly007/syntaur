@@ -41,6 +41,7 @@ pub mod crypto;
 pub mod terminal;
 mod agents;
 mod background_tasks;
+mod security;
 
 /// Brand name constant — used in user-facing messages.
 pub const BRAND: &str = "Syntaur";
@@ -117,8 +118,14 @@ pub struct AppState {
     pub sharing_mode: Arc<tokio::sync::RwLock<String>>,
     /// Tool names disabled by the module system (from disabled modules).
     pub disabled_tools: Vec<&'static str>,
-    /// Bearer secret required for /v1/chat/completions when set
-    /// in connectors.home_assistant.voice_secret. None = open.
+    /// Bearer secret required for /v1/chat/completions. When
+    /// `security.require_voice_auth = true` (the default) and this is
+    /// `None`, the endpoint rejects all traffic with 401 — failing
+    /// closed rather than open. The only way to run unauthenticated
+    /// is to explicitly set `security.require_voice_auth = false` in
+    /// config AND set a value here (keeping a weak check), or run the
+    /// gateway bound to loopback only. Do not remove without replacing
+    /// the `check_auth` call in voice_chat.rs.
     pub ha_voice_secret: Option<String>,
     pub escalation: std::sync::Arc<crate::agents::escalation::EscalationTracker>,
     pub bg_tasks: std::sync::Arc<crate::background_tasks::BackgroundTaskManager>,
@@ -5480,8 +5487,9 @@ async fn main() {
         .route("/api/music/local/albums", get(music_local::list_albums))
         .route("/api/music/local/artists", get(music_local::list_artists))
         .route("/api/music/local/playlists", get(music_local::list_playlists).post(music_local::create_playlist))
-        .route("/api/music/local/playlists/{id}", get(music_local::get_playlist_tracks).delete(music_local::delete_playlist))
+        .route("/api/music/local/playlists/{id}", get(music_local::get_playlist_tracks).delete(music_local::delete_playlist).patch(music_local::rename_playlist))
         .route("/api/music/local/playlists/{id}/tracks", post(music_local::playlist_add_track))
+        .route("/api/music/local/playlists/{id}/tracks/{track_id}", axum::routing::delete(music_local::playlist_remove_track))
         .route("/api/music/local/lyrics/{id}", get(music_local::fetch_lyrics))
         .route("/api/music/local/duplicates", get(music_local::list_duplicates))
         .route("/api/music/local/nl_search", post(music_local::nl_search))
@@ -5784,6 +5792,20 @@ async fn main() {
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),
             setup::first_run_redirect,
+        ))
+        // Security layers — applied from innermost (runs last on request,
+        // first on response) to outermost. Tower layers the opposite order
+        // of their declaration on the request path, so the closer to the
+        // router, the earlier it runs on response. Ordering here:
+        //   bootstrap-loopback → csrf → lift-bearer → security-headers
+        // ensures bootstrap check runs first, then CSRF, then the bearer
+        // hoist, and headers are set after the handler responds.
+        .layer(axum::middleware::from_fn(security::security_headers))
+        .layer(axum::middleware::from_fn(security::lift_bearer_to_body_and_query))
+        .layer(axum::middleware::from_fn(security::csrf_check))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            security::bootstrap_loopback_only,
         ))
         .layer({
             use tower_http::cors::{CorsLayer, AllowOrigin};
@@ -6203,10 +6225,16 @@ async fn main() {
         tokio::time::sleep(Duration::from_secs(2)).await;
     };
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await
-        .unwrap_or_else(|e| error!("HTTP server error: {}", e));
+    // `into_make_service_with_connect_info` gives middleware access to
+    // the peer SocketAddr — required by `security::bootstrap_loopback_only`
+    // which checks `addr.ip().is_loopback()`.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await
+    .unwrap_or_else(|e| error!("HTTP server error: {}", e));
 
     info!("Shutdown complete");
 }

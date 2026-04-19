@@ -1,0 +1,39 @@
+version: 2
+updates:
+  # Rust workspace dependencies
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "sunday"
+      time: "09:00"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "buddyholly007"
+    labels:
+      - "dependencies"
+      - "cargo"
+    groups:
+      # Batch non-major updates so the PR queue stays manageable
+      rust-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+      # Keep major bumps separate for manual review
+      rust-major:
+        update-types:
+          - "major"
+
+  # GitHub Actions workflow pins
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "sunday"
+      time: "09:30"
+    open-pull-requests-limit: 5
+    reviewers:
+      - "buddyholly007"
+    labels:
+      - "dependencies"
+      - "github-actions"
