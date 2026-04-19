@@ -461,17 +461,36 @@ pub async fn handle_login(
         }));
     }
 
-    // Try 3: check gateway password (constant-time comparison) — legacy single-user mode
+    // Try 3: if no username was supplied, try the primary admin user's
+    // password (user id=1). Lets `password-only` login forms keep working
+    // without the user having to remember their own username — the common
+    // solo-install case. The user table is the source of truth; the
+    // gateway password field in syntaur.json is kept in sync by
+    // handle_change_password but treated as a fallback only.
+    let mut admin_password_match = false;
+    if req.username.is_none() {
+        if let Ok(Some(admin)) = state.users.get_user(1).await {
+            if !admin.disabled
+                && state.users.verify_password(1, &req.password).await.unwrap_or(false)
+            {
+                admin_password_match = true;
+            }
+        }
+    }
+
+    // Try 4: legacy gateway password (constant-time comparison). Only used
+    // when no users exist yet (fresh install) or as a fallback if the
+    // gateway password somehow drifted ahead of the admin user password.
     let gw_auth = &state.config.gateway.auth;
     let password_match = gw_auth.extra.get("password")
         .and_then(|v| v.as_str())
         .map(|p| constant_time_eq(p.as_bytes(), req.password.as_bytes()))
         .unwrap_or(false);
 
-    // Try 4: check gateway token directly (constant-time comparison)
+    // Try 5: check gateway token directly (constant-time comparison)
     let token_match = constant_time_eq(gw_auth.token.as_bytes(), req.password.as_bytes());
 
-    if password_match || token_match {
+    if admin_password_match || password_match || token_match {
         // Mint a session token for the first user (admin)
         if let Ok(users) = state.users.list_users().await {
             if let Some(user) = users.first() {
@@ -644,6 +663,51 @@ pub struct LicenseActivateResponse {
     pub error: Option<String>,
 }
 
+
+/// Rewrite `gateway.auth.password` in the live syntaur.json config so the
+/// gateway password and the admin user password never drift. Called after a
+/// successful admin user password change (user_id == 1). Uses an atomic
+/// temp-file + rename so a crashed write cannot corrupt the config. Refuses
+/// to silently overwrite a `{{vault.*}}` template — the caller must handle
+/// that case explicitly because we don't want to accidentally break vault-
+/// managed deployments.
+pub async fn sync_gateway_password(state: &AppState, new_password: &str) -> Result<(), String> {
+    let path = &state.config_path;
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("read {}: {}", path.display(), e))?;
+    let mut config: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("parse {}: {}", path.display(), e))?;
+
+    let gw_auth = config
+        .pointer_mut("/gateway/auth")
+        .ok_or_else(|| "config missing gateway.auth".to_string())?;
+
+    if let Some(existing) = gw_auth.get("password").and_then(|v| v.as_str()) {
+        if existing.starts_with("{{vault.") {
+            return Err(
+                "gateway password is a vault template; change via vault, not via UI"
+                    .to_string(),
+            );
+        }
+    }
+
+    gw_auth["password"] = serde_json::Value::String(new_password.to_string());
+
+    let serialized = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("serialize: {}", e))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serialized)
+        .map_err(|e| format!("write tmp: {}", e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    std::fs::rename(&tmp, path)
+        .map_err(|e| format!("rename {}: {}", path.display(), e))?;
+
+    Ok(())
+}
 
 /// POST /api/setup/apply — apply the full setup configuration.
 /// Writes config file + agent workspace from installer choices.
