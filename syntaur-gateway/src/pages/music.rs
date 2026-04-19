@@ -2079,7 +2079,7 @@ async function loadLocalTracks() {
           : t.metadata_source === 'musicbrainz'
             ? '<span title="Canonical tags from MusicBrainz" class="text-[9px] text-emerald-400 font-mono uppercase tracking-wider">MB</span>'
             : '';
-        return '<div class="flex items-center gap-2 px-2 py-1 rounded hover:bg-gray-900 group" data-track-row="' + t.id + '">'
+        return '<div class="flex items-center gap-2 px-2 py-1 rounded hover:bg-gray-900 group" data-track-row="' + t.id + '" style="user-select:none;-webkit-user-select:none;">'
           + '<button class="flex-1 min-w-0 text-left local-play-btn"'
           + ' data-track-id="' + t.id + '"'
           + ' data-track-title="' + title + '"'
@@ -2096,35 +2096,49 @@ async function loadLocalTracks() {
   } catch(e) { console.warn('[local-lib] load tracks failed', e); el.innerHTML = ''; }
 }
 
-// Guard against the double-click freeze. Two rapid clicks used to
-// overlap two play() promises on the same <audio> element; WebKitGTK
-// (viewer) deadlocks when a second src+play fires while the first is
-// still buffering. Fix: serialize through a single busy flag, pause +
-// load + await play() so the previous request resolves cleanly, and
-// swallow AbortError (normal when src changes mid-load).
-let localPlayBusy = false;
-let localPlayCurrent = null;
-async function playLocalTrack(trackId, title, artist) {
-  if (localPlayBusy) return;
-  if (localPlayCurrent === trackId) return;
-  localPlayBusy = true;
-  localPlayCurrent = trackId;
+// Double-click freeze fight, round 2. First fix used a busy flag +
+// await play() but that still left a window where WebKitGTK's native
+// dblclick handling could fire a second click event before the guard
+// was set, which wedged the <audio> element. This version:
+//   • debounces at a timestamp level (400 ms lockout across ALL
+//     invocation paths — click delegation, programmatic calls, cloud
+//     play buttons).
+//   • bails out when click.detail > 1 (second click of a double).
+//   • tears the <audio> element down fully — pause, clear src,
+//     removeAttribute, load() — before setting the new src, so no
+//     half-buffered resource can collide with the new one.
+//   • yields to the event loop via setTimeout(0) between tear-down and
+//     new src, letting WebKit finish its internal cleanup pass.
+//   • swallows AbortError (expected when src changes mid-load).
+let lastLocalPlayAt = 0;
+let localPlayGeneration = 0;
+function playLocalTrack(trackId, title, artist) {
+  const now = Date.now();
+  if (now - lastLocalPlayAt < 400) return;   // lockout window
+  lastLocalPlayAt = now;
+  const myGen = ++localPlayGeneration;
   const a = document.getElementById('local-audio');
+  // Hard reset — covers in-flight fetches, pending play() promises,
+  // and WebKit's internal media-element state machine.
   try { a.pause(); } catch(e) {}
-  a.src = '/api/music/local/file/' + trackId + '?token=' + encodeURIComponent(token);
-  a.load();
+  try { a.removeAttribute('src'); } catch(e) {}
+  try { a.load(); } catch(e) {}
   showMusicNotice('▶ ' + (title || 'Track ' + trackId) + (artist ? ' — ' + artist : ''), false);
-  try {
-    await a.play();
-  } catch(e) {
-    if (e && e.name !== 'AbortError') {
-      console.warn('[local-play]', e);
-      showMusicNotice("Couldn't play that track. " + (e.message || ''), true);
-      localPlayCurrent = null;
+  // Yield one tick before re-arming so the element fully settles.
+  setTimeout(() => {
+    if (myGen !== localPlayGeneration) return;  // superseded
+    a.src = '/api/music/local/file/' + trackId + '?token=' + encodeURIComponent(token);
+    a.load();
+    const p = a.play();
+    if (p && typeof p.catch === 'function') {
+      p.catch(e => {
+        if (e && e.name !== 'AbortError') {
+          console.warn('[local-play]', e);
+          showMusicNotice("Couldn't play that track. " + (e.message || ''), true);
+        }
+      });
     }
-  } finally {
-    localPlayBusy = false;
-  }
+  }, 50);
 }
 
 // Top-level click delegation on the local track list. Two classes:
@@ -2132,10 +2146,24 @@ async function playLocalTrack(trackId, title, artist) {
 // lookup + edit drawer). Using data attributes + delegation avoids the
 // escape bugs of inlined onclick="..." strings and survives track list
 // re-renders without rewiring.
+//
+// Double-click guards — layered defence so WebKitGTK can't freeze:
+//   • swallow the native dblclick event (no text selection, no UA hook)
+//   • ignore `click` events with detail > 1 (the second click of a
+//     double-click fires a separate event with detail=2)
+//   • debounce the play handler itself (playLocalTrack has its own
+//     400 ms lockout as a third line of defence)
 (function() {
   const listEl = document.getElementById('local-lib-tracks');
   if (!listEl) return;
+  listEl.addEventListener('dblclick', (ev) => {
+    if (ev.target.closest('.local-play-btn') || ev.target.closest('.local-details-btn')) {
+      ev.preventDefault();
+      ev.stopPropagation();
+    }
+  });
   listEl.addEventListener('click', (ev) => {
+    if (ev.detail > 1) { ev.preventDefault(); return; }  // ignore 2nd+ of a multi-click burst
     const playBtn = ev.target.closest('.local-play-btn');
     if (playBtn) {
       const id = parseInt(playBtn.dataset.trackId, 10);
