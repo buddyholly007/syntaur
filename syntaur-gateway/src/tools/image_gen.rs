@@ -390,7 +390,7 @@ impl Tool for SaveImageTool {
 }
 
 /// Provider for image generation. Dispatch is chosen at call time from the
-/// `image_gen` section of openclaw.json, with Pollinations.ai as the
+/// `image_gen` section of syntaur.json, with Pollinations.ai as the
 /// zero-config default so a fresh install generates images without any
 /// signup, API key, or paid account.
 ///

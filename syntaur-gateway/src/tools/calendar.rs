@@ -855,7 +855,7 @@ pub async fn gmail_send_reply(state: &Arc<AppState>, user_id: i64, approval_id: 
 
 // ── Microsoft 365 / Graph OAuth ──────────────────────────────────────
 // These functions are config-gated. If M365_CLIENT_ID / M365_CLIENT_SECRET /
-// M365_TENANT_ID aren't set in the gateway env or openclaw.json, the
+// M365_TENANT_ID aren't set in the gateway env or syntaur.json, the
 // functions return a descriptive error so the UI can show "Connect
 // Microsoft 365" with setup instructions.
 

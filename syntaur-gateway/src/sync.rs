@@ -2111,7 +2111,7 @@ pub async fn handle_apple_music_bookmarklet(
     let _ = crate::resolve_principal(&state, token).await?;
     // The capture page is served at /apple_music_capture.html same-origin.
     // Host comes from the Host header typically; the UI substitutes the actual origin.
-    let bookmarklet = r#"javascript:(function(){var m=MusicKit.getInstance();if(!m||!m.musicUserToken){alert('Not signed in. Sign into music.apple.com first.');return;}var d={dev:m.developerToken,mut:m.musicUserToken};var u=document.referrer||'';var origin=prompt('Syntaur origin (e.g. http://openclawprod:18789):',origin||'http://openclawprod:18789');if(!origin)return;window.location.href=origin.replace(/\/$/,'')+'/apple_music_capture#'+encodeURIComponent(JSON.stringify(d));})()"#;
+    let bookmarklet = r#"javascript:(function(){var m=MusicKit.getInstance();if(!m||!m.musicUserToken){alert('Not signed in. Sign into music.apple.com first.');return;}var d={dev:m.developerToken,mut:m.musicUserToken};var u=document.referrer||'';var origin=prompt('Syntaur origin (e.g. http://your-syntaur-host:18789):',origin||'http://your-syntaur-host:18789');if(!origin)return;window.location.href=origin.replace(/\/$/,'')+'/apple_music_capture#'+encodeURIComponent(JSON.stringify(d));})()"#;
     Ok(Json(serde_json::json!({ "bookmarklet": bookmarklet })))
 }
 

@@ -198,7 +198,7 @@ fn main_pane() -> Markup {
                     div {
                         div class="j-eyebrow" { "settings" }
                         h1 class="j-daytitle" { "Your journal, your terms" }
-                        p class="j-dayprompt" { "Read-only view of the recording pipeline configuration. Edit in `~/.openclaw/openclaw.json`." }
+                        p class="j-dayprompt" { "Read-only view of the recording pipeline configuration. Edit in `~/.syntaur/syntaur.json`." }
                     }
                 }
                 div id="j-settings" class="j-settings" {
