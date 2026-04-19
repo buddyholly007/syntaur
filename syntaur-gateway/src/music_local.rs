@@ -1665,6 +1665,53 @@ pub async fn album_liner_notes(
 static MB_LAST_CALL: tokio::sync::Mutex<Option<std::time::Instant>> =
     tokio::sync::Mutex::const_new(None);
 
+/// Strip filename-style prefixes that break MusicBrainz exact-match.
+/// Matches "01-", "A01 ", "Track 05 - ", "05. ", etc. at the start.
+fn strip_track_prefix(s: &str) -> String {
+    let trimmed = s.trim();
+    // A01, A1, B12, 01, 001, Disc1-A01 etc. followed by space/dash/dot/period
+    let re = regex::Regex::new(
+        r"(?i)^(?:disc\s*\d+[\s\-.]+)?(?:track\s+)?([A-Z]?\d{1,3})[\s\-.]+"
+    ).unwrap();
+    let once = re.replace(trimmed, "");
+    once.trim().to_string()
+}
+
+/// Escape Lucene special chars so the query can't break quoted fields.
+fn lucene_escape(s: &str) -> String {
+    // The MB search server uses Lucene 4.x syntax. Backslash-escape
+    // the documented reserved characters.
+    let specials = ['\\', '+', '-', '!', '(', ')', '{', '}', '[', ']',
+                    '^', '"', '~', '*', '?', ':', '/'];
+    let mut out = String::with_capacity(s.len() + 4);
+    for c in s.chars() {
+        if specials.contains(&c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Build a MusicBrainz Lucene query. Quoted mode does exact-match on
+/// the recording title and artist; loose mode uses plain keyword
+/// search that matches anywhere in any field.
+fn build_mb_query(title: &str, artist: &str, quoted: bool) -> String {
+    let title = title.trim();
+    let artist = artist.trim();
+    if title.is_empty() && artist.is_empty() { return String::new(); }
+
+    if quoted {
+        let mut parts = Vec::new();
+        if !title.is_empty()  { parts.push(format!(r#"recording:"{}""#, lucene_escape(title))); }
+        if !artist.is_empty() { parts.push(format!(r#"artist:"{}""#,    lucene_escape(artist))); }
+        parts.join(" AND ")
+    } else {
+        // Loose: just join terms, MB ranks hits across all fields.
+        format!("{} {}", title, artist).trim().to_string()
+    }
+}
+
 /// User-Agent string required by MusicBrainz. Includes project name,
 /// version, and a contact path (their policy page specifically asks
 /// for a contact). Keep under ~80 chars.
@@ -1721,35 +1768,55 @@ pub async fn lookup(
           .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let (title, artist, album) = row.ok_or(StatusCode::NOT_FOUND)?;
 
-    // Build MB search. Unquoted queries are less precise; Lucene-style
-    // field queries (`recording:"x" AND artist:"y"`) work best.
-    let mut terms: Vec<String> = Vec::new();
-    if let Some(t) = title.as_ref().filter(|s| !s.is_empty()) {
-        terms.push(format!(r#"recording:"{}""#, t.replace('"', "")));
-    }
-    if let Some(a) = artist.as_ref().filter(|s| !s.is_empty()) {
-        terms.push(format!(r#"artist:"{}""#, a.replace('"', "")));
-    }
-    if terms.is_empty() {
+    // Strip filename-style prefixes that kill MB exact-match. Covers:
+    //   "01-Brianstorm" → "Brianstorm"
+    //   "A01 Bad" → "Bad"
+    //   "Track 05 - Title" → "Title"
+    //   "05. Title" → "Title"
+    let cleaned_title = title.as_ref().map(|s| strip_track_prefix(s));
+    let cleaned_artist = artist.as_ref().map(|s| strip_track_prefix(s));
+
+    if cleaned_title.as_deref().unwrap_or("").is_empty() && cleaned_artist.as_deref().unwrap_or("").is_empty() {
         return Ok(Json(json!({
             "current": { "title": title, "artist": artist, "album": album },
             "matches": [],
             "reason": "This track has no title or artist tag to look up. Use Clean up tags to let the AI infer them first."
         })));
     }
-    let query = terms.join(" AND ");
 
-    mb_rate_limit().await;
-    let resp = state.client.get("https://musicbrainz.org/ws/2/recording/")
-        .query(&[("query", query.as_str()), ("fmt", "json"), ("limit", "5")])
-        .header("User-Agent", mb_user_agent())
-        .header("Accept", "application/json")
-        .timeout(std::time::Duration::from_secs(10))
-        .send().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
-    if !resp.status().is_success() {
-        return Err(StatusCode::BAD_GATEWAY);
+    // Two-pass strategy: quoted exact-match first (precise when it
+    // matches), then unquoted fuzzy fallback (catches the 80% of cases
+    // where tagging varies slightly from MB's canonical names).
+    let mut matches: Vec<Value> = Vec::new();
+
+    for pass in ["quoted", "loose"] {
+        let query = build_mb_query(
+            cleaned_title.as_deref().unwrap_or(""),
+            cleaned_artist.as_deref().unwrap_or(""),
+            pass == "quoted",
+        );
+        if query.is_empty() { continue; }
+
+        mb_rate_limit().await;
+        let resp = state.client.get("https://musicbrainz.org/ws/2/recording/")
+            .query(&[("query", query.as_str()), ("fmt", "json"), ("limit", "5")])
+            .header("User-Agent", mb_user_agent())
+            .header("Accept", "application/json")
+            .timeout(std::time::Duration::from_secs(10))
+            .send().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+        if !resp.status().is_success() {
+            return Err(StatusCode::BAD_GATEWAY);
+        }
+        let j: Value = resp.json().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+        let recs = j.get("recordings").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        if !recs.is_empty() {
+            matches = recs;
+            break;
+        }
     }
-    let j: Value = resp.json().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+
+    // Rebuild the Value wrapper so the rest of the code can stay as-is.
+    let j = json!({ "recordings": matches });
 
     // Shape the MB response into something the UI can render without
     // knowing MB's schema.

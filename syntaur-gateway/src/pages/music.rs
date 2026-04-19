@@ -2654,40 +2654,48 @@ VIZ_DRAWERS.wave = function(ctx, W, H, bins, waveform) {
   ctx.restore();
 };
 
-// Dual — two filled area charts stacked. Spectrum top in cyan,
-// waveform bottom in pink — the "teal top / pink bottom" look from
-// ref-1 right-middle.
+// Dual — stepped spectrum bars top + smooth filled waveform bottom.
+// The key is differentiation: top reads as discrete bar columns (bass
+// spectrum), bottom as a continuous ribbon (time-domain waveform).
+// Matches the teal/pink pair from ref-1 with clear visual distinction
+// between the two halves.
 VIZ_DRAWERS.dual = function(ctx, W, H, bins, waveform) {
-  const halfH = H / 2;
+  const halfH = H / 2 - 1;
 
-  // Top: spectrum area (cyan, hanging down from top)
-  ctx.save();
-  ctx.beginPath();
-  ctx.moveTo(0, 0);
-  const BAR_COUNT = 64;
+  // Top: stepped spectrum bars, hanging down from the top edge.
+  // Discrete columns with gaps so it reads as "spectrum analyzer"
+  // not "another waveform".
+  const BAR_COUNT = 56;
   const MAX_BIN = Math.floor(bins.length * 0.5);
-  const pts = [];
-  for (let i = 0; i <= BAR_COUNT; i++) {
+  const gap = 2;
+  const barW = Math.max(2, (W - gap * (BAR_COUNT + 1)) / BAR_COUNT);
+  for (let i = 0; i < BAR_COUNT; i++) {
     const lo = Math.floor(Math.pow(i / BAR_COUNT, 1.6) * MAX_BIN);
     const hi = Math.max(lo + 1, Math.floor(Math.pow((i + 1) / BAR_COUNT, 1.6) * MAX_BIN));
     let peak = 0;
     for (let b = lo; b < hi && b < bins.length; b++) { if (bins[b] > peak) peak = bins[b]; }
-    const v = peak / 255;
-    const x = (i / BAR_COUNT) * W;
-    const y = v * halfH * 0.95;
-    pts.push([x, y]);
+    const treble_lift = 1.0 + (i / BAR_COUNT) * 0.8;
+    const v = Math.min(1, (peak / 255) * treble_lift);
+    const h = Math.max(2, v * halfH * 0.96);
+    const x = gap + i * (barW + gap);
+    const g = ctx.createLinearGradient(0, 0, 0, h);
+    g.addColorStop(0, '#0cf8f0');
+    g.addColorStop(1, 'rgba(12, 248, 240, 0.35)');
+    ctx.fillStyle = g;
+    ctx.fillRect(x, 0, barW, h);
   }
-  pts.forEach(([x, y], i) => { if (i === 0) ctx.lineTo(x, y); else ctx.lineTo(x, y); });
-  ctx.lineTo(W, 0);
-  ctx.closePath();
-  const g1 = ctx.createLinearGradient(0, 0, 0, halfH);
-  g1.addColorStop(0, '#0cf8f0');
-  g1.addColorStop(1, 'rgba(12, 248, 240, 0.25)');
-  ctx.fillStyle = g1;
-  ctx.fill();
-  ctx.restore();
 
-  // Bottom: waveform area (pink, hanging up from bottom)
+  // Divider line
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, halfH + 1);
+  ctx.lineTo(W, halfH + 1);
+  ctx.stroke();
+
+  // Bottom: smooth filled time-domain waveform (pink), rising from
+  // bottom edge. Uses the whole waveform array for a soft ribbon —
+  // deliberately CONTRASTS the stepped bars above.
   ctx.save();
   ctx.beginPath();
   ctx.moveTo(0, H);
@@ -2695,49 +2703,81 @@ VIZ_DRAWERS.dual = function(ctx, W, H, bins, waveform) {
   for (let x = 0; x < W; x++) {
     const i = Math.floor(x * step);
     const v = Math.abs(waveform[i] - 128) / 128;
-    const y = H - v * halfH * 0.95;
+    const y = H - Math.max(1, v * halfH * 1.3);   // slight extra lift to make it punch
     ctx.lineTo(x, y);
   }
   ctx.lineTo(W, H);
   ctx.closePath();
   const g2 = ctx.createLinearGradient(0, halfH, 0, H);
-  g2.addColorStop(0, 'rgba(255, 44, 223, 0.25)');
+  g2.addColorStop(0, 'rgba(255, 44, 223, 0.15)');
   g2.addColorStop(1, '#ff2cdf');
   ctx.fillStyle = g2;
   ctx.fill();
+  // Bright outline on the wave ribbon for definition
+  ctx.strokeStyle = '#ff7de5';
+  ctx.lineWidth = 1.2;
+  ctx.stroke();
   ctx.restore();
 };
 
-// Radial — concentric bars around a center point. Matches the flower/
-// polar look bottom-right of ref-1.
+// Radial — concentric bars around a center point + a bass-pulsing
+// disc in the middle. Uses the canvas's short dimension (height) for
+// the inner radius but extends bars well past the vertical bounds so
+// the viz fills the whole width. Matches the dramatic polar-flower
+// look in ref-1 bottom-right + adds a punchy central bass element.
 VIZ_DRAWERS.radial = function(ctx, W, H, bins, waveform) {
   const cx = W / 2, cy = H / 2;
-  const innerR = Math.min(W, H) * 0.18;
-  const maxLen = Math.min(W, H) * 0.42;
-  const BARS = 72;
-  const MAX_BIN = Math.floor(bins.length * 0.45);
+  const baseR = H / 2;                          // short-dim = height
+  const innerR = baseR * 0.28;
+  const maxLen = baseR * 0.95;                  // bars nearly touch top/bottom edges
+  const BARS = 112;
+  const MAX_BIN = Math.floor(bins.length * 0.5);
+
+  // Bass energy for the central pulse disc.
+  let bassSum = 0;
+  const bassSpan = Math.max(3, Math.floor(bins.length * 0.05));
+  for (let b = 1; b < 1 + bassSpan; b++) bassSum += bins[b];
+  const bassAvg = bassSum / bassSpan / 255;
+
+  // Central bass disc — slowly pulsing with kick drum energy.
+  const discR = innerR * (0.55 + bassAvg * 0.45);
+  const discG = ctx.createRadialGradient(cx, cy, 0, cx, cy, discR);
+  discG.addColorStop(0, `rgba(255, 120, 255, ${0.35 + bassAvg * 0.5})`);
+  discG.addColorStop(0.6, `rgba(168, 82, 255, ${0.2 + bassAvg * 0.3})`);
+  discG.addColorStop(1, 'rgba(12, 248, 240, 0.05)');
+  ctx.fillStyle = discG;
+  ctx.beginPath();
+  ctx.arc(cx, cy, discR, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Outer radial bars — long, thick, radiate to the edges.
   for (let i = 0; i < BARS; i++) {
     const lo = Math.floor(Math.pow(i / BARS, 1.4) * MAX_BIN);
     const hi = Math.max(lo + 1, Math.floor(Math.pow((i + 1) / BARS, 1.4) * MAX_BIN));
     let peak = 0;
     for (let b = lo; b < hi && b < bins.length; b++) { if (bins[b] > peak) peak = bins[b]; }
-    const v = peak / 255;
-    const len = Math.max(2, v * maxLen);
-    const angle = (i / BARS) * Math.PI * 2 - Math.PI / 2;
-    const x1 = cx + Math.cos(angle) * innerR;
-    const y1 = cy + Math.sin(angle) * innerR;
-    const x2 = cx + Math.cos(angle) * (innerR + len);
-    const y2 = cy + Math.sin(angle) * (innerR + len);
-    const g = ctx.createLinearGradient(x1, y1, x2, y2);
-    g.addColorStop(0, '#0cf8f0');
-    g.addColorStop(1, '#ff2cdf');
-    ctx.strokeStyle = g;
-    ctx.lineWidth = 2.2;
-    ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.moveTo(x1, y1);
-    ctx.lineTo(x2, y2);
-    ctx.stroke();
+    const treble_lift = 1.0 + (i / BARS) * 0.6;
+    const v = Math.min(1, (peak / 255) * treble_lift);
+    const len = Math.max(3, v * maxLen);
+    // Double-paint each frequency at opposite angles so the spectrum
+    // reads as symmetric flower — same band top-half + bottom-half.
+    for (const sign of [0, Math.PI]) {
+      const angle = (i / BARS) * Math.PI - Math.PI / 2 + sign;
+      const x1 = cx + Math.cos(angle) * innerR;
+      const y1 = cy + Math.sin(angle) * innerR;
+      const x2 = cx + Math.cos(angle) * (innerR + len);
+      const y2 = cy + Math.sin(angle) * (innerR + len);
+      const g = ctx.createLinearGradient(x1, y1, x2, y2);
+      g.addColorStop(0, '#0cf8f0');
+      g.addColorStop(1, '#ff2cdf');
+      ctx.strokeStyle = g;
+      ctx.lineWidth = 3;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
+    }
   }
 };
 
