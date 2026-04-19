@@ -1323,6 +1323,69 @@ pub async fn delete_playlist(
     Ok(Json(json!({"ok": true})))
 }
 
+#[derive(Deserialize)]
+pub struct PlaylistRenameBody {
+    pub token: Option<String>,
+    pub name: String,
+}
+
+pub async fn rename_playlist(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(pl_id): AxumPath<i64>,
+    Json(body): Json<PlaylistRenameBody>,
+) -> Result<Json<Value>, StatusCode> {
+    let token = extract_token(&headers, body.token.as_deref());
+    let principal = crate::resolve_principal(&state, &token).await?;
+    let uid = principal.user_id();
+    let name = body.name.trim().to_string();
+    if name.is_empty() { return Err(StatusCode::BAD_REQUEST); }
+    let now = chrono::Utc::now().timestamp();
+    let db = state.db_path.clone();
+    let n: usize = tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
+        let conn = rusqlite::Connection::open(&db)?;
+        conn.execute(
+            "UPDATE local_playlists SET name = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+            rusqlite::params![name, now, pl_id, uid],
+        )
+    }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+      .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if n == 0 { return Err(StatusCode::NOT_FOUND); }
+    Ok(Json(json!({"ok": true})))
+}
+
+pub async fn playlist_remove_track(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath((pl_id, track_id)): AxumPath<(i64, i64)>,
+    Query(q): Query<TokenQuery>,
+) -> Result<Json<Value>, StatusCode> {
+    let token = extract_token(&headers, q.token.as_deref());
+    let principal = crate::resolve_principal(&state, &token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
+        let conn = rusqlite::Connection::open(&db)?;
+        // Verify the playlist belongs to the caller.
+        let owned: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM local_playlists WHERE id = ? AND user_id = ?",
+            rusqlite::params![pl_id, uid], |r| r.get(0),
+        ).unwrap_or(0);
+        if owned == 0 { return Ok(()); }
+        conn.execute(
+            "DELETE FROM local_playlist_tracks WHERE playlist_id = ? AND track_id = ?",
+            rusqlite::params![pl_id, track_id],
+        )?;
+        conn.execute(
+            "UPDATE local_playlists SET updated_at = ? WHERE id = ?",
+            rusqlite::params![chrono::Utc::now().timestamp(), pl_id],
+        )?;
+        Ok(())
+    }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+      .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!({"ok": true})))
+}
+
 // ── Lyrics via LRCLIB (T3) ───────────────────────────────────────────
 
 pub async fn fetch_lyrics(

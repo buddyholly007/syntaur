@@ -257,6 +257,69 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
     width: 100%; height: 100%; color: #3a4250; font-size: 14px;
   }
 
+  /* Playlist detail header */
+  .pl-header {
+    display: flex; flex-direction: column; gap: 6px;
+    padding: 6px 2px 10px; margin-bottom: 4px;
+    border-bottom: 1px solid var(--c-line);
+  }
+  .pl-title { display: flex; align-items: center; gap: 8px; }
+  .pl-back {
+    background: transparent; border: 1px solid var(--c-line); color: var(--c-text-mute, #6a7380);
+    padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 12px;
+  }
+  .pl-back:hover { color: var(--c-cy); border-color: var(--c-cy); }
+  .pl-name { color: #e2e8f0; font-size: 13.5px; font-weight: 500; cursor: pointer; border-bottom: 1px dashed transparent; }
+  .pl-name:hover { border-bottom-color: var(--c-mag); }
+  .pl-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .pl-actions button {
+    background: transparent; border: 1px solid var(--c-line); color: var(--c-text-mute, #8a94a3);
+    font: inherit; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em;
+    padding: 4px 10px; border-radius: 4px; cursor: pointer;
+  }
+  .pl-actions .pl-play:hover    { color: var(--c-cy);  border-color: var(--c-cy); }
+  .pl-actions .pl-shuffle:hover { color: var(--c-mag); border-color: var(--c-mag); }
+  .pl-actions .pl-delete:hover  { color: #f87171;      border-color: #f87171; }
+
+  /* Add-to-playlist popover anchored off a track row */
+  .add-to-pl-pop {
+    position: absolute; z-index: 100;
+    background: rgba(10, 14, 20, 0.96); backdrop-filter: blur(8px);
+    border: 1px solid var(--c-line); border-radius: 6px;
+    padding: 4px; min-width: 180px; max-height: 240px; overflow-y: auto;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  }
+  .add-to-pl-pop .atp-row {
+    display: block; width: 100%; text-align: left;
+    padding: 5px 8px; border-radius: 4px;
+    background: transparent; border: none; color: var(--c-text, #c5cbd3);
+    font: inherit; font-size: 12px; cursor: pointer;
+  }
+  .add-to-pl-pop .atp-row:hover { background: rgba(255, 44, 223, 0.12); color: var(--c-mag); }
+  .add-to-pl-pop .atp-new {
+    display: flex; gap: 4px; padding: 5px 8px 6px;
+    border-top: 1px solid var(--c-line); margin-top: 4px;
+  }
+  .add-to-pl-pop .atp-new input {
+    flex: 1; background: rgba(255,255,255,0.05); border: 1px solid var(--c-line);
+    border-radius: 3px; padding: 3px 7px; color: var(--c-text, #c5cbd3);
+    font: inherit; font-size: 11.5px; outline: none;
+  }
+  .add-to-pl-pop .atp-new button {
+    background: var(--c-mag); color: #0a0a0a; border: none;
+    padding: 3px 10px; border-radius: 3px; font-size: 10.5px; cursor: pointer;
+  }
+
+  /* Promotable library tab — grab-feel while dragging */
+  .lib-tab.dragging-tab { opacity: 0.55; cursor: grabbing; }
+  .lib-tab.promoted {
+    opacity: 0.4; text-decoration: line-through;
+    background: transparent; border-style: dashed;
+  }
+  .lib-tab.promoted::after {
+    content: ' ↗'; font-size: 9px; text-decoration: none; display: inline-block; margin-left: 3px;
+  }
+
   /* Artist row */
   .artist-row { padding: 8px 10px; border-bottom: 1px dashed rgba(255,255,255,0.06); cursor: pointer; display: flex; align-items: center; justify-content: space-between; }
   .artist-row:hover { background: rgba(255,255,255,0.03); }
@@ -3170,8 +3233,67 @@ function renderTrackRow(t) {
     + '</button>'
     + heart
     + '<span class="text-[10px] text-gray-600 font-mono flex-shrink-0">' + minutes(t.duration_ms) + '</span>'
+    + '<button class="text-[10px] text-gray-600 hover:text-pink-400 opacity-0 group-hover:opacity-100 transition-opacity local-add-to-pl-btn flex-shrink-0" title="Add to playlist" data-track-id="' + t.id + '">+ List</button>'
     + '<button class="text-[10px] text-gray-600 hover:text-oc-400 opacity-0 group-hover:opacity-100 transition-opacity local-details-btn flex-shrink-0" title="Details + edit + lyrics" data-track-id="' + t.id + '">Details</button>'
     + '</div>';
+}
+
+// Add-to-playlist popover, anchored next to the clicked row's +List
+// button. Fetches playlists, renders a list + a "new playlist" input.
+async function openAddToPlaylist(trackId, anchor) {
+  // Remove any existing popover.
+  document.querySelectorAll('.add-to-pl-pop').forEach(el => el.remove());
+  let pls = [];
+  try {
+    const r = await fetch('/api/music/local/playlists?token=' + encodeURIComponent(token));
+    const d = await r.json();
+    pls = d.playlists || [];
+  } catch(e) {}
+  const pop = document.createElement('div');
+  pop.className = 'add-to-pl-pop';
+  pop.innerHTML =
+    (pls.length
+      ? pls.map(p => `<button class="atp-row" data-pl-id="${p.id}">${escapeHtml(p.name)} <span class="text-[10px] text-gray-600">· ${p.track_count}</span></button>`).join('')
+      : '<div class="text-xs text-gray-500 italic p-2">No playlists yet.</div>')
+    + '<div class="atp-new"><input placeholder="New playlist…"><button>Create + add</button></div>';
+  document.body.appendChild(pop);
+  const rect = anchor.getBoundingClientRect();
+  const popRect = pop.getBoundingClientRect();
+  let left = rect.right - popRect.width;
+  if (left < 8) left = 8;
+  pop.style.left = left + 'px';
+  pop.style.top = (rect.bottom + 4) + 'px';
+
+  const close = () => pop.remove();
+  const addToExisting = async (plId) => {
+    await fetch(`/api/music/local/playlists/${plId}/tracks`, { method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ token, track_id: trackId }) });
+    showMusicNotice('Added to playlist', false);
+    close();
+  };
+  pop.querySelectorAll('.atp-row').forEach(btn => {
+    btn.addEventListener('click', () => addToExisting(parseInt(btn.dataset.plId, 10)));
+  });
+  const input = pop.querySelector('.atp-new input');
+  const createBtn = pop.querySelector('.atp-new button');
+  const createAndAdd = async () => {
+    const name = input.value.trim();
+    if (!name) return;
+    const r = await fetch('/api/music/local/playlists', { method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ token, name }) });
+    if (!r.ok) return;
+    const d = await r.json();
+    await addToExisting(d.id);
+  };
+  createBtn.addEventListener('click', createAndAdd);
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') createAndAdd(); });
+  setTimeout(() => {
+    document.addEventListener('click', function outside(ev) {
+      if (pop.contains(ev.target)) return;
+      close();
+      document.removeEventListener('click', outside);
+    });
+  }, 0);
 }
 
 // Library view switcher — Tracks / Albums / Artists / Favorites / Recent / Playlists / Duplicates.
@@ -3272,40 +3394,127 @@ async function openArtist(name) {
   document.querySelectorAll('.lib-tab').forEach(b => b.classList.toggle('active', b.dataset.view === 'tracks'));
   await loadLocalTracks();
 }
-async function loadPlaylistsView() {
+// Playlists view — can render into any host element (the library
+// tracks area OR a promoted standalone panel body). `host` defaults
+// to the library tracks container for the tab path.
+async function loadPlaylistsView(hostEl) {
+  const el = hostEl || document.getElementById('local-lib-tracks');
+  if (!el) return;
   try {
     const r = await fetch('/api/music/local/playlists?token=' + encodeURIComponent(token));
     const d = await r.json();
-    const el = document.getElementById('local-lib-tracks');
     const pls = d.playlists || [];
-    let html = '<div class="flex gap-2 mb-2"><input id="new-pl-name" placeholder="New playlist name" class="flex-1 bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-gray-200 outline-none"><button onclick="createPlaylistFromUI()" class="bg-oc-600 hover:bg-oc-700 text-white px-3 rounded-lg text-xs">Create</button></div>';
+    let html = '<div class="flex gap-2 mb-2"><input class="pl-new-name flex-1 bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-gray-200 outline-none" placeholder="New playlist name"><button class="pl-create bg-oc-600 hover:bg-oc-700 text-white px-3 rounded-lg text-xs">Create</button></div>';
     if (!pls.length) html += '<p class="text-xs text-gray-500 italic p-2">No playlists yet. Create one above.</p>';
     else html += pls.map(p =>
-      '<div class="artist-row" onclick="openPlaylist(' + p.id + ')">'
-      + '<div class="artist-name">' + escapeHtml(p.name) + '</div>'
-      + '<div class="artist-count">' + p.track_count + ' track' + (p.track_count !== 1 ? 's' : '') + '</div>'
-      + '</div>').join('');
+      `<div class="artist-row pl-row" data-pl-id="${p.id}" data-pl-name="${escapeHtml(p.name)}">`
+      + `<div class="artist-name">${escapeHtml(p.name)}</div>`
+      + `<div class="artist-count">${p.track_count} track${p.track_count !== 1 ? 's' : ''}</div>`
+      + `</div>`).join('');
     el.innerHTML = html;
+    // Wire handlers — scoped to this host so promoted panels don't
+    // collide with the library tab or each other.
+    const input = el.querySelector('.pl-new-name');
+    const createBtn = el.querySelector('.pl-create');
+    if (input && createBtn) {
+      const submit = async () => {
+        const name = input.value.trim();
+        if (!name) return;
+        const r = await fetch('/api/music/local/playlists', { method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ token, name }) });
+        if (r.ok) loadPlaylistsView(el);
+      };
+      createBtn.addEventListener('click', submit);
+      input.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+    }
+    el.querySelectorAll('.pl-row').forEach(row => {
+      row.addEventListener('click', () => openPlaylist(parseInt(row.dataset.plId, 10), row.dataset.plName, el));
+    });
   } catch(e) {}
 }
-async function createPlaylistFromUI() {
-  const name = document.getElementById('new-pl-name').value.trim();
-  if (!name) return;
-  try {
-    const r = await fetch('/api/music/local/playlists', { method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ token, name }) });
-    if (r.ok) loadPlaylistsView();
-  } catch(e) {}
-}
-async function openPlaylist(id) {
+
+async function openPlaylist(id, name, hostEl) {
+  const el = hostEl || document.getElementById('local-lib-tracks');
+  if (!el) return;
   try {
     const r = await fetch('/api/music/local/playlists/' + id + '?token=' + encodeURIComponent(token));
     const d = await r.json();
-    const el = document.getElementById('local-lib-tracks');
     const tracks = d.tracks || [];
-    el.innerHTML = '<p class="text-[10px] text-gray-600 px-1 pb-1">' + tracks.length + ' track(s) in this playlist</p>'
-      + tracks.map(renderTrackRow).join('');
+    // Header with playlist name, track count, and the four primary actions.
+    let html = '<div class="pl-header">'
+      + '<div class="pl-title">'
+      +   `<button class="pl-back" title="Back to playlists">←</button>`
+      +   `<span class="pl-name" data-pl-id="${id}" title="Click to rename">${escapeHtml(name || 'Playlist ' + id)}</span>`
+      + '</div>'
+      + '<div class="pl-actions">'
+      + `  <button class="pl-play" title="Play all">▶ Play all</button>`
+      + `  <button class="pl-shuffle" title="Shuffle all">⤨ Shuffle</button>`
+      + `  <button class="pl-delete" title="Delete playlist">Delete</button>`
+      + '</div>'
+      + '</div>';
+    html += '<p class="text-[10px] text-gray-600 px-1 pb-1">' + tracks.length + ' track(s)</p>';
+    html += tracks.map(t => renderPlaylistTrackRow(t, id)).join('');
+    el.innerHTML = html;
+
+    // Back.
+    el.querySelector('.pl-back').addEventListener('click', () => loadPlaylistsView(el));
+    // Play all.
+    el.querySelector('.pl-play').addEventListener('click', () => {
+      if (tracks.length) playLocalTrack(tracks[0].id, tracks[0].title || '', tracks[0].artist || '');
+    });
+    // Shuffle.
+    el.querySelector('.pl-shuffle').addEventListener('click', () => {
+      if (!tracks.length) return;
+      const t = tracks[Math.floor(Math.random() * tracks.length)];
+      npShuffle = true;
+      document.getElementById('np-shuffle')?.classList.add('active');
+      playLocalTrack(t.id, t.title || '', t.artist || '');
+    });
+    // Rename on title click.
+    el.querySelector('.pl-name').addEventListener('click', async () => {
+      const newName = prompt('Rename playlist:', name);
+      if (!newName || newName.trim() === name) return;
+      const r = await fetch('/api/music/local/playlists/' + id, { method: 'PATCH', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ token, name: newName.trim() }) });
+      if (r.ok) openPlaylist(id, newName.trim(), el);
+    });
+    // Delete.
+    el.querySelector('.pl-delete').addEventListener('click', async () => {
+      if (!confirm(`Delete playlist "${name}"? The tracks themselves stay in your library.`)) return;
+      const r = await fetch('/api/music/local/playlists/' + id + '?token=' + encodeURIComponent(token), { method: 'DELETE' });
+      if (r.ok) loadPlaylistsView(el);
+    });
+    // Remove-from-playlist buttons.
+    el.querySelectorAll('.pl-track-remove').forEach(btn => {
+      btn.addEventListener('click', async (ev) => {
+        ev.stopPropagation();
+        const tid = parseInt(btn.dataset.trackId, 10);
+        const r = await fetch(`/api/music/local/playlists/${id}/tracks/${tid}?token=${encodeURIComponent(token)}`, { method: 'DELETE' });
+        if (r.ok) openPlaylist(id, name, el);
+      });
+    });
   } catch(e) {}
+}
+
+// Playlist track row — same shape as renderTrackRow but with a
+// remove-from-playlist button in place of the details one.
+function renderPlaylistTrackRow(t, plId) {
+  const title = escapeHtml(t.title || '(untitled)');
+  const artist = escapeHtml(t.artist || '');
+  const album = escapeHtml(t.album || '');
+  const minutes = (ms) => { if (!ms) return ''; const s = Math.round(ms/1000); return Math.floor(s/60) + ':' + String(s%60).padStart(2,'0'); };
+  const art = t.has_art
+    ? `<span class="row-art" style="background-image:url(/api/music/local/art/${t.id}?token=${encodeURIComponent(token)})"></span>`
+    : '<span class="row-art placeholder"></span>';
+  return '<div class="flex items-center gap-2 px-2 py-1 rounded hover:bg-gray-900 group" style="user-select:none;-webkit-user-select:none;">'
+    + art
+    + `<button class="flex-1 min-w-0 text-left local-play-btn" data-track-id="${t.id}" data-track-title="${title}" data-track-artist="${artist}">`
+    + `<p class="text-xs text-gray-200 truncate">${title}</p>`
+    + (artist || album ? `<p class="text-[10px] text-gray-500 truncate">${[artist, album].filter(Boolean).join(' · ')}</p>` : '')
+    + '</button>'
+    + `<span class="text-[10px] text-gray-600 font-mono flex-shrink-0">${minutes(t.duration_ms)}</span>`
+    + `<button class="text-[11px] text-gray-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity pl-track-remove flex-shrink-0" data-track-id="${t.id}" title="Remove from playlist">×</button>`
+    + '</div>';
 }
 async function loadDuplicatesView() {
   try {
@@ -3363,6 +3572,12 @@ async function runNLSearch() {
   });
   listEl.addEventListener('click', async (ev) => {
     if (ev.detail > 1) { ev.preventDefault(); return; }
+    const addBtn = ev.target.closest('.local-add-to-pl-btn');
+    if (addBtn) {
+      ev.stopPropagation();
+      openAddToPlaylist(parseInt(addBtn.dataset.trackId, 10), addBtn);
+      return;
+    }
     const favBtn = ev.target.closest('.local-fav-btn');
     if (favBtn) {
       ev.stopPropagation();
@@ -3973,7 +4188,148 @@ function applySplit(pct) {
 
 // Init once the cards have rendered + the loadLocalFolders + loadNowPlaying
 // have populated the queue / provider chip hidden states. Delay a tick.
-setTimeout(initMusicLayoutPanels, 200);
+setTimeout(() => { initMusicLayoutPanels(); initPromotableTabs(); }, 200);
+
+// ── Promotable library tabs ──────────────────────────────────────────
+// Each .lib-tab pill can be grabbed + dragged into the main layout
+// area to spawn a standalone panel hosting that tab's contents. The
+// tab pill shows as "promoted" (dashed, greyed) while the panel is
+// alive; clicking it brings focus. Saved to layout.promotedTabs.
+const TAB_RENDERERS = {
+  tracks:     (el) => { const cur = document.getElementById('local-lib-tracks'); if (cur) el.innerHTML = cur.innerHTML; else loadLocalTracks(); },
+  albums:     (el) => loadAlbumsView(),
+  artists:    (el) => loadArtistsView(),
+  favorites: (el) => loadFavoritesView(),
+  recent:     (el) => loadRecentView(),
+  playlists:  (el) => loadPlaylistsView(el),
+  duplicates: (el) => loadDuplicatesView(),
+};
+const TAB_LABELS = {
+  tracks: 'Tracks', albums: 'Albums', artists: 'Artists', favorites: 'Favorites',
+  recent: 'Recent', playlists: 'Playlists', duplicates: 'Duplicates',
+};
+
+function initPromotableTabs() {
+  const tabs = document.querySelectorAll('.lib-tab');
+  tabs.forEach(tab => {
+    tab.addEventListener('pointerdown', (ev) => startTabDrag(ev, tab));
+  });
+  // Restore promoted tabs from layout.
+  const layout = readMusicLayout();
+  for (const view of (layout.promotedTabs || [])) {
+    promoteTabToPanel(view, /* silent */ true);
+  }
+}
+
+let _tabDragState = null;
+function startTabDrag(ev, tab) {
+  // Don't hijack simple clicks — require at least 8 px movement.
+  _tabDragState = {
+    tab,
+    view: tab.dataset.view,
+    startX: ev.clientX, startY: ev.clientY,
+    captured: false,
+  };
+  const onMove = (e) => {
+    if (!_tabDragState) return;
+    const dx = e.clientX - _tabDragState.startX;
+    const dy = e.clientY - _tabDragState.startY;
+    if (!_tabDragState.captured && Math.hypot(dx, dy) > 8) {
+      _tabDragState.captured = true;
+      _tabDragState.tab.classList.add('dragging-tab');
+      _tabDragState.tab.setPointerCapture(ev.pointerId);
+    }
+  };
+  const onUp = (e) => {
+    const st = _tabDragState;
+    _tabDragState = null;
+    document.removeEventListener('pointermove', onMove);
+    document.removeEventListener('pointerup', onUp);
+    if (!st) return;
+    st.tab.classList.remove('dragging-tab');
+    try { st.tab.releasePointerCapture(ev.pointerId); } catch(_e) {}
+    if (!st.captured) return;   // regular click, let the tab onclick handle it
+    // Decide: dropped inside or outside the tab strip?
+    const stripRect = document.getElementById('lib-tabs').getBoundingClientRect();
+    const inside = e.clientX >= stripRect.left && e.clientX <= stripRect.right
+                && e.clientY >= stripRect.top && e.clientY <= stripRect.bottom;
+    if (!inside) {
+      promoteTabToPanel(st.view);
+    }
+  };
+  document.addEventListener('pointermove', onMove);
+  document.addEventListener('pointerup', onUp);
+}
+
+function promoteTabToPanel(view, silent) {
+  if (!TAB_RENDERERS[view]) return;
+  // Already promoted?
+  if (document.querySelector(`[data-panel-id="tab-${view}"]`)) return;
+
+  const rightCol = document.querySelector('.music-col-right');
+  if (!rightCol) return;
+
+  // Build a card that matches the music-panel shape.
+  const card = document.createElement('div');
+  card.className = 'card music-panel';
+  card.dataset.panelId = 'tab-' + view;
+  card.innerHTML = `
+    <div class="flex items-center justify-between mb-3">
+      <h3 class="font-medium text-gray-200 text-sm">${escapeHtml(TAB_LABELS[view] || view)}</h3>
+      <button class="text-[10px] text-gray-500 hover:text-oc-400 font-mono uppercase tracking-wider pl-return-btn">RETURN TO TAB</button>
+    </div>
+    <div class="promoted-tab-body text-xs" data-promoted-view="${view}"></div>
+  `;
+  rightCol.appendChild(card);
+  // Mark the source tab as promoted.
+  const sourceTab = document.querySelector(`.lib-tab[data-view="${view}"]`);
+  if (sourceTab) sourceTab.classList.add('promoted');
+
+  // Wire the panel handles (drag, resize, close).
+  addPanelHandles(card);
+  bindPanelHandlers(card);
+
+  // Render the view's contents into the panel body.
+  const body = card.querySelector('.promoted-tab-body');
+  try { TAB_RENDERERS[view](body); } catch(e) { body.innerHTML = '<p class="text-xs text-red-400 p-2">Render failed.</p>'; }
+
+  // Return-to-tab: remove the panel + unmark the tab.
+  card.querySelector('.pl-return-btn').addEventListener('click', () => demotePromotedTab(view));
+
+  // Persist.
+  if (!silent) {
+    const layout = readMusicLayout();
+    const promoted = new Set(layout.promotedTabs || []);
+    promoted.add(view);
+    writeMusicLayout({ promotedTabs: Array.from(promoted) });
+  }
+  // If the tab was the current library view, swap back to 'tracks' so
+  // the library card isn't empty.
+  if (currentLibView === view) switchLibView('tracks');
+  // Also hook an observer on the panel — if the user × closes it, we
+  // should also demote the tab so the pill un-greys.
+  const mo = new MutationObserver(() => {
+    if (card.style.display === 'none' || !card.isConnected) {
+      if (sourceTab) sourceTab.classList.remove('promoted');
+      mo.disconnect();
+      // Scrub from layout.
+      const layout = readMusicLayout();
+      const promoted = (layout.promotedTabs || []).filter(v => v !== view);
+      writeMusicLayout({ promotedTabs: promoted });
+    }
+  });
+  mo.observe(card, { attributes: true, attributeFilter: ['style'], childList: false });
+}
+
+function demotePromotedTab(view) {
+  const card = document.querySelector(`[data-panel-id="tab-${view}"]`);
+  if (card) card.remove();
+  const sourceTab = document.querySelector(`.lib-tab[data-view="${view}"]`);
+  if (sourceTab) sourceTab.classList.remove('promoted');
+  const layout = readMusicLayout();
+  const promoted = (layout.promotedTabs || []).filter(v => v !== view);
+  writeMusicLayout({ promotedTabs: promoted });
+}
 
 
 
