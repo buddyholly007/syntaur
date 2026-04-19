@@ -6,6 +6,101 @@
 
 const DEFAULT_URL: &str = "http://localhost:18789";
 const WINDOW_TITLE: &str = "Syntaur";
+const DEFAULT_W: i32 = 1200;
+const DEFAULT_H: i32 = 800;
+
+/// Saved window geometry persisted across launches. Position is `Option`
+/// because Wayland (Linux default) doesn't let clients restore their own
+/// position — only the compositor can decide. On macOS/Windows the tao
+/// path honors it.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug)]
+struct WindowState {
+    width: i32,
+    height: i32,
+    #[serde(default)]
+    x: Option<i32>,
+    #[serde(default)]
+    y: Option<i32>,
+    #[serde(default)]
+    maximized: bool,
+}
+
+impl Default for WindowState {
+    fn default() -> Self {
+        Self { width: DEFAULT_W, height: DEFAULT_H, x: None, y: None, maximized: false }
+    }
+}
+
+impl WindowState {
+    /// Clamp obviously broken values (someone hand-edited the file, or
+    /// monitors got unplugged since last run). Keeps width/height in a
+    /// sensible range; positions stay opaque to us — the OS handles
+    /// off-screen recovery well enough on macOS/Windows.
+    fn sanitized(self) -> Self {
+        let clamp = |v: i32, min: i32, max: i32| v.max(min).min(max);
+        Self {
+            width: clamp(self.width, 480, 10_000),
+            height: clamp(self.height, 320, 10_000),
+            x: self.x,
+            y: self.y,
+            maximized: self.maximized,
+        }
+    }
+}
+
+/// Resolve the per-user state file path. Linux honors XDG_CONFIG_HOME,
+/// macOS uses ~/Library/Application Support, Windows uses %APPDATA%.
+/// Deliberately kept without the `dirs` crate to avoid pulling in extra
+/// deps for what is 20 lines of path logic.
+fn state_file_path() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        let base = std::env::var("XDG_CONFIG_HOME")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var("HOME").ok().map(|h| std::path::PathBuf::from(h).join(".config")))?;
+        Some(base.join("syntaur-viewer").join("window.json"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME").ok()?;
+        Some(std::path::PathBuf::from(home)
+            .join("Library").join("Application Support").join("syntaur-viewer").join("window.json"))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let base = std::env::var("APPDATA")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var("USERPROFILE").ok().map(|h| std::path::PathBuf::from(h).join("AppData").join("Roaming")))?;
+        Some(base.join("syntaur-viewer").join("window.json"))
+    }
+}
+
+fn load_window_state() -> WindowState {
+    let Some(path) = state_file_path() else { return WindowState::default(); };
+    let Ok(text) = std::fs::read_to_string(&path) else { return WindowState::default(); };
+    serde_json::from_str::<WindowState>(&text)
+        .map(|s| s.sanitized())
+        .unwrap_or_default()
+}
+
+fn save_window_state(state: &WindowState) {
+    let Some(path) = state_file_path() else { return; };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(text) = serde_json::to_string_pretty(&state.sanitized()) {
+        // Atomic write: tmp + rename. Prevents half-written state if the
+        // app crashes mid-save.
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, text).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+}
 
 fn main() {
     // URL priority: CLI arg > env var > saved server config > default localhost
@@ -67,14 +162,34 @@ fn run_viewer(url: &str) -> Result<(), String> {
         .build();
 
     let url_owned = url.to_string();
+    let saved = load_window_state();
 
     app.connect_activate(move |app| {
         let window = ApplicationWindow::builder()
             .application(app)
             .title(WINDOW_TITLE)
-            .default_width(1200)
-            .default_height(800)
+            .default_width(saved.width)
+            .default_height(saved.height)
             .build();
+        if saved.maximized {
+            window.maximize();
+        }
+
+        // Save size + maximized state on close. Wayland withholds window
+        // position from clients, so we only round-trip size. GTK4's
+        // default_width/default_height reflect the CURRENT size after the
+        // user has resized — the name is legacy from GTK3.
+        window.connect_close_request(|win| {
+            let s = WindowState {
+                width: win.default_width(),
+                height: win.default_height(),
+                x: None,
+                y: None,
+                maximized: win.is_maximized(),
+            };
+            save_window_state(&s);
+            gtk4::glib::Propagation::Proceed
+        });
 
         // Main layout: horizontal paned — left=Syntaur, right=companion panel
         let paned = Paned::new(Orientation::Horizontal);
@@ -215,7 +330,7 @@ fn run_viewer(url: &str) -> Result<(), String> {
 #[cfg(target_os = "macos")]
 fn run_viewer(url: &str) -> Result<(), String> {
     use tao::{
-        dpi::LogicalSize,
+        dpi::{LogicalPosition, LogicalSize},
         event::{Event, WindowEvent},
         event_loop::{ControlFlow, EventLoop},
         window::WindowBuilder,
@@ -223,12 +338,16 @@ fn run_viewer(url: &str) -> Result<(), String> {
     use wry::WebViewBuilder;
 
     let gateway_origin = url.to_string();
+    let saved = load_window_state();
     let event_loop = EventLoop::new();
-    let window = WindowBuilder::new()
+    let mut builder = WindowBuilder::new()
         .with_title(WINDOW_TITLE)
-        .with_inner_size(LogicalSize::new(1200.0, 800.0))
-        .build(&event_loop)
-        .map_err(|e| format!("window: {}", e))?;
+        .with_inner_size(LogicalSize::new(saved.width as f64, saved.height as f64))
+        .with_maximized(saved.maximized);
+    if let (Some(x), Some(y)) = (saved.x, saved.y) {
+        builder = builder.with_position(LogicalPosition::new(x as f64, y as f64));
+    }
+    let window = builder.build(&event_loop).map_err(|e| format!("window: {}", e))?;
 
     let _webview = WebViewBuilder::new()
         .with_url(url)
@@ -243,10 +362,31 @@ fn run_viewer(url: &str) -> Result<(), String> {
         .build(&window)
         .map_err(|e| format!("webview: {}", e))?;
 
+    // Track current geometry as it changes so we can save it on close.
+    let mut current = saved;
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
-        if let Event::WindowEvent { event: WindowEvent::CloseRequested, .. } = event {
-            *control_flow = ControlFlow::Exit;
+        if let Event::WindowEvent { event: ev, .. } = &event {
+            match ev {
+                WindowEvent::Resized(phys) => {
+                    let scale = window.scale_factor();
+                    let logical = phys.to_logical::<f64>(scale);
+                    current.width = logical.width.round() as i32;
+                    current.height = logical.height.round() as i32;
+                    current.maximized = window.is_maximized();
+                }
+                WindowEvent::Moved(phys) => {
+                    let scale = window.scale_factor();
+                    let logical = phys.to_logical::<f64>(scale);
+                    current.x = Some(logical.x.round() as i32);
+                    current.y = Some(logical.y.round() as i32);
+                }
+                WindowEvent::CloseRequested => {
+                    save_window_state(&current);
+                    *control_flow = ControlFlow::Exit;
+                }
+                _ => {}
+            }
         }
     });
 }
@@ -254,7 +394,7 @@ fn run_viewer(url: &str) -> Result<(), String> {
 #[cfg(target_os = "windows")]
 fn run_viewer(url: &str) -> Result<(), String> {
     use tao::{
-        dpi::LogicalSize,
+        dpi::{LogicalPosition, LogicalSize},
         event::{Event, WindowEvent},
         event_loop::{ControlFlow, EventLoop},
         window::WindowBuilder,
@@ -262,12 +402,16 @@ fn run_viewer(url: &str) -> Result<(), String> {
     use wry::WebViewBuilder;
 
     let gateway_origin = url.to_string();
+    let saved = load_window_state();
     let event_loop = EventLoop::new();
-    let window = WindowBuilder::new()
+    let mut builder = WindowBuilder::new()
         .with_title(WINDOW_TITLE)
-        .with_inner_size(LogicalSize::new(1200.0, 800.0))
-        .build(&event_loop)
-        .map_err(|e| format!("window: {}", e))?;
+        .with_inner_size(LogicalSize::new(saved.width as f64, saved.height as f64))
+        .with_maximized(saved.maximized);
+    if let (Some(x), Some(y)) = (saved.x, saved.y) {
+        builder = builder.with_position(LogicalPosition::new(x as f64, y as f64));
+    }
+    let window = builder.build(&event_loop).map_err(|e| format!("window: {}", e))?;
 
     // CDP / remote debugging: opt-in via SYNTAUR_VIEWER_DEBUG_PORT env var.
     // WebView2 respects these flags when passed through additional_browser_args.
@@ -300,10 +444,30 @@ fn run_viewer(url: &str) -> Result<(), String> {
         .build(&window)
         .map_err(|e| format!("webview: {}", e))?;
 
+    let mut current = saved;
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
-        if let Event::WindowEvent { event: WindowEvent::CloseRequested, .. } = event {
-            *control_flow = ControlFlow::Exit;
+        if let Event::WindowEvent { event: ev, .. } = &event {
+            match ev {
+                WindowEvent::Resized(phys) => {
+                    let scale = window.scale_factor();
+                    let logical = phys.to_logical::<f64>(scale);
+                    current.width = logical.width.round() as i32;
+                    current.height = logical.height.round() as i32;
+                    current.maximized = window.is_maximized();
+                }
+                WindowEvent::Moved(phys) => {
+                    let scale = window.scale_factor();
+                    let logical = phys.to_logical::<f64>(scale);
+                    current.x = Some(logical.x.round() as i32);
+                    current.y = Some(logical.y.round() as i32);
+                }
+                WindowEvent::CloseRequested => {
+                    save_window_state(&current);
+                    *control_flow = ControlFlow::Exit;
+                }
+                _ => {}
+            }
         }
     });
 }
