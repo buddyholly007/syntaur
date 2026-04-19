@@ -112,6 +112,13 @@ pub fn top_bar(crumb: &str, status: Option<ModuleStatus>) -> Markup {
                 span { "Modules" }
                 span.kbd { "⌘K" }
             }
+            button.bugrpt-btn type="button" onclick="openBugModal && openBugModal()" title="Report a bug" aria-label="Report a bug" {
+                svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" {
+                    path d="M8 2l1.88 1.88M14.12 3.88L16 2M9 7.13v-1a3.003 3.003 0 116 0v1" {}
+                    path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 014-4h4a4 4 0 014 4v3c0 3.3-2.7 6-6 6z" {}
+                    path d="M12 20v-9M6.53 9C4.6 8.8 3 7.1 3 5M6 13H2M6 17l-4 1M17.47 9c1.93-.2 3.53-1.9 3.53-4M18 13h4M18 17l4 1" {}
+                }
+            }
             div.avatar-wrap {
                 button.avatar-btn type="button" onclick="toggleAvatarMenu(event)" aria-haspopup="menu" aria-expanded="false" id="avatar-btn" {
                     img src="/app-icon.jpg" alt="Account";
@@ -566,18 +573,12 @@ const TOP_BAR_SCRIPT: &str = r##"
 /// small icon button just before the avatar. Pure vanilla JS.
 const BUG_REPORT_JS: &str = r#"
 (function() {
-  const BUG_TOKEN = sessionStorage.getItem('syntaur_token') || localStorage.getItem('syntaur_token') || '';
-  if (!BUG_TOKEN) return;
-  const topBar = document.querySelector('.syntaur-topbar');
-  const avatar = topBar && topBar.querySelector('.avatar-wrap');
-  if (!topBar || !avatar) return;
-  const bugBtn = document.createElement('button');
-  bugBtn.title = 'Report a Bug';
-  bugBtn.type = 'button';
-  bugBtn.className = 'bugrpt-btn';
-  bugBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2l1.88 1.88M14.12 3.88L16 2M9 7.13v-1a3.003 3.003 0 116 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 014-4h4a4 4 0 014 4v3c0 3.3-2.7 6-6 6z"/><path d="M12 20v-9M6.53 9C4.6 8.8 3 7.1 3 5M6 13H2M6 17l-4 1M17.47 9c1.93-.2 3.53-1.9 3.53-4M18 13h4M18 17l4 1"/></svg>';
-  bugBtn.onclick = function() { openBugModal(); };
-  topBar.insertBefore(bugBtn, avatar);
+  // Button is rendered server-side in top_bar(). This script owns the
+  // modal + submit. Token lookup happens lazily on open/submit so the
+  // modal installs even before the login flow has written to storage.
+  function currentToken() {
+    try { return sessionStorage.getItem('syntaur_token') || localStorage.getItem('syntaur_token') || ''; } catch(_e) { return ''; }
+  }
   const overlay = document.createElement('div');
   overlay.id = 'bug-report-overlay';
   overlay.className = 'fixed inset-0 z-50 bg-black/60 backdrop-blur-sm hidden flex items-center justify-center';
@@ -606,7 +607,7 @@ const BUG_REPORT_JS: &str = r#"
     const si = { userAgent: navigator.userAgent, screen: screen.width+'x'+screen.height, window: innerWidth+'x'+innerHeight, page: location.href, time: new Date().toISOString() };
     try { const r = await fetch('/health'); if (r.ok) si.gateway = await r.json(); } catch(e) {}
     try {
-      const res = await fetch('/api/bug-reports', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ token: BUG_TOKEN, description: desc, system_info: si, page_url: location.href }) });
+      const res = await fetch('/api/bug-reports', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ token: currentToken(), description: desc, system_info: si, page_url: location.href }) });
       const data = await res.json();
       if (data.id) { fb.className='text-sm text-green-400'; fb.textContent='Bug report #'+data.id+' submitted. Thank you!'; fb.classList.remove('hidden'); btn.textContent='Submitted'; setTimeout(function(){ document.getElementById('bug-report-overlay').classList.add('hidden'); }, 2000); }
       else { fb.className='text-sm text-red-400'; fb.textContent=data.error||'Submission failed.'; fb.classList.remove('hidden'); btn.disabled=false; btn.textContent='Submit'; }
