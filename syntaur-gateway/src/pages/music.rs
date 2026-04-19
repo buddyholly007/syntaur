@@ -2511,10 +2511,12 @@ function setVizStyle(style) {
   try { localStorage.setItem('syntaurVizStyle', style); } catch(_e) {}
   const label = document.getElementById('np-viz-label');
   if (label) label.textContent = VIZ_LABELS[style] || style;
-  // Some styles want a taller canvas. Add/remove the viz-tall class.
+  // Some styles need a taller canvas. Synthwave wants vertical room
+  // for the sun + grid. Radial wants a more square aspect so the
+  // flower doesn't look cramped.
   const canvas = document.getElementById('np-spectrum');
   if (canvas) {
-    const tall = (style === 'synthwave');
+    const tall = (style === 'synthwave' || style === 'radial');
     canvas.classList.toggle('viz-tall', tall);
     canvas.height = tall ? 140 : 96;
   }
