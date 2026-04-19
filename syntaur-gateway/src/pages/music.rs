@@ -2494,20 +2494,26 @@ function startRealEqualizer() {
     //    Real music has ~20 dB more energy in bass than treble; this
     //    curve scales bass down and treble up so the whole spectrum
     //    moves together.
+    // Skip the DC bin (bin 0, always near zero) so the center-most bar
+    // — which Sean sees as the two mirrored middle bars — lands on the
+    // real kick-drum / bass-guitar range (≈ 40-170 Hz) instead of a
+    // dead bin. Exponent 1.7 (was 1.9) spreads the bars more evenly so
+    // bar 0 actually spans a usable 4-bin range.
     const heights = new Array(HALF);
     const MAX_BIN = Math.floor(bins.length * 0.45);
+    const BIN_START = 1;
+    const BIN_AVAIL = MAX_BIN - BIN_START;
     for (let i = 0; i < HALF; i++) {
-      const lo = Math.floor(Math.pow(i / HALF, 1.9) * MAX_BIN);
-      const hi = Math.max(lo + 1, Math.floor(Math.pow((i + 1) / HALF, 1.9) * MAX_BIN));
-      // Average the bins in this range rather than peak — peak was
-      // making low-bin bars (where each bar is a single high-energy
-      // bass bin) overshoot compared to high-bin bars (which average
-      // many quieter bins).
+      const lo = BIN_START + Math.floor(Math.pow(i / HALF, 1.7) * BIN_AVAIL);
+      const hi = Math.max(lo + 1, BIN_START + Math.floor(Math.pow((i + 1) / HALF, 1.7) * BIN_AVAIL));
       let sum = 0, count = 0;
       for (let b = lo; b < hi && b < bins.length; b++) { sum += bins[b]; count++; }
       const avg = count > 0 ? sum / count : 0;
       const t = i / (HALF - 1);                    // 0 = bass, 1 = treble
-      const weight = 0.5 + Math.pow(t, 0.45) * 2.3;
+      // Bump the bass floor slightly (0.72 vs previous 0.5) so the
+      // center stays prominent without pegging. Treble still tops
+      // out around 2.8 for lively edges.
+      const weight = 0.72 + Math.pow(t, 0.5) * 2.08;
       const v = Math.min(1, (avg / 255) * weight);
       heights[i] = Math.max(2, v * H * CEILING);
     }

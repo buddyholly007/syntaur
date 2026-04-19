@@ -776,25 +776,137 @@ pub async fn serve_art(
         }
     }
 
-    // Tier 3: MusicBrainz Cover Art Archive.
+    // Tier 3: MusicBrainz Cover Art Archive (needs mbid from user
+    // confirming a match).
     if let Some(mbid_val) = mbid.filter(|s| !s.is_empty()) {
-        // Recording MBID isn't directly keyed; typically we'd need the
-        // release MBID. The MB lookup we do stores recording MBID — try
-        // the release endpoint first; fall back to the recording art
-        // URL (which MB redirects to the release's art if any).
         let url = format!("https://coverartarchive.org/release/{}/front-500", mbid_val);
         if let Ok(resp) = state.client.get(&url)
             .timeout(std::time::Duration::from_secs(8))
             .send().await {
             if resp.status().is_success() {
                 if let Ok(bytes) = resp.bytes().await {
+                    let cached_key = cache_fetched_art(state.db_path.clone(), id, uid, &bytes, "image/jpeg").await;
+                    let _ = cached_key;
                     return image_response(bytes.to_vec(), "image/jpeg");
                 }
             }
         }
     }
 
+    // Tier 4: iTunes Search API. Free, no key, high hit rate for
+    // commercial music. Query by "artist album" and take the first
+    // result's artworkUrl100 → swap in 600x600. Covers the case where
+    // a track has no embedded image AND no folder.jpg AND no mbid.
+    let (title_opt, artist_opt, album_opt): (Option<String>, Option<String>, Option<String>) = {
+        let db2 = state.db_path.clone();
+        tokio::task::spawn_blocking(move || -> rusqlite::Result<(Option<String>, Option<String>, Option<String>)> {
+            let conn = rusqlite::Connection::open(&db2)?;
+            let mut stmt = conn.prepare(
+                "SELECT title, artist, album FROM local_music_tracks WHERE id = ? AND user_id = ?"
+            )?;
+            Ok(stmt.query_row(rusqlite::params![id, uid], |r| Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))).unwrap_or((None, None, None)))
+        }).await.unwrap_or(Ok((None, None, None))).unwrap_or((None, None, None))
+    };
+
+    let artist = artist_opt.as_deref().unwrap_or("");
+    let album_or_title = album_opt.as_deref()
+        .filter(|s| !s.is_empty())
+        .or_else(|| title_opt.as_deref())
+        .unwrap_or("");
+    if !artist.is_empty() || !album_or_title.is_empty() {
+        let term = format!("{} {}", artist, album_or_title).trim().to_string();
+        let entity = if album_opt.as_deref().filter(|s| !s.is_empty()).is_some() { "album" } else { "song" };
+        if !term.is_empty() {
+            if let Ok(resp) = state.client.get("https://itunes.apple.com/search")
+                .query(&[("term", term.as_str()), ("entity", entity), ("limit", "1"), ("media", "music")])
+                .timeout(std::time::Duration::from_secs(6))
+                .send().await {
+                if resp.status().is_success() {
+                    if let Ok(j) = resp.json::<serde_json::Value>().await {
+                        let art_url = j.get("results")
+                            .and_then(|v| v.as_array())
+                            .and_then(|arr| arr.first())
+                            .and_then(|first| first.get("artworkUrl100").or_else(|| first.get("artworkUrl60")))
+                            .and_then(|v| v.as_str())
+                            // Upgrade 100×100 → 600×600 — iTunes serves it from the same URL pattern.
+                            .map(|s| s.replace("100x100bb", "600x600bb").replace("100x100-75", "600x600-75"));
+                        if let Some(url) = art_url {
+                            if let Ok(imgresp) = state.client.get(&url)
+                                .timeout(std::time::Duration::from_secs(6))
+                                .send().await {
+                                if imgresp.status().is_success() {
+                                    if let Ok(bytes) = imgresp.bytes().await {
+                                        let _ = cache_fetched_art(state.db_path.clone(), id, uid, &bytes, "image/jpeg").await;
+                                        return image_response(bytes.to_vec(), "image/jpeg");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     Err(StatusCode::NOT_FOUND)
+}
+
+/// After fetching art from a remote source (MB / iTunes), persist it
+/// under /config/art/<key>.jpg and point this track's art_cache_key
+/// at it so future requests don't re-hit the network. Keyed by
+/// (artist|album) so the whole album dedupes, not per-track.
+async fn cache_fetched_art(db: PathBuf, track_id: i64, uid: i64, bytes: &[u8], mime: &str) -> Option<String> {
+    let dir = art_cache_dir();
+    let _ = tokio::fs::create_dir_all(&dir).await;
+    let (artist, album): (Option<String>, Option<String>) = {
+        let dbc = db.clone();
+        tokio::task::spawn_blocking(move || -> rusqlite::Result<(Option<String>, Option<String>)> {
+            let conn = rusqlite::Connection::open(&dbc)?;
+            let mut stmt = conn.prepare(
+                "SELECT artist, album FROM local_music_tracks WHERE id = ? AND user_id = ?"
+            )?;
+            Ok(stmt.query_row(rusqlite::params![track_id, uid], |r| Ok((
+                r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?,
+            ))).unwrap_or((None, None)))
+        }).await.ok().and_then(|r| r.ok()).unwrap_or((None, None))
+    };
+    let key = art_key_for_album(artist.as_deref(), album.as_deref(), bytes);
+    let ext = match mime {
+        "image/png" => "png",
+        "image/webp" => "webp",
+        _ => "jpg",
+    };
+    let file = format!("{}.{}", key, ext);
+    let dest = dir.join(&file);
+    if tokio::fs::write(&dest, bytes).await.is_err() {
+        return None;
+    }
+    // Point THIS track + every same-album track at the cached file.
+    let dbp = db.clone();
+    let k = file.clone();
+    let ar = artist.clone();
+    let al = album.clone();
+    let _ = tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
+        let conn = rusqlite::Connection::open(&dbp)?;
+        if let (Some(a), Some(b)) = (ar.as_deref(), al.as_deref()) {
+            conn.execute(
+                "UPDATE local_music_tracks SET art_cache_key = ? \
+                 WHERE user_id = ? AND COALESCE(artist,'') = ? AND COALESCE(album,'') = ? AND art_cache_key IS NULL",
+                rusqlite::params![k, uid, a, b],
+            )?;
+        } else {
+            conn.execute(
+                "UPDATE local_music_tracks SET art_cache_key = ? WHERE id = ? AND user_id = ?",
+                rusqlite::params![k, track_id, uid],
+            )?;
+        }
+        Ok(())
+    }).await;
+    Some(file)
 }
 
 fn image_response(bytes: Vec<u8>, content_type: &'static str) -> Result<Response<Body>, StatusCode> {
