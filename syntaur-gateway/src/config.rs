@@ -36,7 +36,7 @@ pub struct Config {
     pub security: SecurityConfig,
     /// Image generation provider selection. Defaults to zero-config
     /// Pollinations.ai (free, no key) when no `image_gen` block is present
-    /// in openclaw.json. Users can opt into local SD (Gaming PC / ComfyUI)
+    /// in syntaur.json. Users can opt into local SD (Gaming PC / ComfyUI)
     /// or a paid OpenRouter model via the wizard or settings.
     #[serde(default)]
     pub image_gen: ImageGenConfig,
@@ -607,7 +607,7 @@ pub fn load_config(path: &Path) -> ConfigLoadResult {
 
     // Phase 3.1 of the security plan: resolve `{{vault.NAME}}` references
     // in config values to decrypted secrets from ~/.syntaur/vault.json.
-    // Keeps plaintext API keys out of openclaw.json entirely.
+    // Keeps plaintext API keys out of syntaur.json entirely.
     //
     // Done BEFORE serde parsing so every string field in the whole
     // config tree gets the substitution, with zero per-field plumbing.
