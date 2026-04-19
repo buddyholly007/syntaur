@@ -778,6 +778,12 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   .music-col .card.drop-after {
     box-shadow: 0 2px 0 var(--c-cy);
   }
+  /* Column hover cue while a cross-column drag is in progress. */
+  .music-col.drop-col {
+    background: rgba(0, 240, 255, 0.03);
+    box-shadow: inset 0 0 0 1px rgba(0, 240, 255, 0.25);
+    transition: background 0.1s, box-shadow 0.1s;
+  }
   .border-b.border-gray-800 { border-bottom-color: var(--c-line) !important; }"##;
 
 const BODY_HTML: &str = r##"<!-- Module sub-bar — "Bridge live" indicator + refresh. Global nav
@@ -4079,36 +4085,81 @@ function bindPanelHandlers(card) {
 function bindDrag(card, grip) {
   grip.addEventListener('pointerdown', (ev) => {
     ev.preventDefault();
-    const col = card.parentElement;
     card.classList.add('dragging');
     grip.setPointerCapture(ev.pointerId);
+
+    const leftCol = document.querySelector('.music-col-left');
+    const rightCol = document.querySelector('.music-col-right');
+    const allCols = [leftCol, rightCol].filter(Boolean);
+
+    // Highlight a column while the pointer is hovering it (subtle
+    // visual cue that a cross-column drop will land there).
+    const clearColHighlight = () => allCols.forEach(c => c.classList.remove('drop-col'));
+
+    const clearDropMarkers = () => {
+      document.querySelectorAll('.music-panel').forEach(s => s.classList.remove('drop-before', 'drop-after'));
+    };
+
+    const colUnderPointer = (x, y) => {
+      for (const c of allCols) {
+        const r = c.getBoundingClientRect();
+        if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return c;
+      }
+      return null;
+    };
+
     const onMove = (e) => {
-      // Find the panel we're hovering over in the same column.
+      clearDropMarkers();
+      clearColHighlight();
+      const col = colUnderPointer(e.clientX, e.clientY);
+      if (!col) return;
+      col.classList.add('drop-col');
+      // Siblings in the HOVERED column (not just the start column) —
+      // this is what enables cross-column moves.
       const siblings = Array.from(col.querySelectorAll(':scope > .music-panel')).filter(c => c !== card);
-      siblings.forEach(s => s.classList.remove('drop-before', 'drop-after'));
       const y = e.clientY;
-      let over = null, before = true;
+      let marked = false;
       for (const s of siblings) {
+        if (s.style.display === 'none') continue;
         const r = s.getBoundingClientRect();
         if (y >= r.top && y <= r.bottom) {
-          over = s;
-          before = (y - r.top) < r.height / 2;
+          const before = (y - r.top) < r.height / 2;
+          s.classList.add(before ? 'drop-before' : 'drop-after');
+          marked = true;
           break;
         }
       }
-      if (over) over.classList.add(before ? 'drop-before' : 'drop-after');
+      // If pointer is below the last panel, we'll append; no marker
+      // needed — cleared already.
+      if (!marked) {
+        // Leaving the 'drop-col' highlight is enough to signal "drop
+        // at end of this column."
+      }
     };
+
     const onUp = (e) => {
       grip.releasePointerCapture(ev.pointerId);
       card.classList.remove('dragging');
-      const siblings = Array.from(col.querySelectorAll(':scope > .music-panel'));
-      const target = siblings.find(s => s.classList.contains('drop-before') || s.classList.contains('drop-after'));
-      if (target) {
-        const before = target.classList.contains('drop-before');
-        col.insertBefore(card, before ? target : target.nextSibling);
+      const col = colUnderPointer(e.clientX, e.clientY);
+      const sourceCol = card.parentElement;
+      if (col) {
+        // Find which sibling (if any) has a drop marker.
+        const target = Array.from(col.querySelectorAll(':scope > .music-panel'))
+          .find(s => s.classList.contains('drop-before') || s.classList.contains('drop-after'));
+        if (target) {
+          const before = target.classList.contains('drop-before');
+          col.insertBefore(card, before ? target : target.nextSibling);
+        } else {
+          // No sibling under pointer — append to end of hovered column.
+          col.appendChild(card);
+        }
+        // Persist order for both columns (source + destination — they
+        // both changed when cross-column).
+        if (sourceCol !== col) persistColumnOrder(sourceCol);
         persistColumnOrder(col);
       }
-      siblings.forEach(s => s.classList.remove('drop-before', 'drop-after'));
+      clearDropMarkers();
+      clearColHighlight();
       grip.removeEventListener('pointermove', onMove);
       grip.removeEventListener('pointerup', onUp);
     };
