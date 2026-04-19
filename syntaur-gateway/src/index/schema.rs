@@ -1767,6 +1767,195 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE local_music_tracks ADD COLUMN mbid TEXT;
     ALTER TABLE local_music_tracks ADD COLUMN metadata_source TEXT NOT NULL DEFAULT 'file_tags';
     "#,
+
+    // Music module Tier 0 + 1 + 2 schema in one bundle:
+    // • original_* columns preserve the file-tag snapshot so retag /
+    //   MB-match / user-edit are all reversible.
+    // • art_cache_key points at /config/art/<key>.jpg once an embedded
+    //   picture or folder.jpg has been extracted; NULL = try MB Cover
+    //   Art Archive via mbid next.
+    // • bit_depth + sample_rate feed the lossless/format badge.
+    // • play_count + last_played_at + favorite feed Recently Played /
+    //   Most Played / Favorites views.
+    // • Playlists tables (manual + smart-via-rule_json).
+    // • Album-liner-notes + lyrics caches land as empty tables so the
+    //   T3/T4 features don't need their own migration later.
+    r#"
+    ALTER TABLE local_music_tracks ADD COLUMN original_title TEXT;
+    ALTER TABLE local_music_tracks ADD COLUMN original_artist TEXT;
+    ALTER TABLE local_music_tracks ADD COLUMN original_album TEXT;
+    ALTER TABLE local_music_tracks ADD COLUMN art_cache_key TEXT;
+    ALTER TABLE local_music_tracks ADD COLUMN bit_depth INTEGER;
+    ALTER TABLE local_music_tracks ADD COLUMN sample_rate INTEGER;
+    ALTER TABLE local_music_tracks ADD COLUMN play_count INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE local_music_tracks ADD COLUMN last_played_at INTEGER;
+    ALTER TABLE local_music_tracks ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0;
+    UPDATE local_music_tracks SET original_title = title WHERE original_title IS NULL;
+    UPDATE local_music_tracks SET original_artist = artist WHERE original_artist IS NULL;
+    UPDATE local_music_tracks SET original_album = album WHERE original_album IS NULL;
+
+    CREATE TABLE IF NOT EXISTS local_playlists (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name         TEXT NOT NULL,
+        kind         TEXT NOT NULL DEFAULT 'manual',
+        rule_json    TEXT,
+        created_at   INTEGER NOT NULL,
+        updated_at   INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_local_playlists_user ON local_playlists(user_id);
+
+    CREATE TABLE IF NOT EXISTS local_playlist_tracks (
+        playlist_id  INTEGER NOT NULL REFERENCES local_playlists(id) ON DELETE CASCADE,
+        track_id     INTEGER NOT NULL REFERENCES local_music_tracks(id) ON DELETE CASCADE,
+        position     INTEGER NOT NULL,
+        added_at     INTEGER NOT NULL,
+        PRIMARY KEY (playlist_id, track_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_local_playlist_tracks_pos ON local_playlist_tracks(playlist_id, position);
+
+    CREATE TABLE IF NOT EXISTS local_album_notes (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        artist       TEXT NOT NULL,
+        album        TEXT NOT NULL,
+        body         TEXT NOT NULL,
+        generated_at INTEGER NOT NULL,
+        UNIQUE (user_id, artist, album)
+    );
+
+    CREATE TABLE IF NOT EXISTS local_lyrics_cache (
+        track_id     INTEGER PRIMARY KEY REFERENCES local_music_tracks(id) ON DELETE CASCADE,
+        plain_text   TEXT,
+        synced_lrc   TEXT,
+        fetched_at   INTEGER NOT NULL
+    );
+    "#,
+
+    // Scheduler module — Thaddeus's backing store. Covers the consent gate,
+    // the one-observation-per-pattern rule, per-calendar subscriptions with
+    // enable + write-enable flags, custom lists + items, habit tracking,
+    // sticker placements, and per-user scheduler prefs. Existing tables
+    // (calendar_events / todos / calendar_reminders_sent) stay and are
+    // extended in place.
+    r#"
+    CREATE TABLE IF NOT EXISTS pending_approvals (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        kind          TEXT NOT NULL,
+        source        TEXT NOT NULL DEFAULT '',
+        summary       TEXT NOT NULL,
+        payload_json  TEXT NOT NULL,
+        reply_draft   TEXT,
+        reply_sent_at INTEGER,
+        created_at    INTEGER NOT NULL,
+        resolved_at   INTEGER,
+        resolution    TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_pending_approvals_user   ON pending_approvals(user_id, resolved_at);
+    CREATE INDEX IF NOT EXISTS idx_pending_approvals_source ON pending_approvals(source);
+
+    CREATE TABLE IF NOT EXISTS detected_patterns (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        signature    TEXT NOT NULL,
+        description  TEXT NOT NULL,
+        confidence   REAL NOT NULL,
+        first_seen   INTEGER NOT NULL,
+        last_seen    INTEGER NOT NULL,
+        surfaced_at  INTEGER,
+        dismissed    INTEGER NOT NULL DEFAULT 0,
+        UNIQUE(user_id, signature)
+    );
+
+    CREATE TABLE IF NOT EXISTS custom_lists (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name         TEXT NOT NULL,
+        icon         TEXT NOT NULL DEFAULT '📋',
+        color        TEXT NOT NULL DEFAULT '#94a3b8',
+        sort_order   INTEGER NOT NULL DEFAULT 0,
+        created_at   INTEGER NOT NULL,
+        updated_at   INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_custom_lists_user ON custom_lists(user_id, sort_order);
+
+    CREATE TABLE IF NOT EXISTS list_items (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        list_id      INTEGER NOT NULL REFERENCES custom_lists(id) ON DELETE CASCADE,
+        user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        text         TEXT NOT NULL,
+        checked      INTEGER NOT NULL DEFAULT 0,
+        sort_order   INTEGER NOT NULL DEFAULT 0,
+        created_at   INTEGER NOT NULL,
+        updated_at   INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_list_items_list ON list_items(list_id, sort_order);
+
+    CREATE TABLE IF NOT EXISTS habits (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name         TEXT NOT NULL,
+        icon         TEXT NOT NULL DEFAULT '●',
+        color        TEXT NOT NULL DEFAULT '#84cc16',
+        target_days  TEXT NOT NULL DEFAULT '1,2,3,4,5,6,7',
+        sort_order   INTEGER NOT NULL DEFAULT 0,
+        archived     INTEGER NOT NULL DEFAULT 0,
+        created_at   INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS habit_entries (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        habit_id     INTEGER NOT NULL REFERENCES habits(id) ON DELETE CASCADE,
+        user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        date         TEXT NOT NULL,
+        done         INTEGER NOT NULL DEFAULT 1,
+        note         TEXT,
+        created_at   INTEGER NOT NULL,
+        UNIQUE(habit_id, date)
+    );
+    CREATE INDEX IF NOT EXISTS idx_habit_entries_lookup ON habit_entries(user_id, date);
+
+    CREATE TABLE IF NOT EXISTS user_calendar_subscriptions (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        provider        TEXT NOT NULL,
+        calendar_id     TEXT NOT NULL,
+        calendar_name   TEXT NOT NULL,
+        color           TEXT NOT NULL DEFAULT '#3b82f6',
+        enabled         INTEGER NOT NULL DEFAULT 1,
+        write_enabled   INTEGER NOT NULL DEFAULT 0,
+        last_synced_at  INTEGER,
+        created_at      INTEGER NOT NULL,
+        UNIQUE(user_id, provider, calendar_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_ucs_user ON user_calendar_subscriptions(user_id, enabled);
+
+    CREATE TABLE IF NOT EXISTS scheduler_stickers_placed (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        date         TEXT NOT NULL,
+        sticker_key  TEXT NOT NULL,
+        position     TEXT NOT NULL DEFAULT 'tr',
+        created_at   INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_stickers_lookup ON scheduler_stickers_placed(user_id, date);
+
+    ALTER TABLE calendar_events ADD COLUMN source_calendar_id TEXT NOT NULL DEFAULT '';
+    ALTER TABLE calendar_events ADD COLUMN color              TEXT NOT NULL DEFAULT '';
+    ALTER TABLE calendar_events ADD COLUMN external_id        TEXT NOT NULL DEFAULT '';
+
+    CREATE TABLE IF NOT EXISTS scheduler_prefs (
+        user_id            INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        theme              TEXT NOT NULL DEFAULT 'garden',
+        default_view       TEXT NOT NULL DEFAULT 'month',
+        week_starts_on     INTEGER NOT NULL DEFAULT 1,
+        show_weekends      INTEGER NOT NULL DEFAULT 1,
+        work_hours_start   TEXT NOT NULL DEFAULT '08:00',
+        work_hours_end     TEXT NOT NULL DEFAULT '18:00',
+        updated_at         INTEGER NOT NULL DEFAULT 0
+    );
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

@@ -13,7 +13,7 @@
 use axum::response::Html;
 use maud::{html, Markup, PreEscaped};
 
-use super::shared::{shell, Page};
+use super::shared::{shell, top_bar_standard, Page};
 
 pub async fn render() -> Html<String> {
     let page = Page {
@@ -22,7 +22,8 @@ pub async fn render() -> Html<String> {
         extra_style: Some(EXTRA_STYLE),
     };
     let body = html! {
-        (top_bar())
+        (top_bar_standard("Journal"))
+        (journal_hero())
         (chip_bar())
         div class="j-shell" {
             (left_rail())
@@ -34,28 +35,19 @@ pub async fn render() -> Html<String> {
     Html(shell(page, body).into_string())
 }
 
-// ── Top bar — paper-and-tea ──────────────────────────────────────────
-
-fn top_bar() -> Markup {
+// ── Journal hero — ornament + subtitle moved out of the top bar ──────
+// Keeps the tea-house identity visible inside the canvas while the shared
+// top bar above stays identical to every other module.
+fn journal_hero() -> Markup {
     html! {
-        div class="j-topbar" {
-            div class="j-topbar-inner" {
-                div class="flex items-center gap-3 min-w-0" {
-                    a href="/" class="flex items-center gap-2 hover:opacity-80 flex-shrink-0" {
-                        img src="/app-icon.jpg" class="h-8 w-8 rounded" alt="";
-                        span class="j-brand" { "Syntaur" }
-                    }
-                    span class="j-leaf" aria-hidden="true" { "❧" }
-                    span class="j-section" { "Journal" }
-                    span class="j-subtle" { "· Take your time." }
-                }
-                div class="flex items-center gap-4 text-sm" {
-                    button id="j-mushi-toggle" class="j-link" onclick="toggleMushi()" title="Open a window to Mushi" {
-                        "Talk with Mushi"
-                    }
-                    a href="/" class="j-link" { "Home" }
-                    a href="/voice-setup" class="j-link" { "Voice Setup" }
-                }
+        div class="j-hero" {
+            div class="j-hero-inner" {
+                span class="j-leaf" aria-hidden="true" { "❧" }
+                span class="j-section" { "Journal" }
+                span class="j-subtle" { "· Take your time." }
+                div class="flex-1" {}
+                button id="j-mushi-toggle" class="j-link" onclick="toggleMushi()" title="Open a window to Mushi" { "Talk with Mushi" }
+                a href="/voice-setup" class="j-link" { "Voice Setup" }
             }
         }
     }
@@ -298,18 +290,18 @@ const EXTRA_STYLE: &str = r##"
     background: radial-gradient(ellipse 65% 55% at 52% 42%, rgba(216,160,73,0.06), transparent 70%);
   }
 
-  /* ── Top bar ─────────────────────────────────────────────────── */
-  .j-topbar {
-    position: sticky; top: 0; z-index: 40;
+  /* ── Journal hero ───────────────────────────────────────────── */
+  /* Global nav is the shared top bar now. This hero sits below it and
+     carries Journal's tea-house identity: amber leaf, Crimson serif,
+     "take your time" subtitle. */
+  .j-hero {
     border-bottom: 1px solid var(--j-rule);
     background: linear-gradient(180deg, rgba(20,14,7,0.9), rgba(14,10,7,0.9));
-    backdrop-filter: blur(6px);
-    -webkit-backdrop-filter: blur(6px);
   }
-  .j-topbar-inner {
+  .j-hero-inner {
     max-width: 1400px; margin: 0 auto;
     padding: 10px 20px;
-    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    display: flex; align-items: center; gap: 10px;
   }
   .j-brand {
     font-family: 'Crimson Text', serif;

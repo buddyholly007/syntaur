@@ -36,7 +36,14 @@ pub enum Principal {
     /// (empty users table) and the caller presented the global token.
     LegacyAdmin,
     /// Real user row from the `users` table.
-    User { id: i64, name: String, role: String },
+    User {
+        id: i64,
+        name: String,
+        role: String,
+        /// Empty = unscoped (full access). Non-empty = token is limited to
+        /// these scopes; endpoints that don't accept one of them 401.
+        scopes: Vec<String>,
+    },
 }
 
 impl Principal {
@@ -63,6 +70,36 @@ impl Principal {
             Self::LegacyAdmin => true,
             Self::User { role, .. } => role == "admin",
         }
+    }
+
+    /// True iff this principal's token is unscoped (web session, admin CLI,
+    /// or legacy global token). Scoped tokens (MACE sessions etc.) return
+    /// false. The mint endpoint uses this to refuse scoped tokens from
+    /// minting further scoped tokens.
+    pub fn is_unscoped(&self) -> bool {
+        match self {
+            Self::LegacyAdmin => true,
+            Self::User { scopes, .. } => scopes.is_empty(),
+        }
+    }
+
+    /// Does this principal's token grant the named scope? Unscoped tokens
+    /// always return true (backward compat — every existing web session
+    /// keeps working untouched). Scoped tokens match the literal scope name
+    /// or the wildcard `*`.
+    pub fn has_scope(&self, scope: &str) -> bool {
+        match self {
+            Self::LegacyAdmin => true,
+            Self::User { scopes, .. } => {
+                scopes.is_empty()
+                    || scopes.iter().any(|s| s == scope || s == "*")
+            }
+        }
+    }
+
+    /// `has_scope` as a `Result<_, StatusCode>` so handlers can `?`-propagate.
+    pub fn require_scope(&self, scope: &str) -> Result<(), axum::http::StatusCode> {
+        if self.has_scope(scope) { Ok(()) } else { Err(axum::http::StatusCode::UNAUTHORIZED) }
     }
 
     /// Row-level filter key for stores that support per-user scoping.
@@ -174,6 +211,11 @@ where
                     id: resolved.user_id,
                     name: resolved.user_name,
                     role: resolved.user_role,
+                    scopes: resolved.scopes
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect(),
                 });
             }
             Ok(None) => {}

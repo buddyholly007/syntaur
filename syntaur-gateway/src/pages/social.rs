@@ -11,7 +11,7 @@
 use axum::response::Html;
 use maud::{html, PreEscaped};
 
-use super::shared::{shell, Page};
+use super::shared::{shell, top_bar, Page};
 
 pub async fn render() -> Html<String> {
     let page = Page {
@@ -20,27 +20,20 @@ pub async fn render() -> Html<String> {
         extra_style: Some(EXTRA_STYLE),
     };
     let body = html! {
-        // ── Top bar ────────────────────────────────────────────────────────
-        div class="soc-topbar" {
-            div class="soc-topbar-inner" {
-                a href="/" class="soc-crumb-link" { "Syntaur" }
-                span class="soc-crumb-sep" { "/" }
-                span class="soc-crumb-current" { "Social" }
-                div class="soc-topbar-right" {
-                    span id="soc-pause-pill" class="soc-pause-pill soc-pause-hidden" title="Something is paused — see Settings → Pause" {
-                        "Paused"
-                    }
-                    span class="soc-persona-pill" title="Module specialist: Nyota" {
-                        span class="soc-persona-sigil" { "★" }
-                        span class="soc-persona-name" { "Nyota" }
-                    }
-                    button id="soc-chat-toggle" class="soc-chat-btn" onclick="socToggleChat()" {
-                        "Talk with Nyota"
-                    }
+        (top_bar("Social", None))
+        // Social hero — persona pill + "Talk with Nyota" + subtitle. Sits
+        // below the shared top bar, keeps the "Backstage. Quiet." identity
+        // inside the canvas.
+        div class="soc-hero" {
+            div class="soc-hero-inner" {
+                span class="soc-persona-pill" title="Module specialist: Nyota" {
+                    span class="soc-persona-sigil" { "★" }
+                    span class="soc-persona-name" { "Nyota" }
                 }
-            }
-            div class="soc-brand-sub" {
-                "Backstage. Quiet. Ready when you are."
+                span class="soc-brand-sub" { "Backstage. Quiet. Ready when you are." }
+                div style="flex:1" {}
+                span id="soc-pause-pill" class="soc-pause-pill soc-pause-hidden" title="Something is paused — see Settings → Pause" { "Paused" }
+                button id="soc-chat-toggle" class="soc-chat-btn" onclick="socToggleChat()" { "Talk with Nyota" }
             }
         }
 
@@ -499,25 +492,16 @@ const EXTRA_STYLE: &str = r##"
 
 body { background: var(--soc-bg); color: var(--soc-ink); }
 
-.soc-topbar {
+.soc-hero {
   background: linear-gradient(180deg, #1d1815 0%, #161210 100%);
   border-bottom: 1px solid #2a221b;
-  padding: 14px 22px 10px;
+  padding: 8px 22px;
 }
-.soc-topbar-inner {
+.soc-hero-inner {
   max-width: 1440px; margin: 0 auto;
   display: flex; align-items: center; gap: 10px;
   font-family: 'Inter', system-ui, sans-serif; font-size: 14px;
 }
-.soc-crumb-link { color: var(--soc-amber); text-decoration: none; letter-spacing: .02em; }
-.soc-crumb-link:hover { color: #e7b45e; }
-.soc-crumb-sep { color: #5a4a38; }
-.soc-crumb-current {
-  color: #f5e8cf;
-  font-family: 'Playfair Display', 'Iowan Old Style', Georgia, serif;
-  font-size: 18px; letter-spacing: .01em;
-}
-.soc-topbar-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
 .soc-persona-pill {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 4px 10px; border: 1px solid #4a3a28;
@@ -2307,18 +2291,6 @@ function socToggleChat() {
 // conversation_id so the context accumulates across turns.
 let SOC_CHAT_CONV_ID = null;
 
-// Mirror of main.rs::persona_thinking_bank("nyota") — shown as the
-// grey italic thought line while an LLM turn is in flight, matching
-// the thinking-bubble pattern every other persona's chat surface uses.
-const SOC_NYOTA_THOUGHTS = [
-  'Reading the draft.',
-  'One moment — checking the line.',
-  'Looking at recent posts.',
-  'Pulling the draft queue.',
-  'Checking what\u2019s scheduled.',
-  'Re-reading the tone.',
-];
-
 function socChatAppend(role, text) {
   const body = document.getElementById('soc-chat-body');
   if (!body) return;
@@ -2334,7 +2306,106 @@ function socChatAppend(role, text) {
   return div;
 }
 
-function socChatThinkingBubble() {
+// Nyota's thought bank — grouped by intent so the grey line under the
+// dots actually reflects what she's looking at. One phrase per turn,
+// held the whole time (people don't think in a rotating reel). Larger
+// bank + session-level avoidance of the last phrase so repeats don't
+// feel canned across consecutive turns. Voice discipline: calm,
+// composed, comms-officer tone, occasional nerd-heart specificity, no
+// hype words, no forced familiarity.
+const SOC_NYOTA_THOUGHT_BANK = {
+  greeting: [
+    'Hey.', 'Morning.', 'With you.', 'One sec.', 'Hi.', 'Here.',
+    'Ready when you are.',
+  ],
+  draft: [
+    'Finding the angle.', 'Let me sit with this for a beat.',
+    'Reading your voice back.', 'Looking at your pillars.',
+    'Turning it over before I write anything.',
+    'Checking how the last one landed first.',
+    'What\u2019s the one line you\u2019d say out loud. Starting there.',
+    'Letting it find its shape.', 'Pulling your recent posts for tone.',
+    'One moment \u2014 your brand voice is specific, I want to honor it.',
+  ],
+  queue: [
+    'Pulling your queue.', 'Reading back what\u2019s pending.',
+    'Let me see what\u2019s waiting on you.',
+    'Checking drafts in order.', 'One sec \u2014 scanning the queue.',
+  ],
+  stats: [
+    'Looking at the numbers. Not chasing them.',
+    'Pulling the latest snapshot.', 'Reading the last week.',
+    'Checking the trend, not the spike.',
+  ],
+  reply: [
+    'Reading who they are first.', 'One sec \u2014 what tone did they use?',
+    'Reading the parent post carefully.', 'Thinking about whether a reply even serves this one.',
+    'Drafting something warm but brief.',
+  ],
+  platform_bluesky: [
+    'Reading your Bluesky feed.', 'Checking the Bluesky rhythm.',
+    'Reading the last few posts that landed.',
+  ],
+  platform_youtube: [
+    'Pulling your channel context.', 'Reading community-post norms.',
+    'One sec \u2014 thinking about how YouTube reads differently.',
+  ],
+  settings: [
+    'Looking at your current settings.', 'Reading the approval mode first.',
+    'Checking what\u2019s on and what\u2019s paused.',
+  ],
+  schedule: [
+    'Reading your cadence.', 'Checking what\u2019s already scheduled.',
+    'Thinking about timing.',
+  ],
+  help: [
+    'Let me think through this clearly.', 'One moment \u2014 framing this properly.',
+    'Reading your question again.', 'Making sure I heard you right.',
+  ],
+  general: [
+    'One moment.', 'Let me think.', 'Turning this over.',
+    'Finding the through-line.', 'Hmm.', 'Reading back.',
+    'One beat.', 'Checking my notes.', 'Sitting with this.',
+    'Let me frame it properly before I speak.',
+    'Thinking.', 'Reading the thread.',
+    'Let me see.', 'One sec \u2014 pulling context.',
+  ],
+};
+
+// Avoid repeating the last chosen phrase across turns in the same session
+let SOC_LAST_THOUGHT = '';
+
+function socPickThought(userMessage) {
+  const m = (userMessage || '').toLowerCase().trim();
+  const buckets = [];
+  // Greetings
+  if (/^(hi|hey|hello|yo|morning|afternoon|evening|sup)\b/.test(m)) {
+    buckets.push('greeting');
+  }
+  // Keyword intent
+  if (/\b(draft|write|compose|post (about|something)|make a post|craft|author)\b/.test(m)) buckets.push('draft');
+  if (/\b(queue|pending|waiting|drafts?)\b/.test(m))              buckets.push('queue');
+  if (/\b(stats|analytics|numbers|followers|growth|engagement stats)\b/.test(m)) buckets.push('stats');
+  if (/\b(reply|replies|comment|mention|respond|answer)\b/.test(m)) buckets.push('reply');
+  if (/\b(setting|settings|config|cadence|schedule|pause|preferences)\b/.test(m)) buckets.push('settings');
+  if (/\b(schedule|when|time|cadence)\b/.test(m))                  buckets.push('schedule');
+  if (/\b(help|how|what should|advice|think about|should i)\b/.test(m)) buckets.push('help');
+  if (/\bbluesky|bsky|bluesky\.social\b/.test(m))                  buckets.push('platform_bluesky');
+  if (/\byoutube|yt\b|community post\b/.test(m))                   buckets.push('platform_youtube');
+  if (buckets.length === 0) buckets.push('general');
+
+  // Pool candidates from matched buckets + sprinkle of general so it never feels rigid
+  const pool = [];
+  for (const b of buckets) (SOC_NYOTA_THOUGHT_BANK[b] || []).forEach(p => pool.push(p));
+  if (!buckets.includes('general')) SOC_NYOTA_THOUGHT_BANK.general.slice(0, 4).forEach(p => pool.push(p));
+  // Filter out the last-used phrase so we never say the same thing twice in a row
+  const candidates = pool.filter(p => p !== SOC_LAST_THOUGHT);
+  const choice = (candidates.length ? candidates : pool)[Math.floor(Math.random() * (candidates.length || pool.length))];
+  SOC_LAST_THOUGHT = choice;
+  return choice;
+}
+
+function socChatThinkingBubble(userMessage) {
   const body = document.getElementById('soc-chat-body');
   if (!body) return null;
   const div = document.createElement('div');
@@ -2345,14 +2416,10 @@ function socChatThinkingBubble() {
   body.appendChild(div);
   body.scrollTop = body.scrollHeight;
   const thought = div.querySelector('.soc-chat-thought');
-  // Rotate a phrase from the Nyota bank every 3s so the bubble feels alive
-  let i = Math.floor(Math.random() * SOC_NYOTA_THOUGHTS.length);
-  thought.textContent = SOC_NYOTA_THOUGHTS[i];
-  const handle = setInterval(() => {
-    i = (i + 1) % SOC_NYOTA_THOUGHTS.length;
-    if (thought) thought.textContent = SOC_NYOTA_THOUGHTS[i];
-  }, 3000);
-  return { el: div, stop: () => clearInterval(handle) };
+  // Pick ONE phrase matched to the user's message intent and hold it.
+  // No rotation — a real thought is a thought, not a stream of bullets.
+  thought.textContent = socPickThought(userMessage);
+  return { el: div, stop: () => {} };
 }
 
 async function socChatSend(ev) {
@@ -2362,7 +2429,7 @@ async function socChatSend(ev) {
   if (!text) return false;
   input.value = '';
   socChatAppend('user', text);
-  const bubble = socChatThinkingBubble();
+  const bubble = socChatThinkingBubble(text);
   try {
     // Lazily create a conversation the first time we need one.
     if (!SOC_CHAT_CONV_ID) {

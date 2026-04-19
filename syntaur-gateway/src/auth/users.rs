@@ -39,6 +39,10 @@ pub struct ResolvedToken {
     pub user_name: String,
     pub user_role: String,
     pub token_id: i64,
+    /// Comma-separated scope list. Empty = unscoped (full access — this is
+    /// every web-session token). Non-empty = the token can only reach
+    /// endpoints that accept one of these scopes. See `Principal::has_scope`.
+    pub scopes: String,
 }
 
 /// A user-owned agent definition.
@@ -307,6 +311,13 @@ impl UserStore {
     }
 
     pub async fn mint_token_with_expiry(&self, user_id: i64, name: &str, expiry_hours: Option<u64>) -> Result<String, String> {
+        self.mint_token_scoped(user_id, name, "", expiry_hours).await
+    }
+
+    /// Mint a short-TTL scoped token (MACE sessions etc.). Scopes is a
+    /// comma-separated list of scope names — see `Principal::has_scope`.
+    /// Empty string = unscoped (full access).
+    pub async fn mint_token_scoped(&self, user_id: i64, name: &str, scopes: &str, expiry_hours: Option<u64>) -> Result<String, String> {
         use rand::RngCore;
 
         if self.get_user(user_id).await?.is_none() {
@@ -328,9 +339,9 @@ impl UserStore {
 
         let db = self.db.lock().await;
         db.execute(
-            "INSERT INTO user_api_tokens (user_id, token_hash, name, created_at, expires_at) \
-             VALUES (?, ?, ?, ?, ?)",
-            params![user_id, hash, name, now, expires_at],
+            "INSERT INTO user_api_tokens (user_id, token_hash, name, created_at, expires_at, scopes) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+            params![user_id, hash, name, now, expires_at, scopes],
         )
         .map_err(|e| format!("mint_token: {}", e))?;
 
@@ -342,7 +353,7 @@ impl UserStore {
         let db = self.db.lock().await;
         let row = db
             .query_row(
-                "SELECT t.id, t.user_id, u.name, COALESCE(u.role,'user'), t.revoked_at, t.expires_at \
+                "SELECT t.id, t.user_id, u.name, COALESCE(u.role,'user'), t.revoked_at, t.expires_at, COALESCE(t.scopes, '') \
                  FROM user_api_tokens t \
                  JOIN users u ON u.id = t.user_id \
                  WHERE t.token_hash = ? AND u.disabled = 0",
@@ -355,13 +366,14 @@ impl UserStore {
                         r.get::<_, String>(3)?,
                         r.get::<_, Option<i64>>(4)?,
                         r.get::<_, Option<i64>>(5)?,
+                        r.get::<_, String>(6)?,
                     ))
                 },
             )
             .optional()
             .map_err(|e| format!("resolve_token: {}", e))?;
 
-        let Some((token_id, user_id, user_name, user_role, revoked_at, expires_at)) = row else {
+        let Some((token_id, user_id, user_name, user_role, revoked_at, expires_at, scopes)) = row else {
             return Ok(None);
         };
         if revoked_at.is_some() {
@@ -382,6 +394,7 @@ impl UserStore {
             user_name,
             user_role,
             token_id,
+            scopes,
         }))
     }
 

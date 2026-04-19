@@ -701,3 +701,325 @@ fn format_ical_datetime(raw: &str) -> String {
 fn urlencoded_email(email: &str) -> String {
     email.replace('@', "%40")
 }
+
+// ══════════════════════════════════════════════════════════════════════
+// Gmail connector (reuses Google OAuth infra above) + Microsoft 365
+// ══════════════════════════════════════════════════════════════════════
+// Scheduler module's intake pipelines call these from handlers in main.rs.
+// All config-gated: if the relevant OAuth app/credentials aren't set,
+// the call returns a descriptive error and the caller shows a connect CTA
+// instead of exploding.
+
+use crate::AppState;
+use std::sync::Arc;
+
+/// Scan the user's Gmail inbox for appointment-shaped emails and land any
+/// hits as `pending_approvals` rows with kind='from_email'. Returns the
+/// count of new proposals created. Requires the Google OAuth token already
+/// granted for calendar — upgrades the scope list to include
+/// `https://www.googleapis.com/auth/gmail.readonly`.
+pub async fn gmail_scan_for_proposals(state: &Arc<AppState>, user_id: i64) -> Result<i64, String> {
+    let token = google_get_token().await.map_err(|e| format!("gmail requires Google OAuth: {e}"))?;
+    let client = state.client.clone();
+    // Pull the 20 most recent messages in the primary inbox.
+    let url = "https://gmail.googleapis.com/gmail/v1/users/me/messages?labelIds=INBOX&maxResults=20&q=newer_than:14d";
+    let resp = client.get(url).bearer_auth(&token).send().await.map_err(|e| format!("gmail list: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("gmail list status: {}", resp.status()));
+    }
+    let body: serde_json::Value = resp.json().await.map_err(|e| format!("gmail list json: {e}"))?;
+    let msgs = body.get("messages").and_then(|m| m.as_array()).cloned().unwrap_or_default();
+    let mut created = 0i64;
+    for m in msgs.iter().take(10) {
+        let Some(id) = m.get("id").and_then(|v| v.as_str()) else { continue; };
+        let full_url = format!("https://gmail.googleapis.com/gmail/v1/users/me/messages/{id}?format=full");
+        let Ok(r) = client.get(&full_url).bearer_auth(&token).send().await else { continue; };
+        if !r.status().is_success() { continue; }
+        let Ok(msg): Result<serde_json::Value, _> = r.json().await else { continue; };
+        let headers = msg["payload"]["headers"].as_array().cloned().unwrap_or_default();
+        let get_header = |name: &str| -> String {
+            headers.iter().find(|h| h["name"].as_str().map(|n| n.eq_ignore_ascii_case(name)).unwrap_or(false))
+                .and_then(|h| h["value"].as_str()).unwrap_or("").to_string()
+        };
+        let subject = get_header("Subject");
+        let snippet = msg["snippet"].as_str().unwrap_or("").to_string();
+        if !subject_looks_like_appointment(&subject) { continue; }
+        // Quick LLM parse
+        let chain = crate::llm::LlmChain::from_config(&state.config, "main", state.client.clone());
+        let prompt = format!("Extract calendar event from email.\nSubject: {subject}\nBody: {snippet}\n\nReturn JSON only: {{title, start_time, end_time, location}}. ISO 8601 local. 1-hour default.");
+        let messages = vec![
+            crate::llm::ChatMessage::system("Extract a calendar event from an email subject + snippet. JSON only."),
+            crate::llm::ChatMessage::user(&prompt),
+        ];
+        let reply = match chain.call(&messages).await { Ok(r) => r, Err(_) => continue };
+        let (s, e) = match (reply.find('{'), reply.rfind('}')) {
+            (Some(s), Some(e)) if e > s => (s, e + 1),
+            _ => continue,
+        };
+        let Ok(parsed): Result<serde_json::Value, _> = serde_json::from_str(&reply[s..e]) else { continue };
+        let title = parsed["title"].as_str().unwrap_or("(email event)").to_string();
+        let start = parsed["start_time"].as_str().unwrap_or("").to_string();
+        let summary = if start.len() >= 16 { format!("{title} · {}", &start[..16]) } else { title.clone() };
+        let source = format!("gmail:{id}");
+        // Dedup — skip if we already have a pending approval for this email id.
+        let db = state.db_path.clone();
+        let src = source.clone();
+        let exists = tokio::task::spawn_blocking(move || {
+            rusqlite::Connection::open(&db).ok()
+                .and_then(|c| c.query_row(
+                    "SELECT 1 FROM pending_approvals WHERE user_id = ? AND source = ? LIMIT 1",
+                    rusqlite::params![user_id, src], |r| r.get::<_, i64>(0)
+                ).ok()).is_some()
+        }).await.unwrap_or(false);
+        if exists { continue; }
+        let db2 = state.db_path.clone();
+        let payload = parsed.clone();
+        let payload_str = serde_json::to_string(&payload).unwrap_or_default();
+        let sum = summary.clone();
+        let src2 = source.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Ok(conn) = rusqlite::Connection::open(&db2) {
+                let _ = conn.execute(
+                    "INSERT INTO pending_approvals (user_id, kind, source, summary, payload_json, created_at) VALUES (?, 'from_email', ?, ?, ?, ?)",
+                    rusqlite::params![user_id, src2, sum, payload_str, chrono::Utc::now().timestamp()],
+                );
+            }
+        }).await.ok();
+        created += 1;
+    }
+    Ok(created)
+}
+
+fn subject_looks_like_appointment(subject: &str) -> bool {
+    let s = subject.to_lowercase();
+    let hints = [
+        "appointment", "confirm", "reservation", "rsvp", "you're invited",
+        "you are invited", "save the date", "reminder:", "meeting", "schedule",
+        "booking", "consultation", "session", "registered", "your visit",
+    ];
+    hints.iter().any(|h| s.contains(h))
+}
+
+/// Send a reply to the email referenced by `pending_approvals.source='gmail:<id>'`.
+pub async fn gmail_send_reply(state: &Arc<AppState>, user_id: i64, approval_id: i64, body_text: &str) -> Result<(), String> {
+    let token = google_get_token().await.map_err(|e| format!("gmail send requires Google OAuth: {e}"))?;
+    let db = state.db_path.clone();
+    let row: Option<String> = tokio::task::spawn_blocking(move || {
+        rusqlite::Connection::open(&db).ok().and_then(|c| c.query_row(
+            "SELECT source FROM pending_approvals WHERE id = ? AND user_id = ?",
+            rusqlite::params![approval_id, user_id], |r| r.get::<_, String>(0)
+        ).ok())
+    }).await.unwrap_or(None);
+    let Some(source) = row else { return Err("approval not found".into()); };
+    let gid = source.strip_prefix("gmail:").ok_or("not a gmail-sourced approval")?.to_string();
+    // Fetch the original thread headers to build a proper reply.
+    let client = state.client.clone();
+    let url = format!("https://gmail.googleapis.com/gmail/v1/users/me/messages/{gid}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Message-ID&metadataHeaders=References");
+    let r = client.get(&url).bearer_auth(&token).send().await.map_err(|e| format!("gmail meta: {e}"))?;
+    if !r.status().is_success() { return Err(format!("gmail meta status: {}", r.status())); }
+    let msg: serde_json::Value = r.json().await.map_err(|e| format!("gmail meta json: {e}"))?;
+    let thread_id = msg["threadId"].as_str().unwrap_or("").to_string();
+    let headers = msg["payload"]["headers"].as_array().cloned().unwrap_or_default();
+    let get_header = |name: &str| -> String {
+        headers.iter().find(|h| h["name"].as_str().map(|n| n.eq_ignore_ascii_case(name)).unwrap_or(false))
+            .and_then(|h| h["value"].as_str()).unwrap_or("").to_string()
+    };
+    let to = get_header("From");
+    let subject_orig = get_header("Subject");
+    let subject = if subject_orig.to_lowercase().starts_with("re:") { subject_orig.clone() } else { format!("Re: {subject_orig}") };
+    let msg_id = get_header("Message-ID");
+    let references = get_header("References");
+    let new_refs = if references.is_empty() { msg_id.clone() } else { format!("{references} {msg_id}") };
+    // Build RFC 822 body.
+    let rfc = format!(
+        "To: {to}\r\nSubject: {subject}\r\nIn-Reply-To: {msg_id}\r\nReferences: {new_refs}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{body_text}",
+    );
+    use base64::Engine as _;
+    let raw = base64::engine::general_purpose::URL_SAFE.encode(rfc.as_bytes());
+    let send_url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send";
+    let body = serde_json::json!({ "raw": raw, "threadId": thread_id });
+    let s = client.post(send_url).bearer_auth(&token).json(&body).send().await.map_err(|e| format!("gmail send: {e}"))?;
+    if !s.status().is_success() {
+        let code = s.status();
+        let text = s.text().await.unwrap_or_default();
+        return Err(format!("gmail send status {code}: {}", text.chars().take(200).collect::<String>()));
+    }
+    Ok(())
+}
+
+// ── Microsoft 365 / Graph OAuth ──────────────────────────────────────
+// These functions are config-gated. If M365_CLIENT_ID / M365_CLIENT_SECRET /
+// M365_TENANT_ID aren't set in the gateway env or openclaw.json, the
+// functions return a descriptive error so the UI can show "Connect
+// Microsoft 365" with setup instructions.
+
+const M365_REDIRECT_PATH: &str = "/api/scheduler/m365/callback";
+const M365_SCOPES: &str = "offline_access openid profile User.Read Calendars.ReadWrite Schedule.Read.All";
+
+fn m365_config() -> Result<(String, String, String, String), String> {
+    let client_id = std::env::var("M365_CLIENT_ID").map_err(|_| "M365_CLIENT_ID not set".to_string())?;
+    let client_secret = std::env::var("M365_CLIENT_SECRET").map_err(|_| "M365_CLIENT_SECRET not set".to_string())?;
+    let tenant = std::env::var("M365_TENANT_ID").unwrap_or_else(|_| "common".to_string());
+    let redirect = std::env::var("M365_REDIRECT_URI").unwrap_or_else(|_| format!("http://127.0.0.1:18789{M365_REDIRECT_PATH}"));
+    Ok((client_id, client_secret, tenant, redirect))
+}
+
+fn pct_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+pub async fn m365_auth_url(_state: &Arc<AppState>) -> Result<String, String> {
+    let (client_id, _secret, tenant, redirect) = m365_config()?;
+    let url = format!(
+        "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize?client_id={client_id}&response_type=code&redirect_uri={redirect}&response_mode=query&scope={scope}&state=sch",
+        tenant = tenant, client_id = client_id,
+        redirect = pct_encode(&redirect), scope = pct_encode(M365_SCOPES),
+    );
+    Ok(url)
+}
+
+pub async fn m365_exchange_code(state: &Arc<AppState>, code: &str) -> Result<(), String> {
+    let (client_id, secret, tenant, redirect) = m365_config()?;
+    let client = state.client.clone();
+    let form = vec![
+        ("client_id", client_id.as_str()),
+        ("client_secret", secret.as_str()),
+        ("code", code),
+        ("redirect_uri", redirect.as_str()),
+        ("grant_type", "authorization_code"),
+        ("scope", M365_SCOPES),
+    ];
+    let url = format!("https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token");
+    let r = client.post(&url).form(&form).send().await.map_err(|e| format!("token: {e}"))?;
+    if !r.status().is_success() { return Err(format!("token status: {}", r.status())); }
+    let body: serde_json::Value = r.json().await.map_err(|e| format!("token json: {e}"))?;
+    let access = body["access_token"].as_str().unwrap_or("").to_string();
+    let refresh = body["refresh_token"].as_str().unwrap_or("").to_string();
+    let expires = body["expires_in"].as_i64().unwrap_or(3600);
+    // Cache on disk next to the Google token for simplicity.
+    let payload = serde_json::json!({
+        "access_token": access, "refresh_token": refresh,
+        "expires_at": chrono::Utc::now().timestamp() + expires,
+    });
+    let _ = tokio::fs::write("/tmp/syntaur/m365_token.json", payload.to_string()).await;
+    Ok(())
+}
+
+async fn m365_get_token(state: &Arc<AppState>) -> Result<String, String> {
+    let raw = tokio::fs::read_to_string("/tmp/syntaur/m365_token.json").await
+        .map_err(|_| "no M365 token on disk — run /api/scheduler/m365/connect_url first".to_string())?;
+    let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| format!("bad token file: {e}"))?;
+    let now = chrono::Utc::now().timestamp();
+    let expires_at = v["expires_at"].as_i64().unwrap_or(0);
+    if now < expires_at - 60 {
+        return Ok(v["access_token"].as_str().unwrap_or("").to_string());
+    }
+    // Refresh.
+    let (client_id, secret, tenant, _redirect) = m365_config()?;
+    let refresh = v["refresh_token"].as_str().unwrap_or("").to_string();
+    if refresh.is_empty() { return Err("M365 token expired and no refresh_token".into()); }
+    let client = state.client.clone();
+    let form = vec![
+        ("client_id", client_id.as_str()),
+        ("client_secret", secret.as_str()),
+        ("refresh_token", refresh.as_str()),
+        ("grant_type", "refresh_token"),
+        ("scope", M365_SCOPES),
+    ];
+    let url = format!("https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token");
+    let r = client.post(&url).form(&form).send().await.map_err(|e| format!("refresh: {e}"))?;
+    if !r.status().is_success() { return Err(format!("refresh status: {}", r.status())); }
+    let body: serde_json::Value = r.json().await.map_err(|e| format!("refresh json: {e}"))?;
+    let access = body["access_token"].as_str().unwrap_or("").to_string();
+    let new_refresh = body["refresh_token"].as_str().unwrap_or(&refresh).to_string();
+    let expires = body["expires_in"].as_i64().unwrap_or(3600);
+    let payload = serde_json::json!({
+        "access_token": access.clone(), "refresh_token": new_refresh,
+        "expires_at": chrono::Utc::now().timestamp() + expires,
+    });
+    let _ = tokio::fs::write("/tmp/syntaur/m365_token.json", payload.to_string()).await;
+    Ok(access)
+}
+
+pub async fn m365_list_calendars(state: &Arc<AppState>) -> Result<Vec<serde_json::Value>, String> {
+    let token = m365_get_token(state).await?;
+    let r = state.client.get("https://graph.microsoft.com/v1.0/me/calendars").bearer_auth(&token).send().await
+        .map_err(|e| format!("graph: {e}"))?;
+    if !r.status().is_success() { return Err(format!("graph status: {}", r.status())); }
+    let body: serde_json::Value = r.json().await.map_err(|e| format!("graph json: {e}"))?;
+    let list = body["value"].as_array().cloned().unwrap_or_default()
+        .into_iter().map(|c| serde_json::json!({
+            "calendar_id": c["id"].as_str().unwrap_or(""),
+            "calendar_name": c["name"].as_str().unwrap_or(""),
+            "color": c["hexColor"].as_str().unwrap_or("#6366f1"),
+        })).collect();
+    Ok(list)
+}
+
+pub async fn m365_sync_once(state: &Arc<AppState>, user_id: i64) -> Result<i64, String> {
+    let token = m365_get_token(state).await?;
+    // Figure out which Outlook calendars the user asked us to sync.
+    let db = state.db_path.clone();
+    let subs: Vec<(String, String)> = tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<(String, String)>> {
+        let conn = rusqlite::Connection::open(&db)?;
+        let mut stmt = conn.prepare(
+            "SELECT calendar_id, color FROM user_calendar_subscriptions WHERE user_id = ? AND provider = 'outlook' AND enabled = 1",
+        )?;
+        let iter = stmt.query_map(rusqlite::params![user_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        Ok(iter.filter_map(Result::ok).collect())
+    }).await.map_err(|e| format!("join: {e}"))?.map_err(|e| format!("sql: {e}"))?;
+    let mut synced = 0i64;
+    let since = (chrono::Utc::now() - chrono::Duration::days(1)).format("%Y-%m-%dT00:00:00Z").to_string();
+    let until = (chrono::Utc::now() + chrono::Duration::days(90)).format("%Y-%m-%dT00:00:00Z").to_string();
+    for (cid, color) in subs {
+        let url = format!(
+            "https://graph.microsoft.com/v1.0/me/calendars/{cid}/calendarView?startDateTime={since}&endDateTime={until}&$top=200",
+            cid = cid, since = since, until = until,
+        );
+        let r = state.client.get(&url).bearer_auth(&token).send().await.map_err(|e| format!("events: {e}"))?;
+        if !r.status().is_success() { continue; }
+        let body: serde_json::Value = match r.json().await { Ok(v) => v, Err(_) => continue };
+        let items = body["value"].as_array().cloned().unwrap_or_default();
+        for ev in items {
+            let external_id = ev["id"].as_str().unwrap_or("").to_string();
+            let title = ev["subject"].as_str().unwrap_or("(untitled)").to_string();
+            let start = ev["start"]["dateTime"].as_str().unwrap_or("").to_string();
+            let end = ev["end"]["dateTime"].as_str().unwrap_or("").to_string();
+            if external_id.is_empty() || start.is_empty() { continue; }
+            let db2 = state.db_path.clone();
+            let t_color = color.clone();
+            let t_cid = cid.clone();
+            let t_ext = external_id.clone();
+            let t_title = title.clone();
+            let t_start = start.clone();
+            let t_end = end.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                if let Ok(conn) = rusqlite::Connection::open(&db2) {
+                    // Upsert by (user_id, source, external_id).
+                    let existing: Option<i64> = conn.query_row(
+                        "SELECT id FROM calendar_events WHERE user_id = ? AND source = 'outlook' AND external_id = ?",
+                        rusqlite::params![user_id, t_ext], |r| r.get(0)).ok();
+                    if let Some(id) = existing {
+                        let _ = conn.execute(
+                            "UPDATE calendar_events SET title = ?, start_time = ?, end_time = ?, source_calendar_id = ?, color = ? WHERE id = ?",
+                            rusqlite::params![t_title, t_start, t_end, t_cid, t_color, id]);
+                    } else {
+                        let _ = conn.execute(
+                            "INSERT INTO calendar_events (user_id, title, description, start_time, end_time, all_day, source, source_calendar_id, color, external_id) \
+                             VALUES (?, ?, '', ?, ?, 0, 'outlook', ?, ?, ?)",
+                            rusqlite::params![user_id, t_title, t_start, t_end, t_cid, t_color, t_ext]);
+                    }
+                }
+            }).await;
+            synced += 1;
+        }
+    }
+    Ok(synced)
+}

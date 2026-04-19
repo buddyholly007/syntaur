@@ -5,3 +5,5 @@ target/
 .DS_Store
 release/
 /tmp/
+/.cargo/
+/.fastembed_cache/

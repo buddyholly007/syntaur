@@ -5,7 +5,7 @@
 use axum::response::Html;
 use maud::{html, PreEscaped};
 
-use super::shared::{shell, Page};
+use super::shared::{shell, top_bar, ModuleStatus, Page};
 
 pub async fn render() -> Html<String> {
     let page = Page {
@@ -13,7 +13,10 @@ pub async fn render() -> Html<String> {
         authed: true,
         extra_style: Some(EXTRA_STYLE),
     };
-    let body = html! { (PreEscaped(BODY_HTML)) };
+    let body = html! {
+        (top_bar("Dashboard", Some(ModuleStatus::ok("Online"))))
+        (PreEscaped(BODY_HTML))
+    };
     Html(shell(page, body).into_string())
 }
 
@@ -464,26 +467,17 @@ const BODY_HTML: &str = r##"<!-- Login overlay -->
   </div>
 </div>
 
-<!-- Top bar -->
-<div class="border-b border-gray-800 bg-gray-900/50 backdrop-blur sticky top-0 z-40">
-  <div class="px-4 py-2.5 flex items-center justify-between">
-    <div class="flex items-center gap-3">
-      <img src="/app-icon.jpg" class="h-8 w-8 rounded-lg" alt="">
-      <span class="font-semibold">Syntaur</span>
-      <span class="badge badge-green text-xs" id="status-badge">
-        <span class="w-1.5 h-1.5 rounded-full bg-green-400 mr-1"></span>Online
-      </span>
-      <span id="license-badge" class="badge badge-gray text-xs hidden"></span>
-    </div>
-    <div class="flex items-center gap-3 text-sm">
-      <button onclick="showPanel('main')" class="text-gray-400 hover:text-white transition-colors" id="nav-main">Home</button>
-      <button onclick="showPanel('more')" class="text-gray-400 hover:text-white transition-colors" id="nav-more">Modules &amp; System</button>
-      <a href="/settings" class="text-gray-400 hover:text-gray-300">Settings</a>
-      <a href="/profile" class="text-gray-400 hover:text-gray-300" id="user-label" title="Profile"></a>
-      <button onclick="doLogout()" class="text-gray-500 hover:text-red-400 transition-colors" title="Sign out">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
-      </button>
-    </div>
+<!-- Dashboard sub-nav (Home / Modules & System tabs live INSIDE the
+     canvas now; global nav is in the shared top bar above). Hidden IDs
+     kept so the existing JS that drives license/user/status can keep
+     writing to them without null-checks. -->
+<div class="dash-subnav border-b border-gray-800/70 bg-gray-950/40 sticky top-12 z-30">
+  <div class="px-4 py-1.5 flex items-center gap-3 text-sm">
+    <button onclick="showPanel('main')" class="text-gray-200 hover:text-white transition-colors font-medium" id="nav-main">Home</button>
+    <button onclick="showPanel('more')" class="text-gray-500 hover:text-white transition-colors" id="nav-more">Modules &amp; System</button>
+    <span id="license-badge" class="badge badge-gray text-xs hidden ml-auto"></span>
+    <span id="user-label" class="hidden" title="Profile"></span>
+    <span id="status-badge" class="hidden"></span>
   </div>
   <!-- Mini Player (hidden when nothing playing) -->
   <div id="mini-player" class="hidden border-t border-gray-800/50 px-4 py-1.5 flex items-center gap-3 text-xs bg-gray-950/60">

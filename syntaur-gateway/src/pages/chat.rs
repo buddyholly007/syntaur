@@ -5,7 +5,7 @@
 use axum::response::Html;
 use maud::{html, PreEscaped};
 
-use super::shared::{shell, Page};
+use super::shared::{shell, top_bar, Page};
 
 pub async fn render() -> Html<String> {
     let page = Page {
@@ -13,7 +13,10 @@ pub async fn render() -> Html<String> {
         authed: true,
         extra_style: Some(EXTRA_STYLE),
     };
-    let body = html! { (PreEscaped(BODY_HTML)) };
+    let body = html! {
+        (top_bar("Chat", None))
+        (PreEscaped(BODY_HTML))
+    };
     Html(shell(page, body).into_string())
 }
 
@@ -32,30 +35,32 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   .vm-thinking #vm-ring { border-color: #8b5cf6; }
   .vm-thinking #vm-mic-icon { color: #8b5cf6; }
   .vm-playing #vm-ring { border-color: #10b981; }
-  .vm-playing #vm-mic-icon { color: #10b981; }"##;
+  .vm-playing #vm-mic-icon { color: #10b981; }
 
-const BODY_HTML: &str = r##"<!-- Top bar -->
-<div class="border-b border-gray-800 bg-gray-900/80 backdrop-blur flex-shrink-0">
-  <div class="max-w-4xl mx-auto px-3 sm:px-4 py-2 sm:py-2.5 flex items-center justify-between">
-    <div class="flex items-center gap-2 sm:gap-3 min-w-0">
-      <a href="/" class="flex items-center gap-2 hover:opacity-80 flex-shrink-0">
-        <img src="/app-icon.jpg" class="h-8 w-8 rounded-lg" alt="">
-        <span class="font-semibold hidden sm:inline">Syntaur</span>
-      </a>
-      <div class="relative" id="agent-switcher">
-        <button onclick="toggleAgentMenu()" class="flex items-center gap-1 text-gray-300 text-sm font-medium hover:text-white transition-colors">
-          <span id="agent-name">Chat</span>
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="text-gray-500"><path d="M6 9l6 6 6-6"/></svg>
-        </button>
-        <div id="agent-menu" class="hidden absolute left-0 top-full mt-1 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1 min-w-[160px] z-50">
-          <!-- Populated by JS -->
-        </div>
-      </div>
-    </div>
-    <div class="flex items-center gap-2 sm:gap-3 text-sm flex-shrink-0">
-      <button onclick="newConversation()" class="text-gray-500 hover:text-gray-300 text-xs sm:text-sm">New Chat</button>
-      <a href="/" class="text-gray-500 hover:text-gray-300 text-xs sm:text-sm">Home</a>
-    </div>
+  /* Persona chip strip — sits just below the shared top bar, inside the
+     Chat canvas. All main-tier personas visible at once. */
+  .chat-agent-strip { border-bottom: 1px solid rgb(31,41,55); background: rgba(17,24,39,0.6); }
+  .chat-agent-strip .inner { max-width: 56rem; margin: 0 auto; padding: 8px 16px;
+    display: flex; align-items: center; gap: 8px; }
+  .chat-agent-strip .chips { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; }
+  .chat-chip { padding: 4px 12px; border-radius: 999px; font-size: 13px;
+    border: 1px solid rgb(55,65,81); background: rgba(31,41,55,0.5);
+    color: rgb(156,163,175); cursor: pointer;
+    font-family: inherit; transition: all 0.15s; }
+  .chat-chip:hover { color: rgb(229,231,235); border-color: rgb(75,85,99); }
+  .chat-chip.active { color: rgb(191,219,254); border-color: rgb(59,130,246);
+    background: rgba(59,130,246,0.15); }
+  .new-chat-btn { padding: 4px 10px; border-radius: 6px; font-size: 12px;
+    border: 1px solid rgb(55,65,81); background: transparent;
+    color: rgb(156,163,175); cursor: pointer; font-family: inherit; }
+  .new-chat-btn:hover { color: rgb(229,231,235); background: rgba(55,65,81,0.4); }"##;
+
+const BODY_HTML: &str = r##"<!-- Agent strip (chips + new-chat) — lives inside the Chat canvas now,
+     not in the global top bar. The top bar is rendered by shared::top_bar. -->
+<div class="chat-agent-strip">
+  <div class="inner">
+    <div id="agent-chips" class="chips"></div>
+    <button onclick="newConversation()" class="new-chat-btn" title="Start a new conversation">+ New chat</button>
   </div>
 </div>
 
@@ -194,38 +199,27 @@ let conversationId = null;
 })();
 
 function updateAgentDisplay() {
-  document.getElementById('agent-name').textContent = currentAgent;
-  document.getElementById('greeting').textContent = `Hey! I'm ${currentAgent}. How can I help you today?`;
+  const gEl = document.getElementById('greeting');
+  if (gEl) gEl.textContent = `Hey! I'm ${currentAgent}. How can I help you today?`;
   document.title = `${currentAgent} — Syntaur`;
 }
 
+// Renders the persona chip strip below the shared top bar. One pill per
+// available main-tier agent, current one highlighted. Clicking switches.
 function buildAgentMenu() {
-  const menu = document.getElementById('agent-menu');
-  menu.innerHTML = agents.map(a => `
-    <button onclick="switchAgent('${a}')" class="w-full text-left px-4 py-2 text-sm hover:bg-gray-700 transition-colors ${a === currentAgent ? 'text-oc-500 font-medium' : 'text-gray-300'}">
+  const chips = document.getElementById('agent-chips');
+  if (!chips) return;
+  chips.innerHTML = agents.map(a => `
+    <button onclick="switchAgent('${a}')" class="chat-chip${a === currentAgent ? ' active' : ''}">
       ${esc(a)}
     </button>
   `).join('');
 }
 
-function toggleAgentMenu() {
-  const menu = document.getElementById('agent-menu');
-  menu.classList.toggle('hidden');
-  // Close on click outside
-  if (!menu.classList.contains('hidden')) {
-    setTimeout(() => {
-      document.addEventListener('click', function close(e) {
-        if (!menu.contains(e.target) && !e.target.closest('#agent-switcher')) {
-          menu.classList.add('hidden');
-        }
-        document.removeEventListener('click', close);
-      });
-    }, 10);
-  }
-}
+// Kept as a no-op so any remaining inline onclick refs don't throw.
+function toggleAgentMenu() { /* chips are always visible now */ }
 
 async function switchAgent(name) {
-  document.getElementById('agent-menu').classList.add('hidden');
   if (name === currentAgent) return;
   currentAgent = name;
   updateAgentDisplay();
@@ -600,14 +594,42 @@ function clearMessages() {
   newConversation();
 }
 
-function acceptHandoff(module) {
-      // Navigate to the specialist module page
+async function acceptHandoff(module) {
+      // Seed the specialist's conversation with the current context before
+      // navigating. /api/agents/handoff creates a fresh specialist conv, writes
+      // a system-message summary of the last few turns + relevant memories,
+      // and returns the new conv id + a greeting for the banner.
       const moduleUrls = {
         tax: '/tax', research: '/knowledge', music: '/music',
         scheduler: '/settings', coders: '/coders', journal: '/journal'
       };
-      const url = moduleUrls[module] || '/' + module;
-      window.location.href = url;
+      const base = moduleUrls[module] || '/' + module;
+      const token = localStorage.getItem('syntaur_token') || sessionStorage.getItem('syntaur_token') || '';
+      const mainAgentName = (typeof currentAgent === 'string' && currentAgent) ? currentAgent : 'Peter';
+      let seeded = null;
+      try {
+        const r = await fetch('/api/agents/handoff', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            token,
+            from_conversation_id: conversationId || 'ephemeral',
+            to_module: module,
+            context_messages: 8,
+          }),
+        });
+        if (r.ok) seeded = await r.json();
+      } catch (e) {
+        console.warn('[handoff] seed failed, navigating without context:', e);
+      }
+      const qs = new URLSearchParams();
+      qs.set('handoff', '1');
+      qs.set('return_agent', mainAgentName);
+      if (conversationId) qs.set('return_conv', conversationId);
+      if (seeded && seeded.conversation_id) qs.set('specialist_conv', seeded.conversation_id);
+      if (seeded && seeded.greeting) qs.set('greeting', seeded.greeting);
+      if (token) qs.set('token', token);
+      window.location.href = `${base}?${qs.toString()}`;
     }
     function dismissEscalation(module) {
       // Tell the backend to suppress this escalation

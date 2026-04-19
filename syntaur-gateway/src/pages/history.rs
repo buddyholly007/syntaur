@@ -3,7 +3,7 @@
 use axum::response::Html;
 use maud::{html, Markup, PreEscaped};
 
-use super::shared::{shell, Page};
+use super::shared::{shell, top_bar_standard, Page};
 
 pub async fn render() -> Html<String> {
     let page = Page {
@@ -12,35 +12,12 @@ pub async fn render() -> Html<String> {
         extra_style: None,
     };
     let body = html! {
-        (top_bar())
+        (top_bar_standard("History"))
         (page_body())
         (modal())
         script { (PreEscaped(PAGE_JS)) }
     };
     Html(shell(page, body).into_string())
-}
-
-/// /history has its own top bar — "New Chat" + "Dashboard" on the right
-/// (not the standard single "← Dashboard").
-fn top_bar() -> Markup {
-    html! {
-        div class="border-b border-gray-800 bg-gray-900/50 backdrop-blur sticky top-0 z-40" {
-            div class="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between" {
-                div class="flex items-center gap-3" {
-                    a href="/" class="flex items-center gap-2 hover:opacity-80" {
-                        img src="/app-icon.jpg" class="h-8 w-8 rounded-lg" alt="";
-                        span class="font-semibold text-lg" { "Syntaur" }
-                    }
-                    span class="text-gray-600" { "/" }
-                    span class="text-gray-400" { "History" }
-                }
-                div class="flex items-center gap-3" {
-                    a href="/chat" class="text-sm text-oc-500 hover:text-oc-400" { "New Chat" }
-                    a href="/" class="text-sm text-gray-400 hover:text-gray-300" { "Dashboard" }
-                }
-            }
-        }
-    }
 }
 
 fn page_body() -> Markup {

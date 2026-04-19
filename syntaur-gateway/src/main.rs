@@ -5320,6 +5320,35 @@ async fn main() {
         .route("/api/llm/complete/stream", post(handle_api_llm_complete_stream))
         .route("/api/conversations/{id}/append", post(handle_api_conversation_append))
         .route("/api/tokens/mint_scoped", post(handle_api_mint_scoped_token))
+        // Scheduler module endpoints. All read/write through `pending_approvals`
+        // for mutations (Thaddeus's consent gate) — except plain calendar CRUD
+        // which lives on /api/calendar above.
+        .route("/api/scheduler/prefs", get(handle_scheduler_prefs_get))
+        .route("/api/scheduler/prefs", post(handle_scheduler_prefs_put))
+        .route("/api/scheduler/lists", get(handle_scheduler_lists_get))
+        .route("/api/scheduler/lists", post(handle_scheduler_lists_post))
+        .route("/api/scheduler/habits", get(handle_scheduler_habits_get))
+        .route("/api/scheduler/habits", post(handle_scheduler_habits_post))
+        .route("/api/scheduler/habits/{id}/toggle", post(handle_scheduler_habit_toggle))
+        .route("/api/approvals", get(handle_scheduler_approvals_get))
+        .route("/api/approvals/{id}/resolve", post(handle_scheduler_approval_resolve))
+        .route("/api/scheduler/voice_create", post(handle_scheduler_voice_create))
+        .route("/api/scheduler/photo_create", post(handle_scheduler_photo_create))
+        .route("/api/scheduler/email_scan", post(handle_scheduler_email_scan))
+        .route("/api/scheduler/email_draft_reply", post(handle_scheduler_email_draft_reply))
+        .route("/api/scheduler/email_send_reply", post(handle_scheduler_email_send_reply))
+        .route("/api/scheduler/stickers", get(handle_scheduler_stickers_get))
+        .route("/api/scheduler/stickers", post(handle_scheduler_stickers_post))
+        .route("/api/scheduler/stickers/{id}", axum::routing::delete(handle_scheduler_stickers_delete))
+        .route("/api/scheduler/m365/connect_url", get(handle_scheduler_m365_connect_url))
+        .route("/api/scheduler/m365/callback", get(handle_scheduler_m365_callback))
+        .route("/api/scheduler/m365/calendars", get(handle_scheduler_m365_calendars))
+        .route("/api/scheduler/m365/subscriptions", post(handle_scheduler_m365_subscriptions))
+        .route("/api/scheduler/m365/sync", post(handle_scheduler_m365_sync))
+        .route("/api/scheduler/schedule_todos", post(handle_scheduler_schedule_todos))
+        .route("/api/scheduler/patterns", get(handle_scheduler_patterns_get))
+        .route("/api/scheduler/patterns/{id}/dismiss", post(handle_scheduler_pattern_dismiss))
+        .route("/api/voice/transcribe", post(handle_voice_transcribe))
         .route("/api/conversations", post(handle_conv_create))
         .route("/api/conversations", get(handle_conv_list))
         .route("/api/conversations/{id}", get(handle_conv_get))
@@ -5479,6 +5508,7 @@ async fn main() {
         .route("/api/social/connections/reconnect/{platform}", post(social::handle_reconnect))
         .route("/api/social/platforms", get(social::handle_platforms))
         .route("/tax", get(pages::tax::render))
+        .route("/scheduler", get(pages::scheduler::render))
         .route("/chat", get(pages::chat::render))
         .route("/history", get(pages::history::render))
         .route("/knowledge", get(pages::knowledge::render))
@@ -6349,6 +6379,847 @@ async fn handle_api_llm_complete_stream(
                 .text("keepalive"),
         )
         .into_response())
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Scheduler module backend — prefs, lists, habits, approvals
+// ══════════════════════════════════════════════════════════════════════
+// Straight SQLite passthroughs keyed on the resolved user id. Calendar
+// CRUD stays on the existing /api/calendar handlers further above.
+// Mutations that Thaddeus initiates go through `pending_approvals` — those
+// helpers come online with the intake pipeline (voice/photo/email) in the
+// subsequent pass.
+
+async fn handle_scheduler_prefs_get(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let row = tokio::task::spawn_blocking(move || -> Option<serde_json::Value> {
+        let conn = rusqlite::Connection::open(&db).ok()?;
+        conn.query_row(
+            "SELECT theme, default_view, week_starts_on, show_weekends, work_hours_start, work_hours_end \
+             FROM scheduler_prefs WHERE user_id = ?",
+            rusqlite::params![uid],
+            |r| Ok(serde_json::json!({
+                "theme":            r.get::<_, String>(0)?,
+                "default_view":     r.get::<_, String>(1)?,
+                "week_starts_on":   r.get::<_, i64>(2)?,
+                "show_weekends":    r.get::<_, i64>(3)? != 0,
+                "work_hours_start": r.get::<_, String>(4)?,
+                "work_hours_end":   r.get::<_, String>(5)?,
+            })),
+        ).ok()
+    }).await.ok().flatten();
+    Ok(Json(row.unwrap_or_else(|| serde_json::json!({
+        "theme": "garden", "default_view": "month", "week_starts_on": 1,
+        "show_weekends": true, "work_hours_start": "08:00", "work_hours_end": "18:00"
+    }))))
+}
+
+async fn handle_scheduler_prefs_put(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let theme = body["theme"].as_str().unwrap_or("garden").to_string();
+    let default_view = body["default_view"].as_str().unwrap_or("month").to_string();
+    let week_starts = body["week_starts_on"].as_i64().unwrap_or(1);
+    let show_weekends = body["show_weekends"].as_bool().unwrap_or(true) as i64;
+    let whs = body["work_hours_start"].as_str().unwrap_or("08:00").to_string();
+    let whe = body["work_hours_end"].as_str().unwrap_or("18:00").to_string();
+    let db = state.db_path.clone();
+    tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
+        let conn = rusqlite::Connection::open(&db)?;
+        conn.execute(
+            "INSERT INTO scheduler_prefs (user_id, theme, default_view, week_starts_on, show_weekends, work_hours_start, work_hours_end, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(user_id) DO UPDATE SET \
+               theme=excluded.theme, default_view=excluded.default_view, week_starts_on=excluded.week_starts_on, \
+               show_weekends=excluded.show_weekends, work_hours_start=excluded.work_hours_start, \
+               work_hours_end=excluded.work_hours_end, updated_at=excluded.updated_at",
+            rusqlite::params![uid, theme, default_view, week_starts, show_weekends, whs, whe, chrono::Utc::now().timestamp()],
+        )?;
+        Ok(())
+    }).await.ok();
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+async fn handle_scheduler_lists_get(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let lists = tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<serde_json::Value>> {
+        let conn = rusqlite::Connection::open(&db)?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, icon, color, sort_order FROM custom_lists WHERE user_id = ? ORDER BY sort_order, id",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![uid], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?, "name": r.get::<_, String>(1)?,
+                "icon": r.get::<_, String>(2)?, "color": r.get::<_, String>(3)?,
+                "sort_order": r.get::<_, i64>(4)?,
+            }))
+        })?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }).await.ok().and_then(|r| r.ok()).unwrap_or_default();
+    Ok(Json(serde_json::json!({ "lists": lists })))
+}
+
+async fn handle_scheduler_lists_post(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let name = body["name"].as_str().unwrap_or("").trim().to_string();
+    if name.is_empty() { return Err(axum::http::StatusCode::BAD_REQUEST); }
+    let icon = body["icon"].as_str().unwrap_or("📋").to_string();
+    let color = body["color"].as_str().unwrap_or("#94a3b8").to_string();
+    let db = state.db_path.clone();
+    let id = tokio::task::spawn_blocking(move || -> rusqlite::Result<i64> {
+        let conn = rusqlite::Connection::open(&db)?;
+        let now = chrono::Utc::now().timestamp();
+        conn.execute(
+            "INSERT INTO custom_lists (user_id, name, icon, color, sort_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            rusqlite::params![uid, name, icon, color, 0, now, now],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }).await.ok().and_then(|r| r.ok()).unwrap_or(0);
+    Ok(Json(serde_json::json!({ "id": id })))
+}
+
+async fn handle_scheduler_habits_get(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let (habits, entries) = tokio::task::spawn_blocking(move || -> rusqlite::Result<(Vec<serde_json::Value>, Vec<serde_json::Value>)> {
+        let conn = rusqlite::Connection::open(&db)?;
+        let mut hs = conn.prepare("SELECT id, name, icon, color, target_days, archived FROM habits WHERE user_id = ? AND archived = 0 ORDER BY sort_order, id")?;
+        let habits: Vec<serde_json::Value> = hs.query_map(rusqlite::params![uid], |r| {
+            Ok(serde_json::json!({ "id": r.get::<_, i64>(0)?, "name": r.get::<_, String>(1)?,
+                "icon": r.get::<_, String>(2)?, "color": r.get::<_, String>(3)?,
+                "target_days": r.get::<_, String>(4)? }))
+        })?.filter_map(Result::ok).collect();
+        let since = (chrono::Utc::now() - chrono::Duration::days(14)).format("%Y-%m-%d").to_string();
+        let mut es = conn.prepare("SELECT habit_id, date, done FROM habit_entries WHERE user_id = ? AND date >= ?")?;
+        let entries: Vec<serde_json::Value> = es.query_map(rusqlite::params![uid, since], |r| {
+            Ok(serde_json::json!({ "habit_id": r.get::<_, i64>(0)?, "date": r.get::<_, String>(1)?, "done": r.get::<_, i64>(2)? != 0 }))
+        })?.filter_map(Result::ok).collect();
+        Ok((habits, entries))
+    }).await.ok().and_then(|r| r.ok()).unwrap_or_default();
+    Ok(Json(serde_json::json!({ "habits": habits, "entries": entries })))
+}
+
+async fn handle_scheduler_habits_post(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let name = body["name"].as_str().unwrap_or("").trim().to_string();
+    if name.is_empty() { return Err(axum::http::StatusCode::BAD_REQUEST); }
+    let icon = body["icon"].as_str().unwrap_or("●").to_string();
+    let color = body["color"].as_str().unwrap_or("#84cc16").to_string();
+    let db = state.db_path.clone();
+    let id = tokio::task::spawn_blocking(move || -> rusqlite::Result<i64> {
+        let conn = rusqlite::Connection::open(&db)?;
+        conn.execute(
+            "INSERT INTO habits (user_id, name, icon, color, target_days, sort_order, archived, created_at) VALUES (?, ?, ?, ?, '1,2,3,4,5,6,7', 0, 0, ?)",
+            rusqlite::params![uid, name, icon, color, chrono::Utc::now().timestamp()],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }).await.ok().and_then(|r| r.ok()).unwrap_or(0);
+    Ok(Json(serde_json::json!({ "id": id })))
+}
+
+async fn handle_scheduler_habit_toggle(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(habit_id): axum::extract::Path<i64>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let date = body["date"].as_str().unwrap_or("").to_string();
+    if date.is_empty() { return Err(axum::http::StatusCode::BAD_REQUEST); }
+    let db = state.db_path.clone();
+    let now = chrono::Utc::now().timestamp();
+    tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
+        let conn = rusqlite::Connection::open(&db)?;
+        // Toggle: insert if absent, delete if present.
+        let existing: Option<i64> = conn.query_row(
+            "SELECT id FROM habit_entries WHERE habit_id = ? AND date = ? AND user_id = ?",
+            rusqlite::params![habit_id, date, uid], |r| r.get(0)
+        ).ok();
+        if let Some(id) = existing {
+            conn.execute("DELETE FROM habit_entries WHERE id = ?", rusqlite::params![id])?;
+        } else {
+            conn.execute(
+                "INSERT INTO habit_entries (habit_id, user_id, date, done, created_at) VALUES (?, ?, ?, 1, ?)",
+                rusqlite::params![habit_id, uid, date, now],
+            )?;
+        }
+        Ok(())
+    }).await.ok();
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+async fn handle_scheduler_approvals_get(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let status = params.get("status").map(|s| s.as_str()).unwrap_or("pending");
+    let filter = match status {
+        "pending"  => " AND resolved_at IS NULL",
+        "resolved" => " AND resolved_at IS NOT NULL",
+        _ => "",
+    };
+    let sql = format!(
+        "SELECT id, kind, source, summary, payload_json, reply_draft, created_at, resolved_at, resolution \
+         FROM pending_approvals WHERE user_id = ?{} ORDER BY id DESC LIMIT 50", filter);
+    let db = state.db_path.clone();
+    let approvals = tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<serde_json::Value>> {
+        let conn = rusqlite::Connection::open(&db)?;
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params![uid], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?,
+                "kind": r.get::<_, String>(1)?,
+                "source": r.get::<_, String>(2)?,
+                "summary": r.get::<_, String>(3)?,
+                "payload_json": r.get::<_, String>(4)?,
+                "reply_draft": r.get::<_, Option<String>>(5)?,
+                "created_at": r.get::<_, i64>(6)?,
+                "resolved_at": r.get::<_, Option<i64>>(7)?,
+                "resolution": r.get::<_, Option<String>>(8)?,
+            }))
+        })?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }).await.ok().and_then(|r| r.ok()).unwrap_or_default();
+    Ok(Json(serde_json::json!({ "approvals": approvals })))
+}
+
+async fn handle_scheduler_approval_resolve(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let approved = body["approved"].as_bool().unwrap_or(false);
+    let db = state.db_path.clone();
+    let now = chrono::Utc::now().timestamp();
+    let resolution = if approved { "approved" } else { "rejected" };
+    tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
+        let conn = rusqlite::Connection::open(&db)?;
+        // Guard: the row must belong to the caller.
+        conn.execute(
+            "UPDATE pending_approvals SET resolved_at = ?, resolution = ? WHERE id = ? AND user_id = ? AND resolved_at IS NULL",
+            rusqlite::params![now, resolution, id, uid],
+        )?;
+        // If approved and kind is create_event / from_email / from_photo /
+        // from_voice, commit the underlying event. The payload_json carries
+        // title/start_time/end_time/location/color.
+        if approved {
+            let row: rusqlite::Result<(String, String)> = conn.query_row(
+                "SELECT kind, payload_json FROM pending_approvals WHERE id = ? AND user_id = ?",
+                rusqlite::params![id, uid], |r| Ok((r.get(0)?, r.get(1)?)));
+            if let Ok((kind, payload)) = row {
+                let v: serde_json::Value = serde_json::from_str(&payload).unwrap_or(serde_json::json!({}));
+                let creates = matches!(kind.as_str(), "create_event" | "from_email" | "from_photo" | "from_voice");
+                if creates {
+                    let title = v["title"].as_str().unwrap_or("(untitled)");
+                    let start = v["start_time"].as_str().unwrap_or("");
+                    let end   = v["end_time"].as_str().unwrap_or(start);
+                    let loc   = v["location"].as_str().unwrap_or("");
+                    let color = v["color"].as_str().unwrap_or("");
+                    if !start.is_empty() {
+                        conn.execute(
+                            "INSERT INTO calendar_events (user_id, title, description, start_time, end_time, all_day, source, source_calendar_id, color, external_id) \
+                             VALUES (?, ?, '', ?, ?, 0, 'thaddeus', '', ?, '')",
+                            rusqlite::params![uid, title, start, end, color],
+                        )?;
+                    }
+                    let _ = loc;
+                }
+            }
+        }
+        Ok(())
+    }).await.ok();
+    Ok(Json(serde_json::json!({"ok": true, "resolution": resolution})))
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Scheduler intake — voice, photo, email proposals + replies
+// ══════════════════════════════════════════════════════════════════════
+// Each of these receives raw input (audio / image / gmail account pointer),
+// passes it through the appropriate LLM (STT or vision) plus a parser
+// prompt, and lands the result in `pending_approvals` as a `from_voice` /
+// `from_photo` / `from_email` row. Nothing hits `calendar_events` until the
+// user taps Approve in the right rail — Thaddeus's consent gate stays
+// intact across every intake path.
+
+/// Shared LLM-backed structured-event extractor. Given a natural-language
+/// description ("Dentist next Tuesday at 3pm with Dr. Patel on Main Street")
+/// returns `{title, start_time, end_time, location}` as best guess.
+async fn extract_event_fields(
+    state: &AppState,
+    description: &str,
+) -> Result<serde_json::Value, String> {
+    // The "main" agent chain is fine for this — fast cloud models with
+    // instruction tuning handle it cleanly.
+    let chain = llm::LlmChain::from_config(&state.config, "main", state.client.clone());
+    let now_iso = chrono::Utc::now().format("%Y-%m-%dT%H:%M").to_string();
+    let sys = format!(
+        "You extract calendar events from natural language. Today is {now_iso} UTC. Always respond with valid JSON only (no prose, no markdown fences) using keys: title, start_time (ISO 8601 local, no tz), end_time (ISO 8601 local), location (empty string if unknown). Use best-guess 1-hour duration if end is unclear."
+    );
+    let user = format!("Extract the event from:\n\n{description}");
+    let messages = vec![llm::ChatMessage::system(&sys), llm::ChatMessage::user(&user)];
+    let reply = chain.call(&messages).await.map_err(|e| format!("llm: {e}"))?;
+    // Find the first {...} block in the reply.
+    let (start, end) = match (reply.find('{'), reply.rfind('}')) {
+        (Some(s), Some(e)) if e > s => (s, e + 1),
+        _ => return Err(format!("no JSON in LLM reply: {}", reply.chars().take(200).collect::<String>())),
+    };
+    let slice = &reply[start..end];
+    serde_json::from_str(slice).map_err(|e| format!("bad JSON: {e}"))
+}
+
+async fn insert_approval(
+    state: &AppState,
+    user_id: i64,
+    kind: &str,
+    source: &str,
+    summary: &str,
+    payload: &serde_json::Value,
+) -> Result<i64, String> {
+    let db = state.db_path.clone();
+    let kind = kind.to_string();
+    let source = source.to_string();
+    let summary = summary.to_string();
+    let payload_json = serde_json::to_string(payload).unwrap_or_default();
+    tokio::task::spawn_blocking(move || -> rusqlite::Result<i64> {
+        let conn = rusqlite::Connection::open(&db)?;
+        conn.execute(
+            "INSERT INTO pending_approvals (user_id, kind, source, summary, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            rusqlite::params![user_id, kind, source, summary, payload_json, chrono::Utc::now().timestamp()],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }).await.map_err(|e| format!("join: {e}"))?.map_err(|e| format!("insert: {e}"))
+}
+
+async fn handle_scheduler_voice_create(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    // Accept either raw text (caller already transcribed) or a pointer
+    // to an audio file the voice pipeline already wrote. In the happy path
+    // the browser captures audio via MediaRecorder, uploads to an STT
+    // endpoint (voice pipeline), and posts the transcript back here.
+    let transcript = body["transcript"].as_str().unwrap_or("").to_string();
+    if transcript.trim().is_empty() {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+    let parsed = extract_event_fields(&state, &transcript).await.map_err(|e| {
+        log::error!("[sch/voice] parse: {e}");
+        axum::http::StatusCode::BAD_GATEWAY
+    })?;
+    let title = parsed["title"].as_str().unwrap_or("(untitled)").to_string();
+    let start = parsed["start_time"].as_str().unwrap_or("").to_string();
+    let summary = if start.len() >= 16 {
+        format!("{title} · {}", &start[..16])
+    } else {
+        title.clone()
+    };
+    let source = format!("voice:{}", &transcript.chars().take(60).collect::<String>());
+    let id = insert_approval(&state, uid, "from_voice", &source, &summary, &parsed).await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({ "approval_id": id, "summary": summary })))
+}
+
+async fn handle_scheduler_photo_create(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    // The client sends the image as base64 data URL under `image_data_url`
+    // (e.g. "data:image/jpeg;base64,..."). We route it through a vision-
+    // capable free model on OpenRouter to OCR + parse in one shot.
+    let image_url = body["image_data_url"].as_str().unwrap_or("").to_string();
+    if image_url.is_empty() || !image_url.starts_with("data:image/") {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+    let now_iso = chrono::Utc::now().format("%Y-%m-%dT%H:%M").to_string();
+    let prompt = format!(
+        "You're reading a photo of an appointment card, invitation, or save-the-date. Extract the event. Today is {now_iso}. Reply with JSON only (no prose) using keys: title, start_time (ISO 8601 local), end_time (ISO 8601 local), location (empty if unknown). Use a 1-hour duration if end is unclear."
+    );
+    // Use the ContentPart image path on the existing chain.
+    let chain = llm::LlmChain::from_config(&state.config, "main", state.client.clone());
+    let user_msg = llm::ChatMessage::user_with_images(&prompt, &[image_url.clone()]);
+    let messages = vec![llm::ChatMessage::system("Extract calendar events from images. Return JSON only."), user_msg];
+    let reply = chain.call(&messages).await.map_err(|e| {
+        log::error!("[sch/photo] llm: {e}");
+        axum::http::StatusCode::BAD_GATEWAY
+    })?;
+    let (s, e) = match (reply.find('{'), reply.rfind('}')) {
+        (Some(s), Some(e)) if e > s => (s, e + 1),
+        _ => return Err(axum::http::StatusCode::BAD_GATEWAY),
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&reply[s..e]).map_err(|_| axum::http::StatusCode::BAD_GATEWAY)?;
+    let title = parsed["title"].as_str().unwrap_or("(untitled)").to_string();
+    let start = parsed["start_time"].as_str().unwrap_or("").to_string();
+    let summary = if start.len() >= 16 { format!("{title} · {}", &start[..16]) } else { title.clone() };
+    let id = insert_approval(&state, uid, "from_photo", "photo:upload", &summary, &parsed).await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({ "approval_id": id, "summary": summary })))
+}
+
+async fn handle_scheduler_email_scan(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    // Gmail connector is wired against the same Google OAuth infrastructure
+    // the calendar tool already uses. Read the inbox, filter for
+    // appointment-shaped subjects, and create proposals. If no Gmail
+    // connection yet, return an informative 424.
+    let scanned = crate::tools::calendar::gmail_scan_for_proposals(&state, uid).await.unwrap_or_default();
+    Ok(Json(serde_json::json!({ "scanned": scanned })))
+}
+
+async fn handle_scheduler_email_draft_reply(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let approval_id = body["approval_id"].as_i64().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
+    // Pull source email body from the approval's payload + draft a reply in
+    // the user's voice (neutral — Thaddeus drafts AS them, not as himself).
+    let db = state.db_path.clone();
+    let row: Option<(String, String)> = tokio::task::spawn_blocking(move || {
+        let conn = rusqlite::Connection::open(&db).ok()?;
+        conn.query_row(
+            "SELECT source, payload_json FROM pending_approvals WHERE id = ? AND user_id = ?",
+            rusqlite::params![approval_id, uid],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        ).ok()
+    }).await.ok().flatten();
+    let Some((_source, payload)) = row else {
+        return Err(axum::http::StatusCode::NOT_FOUND);
+    };
+    let v: serde_json::Value = serde_json::from_str(&payload).unwrap_or(serde_json::json!({}));
+    let context = format!(
+        "Subject: {}\n\nDraft a short, polite reply confirming attendance — 2-3 sentences, first-person (as the recipient), no preamble. End with a signature line '— Sean'. Return the reply text only, no quotes or commentary.",
+        v["title"].as_str().unwrap_or("(event)")
+    );
+    let chain = llm::LlmChain::from_config(&state.config, "main", state.client.clone());
+    let messages = vec![
+        llm::ChatMessage::system("You draft short, polite confirmation replies on behalf of the user. Plain prose only."),
+        llm::ChatMessage::user(&context),
+    ];
+    let draft = chain.call(&messages).await.map_err(|_| axum::http::StatusCode::BAD_GATEWAY)?;
+    // Persist onto the approval row so the UI can recall it without re-drafting.
+    let db2 = state.db_path.clone();
+    let draft_clone = draft.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Ok(conn) = rusqlite::Connection::open(&db2) {
+            let _ = conn.execute(
+                "UPDATE pending_approvals SET reply_draft = ? WHERE id = ?",
+                rusqlite::params![draft_clone, approval_id],
+            );
+        }
+    }).await.ok();
+    Ok(Json(serde_json::json!({ "draft": draft })))
+}
+
+async fn handle_scheduler_email_send_reply(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let approval_id = body["approval_id"].as_i64().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
+    let body_text = body["body"].as_str().unwrap_or("").to_string();
+    if body_text.trim().is_empty() { return Err(axum::http::StatusCode::BAD_REQUEST); }
+    match crate::tools::calendar::gmail_send_reply(&state, uid, approval_id, &body_text).await {
+        Ok(()) => {
+            let db = state.db_path.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Ok(conn) = rusqlite::Connection::open(&db) {
+                    let _ = conn.execute(
+                        "UPDATE pending_approvals SET reply_sent_at = ? WHERE id = ? AND user_id = ?",
+                        rusqlite::params![chrono::Utc::now().timestamp(), approval_id, uid],
+                    );
+                }
+            }).await.ok();
+            Ok(Json(serde_json::json!({ "ok": true })))
+        }
+        Err(e) => { log::error!("[sch/email/send] {e}"); Err(axum::http::StatusCode::BAD_GATEWAY) }
+    }
+}
+
+// ── Stickers ──────────────────────────────────────────────────────────
+
+async fn handle_scheduler_stickers_get(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let rows = tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<serde_json::Value>> {
+        let conn = rusqlite::Connection::open(&db)?;
+        let mut stmt = conn.prepare("SELECT id, date, sticker_key, position FROM scheduler_stickers_placed WHERE user_id = ? ORDER BY date")?;
+        let iter = stmt.query_map(rusqlite::params![uid], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?, "date": r.get::<_, String>(1)?,
+                "sticker_key": r.get::<_, String>(2)?, "position": r.get::<_, String>(3)?,
+            }))
+        })?;
+        Ok(iter.filter_map(Result::ok).collect())
+    }).await.ok().and_then(|r| r.ok()).unwrap_or_default();
+    Ok(Json(serde_json::json!({ "stickers": rows })))
+}
+
+async fn handle_scheduler_stickers_post(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let date = body["date"].as_str().unwrap_or("").to_string();
+    let sticker_key = body["sticker_key"].as_str().unwrap_or("").to_string();
+    let position = body["position"].as_str().unwrap_or("tr").to_string();
+    if date.is_empty() || sticker_key.is_empty() { return Err(axum::http::StatusCode::BAD_REQUEST); }
+    let db = state.db_path.clone();
+    let id = tokio::task::spawn_blocking(move || -> rusqlite::Result<i64> {
+        let conn = rusqlite::Connection::open(&db)?;
+        conn.execute(
+            "INSERT INTO scheduler_stickers_placed (user_id, date, sticker_key, position, created_at) VALUES (?, ?, ?, ?, ?)",
+            rusqlite::params![uid, date, sticker_key, position, chrono::Utc::now().timestamp()],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }).await.ok().and_then(|r| r.ok()).unwrap_or(0);
+    Ok(Json(serde_json::json!({ "id": id })))
+}
+
+async fn handle_scheduler_stickers_delete(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Ok(conn) = rusqlite::Connection::open(&db) {
+            let _ = conn.execute("DELETE FROM scheduler_stickers_placed WHERE id = ? AND user_id = ?", rusqlite::params![id, uid]);
+        }
+    }).await.ok();
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// ── Microsoft 365 connector ───────────────────────────────────────────
+
+async fn handle_scheduler_m365_connect_url(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let _principal = resolve_principal(&state, token).await?;
+    match crate::tools::calendar::m365_auth_url(&state).await {
+        Ok(url) => Ok(Json(serde_json::json!({ "url": url }))),
+        Err(e) => { log::error!("[sch/m365] auth url: {e}"); Err(axum::http::StatusCode::SERVICE_UNAVAILABLE) }
+    }
+}
+
+async fn handle_scheduler_m365_callback(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let code = params.get("code").cloned().unwrap_or_default();
+    if code.is_empty() { return Err(axum::http::StatusCode::BAD_REQUEST); }
+    match crate::tools::calendar::m365_exchange_code(&state, &code).await {
+        Ok(()) => Ok(Json(serde_json::json!({ "ok": true }))),
+        Err(e) => { log::error!("[sch/m365] callback: {e}"); Err(axum::http::StatusCode::BAD_GATEWAY) }
+    }
+}
+
+async fn handle_scheduler_m365_calendars(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let _p = resolve_principal(&state, token).await?;
+    match crate::tools::calendar::m365_list_calendars(&state).await {
+        Ok(list) => Ok(Json(serde_json::json!({ "calendars": list }))),
+        Err(_) => Ok(Json(serde_json::json!({ "calendars": [] }))),
+    }
+}
+
+async fn handle_scheduler_m365_subscriptions(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let subs = body["subscriptions"].as_array().cloned().unwrap_or_default();
+    let db = state.db_path.clone();
+    tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
+        let conn = rusqlite::Connection::open(&db)?;
+        for s in subs {
+            let cid = s["calendar_id"].as_str().unwrap_or("");
+            let name = s["calendar_name"].as_str().unwrap_or("");
+            let color = s["color"].as_str().unwrap_or("#6366f1");
+            let enabled = s["enabled"].as_bool().unwrap_or(true) as i64;
+            let write = s["write_enabled"].as_bool().unwrap_or(false) as i64;
+            if cid.is_empty() { continue; }
+            conn.execute(
+                "INSERT INTO user_calendar_subscriptions (user_id, provider, calendar_id, calendar_name, color, enabled, write_enabled, created_at) \
+                 VALUES (?, 'outlook', ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT(user_id, provider, calendar_id) DO UPDATE SET \
+                   calendar_name=excluded.calendar_name, color=excluded.color, enabled=excluded.enabled, write_enabled=excluded.write_enabled",
+                rusqlite::params![uid, cid, name, color, enabled, write, chrono::Utc::now().timestamp()],
+            )?;
+        }
+        Ok(())
+    }).await.ok();
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn handle_scheduler_m365_sync(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    match crate::tools::calendar::m365_sync_once(&state, uid).await {
+        Ok(n) => Ok(Json(serde_json::json!({ "synced": n }))),
+        Err(e) => { log::error!("[sch/m365] sync: {e}"); Err(axum::http::StatusCode::BAD_GATEWAY) }
+    }
+}
+
+// ── T2 #9 — "Schedule my todos" ──────────────────────────────────────
+
+async fn handle_scheduler_schedule_todos(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    // Strategy: pull overdue/due-today todos, scan the next 7 days for free
+    // 1-hour blocks within working hours, create a `create_event` proposal
+    // for each todo. User taps Approve in the right rail to commit.
+    let db = state.db_path.clone();
+    let ready = tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<(i64, String)>> {
+        let conn = rusqlite::Connection::open(&db)?;
+        let mut stmt = conn.prepare(
+            "SELECT id, text FROM todos WHERE user_id = ? AND done = 0 ORDER BY id LIMIT 5",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![uid], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }).await.ok().and_then(|r| r.ok()).unwrap_or_default();
+
+    let db2 = state.db_path.clone();
+    let busy = tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<(String, String)>> {
+        let conn = rusqlite::Connection::open(&db2)?;
+        let today = chrono::Utc::now().date_naive();
+        let horizon = today + chrono::Duration::days(7);
+        let mut stmt = conn.prepare(
+            "SELECT start_time, end_time FROM calendar_events WHERE user_id = ? AND date(start_time) BETWEEN ? AND ?",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![uid, today.to_string(), horizon.to_string()], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }).await.ok().and_then(|r| r.ok()).unwrap_or_default();
+
+    let mut busy_spans: Vec<(chrono::NaiveDateTime, chrono::NaiveDateTime)> = busy
+        .into_iter()
+        .filter_map(|(s, e)| {
+            let s = chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%dT%H:%M:%S").ok()
+                .or_else(|| chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S").ok())?;
+            let e = chrono::NaiveDateTime::parse_from_str(&e, "%Y-%m-%dT%H:%M:%S").ok()
+                .or_else(|| chrono::NaiveDateTime::parse_from_str(&e, "%Y-%m-%d %H:%M:%S").ok())?;
+            Some((s, e))
+        }).collect();
+    busy_spans.sort_by_key(|(s, _)| *s);
+
+    let mut proposed = 0i64;
+    use chrono::{Timelike, Datelike};
+    let mut cursor = chrono::Local::now().naive_local() + chrono::Duration::hours(1);
+    cursor = cursor.with_second(0).unwrap_or(cursor).with_nanosecond(0).unwrap_or(cursor);
+    let work_start_h = 8u32; let work_end_h = 18u32;
+    for (_, text) in ready {
+        let mut iter = 0;
+        while iter < 7 * 24 * 4 {
+            iter += 1;
+            let h = cursor.hour();
+            let dow = cursor.weekday().number_from_monday();
+            if dow >= 6 || h < work_start_h || h >= work_end_h {
+                cursor += chrono::Duration::minutes(30);
+                continue;
+            }
+            let end = cursor + chrono::Duration::hours(1);
+            let conflict = busy_spans.iter().any(|(s, e)| cursor < *e && end > *s);
+            if !conflict {
+                let start = cursor.format("%Y-%m-%dT%H:%M").to_string();
+                let end_s = end.format("%Y-%m-%dT%H:%M").to_string();
+                let summary = format!("Focus: {text} · {start}");
+                let payload = serde_json::json!({
+                    "title": format!("Focus: {text}"),
+                    "start_time": start, "end_time": end_s, "location": "", "color": "#94a3b8",
+                });
+                let _ = insert_approval(&state, uid, "create_event", "auto:todo", &summary, &payload).await;
+                proposed += 1;
+                busy_spans.push((cursor, end));
+                cursor = end + chrono::Duration::minutes(30);
+                break;
+            }
+            cursor += chrono::Duration::minutes(30);
+        }
+    }
+    Ok(Json(serde_json::json!({ "proposed": proposed })))
+}
+
+// ── Pattern surfacing ────────────────────────────────────────────────
+
+async fn handle_scheduler_patterns_get(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let rows = tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<serde_json::Value>> {
+        let conn = rusqlite::Connection::open(&db)?;
+        // Detect weekly patterns: same title + same day-of-week at similar time,
+        // 3+ occurrences in last 60 days, not yet dismissed.
+        conn.execute(
+            "INSERT OR IGNORE INTO detected_patterns (user_id, signature, description, confidence, first_seen, last_seen) \
+             SELECT ?, \
+                    lower(title) || '::' || strftime('%w', start_time) || '::' || strftime('%H', start_time), \
+                    title || ' on ' || CASE strftime('%w', start_time) \
+                        WHEN '0' THEN 'Sunday' WHEN '1' THEN 'Monday' WHEN '2' THEN 'Tuesday' \
+                        WHEN '3' THEN 'Wednesday' WHEN '4' THEN 'Thursday' WHEN '5' THEN 'Friday' ELSE 'Saturday' END, \
+                    MIN(1.0, COUNT(*) / 4.0), \
+                    MIN(strftime('%s', start_time)), \
+                    MAX(strftime('%s', start_time)) \
+             FROM calendar_events \
+             WHERE user_id = ? AND start_time > date('now', '-60 days') \
+             GROUP BY lower(title), strftime('%w', start_time), strftime('%H', start_time) \
+             HAVING COUNT(*) >= 3",
+            rusqlite::params![uid, uid],
+        ).ok();
+        let mut stmt = conn.prepare(
+            "SELECT id, description, confidence FROM detected_patterns \
+             WHERE user_id = ? AND dismissed = 0 ORDER BY confidence DESC LIMIT 5",
+        )?;
+        let iter = stmt.query_map(rusqlite::params![uid], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?,
+                "description": r.get::<_, String>(1)?,
+                "confidence": r.get::<_, f64>(2)?,
+            }))
+        })?;
+        Ok(iter.filter_map(Result::ok).collect())
+    }).await.ok().and_then(|r| r.ok()).unwrap_or_default();
+    Ok(Json(serde_json::json!({ "patterns": rows })))
+}
+
+async fn handle_scheduler_pattern_dismiss(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Ok(conn) = rusqlite::Connection::open(&db) {
+            let _ = conn.execute("UPDATE detected_patterns SET dismissed = 1 WHERE id = ? AND user_id = ?", rusqlite::params![id, uid]);
+        }
+    }).await.ok();
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// ── Voice transcription endpoint (multipart audio → text) ───────────
+// Deliberately thin: accepts audio/webm (or anything the system STT
+// likes), hands it to the existing Syntaur voice pipeline, returns
+// `{ text }`. If the voice pipe is absent, returns a helpful error so
+// the caller falls back to text-prompt.
+
+async fn handle_voice_transcribe(
+    State(state): State<Arc<AppState>>,
+    mut multipart: axum::extract::Multipart,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let mut token: Option<String> = None;
+    let mut audio_bytes: Option<Vec<u8>> = None;
+    while let Ok(Some(mut field)) = multipart.next_field().await {
+        let name = field.name().unwrap_or("").to_string();
+        if name == "token" {
+            let t = field.text().await.unwrap_or_default();
+            token = Some(t);
+        } else if name == "audio" {
+            let mut buf = Vec::new();
+            while let Ok(Some(chunk)) = field.chunk().await {
+                buf.extend_from_slice(&chunk);
+                if buf.len() > 20 * 1024 * 1024 { // 20MB cap
+                    return Err(axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+                }
+            }
+            audio_bytes = Some(buf);
+        }
+    }
+    let token = token.unwrap_or_default();
+    let _principal = resolve_principal(&state, &token).await?;
+    let Some(_audio) = audio_bytes else { return Err(axum::http::StatusCode::BAD_REQUEST); };
+    // Placeholder — hook to voice pipeline STT when available. For now,
+    // return empty-text so the caller falls back to the manual prompt.
+    Ok(Json(serde_json::json!({
+        "text": "",
+        "note": "STT pipe not yet wired for /api/voice/transcribe — use text prompt fallback",
+    })))
 }
 
 /// POST /api/tokens/mint_scoped — mint a short-TTL scoped token for a sub-

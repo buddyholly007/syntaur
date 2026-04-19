@@ -5,11 +5,11 @@
 use axum::response::Html;
 use maud::{html, PreEscaped};
 
-use super::shared::{shell, Page};
+use super::shared::{shell, top_bar, Page};
 
 pub async fn render() -> Html<String> {
     let page = Page {
-        title: "Tax & Expenses",
+        title: "Tax",
         authed: true,
         extra_style: Some(EXTRA_STYLE),
     };
@@ -67,39 +67,20 @@ pub async fn render() -> Html<String> {
                 "Upgrade to Pro"
             }
         }
-        // Top bar
-        div class="border-b border-gray-800 bg-gray-900/50 backdrop-blur sticky top-0 z-40" {
-            div class="max-w-6xl mx-auto px-4 py-2.5 flex items-center justify-between gap-3" {
-                div class="flex items-center gap-3 min-w-0" {
-                    a href="/" class="flex items-center gap-2 hover:opacity-80 flex-shrink-0" {
-                        img src="/app-icon.jpg" class="h-8 w-8 rounded-lg" alt="";
-                        span class="font-semibold" {
-                            "Syntaur"
-                        }
-                    }
-                    span class="text-gray-500" {
-                        "/"
-                    }
-                    span class="text-gray-300 font-medium truncate" {
-                        "Tax & Expenses"
-                    }
-                }
-                div class="flex items-center gap-3 text-sm flex-shrink-0" {
-                    // Deadline pill — visible when any deadline is within 60 days
-                    span id="deadline-pill" class="deadline-pill hidden" {
-                        span class="deadline-dot" {
-                        }
-                        span id="deadline-pill-text" {
-                            "—"
-                        }
-                    }
-                    select id="year-select" class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-sm text-gray-300 outline-none" onchange="changeYear()" {
-                    }
-                    a href="/" class="text-gray-500 hover:text-gray-300" {
-                        "Home"
-                    }
-                }
+        // Shared global top bar
+        (top_bar("Tax", None))
+        // Tax-specific sub-bar — deadline pill + year selector. The
+        // deadline-pill element ID is preserved so updateDeadlinePill JS
+        // keeps updating it in place.
+        div class="tax-subbar" {
+            span id="deadline-pill" class="deadline-pill hidden" {
+                span class="deadline-dot" {}
+                span id="deadline-pill-text" { "—" }
             }
+            div style="flex:1" {}
+            select id="year-select" class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-sm text-gray-300 outline-none" onchange="changeYear()" {}
+        }
+        div class="tax-section-wrap" {
             // Section nav (top-level)
             div class="border-t border-gray-800/50" {
                 div class="max-w-6xl mx-auto px-4 flex items-center gap-1 overflow-x-auto whitespace-nowrap" {
@@ -3262,6 +3243,13 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   .kpi-tile.bad  .kpi-value { color: var(--lcars-red); }
 
   /* ─── Deadline pill — LCARS alert ─── */
+  .tax-subbar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 18px;
+    border-bottom: 1px solid rgb(31,41,55);
+    background: rgba(17,24,39,0.4);
+    font-size: 12px;
+  }
   .deadline-pill {
     display: inline-flex; align-items: center; gap: 0.4rem;
     padding: 0.25rem 0.7rem 0.25rem 0.5rem;

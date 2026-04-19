@@ -287,9 +287,18 @@ const S = {
     // Handoff from a main agent (e.g. Peter). When set, /coders shows a
     // banner + "Return to <agent>" button. Cleared when the user either
     // returns or explicitly opts to stay and free-roam.
+    //
+    // specialistConvId = fresh conversation the server created for Maurice
+    // (already seeded with a system-message summary of Peter's recent turns).
+    // Maurice's /api/message posts thread onto this conv so Peter's thread
+    // stays clean — only the outcome report posts back to returnConvId.
     handoff: _urlParams.get('handoff') === '1' ? {
         returnAgent: _urlParams.get('return_agent') || 'Peter',
-        convId: _urlParams.get('conv_id') || null,
+        returnConvId: _urlParams.get('return_conv') || _urlParams.get('conv_id') || null,
+        specialistConvId: _urlParams.get('specialist_conv') || null,
+        greeting: _urlParams.get('greeting') || '',
+        // Legacy ctx param kept for backward compat with bookmarks/tests; the
+        // server-seeded system message is now the source of truth.
         context: _decodeHandoffCtx(_urlParams.get('ctx')),
     } : null,
 };
@@ -315,8 +324,193 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Handoff banner + pre-seeded Maurice opener when Peter (or any main
     // agent) routed the user here. Renders only when ?handoff=1 was in the
     // URL; otherwise /coders behaves as normal free-roam.
-    if (S.handoff) renderHandoffBanner();
+    if (S.handoff) {
+        renderHandoffBanner();
+        // Hydrate the side panel from any existing messages on the specialist
+        // conversation, so a page reload mid-session doesn't lose history.
+        hydrateChatPanel().catch(e => console.warn('[mace] hydrate failed:', e));
+        // Auto-launch MACE in the active terminal so Maurice starts working
+        // immediately — the user doesn't need to know where to click or what
+        // to type. Zero-friction coder mode.
+        autoLaunchMace().catch(e => console.warn('[mace] auto-launch failed:', e));
+        // Poll the specialist conversation so Maurice's replies, tool calls,
+        // and the session-closed marker show up in the side panel too — the
+        // terminal isn't the only source of truth.
+        startHandoffPolling();
+    }
 });
+
+// Tracks which messages we've already rendered into the side panel so the
+// poller can skip them. Keyed by (role|content-hash) pairs; cheap string set.
+const S_RENDERED = new Set();
+
+async function hydrateChatPanel() {
+    if (!S.handoff || !S.handoff.specialistConvId) return;
+    const msgs = document.getElementById('ai-messages');
+    if (!msgs) return;
+    try {
+        const r = await apiFetch(`/api/conversations/${S.handoff.specialistConvId}`);
+        const list = (r && r.messages) || [];
+        // Clear the opener Maurice greeting; we'll rebuild from the conv.
+        msgs.innerHTML = '';
+        for (const m of list) {
+            renderConvMessage(m);
+        }
+        msgs.scrollTop = msgs.scrollHeight;
+    } catch(e) {
+        console.warn('[mace] hydrate failed:', e);
+    }
+}
+
+function renderConvMessage(m) {
+    const msgs = document.getElementById('ai-messages');
+    if (!msgs) return;
+    const role = m.role || '';
+    const content = m.content || '';
+    // Don't render the server-seeded handoff system message (the user just
+    // came from the chat that produced it; it's noise here).
+    if (role === 'system' && content.startsWith('[MACE_SESSION_CLOSED]')) return;
+    if (role === 'system') return;
+    const key = role + '|' + (content.length > 80 ? content.slice(0, 80) + content.length : content);
+    if (S_RENDERED.has(key)) return;
+    S_RENDERED.add(key);
+    if (role === 'assistant') {
+        msgs.innerHTML += `<div class="ai-msg assistant"><strong>Maurice:</strong> ${esc(content)}</div>`;
+    } else if (role === 'user') {
+        msgs.innerHTML += `<div class="ai-msg user">${esc(content)}</div>`;
+    } else if (role === 'tool') {
+        msgs.innerHTML += `<div class="ai-msg assistant" style="color:var(--ink-dim);font-style:italic">tool → ${esc(content.slice(0, 200))}${content.length > 200 ? '…' : ''}</div>`;
+    }
+}
+
+let _handoffPollTimer = null;
+function startHandoffPolling() {
+    if (_handoffPollTimer) return;
+    _handoffPollTimer = setInterval(async () => {
+        if (!S.handoff || !S.handoff.specialistConvId) return;
+        try {
+            const r = await apiFetch(`/api/conversations/${S.handoff.specialistConvId}`);
+            const list = (r && r.messages) || [];
+            const msgs = document.getElementById('ai-messages');
+            for (const m of list) {
+                // Detect Maurice's session-closed marker → auto-navigate back
+                // with the summary pre-filled so the user doesn't have to click
+                // "Return to Peter" after he already said he's done.
+                if (m.role === 'system' && typeof m.content === 'string' && m.content.startsWith('[MACE_SESSION_CLOSED]')) {
+                    if (!S.handoff) return;
+                    const summary = m.content.replace(/^\[MACE_SESSION_CLOSED\]\n?/, '').trim();
+                    console.log('[mace] session closed, navigating back');
+                    stopHandoffPolling();
+                    autoReturn(summary);
+                    return;
+                }
+                renderConvMessage(m);
+            }
+            if (msgs) msgs.scrollTop = msgs.scrollHeight;
+        } catch(_e) { /* transient — keep polling */ }
+    }, 2500);
+}
+
+function stopHandoffPolling() {
+    if (_handoffPollTimer) { clearInterval(_handoffPollTimer); _handoffPollTimer = null; }
+}
+
+async function autoReturn(summary) {
+    if (!S.handoff) return;
+    const returnAgent = S.handoff.returnAgent;
+    const returnConv = S.handoff.returnConvId;
+    S.handoff = null;
+    const params = new URLSearchParams();
+    if (S.token) params.set('token', S.token);
+    if (returnConv) params.set('conv_id', returnConv);
+    if (summary) params.set('mace_summary', summary.slice(0, 400));
+    window.location.href = '/chat' + (params.toString() ? '?' + params.toString() : '');
+}
+
+// Wait until the given tab's WebSocket is OPEN (or give up after timeoutMs).
+async function waitForTabOpen(tab, timeoutMs = 6000) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs) {
+        if (tab && tab.ws && tab.ws.readyState === WebSocket.OPEN) return true;
+        await new Promise(r => setTimeout(r, 80));
+    }
+    return false;
+}
+
+// Pick the best terminal tab and launch MACE into it with the handoff
+// conversation already attached via env vars.
+async function autoLaunchMace() {
+    if (!S.handoff) return;
+    // Prefer the local host (where the gateway is running) so mace has
+    // access to the same filesystem as the rest of Syntaur. Fall back to
+    // whichever tab is already active, then the first host.
+    let target = null;
+    if (S.activeTab) target = S.tabs.find(t => t.id === S.activeTab);
+    if (!target) {
+        const local = S.hosts && S.hosts.find(h => h.is_local);
+        if (local) {
+            const existing = S.tabs.find(t => t.hostId === local.id);
+            if (existing) target = existing;
+            else { addTab(local.id, local.name); target = S.tabs[S.tabs.length - 1]; }
+        } else if (S.hosts && S.hosts.length > 0) {
+            target = S.tabs[0] || (addTab(S.hosts[0].id, S.hosts[0].name), S.tabs[S.tabs.length - 1]);
+        }
+    }
+    if (!target) return;
+    switchTab(target.id);
+    const ready = await waitForTabOpen(target);
+    if (!ready) {
+        console.warn('[mace] terminal never became ready; skipping auto-launch');
+        return;
+    }
+    // Give the shell a beat to finish printing its prompt before we pipe in.
+    await new Promise(r => setTimeout(r, 400));
+    const origin = window.location.origin;
+    // env VAR=val cmd — shell-agnostic (works in bash, zsh, fish).
+    // Figure out which host this tab is pointed at. The sandbox container
+    // ("local" from the gateway's POV) is the default safe environment, so
+    // we skip confirmation prompts there. On every other host, destructive
+    // tool calls (run_shell, write_file, edit_file) require an inline y/N
+    // confirmation to avoid one-wrong-`rm -rf` days.
+    const targetHost = (S.hosts || []).find(h => h.id === target.hostId) || {};
+    const isSandbox = !!targetHost.is_local;
+    const hostLabel = targetHost.name || targetHost.hostname || 'this host';
+    // Mint a short-TTL scoped token so MAURICE_TOKEN isn't Sean's full
+    // session token — if the env leaks via /proc or a terminal recording,
+    // the blast radius is four endpoints for 24 hours. Falls back to the
+    // full token if the mint endpoint isn't reachable (backwards compat).
+    let maceToken = S.token;
+    try {
+        const mint = await apiFetch('/api/tokens/mint_scoped', {
+            method: 'POST',
+            body: JSON.stringify({ scope: 'mace', ttl_secs: 86400, name: 'mace-session' }),
+        });
+        if (mint && mint.token) maceToken = mint.token;
+    } catch(e) {
+        console.warn('[mace] mint_scoped failed, using session token:', e);
+    }
+    const parts = [
+        `env`,
+        // Prepend $HOME/bin to PATH so non-login interactive shells (which
+        // may not auto-add it) still find the mace binary. Container has
+        // /usr/local/bin/mace via bind-mount; other hosts have ~/bin/mace
+        // via deploy.sh's rsync-to-~/bin step.
+        `PATH=$HOME/bin:$PATH`,
+        `MAURICE_TOKEN='${maceToken}'`,
+        `MAURICE_CONV_ID='${S.handoff.specialistConvId || ''}'`,
+        `MAURICE_RETURN_CONV='${S.handoff.returnConvId || ''}'`,
+        `MAURICE_RETURN_AGENT='${S.handoff.returnAgent || 'Peter'}'`,
+        `MAURICE_SYNTAUR_URL='${origin}'`,
+        `MAURICE_HOSTNAME='${hostLabel.replace(/'/g, '')}'`,
+        `MACE_CONFIRM_DESTRUCTIVE=${isSandbox ? '0' : '1'}`,
+        `mace`,
+    ];
+    const cmd = parts.join(' ') + '\n';
+    const enc = new TextEncoder();
+    target.ws.send(enc.encode('clear\n'));
+    await new Promise(r => setTimeout(r, 120));
+    target.ws.send(enc.encode(cmd));
+}
 
 // ======== HANDOFF ========
 function renderHandoffBanner() {
@@ -324,12 +518,16 @@ function renderHandoffBanner() {
     banner.id = 'handoff-banner';
     banner.style.cssText = 'position:relative;z-index:30;margin:8px 16px 0;padding:12px 14px;background:rgba(206,66,43,0.12);border:1px solid var(--rust);border-radius:8px;color:var(--ink);font-family:Share Tech Mono,monospace;font-size:13px;line-height:1.45;display:flex;align-items:flex-start;gap:10px;';
     const returnAgent = S.handoff.returnAgent;
-    const ctxPreview = (S.handoff.context || '').slice(0, 380) + ((S.handoff.context || '').length > 380 ? '…' : '');
+    // Prefer the server-supplied greeting (which already names the topic);
+    // fall back to the legacy ctx preview for older handoff links.
+    const bannerBody = S.handoff.greeting
+        || ((S.handoff.context || '').slice(0, 380) + ((S.handoff.context || '').length > 380 ? '…' : ''))
+        || `${returnAgent} passed you over. Maurice has the context.`;
     banner.innerHTML = `
         <span style="font-size:18px;line-height:1">🔧</span>
         <div style="flex:1;min-width:0">
             <div style="color:var(--rust-hot);font-weight:600;margin-bottom:4px">${esc(returnAgent)} handed this off to Maurice</div>
-            <div style="color:var(--ink-dim);white-space:pre-wrap;margin-bottom:8px">${esc(ctxPreview)}</div>
+            <div style="color:var(--ink-dim);white-space:pre-wrap;margin-bottom:8px">${esc(bannerBody)}</div>
             <div style="display:flex;gap:8px;flex-wrap:wrap">
                 <button onclick="returnToMainAgent()" style="background:var(--phos);color:#000;border:none;padding:6px 12px;border-radius:4px;font-family:inherit;font-size:12px;font-weight:600;cursor:pointer">
                     Return to ${esc(returnAgent)} with outcome report
@@ -343,14 +541,12 @@ function renderHandoffBanner() {
     `;
     document.body.insertBefore(banner, document.body.firstChild);
 
-    // Seed Maurice's chat with the context so his opener is about the
-    // handoff, not a cold start.
+    // Greet from Maurice. The full handoff context is already seeded as a
+    // system message in Maurice's conversation (specialist_conv), so the
+    // chat UI just needs an opener — no need to re-render the transcript.
     const msgs = document.getElementById('ai-messages');
     if (msgs) {
-        msgs.innerHTML = `
-            <div class="ai-msg assistant"><strong>Maurice:</strong> Got it — ${esc(returnAgent)} asked me to look at this. Reading the context now.</div>
-            <div class="ai-msg assistant" style="color:var(--ink-dim);font-style:italic;border-left:2px solid var(--rust);padding-left:10px">${esc(ctxPreview)}</div>
-        `;
+        msgs.innerHTML = `<div class="ai-msg assistant"><strong>Maurice:</strong> ${esc(bannerBody)}</div>`;
         msgs.scrollTop = msgs.scrollHeight;
     }
     // Pre-populate the chat input with a diagnosis prompt so one Enter
@@ -365,7 +561,7 @@ function renderHandoffBanner() {
 async function returnToMainAgent() {
     if (!S.handoff) return;
     const returnAgent = S.handoff.returnAgent;
-    const convId = S.handoff.convId;
+    const convId = S.handoff.returnConvId;
     // Compose an outcome report from Maurice's chat messages in this
     // session. Drop control markers before posting.
     const msgs = document.querySelectorAll('#ai-messages .ai-msg.assistant');
@@ -904,18 +1100,32 @@ async function sendAiMsg() {
     // workspace files (IDENTITY / SOUL / STYLE / AGENTS). Hit him directly
     // rather than cramming a hand-rolled system prompt into the user message.
     // Include terminal context so he can reference what just happened.
-    // If we're in a handoff from Peter, pass the handoff context too so he
-    // remembers why he's here across LLM calls.
-    const handoffCtx = S.handoff && S.handoff.context
-        ? `Peter handed this off to you. Original context:\n${S.handoff.context}\n\n`
-        : '';
+    //
+    // For handoffs, the server-seeded system message in specialist_conv
+    // already carries the original context; the user message stays clean.
     const body = {
-        message: `${handoffCtx}Terminal context (most recent output):\n\`\`\`\n${termContext || '(no terminal output yet)'}\n\`\`\`\n\n${text}`,
+        message: `Terminal context (most recent output):\n\`\`\`\n${termContext || '(no terminal output yet)'}\n\`\`\`\n\n${text}`,
         agent: 'maurice',
     };
-    // Thread on the originating conversation when we know it — keeps memory
-    // of this debugging session tied to the main-agent conversation.
-    if (S.handoff && S.handoff.convId) body.conversation_id = S.handoff.convId;
+    // When a MACE session is active (handoff), route chat-panel input
+    // through /api/conversations/{id}/append instead of /api/message so the
+    // gateway doesn't run a second, conflicting tool loop. MACE polls the
+    // conversation for new user messages between its own tool rounds and
+    // picks these up as mid-task interjections.
+    if (S.handoff && S.handoff.specialistConvId) {
+        const thinkEl = document.getElementById(thinkId);
+        try {
+            await apiFetch(`/api/conversations/${S.handoff.specialistConvId}/append`, {
+                method: 'POST',
+                body: JSON.stringify({ role: 'user', content: body.message }),
+            });
+            if (thinkEl) thinkEl.innerHTML = `<em style="color:var(--ink-dim)">Sent to Maurice in the terminal — watch his reply there.</em>`;
+        } catch(e) {
+            if (thinkEl) thinkEl.innerHTML = `<strong>Maurice:</strong> <span style="color:var(--rust-hot)">Couldn't reach Maurice — ${esc(e.message||e)}</span>`;
+        }
+        msgs.scrollTop = msgs.scrollHeight;
+        return;
+    }
 
     try {
         const r = await apiFetch('/api/message', {

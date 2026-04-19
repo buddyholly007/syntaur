@@ -328,6 +328,8 @@ struct TrackMeta {
     duration_ms: Option<i64>,
     track_no: Option<i64>,
     year: Option<i64>,
+    bit_depth: Option<i64>,
+    sample_rate: Option<i64>,
 }
 
 fn extract_metadata(path: &Path) -> Result<TrackMeta, String> {
@@ -335,7 +337,11 @@ fn extract_metadata(path: &Path) -> Result<TrackMeta, String> {
     use lofty::tag::Accessor;
 
     let tagged = lofty::read_from_path(path).map_err(|e| e.to_string())?;
-    let duration_ms = tagged.properties().duration().as_millis() as i64;
+    let props = tagged.properties();
+    let duration_ms = props.duration().as_millis() as i64;
+    let bit_depth = props.bit_depth().map(|v| v as i64);
+    let sample_rate = props.sample_rate().map(|v| v as i64);
+
     let (title, artist, album, track_no, year) = if let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) {
         (
             tag.title().map(|s| s.into_owned()),
@@ -351,7 +357,28 @@ fn extract_metadata(path: &Path) -> Result<TrackMeta, String> {
         path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string())
     });
 
-    Ok(TrackMeta { title, artist, album, duration_ms: Some(duration_ms), track_no, year })
+    Ok(TrackMeta { title, artist, album, duration_ms: Some(duration_ms), track_no, year, bit_depth, sample_rate })
+}
+
+/// Extract the first `Front` picture (or any picture, as a fallback)
+/// from a tagged audio file. Returns (bytes, mime_type). Used at scan
+/// time to populate the per-user art cache.
+fn extract_embedded_picture(path: &Path) -> Option<(Vec<u8>, String)> {
+    use lofty::file::TaggedFileExt;
+    use lofty::picture::PictureType;
+
+    let tagged = lofty::read_from_path(path).ok()?;
+    let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
+    let pictures = tag.pictures();
+    if pictures.is_empty() { return None; }
+
+    // Prefer CoverFront, fall back to first picture.
+    let pic = pictures.iter().find(|p| p.pic_type() == PictureType::CoverFront)
+        .or_else(|| pictures.first())?;
+    let mime = pic.mime_type()
+        .map(|m| m.as_str().to_string())
+        .unwrap_or_else(|| "image/jpeg".to_string());
+    Some((pic.data().to_vec(), mime))
 }
 
 // ── Track list / search ─────────────────────────────────────────────────
@@ -877,10 +904,27 @@ pub async fn retag_all(
             )
         }).collect::<Vec<_>>().join("\n");
         let user_msg = format!(
-"Parse the real song title, artist, and album for each track below from its file path and any existing tags. Return ONLY a JSON array, one object per input, in the same order, shape: [{{\"title\":\"...\",\"artist\":\"...\",\"album\":\"...\"}}]. If a field is genuinely unknown, return an empty string for that field. Normalize capitalization (title case for titles, artist names as commonly written). Strip track numbers, file extensions, 'cd1/disc1' markers, scene release tags, and URLs. Do NOT invent information — if the path has no clue about the album, return empty string for album.
-
-Tracks:
-{}",
+"Clean up song tags from file paths + existing tags. Return ONLY a JSON \
+array in the same order, shape: \
+[{{\"title\":\"...\",\"artist\":\"...\",\"album\":\"...\"}}].\n\n\
+RULES — read carefully, these are critical:\n\
+1. Per-field empty-string means \"I cannot confidently parse this\". \
+Syntaur will keep the existing tag unchanged when you return empty — \
+DO NOT GUESS. Empty is always safer than wrong.\n\
+2. Only parse a field when the file path, folder name, or existing tag \
+contains clear evidence. Example: path \
+\"Arctic Monkeys/Favourite Worst Nightmare/01-Brianstorm.flac\" → \
+{{\"title\":\"Brianstorm\",\"artist\":\"Arctic Monkeys\",\"album\":\"Favourite Worst Nightmare\"}}.\n\
+3. When the path contains no title info — e.g. \"29 - Prince -.flac\" \
+or \"Track 05.mp3\" — return \"\" for title. Do NOT write the filename \
+back as the title.\n\
+4. Strip these from parsed values: leading track numbers (01-, A1., \
+\"Track 5 - \"), file extensions, disc markers (\"cd1\", \"disc 2\"), \
+scene release tags ([FLAC], [24bit], [1080p]), URLs.\n\
+5. Normalise capitalization: Title Case for titles; artist names as \
+commonly written (\"Arctic Monkeys\", not \"ARCTIC MONKEYS\").\n\
+6. Respect the language of the original. Don't translate or transliterate.\n\n\
+Tracks:\n{}",
             numbered,
         );
         let messages = vec![
@@ -897,28 +941,44 @@ Tracks:
         let parsed: Vec<Value> = serde_json::from_str(cleaned).unwrap_or_default();
         if parsed.is_empty() { continue; }
 
-        // Write each parsed row back.
+        // Write each parsed row back — **per-field COALESCE**: when the
+        // LLM returns an empty string, we keep the existing value
+        // instead of clobbering it. The earlier bug was the opposite:
+        // empty title from the LLM destroyed a usable file_tags title
+        // (see projects/syntaur_music_module_plan for the incident).
         for (input, out) in batch.iter().zip(parsed.iter()) {
-            let (track_id, _path, _t, _a, _al) = input;
-            let new_title = out.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let new_artist = out.get("artist").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let new_album = out.get("album").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            if new_title.trim().is_empty() && new_artist.trim().is_empty() {
+            let (track_id, _path, cur_title, cur_artist, cur_album) = input;
+            let new_title = out.get("title").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+            let new_artist = out.get("artist").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+            let new_album = out.get("album").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+
+            // If the LLM gave us nothing for every field, this row was
+            // a waste — don't touch the DB.
+            if new_title.is_empty() && new_artist.is_empty() && new_album.is_empty() {
                 continue;
             }
+
+            // Per-field merge. An empty LLM field means "I don't know"
+            // — keep what we have.
+            let merged_title  = if new_title.is_empty()  { cur_title.clone()  } else { Some(new_title) };
+            let merged_artist = if new_artist.is_empty() { cur_artist.clone() } else { Some(new_artist) };
+            let merged_album  = if new_album.is_empty()  { cur_album.clone()  } else { Some(new_album) };
+
+            // If the merge changed nothing, skip.
+            if &merged_title == cur_title && &merged_artist == cur_artist && &merged_album == cur_album {
+                continue;
+            }
+
             let db = state.db_path.clone();
             let id = *track_id;
             let u = uid;
-            let nt = new_title;
-            let na = new_artist;
-            let nal = if new_album.is_empty() { None } else { Some(new_album) };
             let ok = tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
                 let conn = rusqlite::Connection::open(&db)?;
                 conn.execute(
                     "UPDATE local_music_tracks \
-                     SET title = ?, artist = ?, album = COALESCE(?, album), metadata_source = 'llm' \
+                     SET title = ?, artist = ?, album = ?, metadata_source = 'llm' \
                      WHERE id = ? AND user_id = ?",
-                    rusqlite::params![nt, na, nal, id, u],
+                    rusqlite::params![merged_title, merged_artist, merged_album, id, u],
                 )
             }).await.ok().and_then(|r| r.ok()).unwrap_or(0);
             if ok > 0 { updated += 1; }
