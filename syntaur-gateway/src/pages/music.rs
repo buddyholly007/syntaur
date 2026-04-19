@@ -599,6 +599,62 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
 
   /* The right-rail border separator gets a faint cyan glow. */
   .border-r.border-gray-800 { border-right-color: var(--c-line) !important; box-shadow: 1px 0 12px rgba(0,240,255,0.04); }
+
+  /* ── Resizable / reorderable dashboard ─────────────────────────── */
+  /* Column splitter — sits between left and right, grab + drag to
+     change widths. Thin neutral bar, cyan glow on hover. */
+  .music-split-handle {
+    width: 5px; cursor: col-resize; flex-shrink: 0;
+    background: transparent;
+    border-left: 1px solid var(--c-line);
+    transition: background 0.15s, border-color 0.15s;
+    position: relative;
+  }
+  .music-split-handle:hover,
+  .music-split-handle.dragging {
+    background: rgba(0, 240, 255, 0.1);
+    border-color: var(--c-cy);
+  }
+
+  /* Make the cards first-class layout nodes — each gets a grip
+     handle (top-right) + a resize corner (bottom-right). Hide
+     handles until hover so they don't clutter the default view. */
+  .music-col .card {
+    position: relative;
+    overflow: hidden;
+  }
+  .music-col .card .panel-grip {
+    position: absolute; top: 8px; right: 8px; z-index: 5;
+    width: 20px; height: 20px;
+    display: flex; align-items: center; justify-content: center;
+    color: rgba(255,255,255,0.25);
+    cursor: grab; user-select: none;
+    opacity: 0; transition: opacity 0.15s, color 0.15s;
+  }
+  .music-col .card:hover .panel-grip { opacity: 1; }
+  .music-col .card .panel-grip:hover { color: var(--c-mag); }
+  .music-col .card .panel-grip:active,
+  .music-col .card.dragging .panel-grip { cursor: grabbing; color: var(--c-mag); }
+  .music-col .card .panel-resize {
+    position: absolute; bottom: 0; right: 0; z-index: 5;
+    width: 14px; height: 14px;
+    cursor: nwse-resize;
+    background: linear-gradient(135deg, transparent 40%, rgba(255,44,223,0.35) 40%, rgba(255,44,223,0.35) 50%, transparent 50%, transparent 60%, rgba(0,240,255,0.35) 60%, rgba(0,240,255,0.35) 70%, transparent 70%);
+    opacity: 0; transition: opacity 0.15s;
+  }
+  .music-col .card:hover .panel-resize,
+  .music-col .card.resizing .panel-resize { opacity: 1; }
+
+  /* Drag ghost + drop indicator */
+  .music-col .card.dragging {
+    opacity: 0.5;
+  }
+  .music-col .card.drop-before {
+    box-shadow: 0 -2px 0 var(--c-cy);
+  }
+  .music-col .card.drop-after {
+    box-shadow: 0 2px 0 var(--c-cy);
+  }
   .border-b.border-gray-800 { border-bottom-color: var(--c-line) !important; }"##;
 
 const BODY_HTML: &str = r##"<!-- Module sub-bar — "Bridge live" indicator + refresh. Global nav
@@ -618,11 +674,14 @@ const BODY_HTML: &str = r##"<!-- Module sub-bar — "Bridge live" indicator + re
 
 <!-- Two-panel layout, matching the dashboard.
      Left  (60%): the listening experience  — hero now-playing + queue
-     Right (40%): the controls — provider, AI DJ, speakers, EQ -->
-<div class="flex h-[calc(100vh-45px)]">
+     Right (40%): the controls — provider, AI DJ, speakers, EQ
+     User can drag the column splitter to rebalance; grips on each
+     card reorder within a column; bottom-right resize handles set
+     per-panel max-height. All persisted in localStorage. -->
+<div class="flex h-[calc(100vh-45px)]" id="music-split-root">
 
-  <!-- LEFT: Listening (60%) -->
-  <div class="w-[60%] border-r border-gray-800 overflow-y-auto px-6 py-6 space-y-4">
+  <!-- LEFT: Listening -->
+  <div class="music-col music-col-left border-r border-gray-800 overflow-y-auto px-6 py-6 space-y-4" style="width:60%">
 
     <!-- Hero Now Playing -->
     <div class="card p-6">
@@ -715,8 +774,11 @@ const BODY_HTML: &str = r##"<!-- Module sub-bar — "Bridge live" indicator + re
 
   </div><!-- /left -->
 
-  <!-- RIGHT: Controls (40%) -->
-  <div class="w-[40%] overflow-y-auto p-4 space-y-4">
+  <!-- Column splitter — grab and drag to rebalance left/right. -->
+  <div class="music-split-handle" id="music-split-handle" role="separator" aria-label="Resize panels" tabindex="0"></div>
+
+  <!-- RIGHT: Controls -->
+  <div class="music-col music-col-right overflow-y-auto p-4 space-y-4" style="width:40%">
 
     <!-- Music provider chip — small, status-only -->
     <div id="provider-chip" class="card bg-gray-900 border-gray-700 py-3 hidden">
@@ -2822,24 +2884,28 @@ VIZ_DRAWERS.synthwave = function(ctx, W, H, bins, waveform) {
   ctx.fillStyle = sky;
   ctx.fillRect(0, 0, W, H * 0.55);
 
-  // Sun half-disc
+  // Sun half-disc. The stripe cutouts are clipped to the sun's
+  // circle so they can't bleed out across the sky as rectangles.
   const sunR = H * 0.28;
   const sunCx = W / 2;
   const sunCy = H * 0.55;
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(sunCx, sunCy, sunR, Math.PI, 2 * Math.PI);
+  ctx.clip();
   const sunGrad = ctx.createLinearGradient(0, sunCy - sunR, 0, sunCy);
   sunGrad.addColorStop(0, '#ffcf40');
   sunGrad.addColorStop(0.6, '#ff4a8a');
   sunGrad.addColorStop(1, '#a02060');
   ctx.fillStyle = sunGrad;
-  ctx.beginPath();
-  ctx.arc(sunCx, sunCy, sunR, Math.PI, 2 * Math.PI);
-  ctx.fill();
-  // Sun stripes (cutouts)
+  ctx.fillRect(sunCx - sunR, sunCy - sunR, sunR * 2, sunR);
+  // Horizontal stripe cutouts — now confined to the clip path.
   ctx.fillStyle = '#231030';
   const stripeGap = 4;
   for (let y = sunCy - sunR * 0.7; y < sunCy; y += stripeGap * 2) {
     ctx.fillRect(sunCx - sunR, y, sunR * 2, stripeGap);
   }
+  ctx.restore();
 
   // Ground gradient
   const grd = ctx.createLinearGradient(0, H * 0.55, 0, H);
@@ -3504,6 +3570,223 @@ function fmtMs(ms) {
 
 // Load on page ready
 loadLocalFolders();
+
+// ── Dashboard layout: drag to reorder + drag to resize + column splitter ──
+// Panels = the .card elements inside .music-col-left and .music-col-right.
+// State shape: { split: 60, panels: { <id>: { column, order, height } } }
+// Each panel is auto-assigned data-panel-id on first render based on DOM
+// order so we don't need to touch every <div class="card"> individually.
+const MUSIC_LAYOUT_KEY = 'syntaurMusicLayout';
+
+function readMusicLayout() {
+  try { return JSON.parse(localStorage.getItem(MUSIC_LAYOUT_KEY) || 'null') || {}; }
+  catch(_e) { return {}; }
+}
+function writeMusicLayout(patch) {
+  const cur = readMusicLayout();
+  const next = Object.assign({}, cur, patch);
+  if (patch.panels) next.panels = Object.assign({}, cur.panels || {}, patch.panels);
+  try { localStorage.setItem(MUSIC_LAYOUT_KEY, JSON.stringify(next)); } catch(_e) {}
+}
+function updatePanelState(id, partial) {
+  const cur = readMusicLayout();
+  const panels = cur.panels || {};
+  panels[id] = Object.assign({}, panels[id] || {}, partial);
+  writeMusicLayout({ panels });
+}
+
+function initMusicLayoutPanels() {
+  const leftCol = document.querySelector('.music-col-left');
+  const rightCol = document.querySelector('.music-col-right');
+  if (!leftCol || !rightCol) return;
+
+  // Assign IDs to every .card in both columns by first-seen index.
+  const assign = (col, prefix) => {
+    Array.from(col.querySelectorAll(':scope > .card')).forEach((card, idx) => {
+      if (!card.dataset.panelId) card.dataset.panelId = prefix + '-' + idx;
+      card.classList.add('music-panel');
+      addPanelHandles(card);
+      bindPanelHandlers(card);
+    });
+  };
+  assign(leftCol, 'left');
+  assign(rightCol, 'right');
+  applySavedLayout();
+  initSplitter();
+}
+
+function addPanelHandles(card) {
+  if (card.querySelector(':scope > .panel-grip')) return;
+  const grip = document.createElement('div');
+  grip.className = 'panel-grip';
+  grip.title = 'Drag to reorder';
+  grip.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="5" r="1.6"/><circle cx="15" cy="5" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="19" r="1.6"/><circle cx="15" cy="19" r="1.6"/></svg>';
+  card.appendChild(grip);
+  const resz = document.createElement('div');
+  resz.className = 'panel-resize';
+  resz.title = 'Drag to resize';
+  card.appendChild(resz);
+}
+
+function applySavedLayout() {
+  const layout = readMusicLayout();
+  if (!layout.panels) return;
+  const leftCol = document.querySelector('.music-col-left');
+  const rightCol = document.querySelector('.music-col-right');
+  if (!leftCol || !rightCol) return;
+  // Apply column-split (handled by initSplitter too, but do it here
+  // so saved heights can settle against the correct width).
+  if (layout.split) applySplit(layout.split);
+
+  // Re-order within each column by saved `order` field.
+  const byCol = { left: [], right: [] };
+  for (const [id, state] of Object.entries(layout.panels)) {
+    const card = document.querySelector(`.music-panel[data-panel-id="${id}"]`);
+    if (!card) continue;
+    if (state.column === 'left' || state.column === 'right') {
+      byCol[state.column].push({ id, card, order: state.order ?? 999, height: state.height });
+    }
+  }
+  byCol.left.sort((a, b) => a.order - b.order).forEach(p => leftCol.appendChild(p.card));
+  byCol.right.sort((a, b) => a.order - b.order).forEach(p => rightCol.appendChild(p.card));
+  // Apply heights.
+  for (const col of [byCol.left, byCol.right]) {
+    for (const p of col) {
+      if (p.height && p.height > 0) {
+        p.card.style.height = p.height + 'px';
+        p.card.style.overflowY = 'auto';
+      }
+    }
+  }
+}
+
+function persistColumnOrder(col) {
+  const column = col.classList.contains('music-col-left') ? 'left' : 'right';
+  Array.from(col.querySelectorAll(':scope > .music-panel')).forEach((card, idx) => {
+    updatePanelState(card.dataset.panelId, { column, order: idx });
+  });
+}
+
+function bindPanelHandlers(card) {
+  const grip = card.querySelector(':scope > .panel-grip');
+  const resz = card.querySelector(':scope > .panel-resize');
+  if (grip) bindDrag(card, grip);
+  if (resz) bindResize(card, resz);
+}
+
+function bindDrag(card, grip) {
+  grip.addEventListener('pointerdown', (ev) => {
+    ev.preventDefault();
+    const col = card.parentElement;
+    card.classList.add('dragging');
+    grip.setPointerCapture(ev.pointerId);
+    const onMove = (e) => {
+      // Find the panel we're hovering over in the same column.
+      const siblings = Array.from(col.querySelectorAll(':scope > .music-panel')).filter(c => c !== card);
+      siblings.forEach(s => s.classList.remove('drop-before', 'drop-after'));
+      const y = e.clientY;
+      let over = null, before = true;
+      for (const s of siblings) {
+        const r = s.getBoundingClientRect();
+        if (y >= r.top && y <= r.bottom) {
+          over = s;
+          before = (y - r.top) < r.height / 2;
+          break;
+        }
+      }
+      if (over) over.classList.add(before ? 'drop-before' : 'drop-after');
+    };
+    const onUp = (e) => {
+      grip.releasePointerCapture(ev.pointerId);
+      card.classList.remove('dragging');
+      const siblings = Array.from(col.querySelectorAll(':scope > .music-panel'));
+      const target = siblings.find(s => s.classList.contains('drop-before') || s.classList.contains('drop-after'));
+      if (target) {
+        const before = target.classList.contains('drop-before');
+        col.insertBefore(card, before ? target : target.nextSibling);
+        persistColumnOrder(col);
+      }
+      siblings.forEach(s => s.classList.remove('drop-before', 'drop-after'));
+      grip.removeEventListener('pointermove', onMove);
+      grip.removeEventListener('pointerup', onUp);
+    };
+    grip.addEventListener('pointermove', onMove);
+    grip.addEventListener('pointerup', onUp);
+  });
+}
+
+function bindResize(card, resz) {
+  resz.addEventListener('pointerdown', (ev) => {
+    ev.preventDefault();
+    card.classList.add('resizing');
+    resz.setPointerCapture(ev.pointerId);
+    const startY = ev.clientY;
+    const startH = card.getBoundingClientRect().height;
+    const onMove = (e) => {
+      const newH = Math.max(80, startH + (e.clientY - startY));
+      card.style.height = newH + 'px';
+      card.style.overflowY = 'auto';
+    };
+    const onUp = () => {
+      resz.releasePointerCapture(ev.pointerId);
+      card.classList.remove('resizing');
+      resz.removeEventListener('pointermove', onMove);
+      resz.removeEventListener('pointerup', onUp);
+      const col = card.parentElement.classList.contains('music-col-left') ? 'left' : 'right';
+      updatePanelState(card.dataset.panelId, {
+        column: col,
+        height: Math.round(card.getBoundingClientRect().height),
+      });
+    };
+    resz.addEventListener('pointermove', onMove);
+    resz.addEventListener('pointerup', onUp);
+  });
+}
+
+function initSplitter() {
+  const handle = document.getElementById('music-split-handle');
+  const root = document.getElementById('music-split-root');
+  if (!handle || !root) return;
+  handle.addEventListener('pointerdown', (ev) => {
+    ev.preventDefault();
+    handle.classList.add('dragging');
+    handle.setPointerCapture(ev.pointerId);
+    const onMove = (e) => {
+      const rootRect = root.getBoundingClientRect();
+      const pct = ((e.clientX - rootRect.left) / rootRect.width) * 100;
+      const clamped = Math.max(25, Math.min(75, pct));
+      applySplit(clamped);
+    };
+    const onUp = () => {
+      handle.releasePointerCapture(ev.pointerId);
+      handle.classList.remove('dragging');
+      handle.removeEventListener('pointermove', onMove);
+      handle.removeEventListener('pointerup', onUp);
+      const left = document.querySelector('.music-col-left');
+      const pct = parseFloat(left.style.width) || 60;
+      writeMusicLayout({ split: pct });
+    };
+    handle.addEventListener('pointermove', onMove);
+    handle.addEventListener('pointerup', onUp);
+  });
+  // Double-click the splitter to reset to 60/40.
+  handle.addEventListener('dblclick', () => {
+    applySplit(60);
+    writeMusicLayout({ split: 60 });
+  });
+}
+
+function applySplit(pct) {
+  const left = document.querySelector('.music-col-left');
+  const right = document.querySelector('.music-col-right');
+  if (!left || !right) return;
+  left.style.width = pct + '%';
+  right.style.width = (100 - pct) + '%';
+}
+
+// Init once the cards have rendered + the loadLocalFolders + loadNowPlaying
+// have populated the queue / provider chip hidden states. Delay a tick.
+setTimeout(initMusicLayoutPanels, 200);
 
 
 
