@@ -990,12 +990,12 @@ const BODY_HTML: &str = r##"<div class="max-w-2xl mx-auto px-4 py-8">
           </div>
 
           <div class="p-3 rounded-lg bg-gray-800" id="done-tailscale-section">
-            <p class="text-sm font-medium text-gray-300 mb-1">From anywhere (outside your home)</p>
-            <p class="text-xs text-gray-500 mb-2">To access Syntaur from anywhere — at work, on the go, or on a different network — we recommend <strong class="text-gray-300">Tailscale</strong>. It creates a secure private connection between your devices with zero configuration.</p>
-            <div id="done-tailscale-status"></div>
-            <div id="done-tailscale-install" class="mt-2">
-              <a href="https://tailscale.com/download" target="_blank" class="text-sm text-sky-400 hover:underline">Install Tailscale (free for personal use) &rarr;</a>
-              <p class="text-xs text-gray-500 mt-1">Install on this computer AND on the devices you want to connect from. Then come back and refresh this page.</p>
+            <p class="text-sm font-medium text-gray-300 mb-1">From anywhere — HTTPS over Tailscale</p>
+            <p class="text-xs text-gray-500 mb-2">Syntaur publishes itself on your Tailscale network with a real trusted HTTPS certificate. Works from your phone on cellular, no VPN toggle, no port forwarding, no browser warnings. Auto-rotating keys via your Tailscale OAuth client — paste credentials once, never come back.</p>
+            <div id="done-tailscale-status" class="text-xs text-gray-400 mb-2">Checking…</div>
+            <div id="done-tailscale-cta">
+              <a href="/setup/tailscale" class="btn-primary inline-block text-sm">Enable HTTPS + remote access →</a>
+              <p class="text-xs text-gray-500 mt-2">Optional — you can enable it anytime from Settings → Connect.</p>
             </div>
           </div>
         </div>
@@ -1133,19 +1133,36 @@ async function detectLocalUrl() {
     const url = `http://${ip}:${port}`;
     document.getElementById('done-local-url').textContent = url;
 
-    // Check Tailscale
+    // Check the sidecar-based Tailscale integration (Phase 4.1). Admin-
+    // session tokens are stored in sessionStorage after login; during
+    // initial setup the /api/setup/tailscale/status call may return 401
+    // because the admin isn't logged in yet — fall through to the
+    // "not-connected" CTA in that case.
+    const tsTok = sessionStorage.getItem('syntaur_token') || '';
     try {
-      const tsResp = await fetch('/api/setup/check-tailscale');
-      const ts = await tsResp.json();
-      if (ts.installed && ts.hostname) {
-        const tsUrl = `http://${ts.hostname}:${port}`;
-        document.getElementById('done-tailscale-status').innerHTML =
-          `<p class="text-sm text-green-400 mb-1">&#10003; Tailscale is connected</p>` +
-          `<p class="text-sm text-sky-400 font-mono">${tsUrl}</p>` +
-          `<p class="text-xs text-gray-500 mt-1">Use this address from any device on your Tailscale network — at home, at work, anywhere.</p>`;
-        document.getElementById('done-tailscale-install').classList.add('hidden');
+      const tsResp = await fetch('/api/setup/tailscale/status', {
+        headers: tsTok ? { 'Authorization': 'Bearer ' + tsTok } : {}
+      });
+      if (tsResp.ok) {
+        const ts = await tsResp.json();
+        if (ts.connected && ts.tailnet_url) {
+          document.getElementById('done-tailscale-status').innerHTML =
+            `<p class="text-sm text-green-400 mb-1">&#10003; Connected to your Tailscale network</p>` +
+            `<p class="text-sm text-sky-400 font-mono break-all"><a href="${ts.tailnet_url}" target="_blank">${ts.tailnet_url}</a></p>` +
+            `<p class="text-xs text-gray-500 mt-1">Open this URL on any device signed into your Tailscale account. Trusted HTTPS, no port forwarding, rotates automatically.</p>`;
+          document.getElementById('done-tailscale-cta').classList.add('hidden');
+        } else if (ts.enabled) {
+          document.getElementById('done-tailscale-status').innerHTML =
+            `<p class="text-xs text-yellow-400">Starting up — give it a minute and refresh.</p>`;
+        } else {
+          document.getElementById('done-tailscale-status').textContent = '';
+        }
+      } else {
+        document.getElementById('done-tailscale-status').textContent = '';
       }
-    } catch(e) {}
+    } catch(e) {
+      document.getElementById('done-tailscale-status').textContent = '';
+    }
   } catch(e) {
     document.getElementById('done-local-url').textContent = 'http://' + location.host;
   }

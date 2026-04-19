@@ -92,6 +92,14 @@ Install paths that skip verification (e.g. `curl … | sh` without `--verify`)
 are clearly labelled as developer-convenience only. The documented default is
 the verified path.
 
+## Operator resources
+
+For anyone running Syntaur in production:
+
+- **[Threat model](docs/security/threat-model.md)** — assets, threat actors, attack surfaces + current defenses, tracked gaps with fix plans.
+- **[Operator hardening checklist](docs/security/operator-hardening.md)** — pre-first-user + weekly + post-upgrade + on-compromise-suspicion playbooks.
+- **[Isolation harness](syntaur-isolation-tests/)** — `syntaur-isolation-tests` CLI. Proves cross-user data isolation holds after every deploy. Ships in the release bundle; invoke with `SYNTAUR_URL=… SYNTAUR_ADMIN_TOKEN=… syntaur-isolation-tests`.
+
 ## Known gaps (public)
 
 We track our own security posture honestly. At time of writing, the following

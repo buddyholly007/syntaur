@@ -266,6 +266,7 @@ fn connect_things_body() -> Markup {
 
         // Everyday
         (connect_category("Everyday", &[
+            ConnectRow { id: "tailscale",     name: "Remote access (Tailscale)", desc: "HTTPS from anywhere — phone on cellular, no VPN toggle", icon: "🌐", target: ("connect", "tailscale") },
             ConnectRow { id: "telegram",      name: "Phone (Telegram)",   desc: "Chat with Syntaur from anywhere",         icon: "📱", target: ("connect", "telegram") },
             ConnectRow { id: "homeassistant", name: "Smart home",         desc: "Home Assistant — lights, locks, sensors", icon: "🏠", target: ("connect", "homeassistant") },
             ConnectRow { id: "voice",         name: "Voice speakers",     desc: "Speakers with wake word (Hey Peter)",      icon: "🎙", target: ("advanced", "voice") },
@@ -323,17 +324,35 @@ fn connect_category(title: &str, rows: &[ConnectRow]) -> Markup {
             h3 class="ss-conn-title" { (title) }
             div class="ss-conn-list" {
                 @for row in rows {
-                    a class="ss-conn-row"
-                       data-conn=(row.id)
-                       href={ "#" (row.target.0) "/" (row.target.1) }
-                       onclick={ "ssNavigate('" (row.target.0) "','" (row.target.1) "');return false;" } {
-                        span class="ss-conn-ico" { (row.icon) }
-                        div class="ss-conn-main" {
-                            div class="ss-conn-name" { (row.name) }
-                            div class="ss-conn-desc" { (row.desc) }
+                    @if row.id == "tailscale" {
+                        // Tailscale deep-links out to the dedicated setup
+                        // page which has the OAuth / auth-key flow. The
+                        // rest of the Connect rows stay inside Settings'
+                        // hash-router.
+                        a class="ss-conn-row"
+                           data-conn=(row.id)
+                           href="/setup/tailscale" {
+                            span class="ss-conn-ico" { (row.icon) }
+                            div class="ss-conn-main" {
+                                div class="ss-conn-name" { (row.name) }
+                                div class="ss-conn-desc" { (row.desc) }
+                            }
+                            span class="ss-conn-status" data-conn-status=(row.id) { "checking…" }
+                            span class="ss-conn-action" { "Manage →" }
                         }
-                        span class="ss-conn-status" data-conn-status=(row.id) { "checking…" }
-                        span class="ss-conn-action" { "Manage →" }
+                    } @else {
+                        a class="ss-conn-row"
+                           data-conn=(row.id)
+                           href={ "#" (row.target.0) "/" (row.target.1) }
+                           onclick={ "ssNavigate('" (row.target.0) "','" (row.target.1) "');return false;" } {
+                            span class="ss-conn-ico" { (row.icon) }
+                            div class="ss-conn-main" {
+                                div class="ss-conn-name" { (row.name) }
+                                div class="ss-conn-desc" { (row.desc) }
+                            }
+                            span class="ss-conn-status" data-conn-status=(row.id) { "checking…" }
+                            span class="ss-conn-action" { "Manage →" }
+                        }
                     }
                 }
             }
@@ -2491,7 +2510,7 @@ async function ssFactoryReset() {
 async function ssRefreshConnections() {
   const rows = document.querySelectorAll('[data-conn-status]');
   if (!rows.length) return;
-  let agg = null, sync = null;
+  let agg = null, sync = null, tailscale = null;
   try {
     const r = await fetch('/api/settings/integration_status', { headers: ssAuthH() });
     if (r.ok) agg = await r.json();
@@ -2499,6 +2518,10 @@ async function ssRefreshConnections() {
   try {
     const r = await fetch('/api/sync/providers', { headers: ssAuthH() });
     if (r.ok) sync = await r.json();
+  } catch(e) {}
+  try {
+    const r = await fetch('/api/setup/tailscale/status', { headers: ssAuthH() });
+    if (r.ok) tailscale = await r.json();
   } catch(e) {}
   const connected = sync && sync.connections ? sync.connections : {};
 
@@ -2508,6 +2531,9 @@ async function ssRefreshConnections() {
     if (id.startsWith('sync:')) {
       const provider = id.slice(5);
       if (connected[provider]) { status = 'connected'; label = '✓ connected'; }
+    } else if (id === 'tailscale') {
+      if (tailscale && tailscale.connected) { status = 'connected'; label = '✓ ' + (tailscale.hostname || 'connected'); }
+      else if (tailscale && tailscale.enabled) { status = 'error'; label = 'starting up…'; }
     } else if (agg) {
       const key = id === 'telegram' ? 'telegram'
                 : id === 'homeassistant' ? 'homeassistant'
