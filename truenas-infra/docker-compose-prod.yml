@@ -1,0 +1,80 @@
+# Syntaur — TrueNAS production compose (Tailscale-enabled)
+#
+# v2 compose: adds a Tailscale sidecar that serves HTTPS on the tailnet,
+# reverse-proxying to the gateway's host-networked HTTP listener on
+# 127.0.0.1:18789. Gateway's own networking is unchanged — host mode is
+# preserved so mDNS, Matter, and Telegram polling keep working.
+#
+# Cutover from the previous compose:
+#   1. Drop this file at /mnt/cherry_family_nas/syntaur/docker-compose-prod.yml
+#      (the previous file is already saved as docker-compose-prod.yml.bak).
+#   2. `docker compose -f docker-compose-prod.yml up -d` — adds the sidecar
+#      alongside the existing syntaur container.
+#   3. Complete the Syntaur setup wizard's "Remote access" step (pastes
+#      OAuth client credentials or an auth key).
+#   4. Watch `docker logs syntaur-tailscale` for "Logged in" — gateway's
+#      /api/setup/tailscale/status endpoint will also report connected.
+#
+# Rollback: `docker compose rm -f syntaur-tailscale` — gateway continues
+# unchanged, no Syntaur state lost.
+
+services:
+  syntaur:
+    image: syntaur-gateway:latest
+    container_name: syntaur
+    restart: unless-stopped
+    command: ["/config/syntaur.json"]
+    network_mode: host
+    environment:
+      - TZ=America/Los_Angeles
+      - RUST_LOG=info
+    volumes:
+      - /mnt/cherry_family_nas/syntaur/config:/config
+      - /mnt/cherry_family_nas/syntaur/data:/data
+      - /mnt/cherry_family_nas/syntaur/logs:/home/syntaur/.logs
+      - /mnt/cherry_family_nas/media:/media
+      - /mnt/cherry_family_nas/documents:/documents:ro
+      - /mnt/cherry_family_nas/downloads:/downloads
+      - /mnt/cherry_family_nas/syntaur/bin/rust-openclaw:/usr/local/bin/rust-openclaw:ro
+      - /mnt/cherry_family_nas/syntaur/bin/rust-social-manager:/usr/local/bin/rust-social-manager:ro
+      - /mnt/cherry_family_nas/syntaur/bin/rust-health-check:/usr/local/bin/rust-health-check:ro
+      - /mnt/cherry_family_nas/syntaur/bin/mace:/usr/local/bin/mace:ro
+      # Phase 4.1 Tailscale Serve — gateway writes the auth key + serve
+      # config here; sidecar reads from the same paths.
+      - /mnt/cherry_family_nas/syntaur/tailscale-config:/config/tailscale
+      # Read-only view of the sidecar's local socket so the gateway's
+      # /api/setup/tailscale/status endpoint can query node state.
+      - /mnt/cherry_family_nas/syntaur/tailscale-state:/state/tailscale:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:18789/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  syntaur-tailscale:
+    image: tailscale/tailscale:latest
+    container_name: syntaur-tailscale
+    restart: unless-stopped
+    hostname: syntaur
+    environment:
+      - TS_HOSTNAME=syntaur
+      - TS_STATE_DIR=/state
+    # Tailscale Serve needs a real network interface to listen on 443. That
+    # means TUN + CAP_NET_ADMIN. Bridge networking (not host) so
+    # `host.docker.internal` cleanly resolves to the TrueNAS host where the
+    # gateway's host-networked listener binds 18789.
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - /mnt/cherry_family_nas/syntaur/tailscale-config:/config
+      - /mnt/cherry_family_nas/syntaur/tailscale-state:/state
+      - /mnt/cherry_family_nas/syntaur/tailscale-sidecar-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    depends_on:
+      - syntaur

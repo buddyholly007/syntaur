@@ -6593,6 +6593,8 @@ name = "syntaur-viewer"
 version = "0.1.0"
 dependencies = [
  "gtk4",
+ "serde",
+ "serde_json",
  "tao",
  "webkit6",
  "wry",

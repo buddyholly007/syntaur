@@ -499,7 +499,7 @@ async fn mint_key_via_oauth(
             }
         },
         "expirySeconds": 60 * 60 * 24 * 60, // 60 days (rotate every 30)
-        "description": format!("syntaur-{hostname} (auto-rotated by Syntaur)"),
+        "description": format!("syntaur {hostname} auto rotated"),
     });
     let key_resp = client
         .post("https://api.tailscale.com/api/v2/tailnet/-/keys")
