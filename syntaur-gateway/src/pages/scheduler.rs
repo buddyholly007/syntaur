@@ -867,104 +867,237 @@ body.sch-print-mode .sch-subbar { display: none !important; }
 }
 .sch-shell { position: relative; }
 
-/* Frame rewrite v2: richer SVGs, proper paper backgrounds, shadows. All
- * styles paint via multi-layer background-image on .sch-shell so they
- * compose cleanly regardless of pseudo-element budget. Each SVG is
- * URL-encoded inline with %23 for '#' and %25 for '%'.
+/* Frame rewrite v3 — research-backed. Fixes the three biggest wrongs:
+ *   1. Coils were horizontal ovals; real spiral binding is a tilted
+ *      ellipse (~18deg), aspect 1.4:1, extending past the page edge.
+ *   2. Paper was generic cream; Artful Agenda uses a warm ivory
+ *      (~#faf6ee) with a very subtle fiber-noise overlay.
+ *   3. Page edge was a clean rectangle; a real spiral notebook has
+ *      scalloped notches where each coil passes through. Simulated
+ *      here by layering a back-coil under the paper and a front-coil
+ *      over it, with a shadow-ring "hole" painted into the paper.
+ *
+ * Every SVG is URL-encoded (%23 for #, %25 for %), so the served
+ * stylesheet stays a single binary — no external assets.
  */
+
+.sch-border-swatch {
+  display: inline-block; width: 16px; height: 14px; border-radius: 2px;
+  background: linear-gradient(180deg, #faf6ee 0%, #f5ebe0 100%);
+  box-shadow:
+    inset 0 0 0 1px rgba(92,74,58,0.18),
+    -3px 0 0 0 #b8b8bc,
+    -3px 0 0 1px rgba(46,46,50,0.6);
+}
+.sch-border-hint {
+  font-size: 12px; color: var(--sch-ink-dim);
+  padding: 10px 14px 0; margin: 0;
+}
+.sch-shell { position: relative; }
 
 /* none - explicit off */
 [data-sch-border="none"] .sch-shell { background: var(--sch-bg) !important; box-shadow: none !important; padding-left: 0 !important; padding-top: 0 !important; border: none !important; }
+[data-sch-border="none"] .sch-shell::before { content: none !important; }
 [data-sch-border="none"] .sch-main { background-image: none !important; }
 
-/* spiral notebook (default) - realistic metallic coil down the left */
+/* ─── Spiral notebook (default) ───
+ * Three stacked layers build the illusion of a coil passing through
+ * a scalloped page:
+ *   Layer 1 (body BG):     back-arc of each loop, dim + shadowed
+ *   Layer 2 (paper fill):  cream ivory with noise + a shadow "hole"
+ *                          column where each coil would cut through
+ *   Layer 3 (::before):    front-arc of each loop, bright with
+ *                          specular highlight + the metal rim
+ * Coil spacing 28px, each tilted 18deg, aspect ~1.4:1.
+ */
 [data-sch-border="notebook"] .sch-shell,
 body:not([data-sch-border]) .sch-shell {
   background:
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='44' height='44' viewBox='0 0 44 44'%3E%3Cdefs%3E%3ClinearGradient id='m' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%23a6a6a6'/%3E%3Cstop offset='.25' stop-color='%23ededed'/%3E%3Cstop offset='.5' stop-color='%23818181'/%3E%3Cstop offset='.75' stop-color='%23d2d2d2'/%3E%3Cstop offset='1' stop-color='%23676767'/%3E%3C/linearGradient%3E%3ClinearGradient id='h' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='rgba(0,0,0,.45)'/%3E%3Cstop offset='.6' stop-color='rgba(0,0,0,.15)'/%3E%3Cstop offset='1' stop-color='rgba(0,0,0,.35)'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cellipse cx='22' cy='22' rx='17' ry='11' fill='none' stroke='url(%23m)' stroke-width='3.4'/%3E%3Cpath d='M7.5 22 Q 22 12 36.5 22' fill='none' stroke='white' stroke-width='1.1' opacity='.7'/%3E%3Cpath d='M9 23.5 Q 22 30 35 23.5' fill='none' stroke='rgba(0,0,0,.35)' stroke-width='.9'/%3E%3Cellipse cx='22' cy='22' rx='8' ry='4.5' fill='url(%23h)'/%3E%3C/svg%3E") left center / 44px 44px repeat-y,
-    repeating-linear-gradient(180deg, transparent 0 3px, rgba(110,90,60,0.025) 3px 4px),
-    linear-gradient(180deg, #f9f2e1 0%, #f3ebd5 100%);
-  padding-left: 56px;
-  border-radius: 4px;
-  box-shadow: 0 10px 32px rgba(40,30,15,0.12), 0 2px 4px rgba(40,30,15,0.06);
+    /* Back-arc (behind the paper edge) */
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='28' viewBox='0 0 56 28'%3E%3Cdefs%3E%3ClinearGradient id='bm' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%235a5a5e'/%3E%3Cstop offset='.5' stop-color='%232e2e32'/%3E%3Cstop offset='1' stop-color='%236e6e72'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cg transform='rotate(-18 28 14)'%3E%3Cpath d='M 6 14 Q 28 22 50 14' fill='none' stroke='url(%23bm)' stroke-width='3.6' stroke-linecap='round' opacity='.75'/%3E%3C/g%3E%3C/svg%3E") left center / 56px 28px repeat-y,
+    /* Hole shadow on the paper — mimics a perforation depression */
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='28' viewBox='0 0 56 28'%3E%3Cdefs%3E%3CradialGradient id='hh' cx='.5' cy='.5' r='.5'%3E%3Cstop offset='.6' stop-color='rgba(90,70,40,.0)'/%3E%3Cstop offset='.85' stop-color='rgba(90,70,40,.28)'/%3E%3Cstop offset='1' stop-color='rgba(90,70,40,.05)'/%3E%3C/radialGradient%3E%3C/defs%3E%3Cellipse cx='28' cy='14' rx='8' ry='5' fill='url(%23hh)'/%3E%3C/svg%3E") left center / 56px 28px repeat-y,
+    /* Subtle cream fibre noise */
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' seed='3'/%3E%3CfeColorMatrix values='0 0 0 0 .95 0 0 0 0 .92 0 0 0 0 .85 0 0 0 .09 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"),
+    /* Cream paper gradient — Artful Agenda "classic" ivory tones */
+    linear-gradient(180deg, #faf6ee 0%, #f4ead5 100%);
+  padding-left: 68px;
+  border-radius: 2px;
+  box-shadow:
+    0 1px 2px rgba(92,74,58,0.08),
+    0 12px 32px rgba(92,74,58,0.14),
+    inset 0 0 40px rgba(180,160,120,0.06);
 }
+/* Front-arc of each coil — brighter metal + specular highlight.
+ * Positioned to cover the full coil column so every loop has both
+ * its back arc (from shell BG) and its front arc stacked here.
+ */
+[data-sch-border="notebook"] .sch-shell::before,
+body:not([data-sch-border]) .sch-shell::before {
+  content: '';
+  position: absolute; left: 0; top: 0; bottom: 0; width: 60px;
+  pointer-events: none; z-index: 2;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='28' viewBox='0 0 56 28'%3E%3Cdefs%3E%3ClinearGradient id='fm' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%238a8a8e'/%3E%3Cstop offset='.3' stop-color='%23ededf0'/%3E%3Cstop offset='.5' stop-color='%235f5f63'/%3E%3Cstop offset='.75' stop-color='%23d4d4d8'/%3E%3Cstop offset='1' stop-color='%234a4a4e'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cg transform='rotate(-18 28 14)'%3E%3Cpath d='M 6 14 Q 28 6 50 14' fill='none' stroke='url(%23fm)' stroke-width='3.8' stroke-linecap='round'/%3E%3Cpath d='M 12 11 Q 28 7 44 11' fill='none' stroke='rgba(255,255,255,.85)' stroke-width='1.3' stroke-linecap='round'/%3E%3Cpath d='M 10 16 Q 28 22 46 16' fill='none' stroke='rgba(0,0,0,.25)' stroke-width='1' stroke-linecap='round'/%3E%3C/g%3E%3C/svg%3E") left center / 56px 28px repeat-y;
+  filter: drop-shadow(2px 1px 2px rgba(0,0,0,0.25));
+}
+/* Ruled lines on main canvas */
 [data-sch-border="notebook"] .sch-main,
 body:not([data-sch-border]) .sch-main {
   background-image:
-    linear-gradient(to bottom, transparent 39px, rgba(74,105,172,0.18) 39px, rgba(74,105,172,0.18) 40px);
+    linear-gradient(to bottom, transparent 39px, rgba(74,105,172,0.22) 39px, rgba(74,105,172,0.22) 40px);
   background-size: 100% 40px;
   background-color: transparent;
 }
 
-/* washi collage - four distinct patterned tape strips */
-[data-sch-border="washi"] .sch-shell {
+/* ─── Disc-bound (Happy Planner style) ───
+ * Flat translucent gold discs down the left with mushroom-shaped
+ * cutouts in the paper. 10 discs evenly spaced.
+ */
+[data-sch-border="disc"] .sch-shell {
   background:
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='38' viewBox='0 0 160 38'%3E%3Cg transform='rotate(-5 80 19)'%3E%3Crect x='0' y='6' width='160' height='26' rx='1' fill='%23f4a5b5' opacity='.92'/%3E%3Cg fill='%23fff' opacity='.55'%3E%3Ccircle cx='14' cy='14' r='2.5'/%3E%3Ccircle cx='34' cy='24' r='2.5'/%3E%3Ccircle cx='54' cy='14' r='2.5'/%3E%3Ccircle cx='74' cy='24' r='2.5'/%3E%3Ccircle cx='94' cy='14' r='2.5'/%3E%3Ccircle cx='114' cy='24' r='2.5'/%3E%3Ccircle cx='134' cy='14' r='2.5'/%3E%3C/g%3E%3Crect x='0' y='6' width='160' height='26' rx='1' fill='none' stroke='rgba(0,0,0,.1)' stroke-width='1'/%3E%3C/g%3E%3C/svg%3E") 60px 8px / 160px 38px no-repeat,
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='38' viewBox='0 0 160 38'%3E%3Cg transform='rotate(6 80 19)'%3E%3Cdefs%3E%3Cpattern id='d' width='10' height='10' patternUnits='userSpaceOnUse' patternTransform='rotate(45)'%3E%3Crect width='5' height='10' fill='%23ffffff' opacity='.35'/%3E%3C/pattern%3E%3C/defs%3E%3Crect x='0' y='6' width='160' height='26' rx='1' fill='%239bbfa2' opacity='.92'/%3E%3Crect x='0' y='6' width='160' height='26' rx='1' fill='url(%23d)'/%3E%3Crect x='0' y='6' width='160' height='26' rx='1' fill='none' stroke='rgba(0,0,0,.1)' stroke-width='1'/%3E%3C/g%3E%3C/svg%3E") calc(100% - 60px) 8px / 160px 38px no-repeat,
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='38' viewBox='0 0 160 38'%3E%3Cg transform='rotate(7 80 19)'%3E%3Cdefs%3E%3Cpattern id='g' width='8' height='8' patternUnits='userSpaceOnUse'%3E%3Crect width='4' height='4' fill='rgba(255,255,255,.45)'/%3E%3Crect x='4' y='4' width='4' height='4' fill='rgba(255,255,255,.45)'/%3E%3C/pattern%3E%3C/defs%3E%3Crect x='0' y='6' width='160' height='26' rx='1' fill='%23e6c25a' opacity='.92'/%3E%3Crect x='0' y='6' width='160' height='26' rx='1' fill='url(%23g)'/%3E%3Crect x='0' y='6' width='160' height='26' rx='1' fill='none' stroke='rgba(0,0,0,.1)' stroke-width='1'/%3E%3C/g%3E%3C/svg%3E") 60px calc(100% - 8px) / 160px 38px no-repeat,
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='38' viewBox='0 0 160 38'%3E%3Cg transform='rotate(-6 80 19)'%3E%3Crect x='0' y='6' width='160' height='26' rx='1' fill='%23b8a5d8' opacity='.92'/%3E%3Cg fill='white' opacity='.6'%3E%3Cg transform='translate(24 19)'%3E%3Ccircle cx='0' cy='-4' r='1.8'/%3E%3Ccircle cx='3.8' cy='-1' r='1.8'/%3E%3Ccircle cx='2.3' cy='3.5' r='1.8'/%3E%3Ccircle cx='-2.3' cy='3.5' r='1.8'/%3E%3Ccircle cx='-3.8' cy='-1' r='1.8'/%3E%3Ccircle cx='0' cy='0' r='1.3' fill='%23e6c25a'/%3E%3C/g%3E%3Cg transform='translate(64 19)'%3E%3Ccircle cx='0' cy='-4' r='1.8'/%3E%3Ccircle cx='3.8' cy='-1' r='1.8'/%3E%3Ccircle cx='2.3' cy='3.5' r='1.8'/%3E%3Ccircle cx='-2.3' cy='3.5' r='1.8'/%3E%3Ccircle cx='-3.8' cy='-1' r='1.8'/%3E%3Ccircle cx='0' cy='0' r='1.3' fill='%23e6c25a'/%3E%3C/g%3E%3Cg transform='translate(104 19)'%3E%3Ccircle cx='0' cy='-4' r='1.8'/%3E%3Ccircle cx='3.8' cy='-1' r='1.8'/%3E%3Ccircle cx='2.3' cy='3.5' r='1.8'/%3E%3Ccircle cx='-2.3' cy='3.5' r='1.8'/%3E%3Ccircle cx='-3.8' cy='-1' r='1.8'/%3E%3Ccircle cx='0' cy='0' r='1.3' fill='%23e6c25a'/%3E%3C/g%3E%3Cg transform='translate(138 19)'%3E%3Ccircle cx='0' cy='-4' r='1.8'/%3E%3Ccircle cx='3.8' cy='-1' r='1.8'/%3E%3Ccircle cx='2.3' cy='3.5' r='1.8'/%3E%3Ccircle cx='-2.3' cy='3.5' r='1.8'/%3E%3Ccircle cx='-3.8' cy='-1' r='1.8'/%3E%3Ccircle cx='0' cy='0' r='1.3' fill='%23e6c25a'/%3E%3C/g%3E%3C/g%3E%3Crect x='0' y='6' width='160' height='26' rx='1' fill='none' stroke='rgba(0,0,0,.1)' stroke-width='1'/%3E%3C/g%3E%3C/svg%3E") calc(100% - 60px) calc(100% - 8px) / 160px 38px no-repeat,
-    var(--sch-paper);
-  filter: drop-shadow(0 2px 4px rgba(0,0,0,0.18));
-  border-radius: 4px;
-  padding-top: 24px;
-  padding-bottom: 24px;
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='60' height='72' viewBox='0 0 60 72'%3E%3Cdefs%3E%3CradialGradient id='dg' cx='.45' cy='.4' r='.6'%3E%3Cstop offset='0' stop-color='%23f4dfa5'/%3E%3Cstop offset='.5' stop-color='%23d4b87a'/%3E%3Cstop offset='1' stop-color='%239a7b3d'/%3E%3C/radialGradient%3E%3C/defs%3E%3Ccircle cx='30' cy='36' r='22' fill='url(%23dg)' opacity='.92'/%3E%3Ccircle cx='30' cy='36' r='22' fill='none' stroke='rgba(70,50,20,.35)' stroke-width='1'/%3E%3Ccircle cx='30' cy='36' r='16' fill='none' stroke='rgba(255,255,255,.45)' stroke-width='.8'/%3E%3C/svg%3E") left center / 60px 72px repeat-y,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' seed='7'/%3E%3CfeColorMatrix values='0 0 0 0 .95 0 0 0 0 .92 0 0 0 0 .85 0 0 0 .08 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"),
+    linear-gradient(180deg, #faf6ee 0%, #f4ead5 100%);
+  padding-left: 72px;
+  border-radius: 2px;
+  box-shadow: 0 1px 2px rgba(92,74,58,0.08), 0 12px 32px rgba(92,74,58,0.14);
 }
 
-/* legal pad - yellow cream + blue ruled lines + red margin + perforated tear */
+/* ─── Moleskine thread-bound ───
+ * No visible spine at the page edge. Signature cues instead: rounded
+ * corners, an elastic closure band, a ribbon bookmark, a stacked-
+ * pages fore-edge, and a subtle ivory paper.
+ */
+[data-sch-border="moleskine"] .sch-shell {
+  background:
+    /* stacked pages fore-edge (thin stripes on the right) */
+    repeating-linear-gradient(90deg, transparent 0 calc(100% - 6px), rgba(160,140,100,0.3) calc(100% - 6px) calc(100% - 5px), transparent calc(100% - 5px) calc(100% - 4px), rgba(160,140,100,0.3) calc(100% - 4px) calc(100% - 3px), transparent calc(100% - 3px) calc(100% - 2px), rgba(160,140,100,0.3) calc(100% - 2px) calc(100% - 1px)),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' seed='11'/%3E%3CfeColorMatrix values='0 0 0 0 .97 0 0 0 0 .94 0 0 0 0 .88 0 0 0 .07 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"),
+    linear-gradient(180deg, #f9f7f1 0%, #f0ebdd 100%);
+  border-radius: 6px 10px 10px 6px;
+  box-shadow: 0 2px 4px rgba(40,30,15,0.1), 0 14px 38px rgba(40,30,15,0.18);
+  padding-right: 12px;
+}
+[data-sch-border="moleskine"] .sch-shell::before {
+  /* elastic closure band crossing vertically */
+  content: ''; position: absolute; top: 0; bottom: 0; right: 36px;
+  width: 8px; background: #1c1c1c;
+  box-shadow: 0 0 6px rgba(0,0,0,0.3);
+  z-index: 3; pointer-events: none;
+}
+[data-sch-border="moleskine"] .sch-shell::after {
+  /* red ribbon bookmark trailing off the bottom */
+  content: ''; position: absolute; top: 0; bottom: -36px; left: 18%;
+  width: 6px; background: #9c1f24;
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 8px), 50% 100%, 0 calc(100% - 8px));
+  box-shadow: 1px 0 2px rgba(0,0,0,0.25);
+  z-index: 2; pointer-events: none;
+}
+
+/* ─── Washi collage — multiply-blended tapes with torn edges ───
+ * mix-blend-mode: multiply so the tape colors absorb into the paper
+ * tone. SVG path uses a slightly wavy edge on the long sides so each
+ * tape looks torn rather than cleanly cut.
+ */
+[data-sch-border="washi"] .sch-shell {
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' seed='5'/%3E%3CfeColorMatrix values='0 0 0 0 .95 0 0 0 0 .92 0 0 0 0 .85 0 0 0 .08 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"),
+    linear-gradient(180deg, #faf6ee 0%, #f5ebe0 100%);
+  border-radius: 2px;
+  box-shadow: 0 1px 2px rgba(92,74,58,0.08), 0 10px 28px rgba(92,74,58,0.12);
+  padding-top: 28px;
+  padding-bottom: 28px;
+}
+[data-sch-border="washi"] .sch-shell::before,
+[data-sch-border="washi"] .sch-shell::after {
+  content: ''; position: absolute; width: 180px; height: 44px;
+  pointer-events: none; z-index: 3;
+  mix-blend-mode: multiply;
+  filter: drop-shadow(0 2px 3px rgba(0,0,0,0.18));
+}
+[data-sch-border="washi"] .sch-shell::before {
+  /* top-left: coral polka w/ torn edge */
+  top: -14px; left: 60px; transform: rotate(-5deg);
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='44' viewBox='0 0 180 44' preserveAspectRatio='none'%3E%3Cpath d='M0,5 Q20,3 40,5 T80,5 T120,5 T160,5 L180,6 L180,38 Q160,40 140,38 T100,38 T60,38 T20,38 L0,39 Z' fill='%23e8a5a5' opacity='.88'/%3E%3Cg fill='%23fff' opacity='.55'%3E%3Ccircle cx='18' cy='16' r='2.8'/%3E%3Ccircle cx='42' cy='28' r='2.8'/%3E%3Ccircle cx='66' cy='16' r='2.8'/%3E%3Ccircle cx='90' cy='28' r='2.8'/%3E%3Ccircle cx='114' cy='16' r='2.8'/%3E%3Ccircle cx='138' cy='28' r='2.8'/%3E%3Ccircle cx='162' cy='16' r='2.8'/%3E%3C/g%3E%3C/svg%3E") center / contain no-repeat;
+}
+[data-sch-border="washi"] .sch-shell::after {
+  /* bottom-right: sage floral w/ torn edge */
+  bottom: -14px; right: 60px; transform: rotate(-4deg);
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='44' viewBox='0 0 180 44' preserveAspectRatio='none'%3E%3Cpath d='M0,5 Q20,3 40,5 T80,5 T120,5 T160,5 L180,6 L180,38 Q160,40 140,38 T100,38 T60,38 T20,38 L0,39 Z' fill='%23a8b89a' opacity='.88'/%3E%3Cg fill='%23fff' opacity='.65'%3E%3Cg transform='translate(30 22)'%3E%3Ccircle cx='0' cy='-4' r='2.2'/%3E%3Ccircle cx='3.8' cy='-1' r='2.2'/%3E%3Ccircle cx='2.3' cy='3.5' r='2.2'/%3E%3Ccircle cx='-2.3' cy='3.5' r='2.2'/%3E%3Ccircle cx='-3.8' cy='-1' r='2.2'/%3E%3Ccircle cx='0' cy='0' r='1.3' fill='%23e6c25a'/%3E%3C/g%3E%3Cg transform='translate(75 22)'%3E%3Ccircle cx='0' cy='-4' r='2.2'/%3E%3Ccircle cx='3.8' cy='-1' r='2.2'/%3E%3Ccircle cx='2.3' cy='3.5' r='2.2'/%3E%3Ccircle cx='-2.3' cy='3.5' r='2.2'/%3E%3Ccircle cx='-3.8' cy='-1' r='2.2'/%3E%3Ccircle cx='0' cy='0' r='1.3' fill='%23e6c25a'/%3E%3C/g%3E%3Cg transform='translate(120 22)'%3E%3Ccircle cx='0' cy='-4' r='2.2'/%3E%3Ccircle cx='3.8' cy='-1' r='2.2'/%3E%3Ccircle cx='2.3' cy='3.5' r='2.2'/%3E%3Ccircle cx='-2.3' cy='3.5' r='2.2'/%3E%3Ccircle cx='-3.8' cy='-1' r='2.2'/%3E%3Ccircle cx='0' cy='0' r='1.3' fill='%23e6c25a'/%3E%3C/g%3E%3Cg transform='translate(155 22)'%3E%3Ccircle cx='0' cy='-4' r='2.2'/%3E%3Ccircle cx='3.8' cy='-1' r='2.2'/%3E%3Ccircle cx='2.3' cy='3.5' r='2.2'/%3E%3Ccircle cx='-2.3' cy='3.5' r='2.2'/%3E%3Ccircle cx='-3.8' cy='-1' r='2.2'/%3E%3Ccircle cx='0' cy='0' r='1.3' fill='%23e6c25a'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E") center / contain no-repeat;
+}
+
+/* ─── Legal pad — authentic yellow + wire-o at top ───
+ * Adds a real wire-o double-loop binding across the TOP (Passion
+ * Planner style) plus the legal-pad paper.
+ */
 [data-sch-border="ruled"] .sch-shell {
   background:
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='18' viewBox='0 0 32 18'%3E%3Ccircle cx='16' cy='9' r='3' fill='rgba(80,60,30,.4)'/%3E%3Ccircle cx='16' cy='9' r='2.2' fill='rgba(0,0,0,.5)'/%3E%3C/svg%3E") left top / 32px 18px repeat-x,
-    repeating-linear-gradient(180deg, transparent 0 31px, rgba(60,110,180,0.28) 31px 32px),
-    linear-gradient(90deg, transparent 56px, rgba(200,60,60,0.5) 56px 57px, transparent 57px),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='44' height='32' viewBox='0 0 44 32'%3E%3Cdefs%3E%3ClinearGradient id='wo' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%23d4d4d8'/%3E%3Cstop offset='.5' stop-color='%236e6e72'/%3E%3Cstop offset='1' stop-color='%232e2e32'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath d='M 12 22 L 12 6 Q 22 2 32 6 L 32 22' fill='none' stroke='url(%23wo)' stroke-width='3' stroke-linecap='round'/%3E%3Cpath d='M 14 20 L 14 8' stroke='rgba(255,255,255,.6)' stroke-width='.8' fill='none'/%3E%3C/svg%3E") top left / 44px 32px repeat-x,
+    repeating-linear-gradient(180deg, transparent 0 31px, rgba(60,110,180,0.3) 31px 32px),
+    linear-gradient(90deg, transparent 56px, rgba(200,60,60,0.55) 56px 57px, transparent 57px),
     linear-gradient(180deg, #fff5c8 0%, #fcecb0 100%);
-  padding-top: 30px !important;
+  padding-top: 42px !important;
   padding-left: 66px !important;
-  border-radius: 4px;
-  box-shadow: 0 10px 32px rgba(40,30,15,0.12);
+  border-radius: 2px;
+  box-shadow: 0 1px 2px rgba(92,74,58,0.1), 0 10px 32px rgba(92,74,58,0.14);
 }
 [data-sch-border="ruled"] .sch-main { background-color: transparent; background-image: none; }
 
-/* gilded frame - border-image stretches ornate SVG */
+/* ─── Gilded edge — thin gold band hugging the perimeter ───
+ * Per the reference, gilded pages are a 2-3px edge band, not corner
+ * ornaments. Uses background-clip to paint only the border region.
+ */
 [data-sch-border="gold-corners"] .sch-shell {
-  border: 20px solid transparent;
-  border-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200' viewBox='0 0 200 200'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23d4af37'/%3E%3Cstop offset='.5' stop-color='%23f5d370'/%3E%3Cstop offset='1' stop-color='%23a6802b'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect x='8' y='8' width='184' height='184' rx='3' fill='none' stroke='url(%23g)' stroke-width='3'/%3E%3Crect x='18' y='18' width='164' height='164' rx='2' fill='none' stroke='url(%23g)' stroke-width='1'/%3E%3Cg fill='url(%23g)'%3E%3Cpath d='M10 10 Q28 10 34 30 Q24 22 10 24 Z'/%3E%3Ccircle cx='26' cy='26' r='2.4'/%3E%3Cpath d='M190 10 Q172 10 166 30 Q176 22 190 24 Z'/%3E%3Ccircle cx='174' cy='26' r='2.4'/%3E%3Cpath d='M10 190 Q28 190 34 170 Q24 178 10 176 Z'/%3E%3Ccircle cx='26' cy='174' r='2.4'/%3E%3Cpath d='M190 190 Q172 190 166 170 Q176 178 190 176 Z'/%3E%3Ccircle cx='174' cy='174' r='2.4'/%3E%3Cpath d='M100 8 L107 14 L100 20 L93 14 Z'/%3E%3Cpath d='M100 180 L107 186 L100 192 L93 186 Z'/%3E%3Cpath d='M8 100 L14 107 L20 100 L14 93 Z'/%3E%3Cpath d='M180 100 L186 107 L192 100 L186 93 Z'/%3E%3C/g%3E%3C/svg%3E") 50 fill / 20px / 0 stretch;
-  background-color: var(--sch-paper);
-  border-radius: 4px;
+  background:
+    linear-gradient(180deg, #faf6ee 0%, #f4ead5 100%) padding-box,
+    linear-gradient(135deg, #d4af37 0%, #f5d370 30%, #9a7b1f 55%, #f5d370 80%, #d4af37 100%) border-box;
+  border: 3px solid transparent;
+  border-radius: 3px;
+  box-shadow:
+    0 1px 2px rgba(92,74,58,0.1),
+    0 10px 32px rgba(92,74,58,0.16),
+    inset 0 0 0 1px rgba(154,123,31,0.25);
 }
 
-/* floral garland - watercolor-style sage vines with dusty-rose buds */
+/* ─── Floral garland — asymmetric watercolor bouquet in one corner ───
+ * Real planner aesthetic: heavy cluster top-left trailing to
+ * the opposite corner. Uses mix-blend-mode so colors absorb into paper.
+ */
 [data-sch-border="pressed-flowers"] .sch-shell {
   background:
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='130' height='130' viewBox='0 0 130 130'%3E%3Cg fill='none' stroke='%235f7a56' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath d='M2 32 C 22 24 40 34 64 46 C 88 58 108 60 128 62'/%3E%3Cpath d='M12 12 C 26 18 34 32 42 40 C 52 50 68 52 80 46'/%3E%3Cg fill='%238fa889' stroke='none'%3E%3Cellipse cx='20' cy='24' rx='7' ry='3.5' transform='rotate(25 20 24)'/%3E%3Cellipse cx='36' cy='36' rx='8' ry='4' transform='rotate(30 36 36)'/%3E%3Cellipse cx='58' cy='44' rx='8' ry='4' transform='rotate(-10 58 44)'/%3E%3Cellipse cx='34' cy='16' rx='6' ry='3' transform='rotate(-35 34 16)'/%3E%3Cellipse cx='78' cy='48' rx='6' ry='3' transform='rotate(10 78 48)'/%3E%3C/g%3E%3C/g%3E%3Cg fill='%23d48fa5'%3E%3Cg transform='translate(44 50)'%3E%3Ccircle cx='0' cy='-4' r='2.4'/%3E%3Ccircle cx='3.7' cy='-1.3' r='2.4'/%3E%3Ccircle cx='2.3' cy='3.3' r='2.4'/%3E%3Ccircle cx='-2.3' cy='3.3' r='2.4'/%3E%3Ccircle cx='-3.7' cy='-1.3' r='2.4'/%3E%3Ccircle cx='0' cy='0' r='1.5' fill='%23e6c25a'/%3E%3C/g%3E%3Cg transform='translate(78 22)'%3E%3Ccircle cx='0' cy='-3' r='2'/%3E%3Ccircle cx='2.8' cy='-.8' r='2'/%3E%3Ccircle cx='1.7' cy='2.5' r='2'/%3E%3Ccircle cx='-1.7' cy='2.5' r='2'/%3E%3Ccircle cx='-2.8' cy='-.8' r='2'/%3E%3Ccircle cx='0' cy='0' r='1.2' fill='%23e6c25a'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E") top left / 130px 130px no-repeat,
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='130' height='130' viewBox='0 0 130 130'%3E%3Cg transform='translate(130 0) scale(-1 1)'%3E%3Cg fill='none' stroke='%235f7a56' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath d='M2 32 C 22 24 40 34 64 46 C 88 58 108 60 128 62'/%3E%3Cg fill='%238fa889' stroke='none'%3E%3Cellipse cx='20' cy='24' rx='7' ry='3.5' transform='rotate(25 20 24)'/%3E%3Cellipse cx='36' cy='36' rx='8' ry='4' transform='rotate(30 36 36)'/%3E%3Cellipse cx='58' cy='44' rx='8' ry='4' transform='rotate(-10 58 44)'/%3E%3C/g%3E%3C/g%3E%3Cg fill='%23d48fa5'%3E%3Cg transform='translate(44 50)'%3E%3Ccircle cx='0' cy='-4' r='2.4'/%3E%3Ccircle cx='3.7' cy='-1.3' r='2.4'/%3E%3Ccircle cx='2.3' cy='3.3' r='2.4'/%3E%3Ccircle cx='-2.3' cy='3.3' r='2.4'/%3E%3Ccircle cx='-3.7' cy='-1.3' r='2.4'/%3E%3Ccircle cx='0' cy='0' r='1.5' fill='%23e6c25a'/%3E%3C/g%3E%3C/g%3E%3C/g%3E%3C/svg%3E") top right / 130px 130px no-repeat,
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='130' height='130' viewBox='0 0 130 130'%3E%3Cg transform='translate(0 130) scale(1 -1)'%3E%3Cg fill='none' stroke='%235f7a56' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath d='M2 32 C 22 24 40 34 64 46 C 88 58 108 60 128 62'/%3E%3Cg fill='%238fa889' stroke='none'%3E%3Cellipse cx='20' cy='24' rx='7' ry='3.5' transform='rotate(25 20 24)'/%3E%3Cellipse cx='36' cy='36' rx='8' ry='4' transform='rotate(30 36 36)'/%3E%3Cellipse cx='58' cy='44' rx='8' ry='4' transform='rotate(-10 58 44)'/%3E%3C/g%3E%3C/g%3E%3Cg fill='%23d48fa5'%3E%3Cg transform='translate(44 50)'%3E%3Ccircle cx='0' cy='-4' r='2.4'/%3E%3Ccircle cx='3.7' cy='-1.3' r='2.4'/%3E%3Ccircle cx='2.3' cy='3.3' r='2.4'/%3E%3Ccircle cx='-2.3' cy='3.3' r='2.4'/%3E%3Ccircle cx='-3.7' cy='-1.3' r='2.4'/%3E%3Ccircle cx='0' cy='0' r='1.5' fill='%23e6c25a'/%3E%3C/g%3E%3C/g%3E%3C/g%3E%3C/svg%3E") bottom left / 130px 130px no-repeat,
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='130' height='130' viewBox='0 0 130 130'%3E%3Cg transform='translate(130 130) scale(-1 -1)'%3E%3Cg fill='none' stroke='%235f7a56' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath d='M2 32 C 22 24 40 34 64 46 C 88 58 108 60 128 62'/%3E%3Cg fill='%238fa889' stroke='none'%3E%3Cellipse cx='20' cy='24' rx='7' ry='3.5' transform='rotate(25 20 24)'/%3E%3Cellipse cx='36' cy='36' rx='8' ry='4' transform='rotate(30 36 36)'/%3E%3Cellipse cx='58' cy='44' rx='8' ry='4' transform='rotate(-10 58 44)'/%3E%3C/g%3E%3C/g%3E%3Cg fill='%23d48fa5'%3E%3Cg transform='translate(44 50)'%3E%3Ccircle cx='0' cy='-4' r='2.4'/%3E%3Ccircle cx='3.7' cy='-1.3' r='2.4'/%3E%3Ccircle cx='2.3' cy='3.3' r='2.4'/%3E%3Ccircle cx='-2.3' cy='3.3' r='2.4'/%3E%3Ccircle cx='-3.7' cy='-1.3' r='2.4'/%3E%3Ccircle cx='0' cy='0' r='1.5' fill='%23e6c25a'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E") bottom right / 130px 130px no-repeat,
-    var(--sch-paper);
-  border-radius: 4px;
-  box-shadow: 0 6px 18px rgba(40,30,15,0.08);
+    linear-gradient(180deg, #faf6ee 0%, #f5ebe0 100%);
+  border-radius: 3px;
+  box-shadow: 0 1px 2px rgba(92,74,58,0.08), 0 10px 28px rgba(92,74,58,0.13);
   padding: 32px 0;
 }
+[data-sch-border="pressed-flowers"] .sch-shell::before {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  mix-blend-mode: multiply; opacity: 0.92; z-index: 3;
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220' viewBox='0 0 220 220'%3E%3Cg fill='none' stroke='%235f7a56' stroke-width='1.8' stroke-linecap='round'%3E%3Cpath d='M2 48 C 28 36 56 50 92 70 C 128 90 162 98 218 102'/%3E%3Cpath d='M14 14 C 40 26 58 46 72 64 C 88 84 112 94 136 90'/%3E%3Cpath d='M4 90 C 22 84 38 92 54 104'/%3E%3C/g%3E%3Cg fill='%238fa889'%3E%3Cellipse cx='28' cy='30' rx='10' ry='5' transform='rotate(25 28 30)'/%3E%3Cellipse cx='52' cy='50' rx='12' ry='6' transform='rotate(30 52 50)'/%3E%3Cellipse cx='82' cy='66' rx='12' ry='6' transform='rotate(-10 82 66)'/%3E%3Cellipse cx='48' cy='22' rx='8' ry='4' transform='rotate(-35 48 22)'/%3E%3Cellipse cx='72' cy='44' rx='8' ry='4' transform='rotate(45 72 44)'/%3E%3Cellipse cx='108' cy='78' rx='10' ry='5' transform='rotate(10 108 78)'/%3E%3Cellipse cx='140' cy='88' rx='9' ry='4' transform='rotate(-5 140 88)'/%3E%3Cellipse cx='32' cy='96' rx='7' ry='3.5' transform='rotate(15 32 96)'/%3E%3C/g%3E%3Cg fill='%23d48fa5'%3E%3Cg transform='translate(60 72)'%3E%3Ccircle cx='0' cy='-5' r='3.2'/%3E%3Ccircle cx='4.8' cy='-1.5' r='3.2'/%3E%3Ccircle cx='3' cy='4.2' r='3.2'/%3E%3Ccircle cx='-3' cy='4.2' r='3.2'/%3E%3Ccircle cx='-4.8' cy='-1.5' r='3.2'/%3E%3Ccircle cx='0' cy='0' r='2' fill='%23e6c25a'/%3E%3C/g%3E%3Cg transform='translate(102 38)'%3E%3Ccircle cx='0' cy='-4' r='2.6'/%3E%3Ccircle cx='3.8' cy='-1.2' r='2.6'/%3E%3Ccircle cx='2.4' cy='3.3' r='2.6'/%3E%3Ccircle cx='-2.4' cy='3.3' r='2.6'/%3E%3Ccircle cx='-3.8' cy='-1.2' r='2.6'/%3E%3Ccircle cx='0' cy='0' r='1.6' fill='%23e6c25a'/%3E%3C/g%3E%3Cg transform='translate(172 110)'%3E%3Ccircle cx='0' cy='-3' r='2.2'/%3E%3Ccircle cx='2.8' cy='-.8' r='2.2'/%3E%3Ccircle cx='1.7' cy='2.5' r='2.2'/%3E%3Ccircle cx='-1.7' cy='2.5' r='2.2'/%3E%3Ccircle cx='-2.8' cy='-.8' r='2.2'/%3E%3Ccircle cx='0' cy='0' r='1.3' fill='%23e6c25a'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E") top left / 260px 260px no-repeat,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160' viewBox='0 0 160 160'%3E%3Cg transform='translate(160 160) scale(-1 -1)'%3E%3Cg fill='none' stroke='%235f7a56' stroke-width='1.8' stroke-linecap='round'%3E%3Cpath d='M2 48 C 28 36 56 50 92 70 C 128 90 162 98 158 102'/%3E%3C/g%3E%3Cg fill='%238fa889'%3E%3Cellipse cx='28' cy='30' rx='9' ry='4.5' transform='rotate(25 28 30)'/%3E%3Cellipse cx='52' cy='50' rx='10' ry='5' transform='rotate(30 52 50)'/%3E%3Cellipse cx='82' cy='66' rx='10' ry='5' transform='rotate(-10 82 66)'/%3E%3C/g%3E%3Cg fill='%23d48fa5'%3E%3Cg transform='translate(60 72)'%3E%3Ccircle cx='0' cy='-4' r='2.6'/%3E%3Ccircle cx='3.8' cy='-1.2' r='2.6'/%3E%3Ccircle cx='2.4' cy='3.3' r='2.6'/%3E%3Ccircle cx='-2.4' cy='3.3' r='2.6'/%3E%3Ccircle cx='-3.8' cy='-1.2' r='2.6'/%3E%3Ccircle cx='0' cy='0' r='1.6' fill='%23e6c25a'/%3E%3C/g%3E%3C/g%3E%3C/g%3E%3C/svg%3E") bottom right / 200px 200px no-repeat;
+}
 
-/* vintage parchment - aged gradient + double keyline + corner brackets */
+/* ─── Vintage parchment — aged gradient + Victorian corners ───
+ */
 [data-sch-border="vintage"] .sch-shell {
   background:
-    radial-gradient(ellipse at center, #f3e8c8 0%, #e8d7a6 80%, #d9c37f 100%);
+    radial-gradient(ellipse at center, #f3e8c8 0%, #e8d7a6 75%, #d9c37f 100%);
   box-shadow:
     inset 0 0 0 2px #6b4f2a,
     inset 0 0 0 3px #f3e8c8,
     inset 0 0 0 5px #6b4f2a,
-    0 8px 24px rgba(30,20,10,0.22);
+    0 2px 4px rgba(30,20,10,0.1),
+    0 12px 36px rgba(30,20,10,0.22);
   border-radius: 6px;
 }
 [data-sch-border="vintage"] .sch-shell::before {
-  content: '';
-  position: absolute; inset: 0; pointer-events: none;
+  content: ''; position: absolute; inset: 0; pointer-events: none; z-index: 4;
   background:
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 100 100'%3E%3Cg fill='none' stroke='%234a3426' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath d='M10 40 Q 10 10 40 10'/%3E%3Cpath d='M20 40 Q 20 20 40 20'/%3E%3Cpath d='M10 50 L 30 50 M 50 10 L 50 30'/%3E%3Cpath d='M24 24 Q 32 16 40 16'/%3E%3Ccircle cx='28' cy='28' r='1.8' fill='%234a3426'/%3E%3Ccircle cx='34' cy='34' r='1.8' fill='%234a3426'/%3E%3C/g%3E%3C/svg%3E") top left / 100px 100px no-repeat,
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 100 100'%3E%3Cg transform='translate(100 0) scale(-1 1)'%3E%3Cg fill='none' stroke='%234a3426' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath d='M10 40 Q 10 10 40 10'/%3E%3Cpath d='M20 40 Q 20 20 40 20'/%3E%3Ccircle cx='28' cy='28' r='1.8' fill='%234a3426'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E") top right / 100px 100px no-repeat,
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 100 100'%3E%3Cg transform='translate(0 100) scale(1 -1)'%3E%3Cg fill='none' stroke='%234a3426' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath d='M10 40 Q 10 10 40 10'/%3E%3Cpath d='M20 40 Q 20 20 40 20'/%3E%3Ccircle cx='28' cy='28' r='1.8' fill='%234a3426'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E") bottom left / 100px 100px no-repeat,
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 100 100'%3E%3Cg transform='translate(100 100) scale(-1 -1)'%3E%3Cg fill='none' stroke='%234a3426' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath d='M10 40 Q 10 10 40 10'/%3E%3Cpath d='M20 40 Q 20 20 40 20'/%3E%3Ccircle cx='28' cy='28' r='1.8' fill='%234a3426'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E") bottom right / 100px 100px no-repeat;
-  z-index: 4;
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='110' height='110' viewBox='0 0 110 110'%3E%3Cg fill='none' stroke='%234a3426' stroke-width='1.8' stroke-linecap='round'%3E%3Cpath d='M10 44 Q 10 10 44 10'/%3E%3Cpath d='M20 44 Q 20 20 44 20'/%3E%3Cpath d='M10 54 L 34 54 M 54 10 L 54 34'/%3E%3Cpath d='M26 26 Q 34 18 42 18'/%3E%3Ccircle cx='30' cy='30' r='2' fill='%234a3426'/%3E%3Ccircle cx='38' cy='38' r='2' fill='%234a3426'/%3E%3Cpath d='M12 34 Q 16 30 22 28 M 14 42 Q 22 34 28 32' stroke-width='1.1'/%3E%3Cpath d='M34 12 Q 30 16 28 22 M 42 14 Q 34 22 32 28' stroke-width='1.1'/%3E%3C/g%3E%3C/svg%3E") top left / 110px 110px no-repeat,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='110' height='110' viewBox='0 0 110 110'%3E%3Cg transform='translate(110 0) scale(-1 1)'%3E%3Cg fill='none' stroke='%234a3426' stroke-width='1.8' stroke-linecap='round'%3E%3Cpath d='M10 44 Q 10 10 44 10'/%3E%3Cpath d='M20 44 Q 20 20 44 20'/%3E%3Cpath d='M10 54 L 34 54 M 54 10 L 54 34'/%3E%3Ccircle cx='30' cy='30' r='2' fill='%234a3426'/%3E%3Ccircle cx='38' cy='38' r='2' fill='%234a3426'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E") top right / 110px 110px no-repeat,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='110' height='110' viewBox='0 0 110 110'%3E%3Cg transform='translate(0 110) scale(1 -1)'%3E%3Cg fill='none' stroke='%234a3426' stroke-width='1.8' stroke-linecap='round'%3E%3Cpath d='M10 44 Q 10 10 44 10'/%3E%3Cpath d='M20 44 Q 20 20 44 20'/%3E%3Ccircle cx='30' cy='30' r='2' fill='%234a3426'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E") bottom left / 110px 110px no-repeat,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='110' height='110' viewBox='0 0 110 110'%3E%3Cg transform='translate(110 110) scale(-1 -1)'%3E%3Cg fill='none' stroke='%234a3426' stroke-width='1.8' stroke-linecap='round'%3E%3Cpath d='M10 44 Q 10 10 44 10'/%3E%3Cpath d='M20 44 Q 20 20 44 20'/%3E%3Ccircle cx='30' cy='30' r='2' fill='%234a3426'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E") bottom right / 110px 110px no-repeat;
 }
 
 /* Preview tiles in the border picker modal */
@@ -978,7 +1111,7 @@ body:not([data-sch-border]) .sch-main {
 .sch-border-tile.active { outline: 2px solid var(--sch-accent); outline-offset: 2px; border-color: var(--sch-accent); }
 .sch-border-tile:hover { border-color: var(--sch-accent); transform: translateY(-2px); }
 .sch-border-preview {
-  height: 120px; position: relative;
+  height: 130px; position: relative;
   display: flex; align-items: center; justify-content: center;
   background: var(--sch-bg); overflow: hidden; padding: 8px;
 }
@@ -1071,12 +1204,14 @@ const PAGE_JS: &str = r##"
   }
 
   const BORDERS = [
-    { key: 'notebook',        name: 'Notebook rings' },
+    { key: 'notebook',        name: 'Spiral notebook' },
+    { key: 'disc',            name: 'Disc-bound' },
+    { key: 'moleskine',       name: 'Moleskine' },
     { key: 'washi',           name: 'Washi tape' },
-    { key: 'ruled',           name: 'Legal pad' },
-    { key: 'gold-corners',    name: 'Gold flourish' },
-    { key: 'pressed-flowers', name: 'Pressed flowers' },
-    { key: 'vintage',         name: 'Vintage frame' },
+    { key: 'ruled',           name: 'Legal pad + wire' },
+    { key: 'gold-corners',    name: 'Gilded edge' },
+    { key: 'pressed-flowers', name: 'Floral bouquet' },
+    { key: 'vintage',         name: 'Vintage parchment' },
     { key: 'none',            name: 'Clean' },
   ];
   function applyBorder(key) {
