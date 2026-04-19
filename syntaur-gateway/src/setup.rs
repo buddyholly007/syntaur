@@ -1174,6 +1174,7 @@ pub async fn handle_scheduler_frame(
     h.insert("cache-control", "public, max-age=604800, immutable".parse().unwrap());
     let bytes: &[u8] = match key.as_str() {
         "garden-notebook" => include_bytes!("../static/scheduler-frames/garden-notebook.webp"),
+        "garden-backdrop" => include_bytes!("../static/scheduler-frames/garden-backdrop.webp"),
         "heirloom"        => include_bytes!("../static/scheduler-frames/heirloom.webp"),
         "woodland"        => include_bytes!("../static/scheduler-frames/woodland.webp"),
         "cosmos"          => include_bytes!("../static/scheduler-frames/cosmos.webp"),

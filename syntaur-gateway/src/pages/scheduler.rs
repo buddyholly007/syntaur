@@ -1103,125 +1103,32 @@ body:not([data-sch-border]) .sch-main {
     url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140' viewBox='0 0 140 140'%3E%3Cg transform='translate(140 140) scale(-1 -1)'%3E%3Cg fill='none' stroke='%234a3426' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M12 56 Q 12 12 56 12'/%3E%3Cpath d='M22 56 Q 22 22 56 22'/%3E%3Cpath d='M32 56 Q 32 32 56 32'/%3E%3Ccircle cx='32' cy='32' r='2.4' fill='%234a3426'/%3E%3Ccircle cx='42' cy='42' r='2.4' fill='%234a3426'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E") bottom right / 140px 140px no-repeat;
 }
 
-/* ══ Painted frames (image overlays with punched paper areas) ══
+/* ══ Garden Backdrop — Sean's clean Gemini-generated backdrop ══
  *
- * The five reference artworks have their paper content areas punched
- * transparent in pre-processing. Each frame:
- *   - .sch-shell gets a solid paper-colored background (what shows
- *     through the punched hole)
- *   - ::after pseudo-element lays the overlay image on top, pointer-
- *     events: none so real UI remains interactive
- *   - Aspect-ratio is locked per frame so the overlay scales correctly
- *   - Layout zones (.sch-left/.sch-main/.sch-right) are transparent
- *     so they render on the cream paper, with decorations framing them
+ * Unlike the punched-overlay approach that fought the scheduler's
+ * content height, this is a straight backdrop: cream paper with
+ * watercolor botanicals at the four corners, no illustrated content
+ * to clash with. The scheduler's layout renders on top in its natural
+ * flex arrangement. `background-size: 100% 100%` stretches the image
+ * to fill the shell — the watercolor corners stay at corners (even if
+ * the shell is taller than the source), the middle is plain cream so
+ * any stretching there is invisible.
  */
-
-[data-sch-border="garden-notebook"],
-[data-sch-border="heirloom"],
-[data-sch-border="woodland"],
-[data-sch-border="cosmos"],
-[data-sch-border="field-journal"] {
-  --sch-bg: transparent;
+[data-sch-border="garden-backdrop"] .sch-shell {
+  background:
+    url('/scheduler-frame/garden-backdrop') center / 100% 100% no-repeat,
+    #f4ead2;
+  padding: 24px;
+  border-radius: 4px;
+  box-shadow: 0 2px 6px rgba(40,30,15,0.12), 0 14px 36px rgba(40,30,15,0.18);
 }
-
-[data-sch-border="garden-notebook"] .sch-shell,
-[data-sch-border="heirloom"]        .sch-shell,
-[data-sch-border="woodland"]        .sch-shell,
-[data-sch-border="cosmos"]          .sch-shell,
-[data-sch-border="field-journal"]   .sch-shell {
-  position: relative;
-  padding: 0;
-  background: none;
-  box-shadow: none;
-  border: none;
-  border-radius: 0;
-  isolation: isolate;
-}
-
-/* Each frame: aspect-ratio matches source image so overlay never distorts.
- * The paper-area inset matches the punched hole so content lives exactly
- * inside the visible paper surface of the painting. */
-[data-sch-border="garden-notebook"] .sch-shell {
-  aspect-ratio: 1302 / 800;
-  background: #f7ecd2; /* cream paper, shows through the overlay punch */
-  padding: 8.5% 3.2% 6.5% 3.5%;
-  border-radius: 3px;
-}
-[data-sch-border="heirloom"] .sch-shell,
-[data-sch-border="woodland"] .sch-shell,
-[data-sch-border="cosmos"]   .sch-shell {
-  aspect-ratio: 1408 / 768;
-  padding: 13% 7.5% 11% 7.5%;
-}
-[data-sch-border="heirloom"] .sch-shell  { background: #ead9b3; }
-[data-sch-border="woodland"] .sch-shell  { background: #ecd9b3; }
-[data-sch-border="cosmos"]   .sch-shell  { background: #1f2d52; }
-[data-sch-border="field-journal"] .sch-shell {
-  aspect-ratio: 1408 / 768;
-  background: #f0e3c5;
-  padding: 22% 19% 18% 19%;
-  border-radius: 2px;
-}
-
-/* The overlay: decorative painting with punched paper hole, on top. */
-[data-sch-border="garden-notebook"] .sch-shell::after,
-[data-sch-border="heirloom"]        .sch-shell::after,
-[data-sch-border="woodland"]        .sch-shell::after,
-[data-sch-border="cosmos"]          .sch-shell::after,
-[data-sch-border="field-journal"]   .sch-shell::after {
-  content: '';
-  position: absolute; inset: 0;
-  pointer-events: none;
-  z-index: 3;
-  background-repeat: no-repeat;
-  background-size: 100% 100%;
-  background-position: center;
-}
-[data-sch-border="garden-notebook"] .sch-shell::after { background-image: url('/scheduler-frame/garden-notebook'); }
-[data-sch-border="heirloom"]        .sch-shell::after { background-image: url('/scheduler-frame/heirloom'); }
-[data-sch-border="woodland"]        .sch-shell::after { background-image: url('/scheduler-frame/woodland'); }
-[data-sch-border="cosmos"]          .sch-shell::after { background-image: url('/scheduler-frame/cosmos'); }
-[data-sch-border="field-journal"]   .sch-shell::after { background-image: url('/scheduler-frame/field-journal'); }
-
-/* Suppress the default spiral-notebook ::before coil on painted frames. */
-[data-sch-border="garden-notebook"] .sch-shell::before,
-[data-sch-border="heirloom"]        .sch-shell::before,
-[data-sch-border="woodland"]        .sch-shell::before,
-[data-sch-border="cosmos"]          .sch-shell::before,
-[data-sch-border="field-journal"]   .sch-shell::before { content: none !important; }
-
-/* Layout zones: transparent so painted paper shows behind. */
-[data-sch-border="garden-notebook"] .sch-left,
-[data-sch-border="garden-notebook"] .sch-main,
-[data-sch-border="garden-notebook"] .sch-right,
-[data-sch-border="heirloom"] .sch-left,
-[data-sch-border="heirloom"] .sch-main,
-[data-sch-border="heirloom"] .sch-right,
-[data-sch-border="woodland"] .sch-left,
-[data-sch-border="woodland"] .sch-main,
-[data-sch-border="woodland"] .sch-right,
-[data-sch-border="cosmos"]   .sch-left,
-[data-sch-border="cosmos"]   .sch-main,
-[data-sch-border="cosmos"]   .sch-right,
-[data-sch-border="field-journal"] .sch-left,
-[data-sch-border="field-journal"] .sch-main,
-[data-sch-border="field-journal"] .sch-right { background: transparent !important; }
-
-/* Content z-index under the overlay (the overlay's decorative frame is on
- * top, but its punched paper area is transparent so content shows through) */
-[data-sch-border="garden-notebook"] .sch-shell > *,
-[data-sch-border="heirloom"]        .sch-shell > *,
-[data-sch-border="woodland"]        .sch-shell > *,
-[data-sch-border="cosmos"]          .sch-shell > *,
-[data-sch-border="field-journal"]   .sch-shell > * { position: relative; z-index: 1; }
-
-/* Cosmos dark-paper theme overrides — keep content readable on navy */
-[data-sch-border="cosmos"] {
-  --sch-ink:       #f5e8c5;
-  --sch-ink-dim:   #c9b890;
-  --sch-ink-faint: #8b7f5f;
-  --sch-border:    #3c5a7a;
-}
+/* Suppress the default spiral-notebook coil. */
+[data-sch-border="garden-backdrop"] .sch-shell::before { content: none !important; }
+/* Layout zones see through to the painted paper — only event chips and
+ * cards should have solid backgrounds to stay readable. */
+[data-sch-border="garden-backdrop"] .sch-left,
+[data-sch-border="garden-backdrop"] .sch-main,
+[data-sch-border="garden-backdrop"] .sch-right { background: transparent !important; }
 
 /* ─── Preview tiles with per-style mini illustrations. */
 .sch-border-tile {
@@ -1423,11 +1330,9 @@ const PAGE_JS: &str = r##"
   }
 
   const BORDERS = [
-    // Painted frames are behind a WIP flag while the aspect-mismatch
-    // between painted 16:10 canvas and the scheduler's taller content
-    // is resolved. Keep the assets shipped (they're embedded in the
-    // binary) but hidden from the picker until the layout redesign
-    // that compacts content to fit the painted paper area.
+    // Clean watercolor-corner backdrop — cream paper with botanical
+    // accents at each corner, middle is open for content. The default.
+    { key: 'garden-backdrop', name: 'Garden Backdrop', painted: true },
     { key: 'notebook',        name: 'Spiral notebook' },
     { key: 'disc',            name: 'Disc-bound' },
     { key: 'moleskine',       name: 'Moleskine' },
@@ -1439,8 +1344,8 @@ const PAGE_JS: &str = r##"
     { key: 'none',            name: 'Clean' },
   ];
   function applyBorder(key) {
-    document.body.setAttribute('data-sch-border', key || 'notebook');
-    S.prefs.border = key || 'notebook';
+    document.body.setAttribute('data-sch-border', key || 'garden-backdrop');
+    S.prefs.border = key || 'garden-backdrop';
   }
 
   // ── Modal UX: backdrop click dismisses, ESC closes top modal ──────
@@ -1545,10 +1450,10 @@ const PAGE_JS: &str = r##"
       const prefs = await api('/api/scheduler/prefs');
       if (prefs && prefs.theme) applyTheme(prefs.theme);
       if (prefs && prefs.border) applyBorder(prefs.border);
-      else applyBorder('notebook');
+      else applyBorder('garden-backdrop');
       if (prefs && prefs.default_view && window.innerWidth > 900) { S.view = prefs.default_view; }
       S.prefs = Object.assign(S.prefs, prefs || {});
-    } catch(e) { console.warn('[sch] prefs load:', e); applyBorder('notebook'); }
+    } catch(e) { console.warn('[sch] prefs load:', e); applyBorder('garden-backdrop'); }
     if (window.innerWidth <= 900) S.view = 'day';
 
     try {
