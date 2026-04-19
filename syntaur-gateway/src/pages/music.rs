@@ -2427,8 +2427,15 @@ function ensureRealEqualizer(audioEl) {
       try {
         webAudioSource = webAudioCtx.createMediaElementSource(audioEl);
         webAudioAnalyser = webAudioCtx.createAnalyser();
-        webAudioAnalyser.fftSize = 256;
-        webAudioAnalyser.smoothingTimeConstant = 0.76;
+        webAudioAnalyser.fftSize = 1024;            // finer bin resolution, esp in the bass
+        webAudioAnalyser.smoothingTimeConstant = 0.68;
+        // Tighten the dB range the byte data maps to. Default is
+        // [-100, -30] which means ANY audio lights up the low bins to
+        // near-max and leaves highs flat. Narrower range + higher
+        // noise floor gives bass room to breathe AND makes highs
+        // actually register.
+        webAudioAnalyser.minDecibels = -75;
+        webAudioAnalyser.maxDecibels = -12;
         webAudioSource.connect(webAudioAnalyser);
         webAudioAnalyser.connect(webAudioCtx.destination);
       } catch(e) {
@@ -2475,13 +2482,22 @@ function startRealEqualizer() {
 
     // Compute HALF heights. Index 0 = bass (center), HALF-1 = treble
     // (edges). Logarithmic bin mapping so bass gets more resolution.
+    //
+    // Per-bar weighting compensates for the pink-noise distribution
+    // of real music: bass FFT bins carry roughly 20 dB more energy
+    // than treble bins on typical pop/rock content. Without this
+    // curve, bass constantly pegs the ceiling while highs never
+    // register. The curve (0.42 → 2.35 from center to edge) flattens
+    // the average response so the whole spectrum moves with the music.
     const heights = new Array(HALF);
     for (let i = 0; i < HALF; i++) {
       const lo = Math.floor(Math.pow(i / HALF, 2.3) * bins.length);
       const hi = Math.floor(Math.pow((i + 1) / HALF, 2.3) * bins.length);
       let peak = 0;
       for (let b = lo; b <= hi && b < bins.length; b++) { if (bins[b] > peak) peak = bins[b]; }
-      const v = peak / 255;
+      const t = i / (HALF - 1);                    // 0 = bass, 1 = treble
+      const weight = 0.42 + Math.pow(t, 0.55) * 1.93;
+      const v = Math.min(1, (peak / 255) * weight);
       heights[i] = Math.max(2, v * H * CEILING);
     }
 
