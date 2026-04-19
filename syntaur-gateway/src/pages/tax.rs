@@ -3554,7 +3554,7 @@ let moduleUnlocked = false;
 
 async function checkModuleAccess() {
   try {
-    const resp = await authFetch(`/api/modules/status?token=${token}&module=tax`);
+    const resp = await authFetch(`/api/modules/status?module=tax`);
     const data = await resp.json();
     const access = data.access || {};
 
@@ -3592,7 +3592,7 @@ async function startFreeTrial() {
   try {
     const resp = await authFetch('/api/modules/trial', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ token, module: 'tax' })
+      body: JSON.stringify({ module: 'tax' })
     });
     const data = await resp.json();
     if (data.granted) {
@@ -3704,7 +3704,7 @@ async function loadKpiStrip() {
 
   // Portfolio — live investment summary
   try {
-    const r = await authFetch(`/api/financial/investments/summary?token=${token}`);
+    const r = await authFetch(`/api/financial/investments/summary`);
     if (r.ok) {
       const d = await r.json();
       if (d.total_value_cents != null) {
@@ -3722,7 +3722,7 @@ async function loadKpiStrip() {
 
   // Income YTD, deductions, est refund — tax summary endpoint
   try {
-    const r = await authFetch(`/api/tax/summary?token=${token}&start=${yearStart()}&end=${yearEnd()}`);
+    const r = await authFetch(`/api/tax/summary?start=${yearStart()}&end=${yearEnd()}`);
     if (r.ok) {
       const d = await r.json();
       if (d.income_ytd_display) {
@@ -3773,16 +3773,16 @@ function updateDeadlinePill() {
 // Overview
 async function loadOverview() {
   try {
-    const resp = await authFetch(`/api/tax/summary?token=${token}&start=${yearStart()}&end=${yearEnd()}`);
+    const resp = await authFetch(`/api/tax/summary?start=${yearStart()}&end=${yearEnd()}`);
     const data = await resp.json();
     document.getElementById('sum-total').textContent = data.total_display || '$0.00';
     document.getElementById('sum-business').textContent = data.business_display || '$0.00';
     document.getElementById('sum-deductible').textContent = data.deductible_display || '$0.00';
     document.getElementById('sum-receipts').textContent = data.receipt_count || '0';
     const yr = selectedYear || yearStart().slice(0,4);
-    document.getElementById('export-txf').href = `/api/tax/export/txf?token=${token}&year=${yr}`;
-    document.getElementById('export-csv-irs').href = `/api/tax/export/csv-irs?token=${token}&year=${yr}`;
-    document.getElementById('export-csv-raw').href = `/api/tax/export?token=${token}&start=${yearStart()}&end=${yearEnd()}`;
+    document.getElementById('export-txf').href = `/api/tax/export/txf?year=${yr}`;
+    document.getElementById('export-csv-irs').href = `/api/tax/export/csv-irs?year=${yr}`;
+    document.getElementById('export-csv-raw').href = `/api/tax/export?start=${yearStart()}&end=${yearEnd()}`;
     document.getElementById('export-year-label').textContent = `Tax Year ${yr}`;
     // Pre-fill extension form from tax estimate
     loadExtensionData();
@@ -3846,7 +3846,7 @@ function filterByCategory(cat) {
 async function loadExpenses() {
   try {
     const entity = document.getElementById('exp-filter-entity').value;
-    let url = `/api/tax/expenses?token=${token}&start=${yearStart()}&end=${yearEnd()}`;
+    let url = `/api/tax/expenses?start=${yearStart()}&end=${yearEnd()}`;
     if (entity) url += `&entity=${entity}`;
     const resp = await authFetch(url);
     const data = await resp.json();
@@ -3868,7 +3868,7 @@ async function loadExpenses() {
           <div class="flex-1 min-w-0">
             <div class="flex items-center gap-2">
               <p class="text-sm text-gray-300 truncate">${esc(e.vendor)}</p>
-              ${e.receipt_id ? `<a href="/api/tax/receipts/${e.receipt_id}/image?token=${token}" target="_blank" class="text-xs text-oc-500 hover:text-oc-400 flex-shrink-0" title="View receipt">&#128206;</a>` : ''}
+              ${e.receipt_id ? `<a href="/api/tax/receipts/${e.receipt_id}/image" target="_blank" class="text-xs text-oc-500 hover:text-oc-400 flex-shrink-0" title="View receipt">&#128206;</a>` : ''}
             </div>
             <p class="text-xs text-gray-500">${e.expense_date} &middot; ${e.category || 'Uncategorized'} &middot; <span class="${e.entity === 'business' ? 'text-oc-400' : 'text-purple-400'}">${e.entity}</span></p>
             ${e.description ? '<p class="text-xs text-gray-600 truncate">' + esc(e.description) + '</p>' : ''}
@@ -3912,7 +3912,7 @@ async function addExpense() {
 // Receipts
 async function loadReceipts() {
   try {
-    const resp = await authFetch(`/api/tax/receipts?token=${token}`);
+    const resp = await authFetch(`/api/tax/receipts`);
     const data = await resp.json();
     const list = document.getElementById('receipt-list');
     const receipts = data.receipts || [];
@@ -3921,7 +3921,7 @@ async function loadReceipts() {
     } else {
       list.innerHTML = receipts.map(r => `
         <div class="bg-gray-900 rounded-lg border border-gray-700 overflow-hidden">
-          <img src="${r.image_url}?token=${token}" class="w-full h-32 object-cover bg-gray-800" alt="" onerror="this.style.display='none'">
+          <img src="${r.image_url}" class="w-full h-32 object-cover bg-gray-800" alt="" onerror="this.style.display='none'">
           <div class="p-3">
             <p class="text-sm font-medium text-gray-300">${esc(r.vendor || 'Scanning...')}</p>
             <p class="text-xs text-gray-500">${r.receipt_date || ''} ${r.amount_display ? '&middot; ' + r.amount_display : ''}</p>
@@ -3941,7 +3941,7 @@ async function uploadReceipt(input) {
   status.textContent = 'Uploading...';
 
   try {
-    const resp = await fetch(`/api/tax/receipts?token=${token}`, {
+    const resp = await fetch(`/api/tax/receipts`, {
       method: 'POST',
       headers: { 'Content-Type': file.type },
       body: file
@@ -3957,7 +3957,7 @@ async function uploadReceipt(input) {
 // Load categories for the form
 async function loadCategories() {
   try {
-    const resp = await authFetch(`/api/tax/categories?token=${token}`);
+    const resp = await authFetch(`/api/tax/categories`);
     const data = await resp.json();
     const sel = document.getElementById('exp-category');
     sel.innerHTML = '<option value="">Select category</option>' +
@@ -3999,7 +3999,7 @@ function clearTaxChat() {
 // Load existing tax conversation on page load
 async function loadTaxConversation() {
   try {
-    const resp = await authFetch(`/api/conversations?token=${token}&agent=main&limit=5`);
+    const resp = await authFetch(`/api/conversations?agent=main&limit=5`);
     const data = await resp.json();
     const convs = (data.conversations || []).filter(c =>
       c.title && c.title.toLowerCase().includes('tax')
@@ -4013,7 +4013,7 @@ async function loadTaxConversation() {
 
 async function loadTaxMessages(convId) {
   try {
-    const resp = await authFetch(`/api/conversations/${convId}?token=${token}`);
+    const resp = await authFetch(`/api/conversations/${convId}`);
     const data = await resp.json();
     const messages = data.messages || [];
     if (messages.length === 0) return;
@@ -4084,7 +4084,7 @@ async function sendTaxChat() {
       try {
         const cr = await authFetch('/api/conversations', {
           method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ token, agent: 'main', title: `Tax Assistant ${selectedYear}` })
+          body: JSON.stringify({ agent: 'main', title: `Tax Assistant ${selectedYear}` })
         });
         const cd = await cr.json();
         if (cd.id) taxConvId = cd.id;
@@ -4095,8 +4095,8 @@ async function sendTaxChat() {
     let taxContext = '';
     try {
       const [sumResp, incResp] = await Promise.all([
-        authFetch(`/api/tax/summary?token=${token}&start=${yearStart()}&end=${yearEnd()}`),
-        authFetch(`/api/tax/income?token=${token}&year=${selectedYear}`).catch(() => null),
+        authFetch(`/api/tax/summary?start=${yearStart()}&end=${yearEnd()}`),
+        authFetch(`/api/tax/income?year=${selectedYear}`).catch(() => null),
       ]);
       const sum = await sumResp.json();
       const inc = incResp ? await incResp.json().catch(() => ({})) : {};
@@ -4132,7 +4132,7 @@ async function sendTaxChat() {
     } else {
       // Stream with tool visibility
       let toolsUsed = [];
-      const evtSource = new EventSource(`/api/message/${turnId}/stream?token=${token}`);
+      const evtSource = new EventSource(`/api/message/${turnId}/stream`);
       evtSource.onmessage = (event) => {
         const ev = JSON.parse(event.data);
         switch (ev.event) {
@@ -4243,7 +4243,7 @@ async function uploadTaxDoc(input) {
   status.textContent = 'Uploading & classifying...';
   try {
     // Use smart upload endpoint — auto-routes to receipt, document, or statement handler
-    const resp = await fetch(`/api/tax/upload?token=${token}`, {
+    const resp = await fetch(`/api/tax/upload`, {
       method: 'POST', headers: { 'Content-Type': file.type }, body: file
     });
     const data = await resp.json();
@@ -4260,7 +4260,7 @@ async function uploadTaxDoc(input) {
   } catch(e) {
     // Fallback to legacy endpoint
     try {
-      const resp2 = await fetch(`/api/tax/documents?token=${token}`, {
+      const resp2 = await fetch(`/api/tax/documents`, {
         method: 'POST', headers: { 'Content-Type': file.type }, body: file
       });
       const data2 = await resp2.json();
@@ -4274,7 +4274,7 @@ async function uploadTaxDoc(input) {
 
 async function loadDocuments() {
   try {
-    const resp = await authFetch(`/api/tax/documents?token=${token}&year=${selectedYear}`);
+    const resp = await authFetch(`/api/tax/documents?year=${selectedYear}`);
     const data = await resp.json();
     const docs = data.documents || [];
     const list = document.getElementById('doc-list');
@@ -4340,7 +4340,7 @@ async function loadDocuments() {
                     d.status === 'duplicate' ? 'bg-red-900/50 text-red-400' :
                     'bg-yellow-900/50 text-yellow-400'
                   }">${d.status === 'duplicate' ? 'Possible duplicate' : d.status}</span>
-                  <a href="${d.image_url}?token=${token}" target="_blank" class="text-xs text-oc-500 hover:text-oc-400">View Original</a>
+                  <a href="${d.image_url}" target="_blank" class="text-xs text-oc-500 hover:text-oc-400">View Original</a>
                 </div>
               </div>
               ${fieldsHtml}
@@ -4366,7 +4366,7 @@ async function keepDoc(docId) {
     await authFetch(`/api/tax/documents/${docId}/status`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, status: 'scanned' })
+      body: JSON.stringify({ status: 'scanned' })
     });
     loadDocuments();
   } catch(e) { console.log('keep:', e); }
@@ -4377,7 +4377,7 @@ async function discardDoc(docId) {
     await authFetch(`/api/tax/documents/${docId}/status`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, status: 'discarded' })
+      body: JSON.stringify({ status: 'discarded' })
     });
     loadDocuments();
   } catch(e) { console.log('discard:', e); }
@@ -4388,7 +4388,7 @@ async function updateDocField(docId, field, value) {
     await authFetch(`/api/tax/documents/${docId}/field`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, field, value })
+      body: JSON.stringify({ field, value })
     });
   } catch(e) { console.log('update field:', e); }
 }
@@ -4479,7 +4479,7 @@ setTimeout(recalcHomeOffice, 500);
 // ── Property Profile ──
 async function loadPropertyProfile() {
   try {
-    const resp = await authFetch(`/api/tax/property?token=${token}`);
+    const resp = await authFetch(`/api/tax/property`);
     const data = await resp.json();
     const profiles = data.profiles || [];
     if (profiles.length > 0) {
@@ -4557,7 +4557,7 @@ async function saveProperty() {
 async function autofillProperty() {
   document.getElementById('prop-status').textContent = 'Auto-filling from documents...';
   try {
-    const resp = await authFetch(`/api/tax/deduction/autofill?token=${token}&year=${selectedYear}`);
+    const resp = await authFetch(`/api/tax/deduction/autofill?year=${selectedYear}`);
     const data = await resp.json();
     if (data.mortgage_interest_cents > 0) {
       document.getElementById('prop-mortgage-interest').value = (data.mortgage_interest_cents / 100).toFixed(2);
@@ -4582,7 +4582,7 @@ async function autofillProperty() {
 // ── Statement Transactions ──
 async function loadStatementTransactions() {
   try {
-    const resp = await authFetch(`/api/tax/statements/transactions?token=${token}&start=${yearStart()}&end=${yearEnd()}`);
+    const resp = await authFetch(`/api/tax/statements/transactions?start=${yearStart()}&end=${yearEnd()}`);
     const data = await resp.json();
     const txns = data.transactions || [];
     const countEl = document.getElementById('stmt-txn-count');
@@ -4616,7 +4616,7 @@ async function loadStatementTransactions() {
 async function loadWizard() {
   document.getElementById('wizard-year').textContent = selectedYear;
   try {
-    const resp = await authFetch(`/api/tax/wizard?token=${token}&year=${selectedYear}`);
+    const resp = await authFetch(`/api/tax/wizard?year=${selectedYear}`);
     const data = await resp.json();
 
     // Progress
@@ -4726,7 +4726,7 @@ async function connectSimpleFIN() {
 
 async function loadConnections() {
   try {
-    const [cr,er]=await Promise.all([authFetch(`/api/financial/connections?token=${token}`),authFetch(`/api/financial/email?token=${token}`).catch(()=>null)]);
+    const [cr,er]=await Promise.all([authFetch(`/api/financial/connections`),authFetch(`/api/financial/email`).catch(()=>null)]);
     const cd=await cr.json(), conns=cd.connections||[], list=document.getElementById('connections-list');
     if(!conns.length){list.innerHTML='<p class="text-xs text-gray-600">No accounts connected yet.</p>';}
     else{list.innerHTML=conns.map(c=>`<div class="p-3 rounded-lg bg-gray-900 border border-gray-700/50 flex items-center justify-between"><div class="flex-1"><div class="flex items-center gap-2"><span class="text-sm font-medium text-gray-300">${esc(c.institution_name||'Unknown')}</span><span class="text-xs px-1.5 py-0.5 rounded ${c.provider==='plaid'?'bg-indigo-900/50 text-indigo-400':'bg-emerald-900/50 text-emerald-400'}">${c.provider}</span><span class="text-xs px-1.5 py-0.5 rounded ${c.status==='active'?'bg-green-900/50 text-green-400':'bg-red-900/50 text-red-400'}">${c.status}</span></div><p class="text-xs text-gray-500 mt-1">${c.last_sync_at?'Synced: '+new Date(c.last_sync_at*1000).toLocaleDateString():'Never synced'}${c.error?' <span class="text-red-400">'+esc(c.error)+'</span>':''}</p></div><div class="flex gap-2 flex-shrink-0 ml-3"><button onclick="syncConn(${c.id})" class="text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 px-2.5 py-1.5 rounded-lg">Sync</button><button onclick="disconnConn(${c.id},'${esc(c.institution_name||'')}')" class="text-xs bg-red-900/30 hover:bg-red-900/50 text-red-400 px-2.5 py-1.5 rounded-lg">Disconnect</button></div></div>`).join('');}
@@ -4735,20 +4735,20 @@ async function loadConnections() {
   } catch(e){console.log('connections:',e);}
 }
 async function syncConn(id){try{await authFetch(`/api/financial/connections/${id}/sync`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});loadConnections();}catch(e){alert('Sync failed');}}
-async function disconnConn(id,name){if(!confirm(`Disconnect ${name}?`))return;try{await authFetch(`/api/financial/connections/${id}?token=${token}`,{method:'DELETE'});loadConnections();}catch(e){}}
+async function disconnConn(id,name){if(!confirm(`Disconnect ${name}?`))return;try{await authFetch(`/api/financial/connections/${id}`,{method:'DELETE'});loadConnections();}catch(e){}}
 async function connectGmail(){const s=document.getElementById('gmail-status');s.textContent='Starting OAuth...';try{const r=await authFetch('/api/financial/email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,provider:'gmail'})});const d=await r.json();if(d.oauth_url){window.open(d.oauth_url,'_blank','width=600,height=700');s.textContent='Complete in popup...';}else{s.textContent=d.error||'Failed';}}catch(e){s.textContent='Error';}}
 async function scanEmail(id){try{await authFetch(`/api/financial/email/${id}/scan`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});loadConnections();}catch(e){}}
-async function disconnEmail(id){if(!confirm('Remove?'))return;try{await authFetch(`/api/financial/email/${id}?token=${token}`,{method:'DELETE'});loadConnections();}catch(e){}}
+async function disconnEmail(id){if(!confirm('Remove?'))return;try{await authFetch(`/api/financial/email/${id}`,{method:'DELETE'});loadConnections();}catch(e){}}
 
 // ── Investments ──
 async function connectAlpaca(){const k=document.getElementById('alpaca-key').value.trim(),s=document.getElementById('alpaca-secret').value.trim(),st=document.getElementById('alpaca-status');if(!k||!s){st.textContent='Key+secret required';return;}st.textContent='Connecting...';try{const r=await authFetch('/api/financial/investments/accounts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,broker:'alpaca',api_key:k,api_secret:s,base_url:document.getElementById('alpaca-env').value,nickname:document.getElementById('alpaca-nickname').value.trim()||null})});const d=await r.json();st.textContent=d.success?'Connected!':d.error||'Failed';st.className='text-xs '+(d.success?'text-green-400':'text-red-400');if(d.success){document.getElementById('alpaca-key').value='';document.getElementById('alpaca-secret').value='';loadInvestmentAccounts();loadInvestmentSummary();}}catch(e){st.textContent='Error';}}
 async function connectCoinbase(){const k=document.getElementById('coinbase-key').value.trim(),s=document.getElementById('coinbase-secret').value.trim(),st=document.getElementById('coinbase-status');if(!k||!s){st.textContent='Key+secret required';return;}st.textContent='Connecting...';try{const r=await authFetch('/api/financial/investments/accounts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,broker:'coinbase',api_key:k,api_secret:s})});const d=await r.json();st.textContent=d.success?'Connected!':d.error||'Failed';st.className='text-xs '+(d.success?'text-green-400':'text-red-400');if(d.success){document.getElementById('coinbase-key').value='';document.getElementById('coinbase-secret').value='';loadInvestmentAccounts();}}catch(e){st.textContent='Error';}}
-async function loadInvestmentAccounts(){try{const r=await authFetch(`/api/financial/investments/accounts?token=${token}`);const d=await r.json();const a=d.accounts||[],l=document.getElementById('inv-accounts-list');if(!a.length){l.innerHTML='<p class="text-xs text-gray-600">No brokerage accounts connected.</p>';return;}l.innerHTML=a.map(a=>`<div class="flex items-center justify-between p-3 rounded-lg bg-gray-900 border border-gray-700/50"><div class="flex-1"><div class="flex items-center gap-2"><span class="text-sm font-medium text-gray-300">${esc(a.nickname||a.broker)}</span><span class="text-xs px-1.5 py-0.5 rounded ${a.broker==='alpaca'?'bg-yellow-900/50 text-yellow-400':'bg-blue-900/50 text-blue-400'}">${a.broker}</span></div><p class="text-xs text-gray-500 mt-0.5">${a.last_sync_at?'Synced: '+new Date(a.last_sync_at*1000).toLocaleDateString():'Never synced'}</p></div><div class="flex gap-2 ml-3"><button onclick="syncInv(${a.id})" class="text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 px-2.5 py-1.5 rounded-lg">Sync</button><button onclick="disconnInv(${a.id},'${esc(a.nickname||a.broker)}')" class="text-xs bg-red-900/30 hover:bg-red-900/50 text-red-400 px-2.5 py-1.5 rounded-lg">Remove</button></div></div>`).join('');}catch(e){console.log('inv:',e);}}
+async function loadInvestmentAccounts(){try{const r=await authFetch(`/api/financial/investments/accounts`);const d=await r.json();const a=d.accounts||[],l=document.getElementById('inv-accounts-list');if(!a.length){l.innerHTML='<p class="text-xs text-gray-600">No brokerage accounts connected.</p>';return;}l.innerHTML=a.map(a=>`<div class="flex items-center justify-between p-3 rounded-lg bg-gray-900 border border-gray-700/50"><div class="flex-1"><div class="flex items-center gap-2"><span class="text-sm font-medium text-gray-300">${esc(a.nickname||a.broker)}</span><span class="text-xs px-1.5 py-0.5 rounded ${a.broker==='alpaca'?'bg-yellow-900/50 text-yellow-400':'bg-blue-900/50 text-blue-400'}">${a.broker}</span></div><p class="text-xs text-gray-500 mt-0.5">${a.last_sync_at?'Synced: '+new Date(a.last_sync_at*1000).toLocaleDateString():'Never synced'}</p></div><div class="flex gap-2 ml-3"><button onclick="syncInv(${a.id})" class="text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 px-2.5 py-1.5 rounded-lg">Sync</button><button onclick="disconnInv(${a.id},'${esc(a.nickname||a.broker)}')" class="text-xs bg-red-900/30 hover:bg-red-900/50 text-red-400 px-2.5 py-1.5 rounded-lg">Remove</button></div></div>`).join('');}catch(e){console.log('inv:',e);}}
 async function syncInv(id){try{const r=await authFetch(`/api/financial/investments/accounts/${id}/sync`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});const d=await r.json();if(d.success){loadInvestmentAccounts();loadInvestmentSummary();loadInvestmentTransactions();loadHoldings();}else{alert(d.error||'Failed');}}catch(e){alert('Error');}}
-async function disconnInv(id,name){if(!confirm(`Remove ${name}?`))return;try{await authFetch(`/api/financial/investments/accounts/${id}?token=${token}`,{method:'DELETE'});loadInvestmentAccounts();loadInvestmentSummary();}catch(e){}}
-async function loadInvestmentSummary(){try{const r=await authFetch(`/api/financial/investments?token=${token}&year=${selectedYear}`);const d=await r.json();document.getElementById('inv-short-term').textContent=fmtSignedDollars(d.short_term_cents||0);document.getElementById('inv-long-term').textContent=fmtSignedDollars(d.long_term_cents||0);document.getElementById('inv-dividends').textContent=fmtDollars((d.dividends_cents||0)/100);document.getElementById('inv-net-pl').textContent=fmtSignedDollars(d.net_realized_cents||0);}catch(e){console.log('inv sum:',e);}}
-async function loadInvestmentTransactions(){try{let url=`/api/financial/investments/transactions?token=${token}&start=${yearStart()}&end=${yearEnd()}`;const tf=document.getElementById('inv-filter-type')?.value;const bf=document.getElementById('inv-filter-broker')?.value;if(tf)url+=`&activity_type=${tf}`;if(bf)url+=`&broker=${bf}`;const r=await authFetch(url);const d=await r.json();const txns=d.transactions||[];document.getElementById('inv-txn-count').textContent=txns.length+' txns';const l=document.getElementById('inv-txn-list');if(!txns.length){l.innerHTML='<p class="text-xs text-gray-600">No transactions found.</p>';return;}l.innerHTML=txns.map(t=>{const sc=t.side==='buy'?'text-green-400':t.side==='sell'?'text-red-400':'text-gray-400';const pl=t.realized_pl_cents!=null?`<span class="${t.realized_pl_cents>=0?'text-green-400':'text-red-400'}">${fmtSignedDollars(t.realized_pl_cents)}</span>`:'';return`<div class="flex items-center justify-between py-1.5 border-b border-gray-700/30 text-xs"><div class="flex-1"><div class="flex items-center gap-2"><span class="text-gray-400">${t.transaction_date}</span><span class="px-1.5 py-0.5 rounded bg-gray-800 text-gray-400">${t.activity_type}</span>${t.symbol?`<span class="font-medium text-gray-200">${esc(t.symbol)}</span>`:''}${t.side?`<span class="${sc}">${t.side}</span>`:''}</div></div><div class="flex items-center gap-3 ml-3">${pl}<span class="font-medium text-gray-200">${fmtSignedDollars(t.amount_cents)}</span><span class="text-gray-600">${t.broker}</span></div></div>`;}).join('');}catch(e){console.log('inv txn:',e);}}
-async function loadHoldings(){try{const r=await authFetch(`/api/financial/investments/holdings?token=${token}`);const d=await r.json();const h=d.holdings||[];document.getElementById('holdings-as-of').textContent=d.as_of?'as of '+d.as_of:'';const l=document.getElementById('holdings-list');if(!h.length){l.innerHTML='<p class="text-xs text-gray-600">No holdings. Connect and sync a brokerage.</p>';return;}l.innerHTML=h.map(p=>`<div class="flex items-center justify-between py-1.5 border-b border-gray-700/30 text-xs"><span class="w-16 font-medium text-gray-200">${esc(p.symbol)}</span><span class="w-16 text-right text-gray-400">${p.qty}</span><span class="w-20 text-right text-gray-300">${p.market_value_cents?fmtDollars(p.market_value_cents/100):'--'}</span><span class="w-20 text-right ${(p.market_value_cents||0)-(p.cost_basis_cents||0)>=0?'text-green-400':'text-red-400'}">${fmtSignedDollars((p.market_value_cents||0)-(p.cost_basis_cents||0))}</span><span class="w-12 text-right text-gray-600">${p.broker}</span></div>`).join('');}catch(e){console.log('holdings:',e);}}
+async function disconnInv(id,name){if(!confirm(`Remove ${name}?`))return;try{await authFetch(`/api/financial/investments/accounts/${id}`,{method:'DELETE'});loadInvestmentAccounts();loadInvestmentSummary();}catch(e){}}
+async function loadInvestmentSummary(){try{const r=await authFetch(`/api/financial/investments?year=${selectedYear}`);const d=await r.json();document.getElementById('inv-short-term').textContent=fmtSignedDollars(d.short_term_cents||0);document.getElementById('inv-long-term').textContent=fmtSignedDollars(d.long_term_cents||0);document.getElementById('inv-dividends').textContent=fmtDollars((d.dividends_cents||0)/100);document.getElementById('inv-net-pl').textContent=fmtSignedDollars(d.net_realized_cents||0);}catch(e){console.log('inv sum:',e);}}
+async function loadInvestmentTransactions(){try{let url=`/api/financial/investments/transactions?start=${yearStart()}&end=${yearEnd()}`;const tf=document.getElementById('inv-filter-type')?.value;const bf=document.getElementById('inv-filter-broker')?.value;if(tf)url+=`&activity_type=${tf}`;if(bf)url+=`&broker=${bf}`;const r=await authFetch(url);const d=await r.json();const txns=d.transactions||[];document.getElementById('inv-txn-count').textContent=txns.length+' txns';const l=document.getElementById('inv-txn-list');if(!txns.length){l.innerHTML='<p class="text-xs text-gray-600">No transactions found.</p>';return;}l.innerHTML=txns.map(t=>{const sc=t.side==='buy'?'text-green-400':t.side==='sell'?'text-red-400':'text-gray-400';const pl=t.realized_pl_cents!=null?`<span class="${t.realized_pl_cents>=0?'text-green-400':'text-red-400'}">${fmtSignedDollars(t.realized_pl_cents)}</span>`:'';return`<div class="flex items-center justify-between py-1.5 border-b border-gray-700/30 text-xs"><div class="flex-1"><div class="flex items-center gap-2"><span class="text-gray-400">${t.transaction_date}</span><span class="px-1.5 py-0.5 rounded bg-gray-800 text-gray-400">${t.activity_type}</span>${t.symbol?`<span class="font-medium text-gray-200">${esc(t.symbol)}</span>`:''}${t.side?`<span class="${sc}">${t.side}</span>`:''}</div></div><div class="flex items-center gap-3 ml-3">${pl}<span class="font-medium text-gray-200">${fmtSignedDollars(t.amount_cents)}</span><span class="text-gray-600">${t.broker}</span></div></div>`;}).join('');}catch(e){console.log('inv txn:',e);}}
+async function loadHoldings(){try{const r=await authFetch(`/api/financial/investments/holdings`);const d=await r.json();const h=d.holdings||[];document.getElementById('holdings-as-of').textContent=d.as_of?'as of '+d.as_of:'';const l=document.getElementById('holdings-list');if(!h.length){l.innerHTML='<p class="text-xs text-gray-600">No holdings. Connect and sync a brokerage.</p>';return;}l.innerHTML=h.map(p=>`<div class="flex items-center justify-between py-1.5 border-b border-gray-700/30 text-xs"><span class="w-16 font-medium text-gray-200">${esc(p.symbol)}</span><span class="w-16 text-right text-gray-400">${p.qty}</span><span class="w-20 text-right text-gray-300">${p.market_value_cents?fmtDollars(p.market_value_cents/100):'--'}</span><span class="w-20 text-right ${(p.market_value_cents||0)-(p.cost_basis_cents||0)>=0?'text-green-400':'text-red-400'}">${fmtSignedDollars((p.market_value_cents||0)-(p.cost_basis_cents||0))}</span><span class="w-12 text-right text-gray-600">${p.broker}</span></div>`).join('');}catch(e){console.log('holdings:',e);}}
 
 initYearSelector();
 
@@ -4845,7 +4845,7 @@ async function loadProfile() {
   try {
     const yr = selectedYear || yearStart().slice(0,4);
     document.getElementById('profile-year-label').textContent = `Tax Year ${yr}`;
-    const resp = await authFetch(`/api/tax/profile?token=${token}&year=${yr}`);
+    const resp = await authFetch(`/api/tax/profile?year=${yr}`);
     const data = await resp.json();
     renderProfileView(data.profile, data.dependents, data.income_sources);
   } catch(e) {}
@@ -5010,7 +5010,7 @@ async function autoFillProfileFromScans() {
   result.textContent = 'Reading scans...'; result.className = 'text-xs self-center text-gray-400';
   sources.textContent = '';
   try {
-    const resp = await authFetch(`/api/tax/profile/suggest?token=${token}&year=${yr}`);
+    const resp = await authFetch(`/api/tax/profile/suggest?year=${yr}`);
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const data = await resp.json();
     // Map suggestion field → input id. Order matters for the spouse section
@@ -5084,13 +5084,13 @@ function showAddDependent() {
   const yr = selectedYear || yearStart().slice(0,4);
   authFetch('/api/tax/dependents', {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ token, year:parseInt(yr), first_name:first, last_name:last, relationship:rel, date_of_birth:dob })
+    body: JSON.stringify({ year:parseInt(yr), first_name:first, last_name:last, relationship:rel, date_of_birth:dob })
   }).then(() => loadProfile());
 }
 
 async function deleteDependent(id) {
   if (!confirm('Remove this dependent?')) return;
-  await authFetch(`/api/tax/dependents/${id}?token=${token}`, { method:'DELETE' });
+  await authFetch(`/api/tax/dependents/${id}`, { method:'DELETE' });
   loadProfile();
 }
 
@@ -5105,7 +5105,7 @@ function parseCents(s) { return Math.round(parseFloat(String(s).replace(/[$,]/g,
 async function loadExtensionData() {
   try {
     const yr = selectedYear || yearStart().slice(0,4);
-    const resp = await authFetch(`/api/tax/extension/status?token=${token}&year=${yr}`);
+    const resp = await authFetch(`/api/tax/extension/status?year=${yr}`);
     const data = await resp.json();
     extData = data;
     // Debug: show what we got
@@ -5180,7 +5180,7 @@ async function startExtFiling(method) {
   if (method === 'mail') {
     // Download form text and mark as filed
     const payment = parseCents(document.getElementById('ext-payment').value);
-    const resp = await authFetch(`/api/tax/extension?token=${token}&year=${yr}&payment=${payment}`);
+    const resp = await authFetch(`/api/tax/extension?year=${yr}&payment=${payment}`);
     if (resp.ok) {
       const blob = await resp.blob();
       const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
@@ -5244,7 +5244,7 @@ async function renderExtFile(method) {
 
   // Fetch taxpayer profile for identity fields
   try {
-    const profResp = await authFetch('/api/tax/profile?token=' + token + '&year=' + yr);
+    const profResp = await authFetch('/api/tax/profile?year=' + yr);
     const profData = await profResp.json();
     const p = profData.profile || {};
     const filingLabels = {single:'Single', married_jointly:'Married Filing Jointly', married_separately:'Married Filing Separately', head_of_household:'Head of Household'};
@@ -5412,7 +5412,7 @@ async function loadDeductionsTab() {
 
 async function loadQuestionnaire() {
   try {
-    const resp = await authFetch(`/api/tax/questionnaire?token=${token}&year=${selectedYear || yearStart().slice(0,4)}`);
+    const resp = await authFetch(`/api/tax/questionnaire?year=${selectedYear || yearStart().slice(0,4)}`);
     const data = await resp.json();
     const q = data.questionnaire || {};
     dedQAnswers = q.answers || {};
@@ -5467,7 +5467,7 @@ async function saveQAnswer(key, value) {
   try {
     await authFetch('/api/tax/questionnaire', {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ token, year: parseInt(selectedYear || yearStart().slice(0,4)), answers: dedQAnswers, completed: false })
+      body: JSON.stringify({ year: parseInt(selectedYear || yearStart().slice(0,4)), answers: dedQAnswers, completed: false })
     });
   } catch(e) {}
 }
@@ -5488,7 +5488,7 @@ async function completeQuestionnaire() {
   try {
     await authFetch('/api/tax/questionnaire', {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ token, year: parseInt(selectedYear || yearStart().slice(0,4)), answers: dedQAnswers, completed: true })
+      body: JSON.stringify({ year: parseInt(selectedYear || yearStart().slice(0,4)), answers: dedQAnswers, completed: true })
     });
     dedQComplete = true;
     renderQuestionnaire();
@@ -5504,7 +5504,7 @@ async function triggerScan() {
   try {
     const resp = await authFetch('/api/tax/deductions/scan', {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ token, year: parseInt(selectedYear || yearStart().slice(0,4)) })
+      body: JSON.stringify({ year: parseInt(selectedYear || yearStart().slice(0,4)) })
     });
     const data = await resp.json();
     const found = data.scan?.candidates_found || 0;
@@ -5527,7 +5527,7 @@ async function triggerDeepScan() {
   try {
     const resp = await authFetch('/api/tax/deductions/deep-scan', {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ token, year: parseInt(selectedYear || yearStart().slice(0,4)) })
+      body: JSON.stringify({ year: parseInt(selectedYear || yearStart().slice(0,4)) })
     });
     const data = await resp.json();
     const found = data.candidates_found || 0;
@@ -5543,7 +5543,7 @@ async function triggerDeepScan() {
 
 async function loadDeductionSummary() {
   try {
-    const resp = await authFetch(`/api/tax/deductions/summary?token=${token}&year=${selectedYear || yearStart().slice(0,4)}`);
+    const resp = await authFetch(`/api/tax/deductions/summary?year=${selectedYear || yearStart().slice(0,4)}`);
     const data = await resp.json();
     document.getElementById('ded-pending').textContent = data.total_pending || 0;
     const appCents = data.total_approved_cents || 0;
@@ -5562,7 +5562,7 @@ async function loadDeductionSummary() {
 async function loadCandidates() {
   try {
     const yr = selectedYear || yearStart().slice(0,4);
-    let url = `/api/tax/deductions/candidates?token=${token}&year=${yr}&status=${dedCurrentStatus}`;
+    let url = `/api/tax/deductions/candidates?year=${yr}&status=${dedCurrentStatus}`;
     if (dedCurrentType) url += `&type=${dedCurrentType}`;
     const resp = await authFetch(url);
     const data = await resp.json();
@@ -5635,7 +5635,7 @@ async function selectCandidate(idx) {
   // Set category/entity dropdowns
   const catSel = document.getElementById('review-category');
   if (catSel.options.length <= 1) {
-    const cats = await authFetch(`/api/tax/categories?token=${token}`).then(r=>r.json());
+    const cats = await authFetch(`/api/tax/categories`).then(r=>r.json());
     catSel.innerHTML = (cats.categories||[]).map(cc=>`<option value="${cc.name}">${cc.name}</option>`).join('');
   }
   if (c.category_suggestion) catSel.value = c.category_suggestion;
@@ -5643,7 +5643,7 @@ async function selectCandidate(idx) {
 
   // Load context (document viewer)
   try {
-    const resp = await authFetch(`/api/tax/deductions/candidates/${c.id}/context?token=${token}`);
+    const resp = await authFetch(`/api/tax/deductions/candidates/${c.id}/context`);
     const ctx = await resp.json();
     const viewer = document.getElementById('ded-viewer');
     if (ctx.source_document) {
@@ -5653,7 +5653,7 @@ async function selectCandidate(idx) {
           <span class="ml-2 badge ${badgeClass(c.deduction_type)}">${c.deduction_type}</span>
           <span class="ml-2 text-gray-500">${Math.round(c.confidence*100)}% confidence</span>
         </div>
-        <img src="${ctx.source_document.image_url}?token=${token}" class="w-full rounded" alt="Source document" onerror="this.outerHTML='<p class=\\'text-xs text-gray-500 text-center py-4\\'>Document image unavailable</p>'">`;
+        <img src="${ctx.source_document.image_url}" class="w-full rounded" alt="Source document" onerror="this.outerHTML='<p class=\\'text-xs text-gray-500 text-center py-4\\'>Document image unavailable</p>'">`;
     } else {
       viewer.innerHTML = `
         <div class="flex flex-col items-center justify-center h-full gap-3">
@@ -5724,7 +5724,7 @@ function escapeHtml(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c
 // ── Credits tab ──
 async function loadCreditsTab() {
   try {
-    const resp = await authFetch(`/api/tax/credits/eligibility?token=${token}&year=${selectedYear}`);
+    const resp = await authFetch(`/api/tax/credits/eligibility?year=${selectedYear}`);
     const data = await resp.json();
     const grid = document.getElementById('credits-eligibility-grid');
     const credits = data.credits || [];
@@ -5814,9 +5814,9 @@ async function loadQuarterlyTab() {
   try {
     const fs = 'single'; // TODO: from profile; handler defaults this anyway
     const [recResp, listResp, projResp] = await Promise.all([
-      authFetch(`/api/tax/estimated-payments/recommended?token=${token}&year=${selectedYear}&filing_status=${fs}`),
-      authFetch(`/api/tax/estimated-payments?token=${token}&year=${selectedYear}`),
-      authFetch(`/api/tax/projection?token=${token}&year=${selectedYear}`),
+      authFetch(`/api/tax/estimated-payments/recommended?year=${selectedYear}&filing_status=${fs}`),
+      authFetch(`/api/tax/estimated-payments?year=${selectedYear}`),
+      authFetch(`/api/tax/projection?year=${selectedYear}`),
     ]);
     const rec = await recResp.json();
     const list = await listResp.json();
@@ -5886,7 +5886,7 @@ function updateAssetLife() {
 let _assetCache = [];
 async function loadDepreciationTab() {
   try {
-    const resp = await authFetch(`/api/tax/assets?token=${token}&year=${selectedYear}`);
+    const resp = await authFetch(`/api/tax/assets?year=${selectedYear}`);
     const data = await resp.json();
     const assets = data.assets || [];
     _assetCache = assets;
@@ -5940,7 +5940,7 @@ async function loadDepreciationTab() {
 
 async function viewSchedule(id) {
   try {
-    const resp = await authFetch(`/api/tax/assets/${id}/schedule?token=${token}`);
+    const resp = await authFetch(`/api/tax/assets/${id}/schedule`);
     const data = await resp.json();
     const asset = _assetCache.find(a => a.id === id);
     const title = asset ? asset.description : ('Asset #' + id);
@@ -5957,7 +5957,7 @@ async function viewSchedule(id) {
 
 async function saveAsset() {
   const body = {
-    token,
+
     description: document.getElementById('asset-desc').value,
     asset_class: document.getElementById('asset-class').value,
     macrs_life_years: parseInt(document.getElementById('asset-life').value),
@@ -5984,7 +5984,7 @@ async function saveAsset() {
 
 async function saveVehicleUsage() {
   const body = {
-    token,
+
     asset_id: parseInt(document.getElementById('veh-asset').value),
     tax_year: parseInt(document.getElementById('veh-year').value),
     business_miles: parseInt(document.getElementById('veh-biz-miles').value) || 0,
@@ -6004,8 +6004,8 @@ async function loadStateTab() {
   try {
     const [supResp, estResp, profResp] = await Promise.all([
       authFetch('/api/tax/state/supported'),
-      authFetch(`/api/tax/state/estimate?token=${token}&year=${selectedYear}`),
-      authFetch(`/api/tax/state/profile?token=${token}&year=${selectedYear}`),
+      authFetch(`/api/tax/state/estimate?year=${selectedYear}`),
+      authFetch(`/api/tax/state/profile?year=${selectedYear}`),
     ]);
     const sup = await supResp.json();
     const est = await estResp.json();
@@ -6068,7 +6068,7 @@ async function saveStateProfile() {
 let currentEntityId = null;
 async function loadEntitiesTab() {
   try {
-    const resp = await authFetch(`/api/tax/entities?token=${token}`);
+    const resp = await authFetch(`/api/tax/entities`);
     const data = await resp.json();
     const list = document.getElementById('entities-list');
     const entities = data.entities || [];
@@ -6091,7 +6091,7 @@ async function loadEntitiesTab() {
 
 async function saveEntity() {
   const body = {
-    token,
+
     entity_name: document.getElementById('ent-name').value,
     entity_type: document.getElementById('ent-type').value,
     ein: document.getElementById('ent-ein').value || null,
@@ -6112,11 +6112,11 @@ async function saveEntity() {
 async function showEntityDetail(id) {
   currentEntityId = id;
   try {
-    const resp = await authFetch(`/api/tax/entities/${id}/summary?token=${token}&year=${selectedYear}`);
+    const resp = await authFetch(`/api/tax/entities/${id}/summary?year=${selectedYear}`);
     const data = await resp.json();
     document.getElementById('entity-detail').classList.remove('hidden');
     // Fetch name from the list
-    const allResp = await authFetch(`/api/tax/entities?token=${token}`);
+    const allResp = await authFetch(`/api/tax/entities`);
     const all = await allResp.json();
     const ent = (all.entities || []).find(e => e.id === id);
     document.getElementById('ent-detail-name').textContent = ent ? ent.name : 'Entity #' + id;
@@ -6166,7 +6166,7 @@ async function saveShareholder() {
 async function generateK1s() {
   if (!currentEntityId) return;
   try {
-    const resp = await authFetch(`/api/tax/entities/${currentEntityId}/k1?token=${token}&year=${selectedYear}`);
+    const resp = await authFetch(`/api/tax/entities/${currentEntityId}/k1?year=${selectedYear}`);
     const data = await resp.json();
     const k1s = data.k1s || [];
     document.getElementById('ent-k1-results').innerHTML = k1s.length === 0 ? '<p class="text-xs text-gray-600">No shareholders — add one to generate K-1s.</p>' :
@@ -6197,7 +6197,7 @@ async function issue1099() {
 async function loadEntity1099List() {
   if (!currentEntityId) return;
   try {
-    const resp = await authFetch(`/api/tax/entities/${currentEntityId}/1099?token=${token}&year=${selectedYear}`);
+    const resp = await authFetch(`/api/tax/entities/${currentEntityId}/1099?year=${selectedYear}`);
     const data = await resp.json();
     const forms = data.forms || [];
     document.getElementById('ent-1099-results').innerHTML = forms.length === 0 ? '<p class="text-xs text-gray-600">No 1099s issued yet.</p>' :
@@ -6210,7 +6210,7 @@ async function loadEntity1099List() {
 
 async function loadEntityComparison() {
   const income = parseCurrencyInput('ent-cmp-income');
-  const qs = `?token=${token}&year=${selectedYear}${income ? '&income=' + income : ''}`;
+  const qs = `?year=${selectedYear}${income ? '&income=' + income : ''}`;
   try {
     const resp = await authFetch('/api/tax/entity-comparison' + qs);
     const data = await resp.json();
@@ -6253,7 +6253,7 @@ async function loadInsightsTab() {
 
 async function loadAuditRisk() {
   try {
-    const resp = await authFetch(`/api/tax/audit-risk?token=${token}&year=${selectedYear}`);
+    const resp = await authFetch(`/api/tax/audit-risk?year=${selectedYear}`);
     const data = await resp.json();
     const factors = data.factors || [];
     // The overall risk comes from the "overall" factor; others are individual factors.
@@ -6291,7 +6291,7 @@ async function loadAuditRisk() {
 
 async function loadInsightsList() {
   try {
-    const resp = await authFetch(`/api/tax/insights?token=${token}&year=${selectedYear}`);
+    const resp = await authFetch(`/api/tax/insights?year=${selectedYear}`);
     const data = await resp.json();
     const insights = data.insights || [];
     const list = document.getElementById('insights-list');
@@ -6342,7 +6342,7 @@ async function runWhatIf() {
 
 async function loadTaxContext() {
   try {
-    const resp = await authFetch(`/api/tax/context?token=${token}&year=${selectedYear}`);
+    const resp = await authFetch(`/api/tax/context?year=${selectedYear}`);
     const data = await resp.json();
     document.getElementById('tax-context-text').textContent = data.context || '(empty — no tax data to inject)';
   } catch(e) {
@@ -6357,7 +6357,7 @@ function showAddK1Form() { document.getElementById('add-k1-form').classList.togg
 async function loadLots() {
   try {
     const status = document.getElementById('lots-status').value || 'open';
-    const resp = await authFetch(`/api/tax/lots?token=${token}&status=${status}`);
+    const resp = await authFetch(`/api/tax/lots?status=${status}`);
     const data = await resp.json();
     const lots = data.lots || [];
     const list = document.getElementById('lots-list');
@@ -6381,7 +6381,7 @@ async function loadLots() {
 
 async function saveLot() {
   const body = {
-    token,
+
     symbol: document.getElementById('lot-symbol').value.toUpperCase(),
     asset_type: document.getElementById('lot-asset-type').value,
     quantity: parseFloat(document.getElementById('lot-qty').value),
@@ -6427,7 +6427,7 @@ async function sellLot(lotId, symbol, maxQty) {
 
 async function loadWashSales() {
   try {
-    const resp = await authFetch(`/api/tax/wash-sales?token=${token}&year=${selectedYear}`);
+    const resp = await authFetch(`/api/tax/wash-sales?year=${selectedYear}`);
     const data = await resp.json();
     const matches = data.wash_sales || [];
     document.getElementById('wash-count').textContent = matches.length + ' match' + (matches.length===1?'':'es');
@@ -6445,7 +6445,7 @@ async function loadWashSales() {
 
 async function loadForm8949() {
   try {
-    const resp = await authFetch(`/api/tax/form-8949?token=${token}&year=${selectedYear}`);
+    const resp = await authFetch(`/api/tax/form-8949?year=${selectedYear}`);
     const data = await resp.json();
     const shortRows = data.short_term || [];
     const longRows = data.long_term || [];
@@ -6475,7 +6475,7 @@ async function loadForm8949() {
 
 async function loadK1s() {
   try {
-    const resp = await authFetch(`/api/tax/k1?token=${token}&year=${selectedYear}`);
+    const resp = await authFetch(`/api/tax/k1?year=${selectedYear}`);
     const data = await resp.json();
     const k1s = data.k1s || [];
     const list = document.getElementById('k1-list');
@@ -6517,7 +6517,7 @@ async function saveK1() {
 
 async function loadCapitalGains() {
   try {
-    const resp = await authFetch(`/api/tax/capital-gains/summary?token=${token}&year=${selectedYear}`);
+    const resp = await authFetch(`/api/tax/capital-gains/summary?year=${selectedYear}`);
     const data = await resp.json();
     const grid = document.getElementById('cap-gains-grid');
     grid.innerHTML = `

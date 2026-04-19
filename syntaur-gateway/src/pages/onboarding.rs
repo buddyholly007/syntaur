@@ -132,6 +132,9 @@ pub async fn render() -> Html<String> {
 const PAGE_JS: &str = r##"
 const token = sessionStorage.getItem('syntaur_token') || '';
 if (!token) { window.location.href = '/'; }
+// Phase 1.1: every fetch carries Authorization: Bearer <token>; no ?token= in URLs.
+const AUTH_H = () => ({ 'Authorization': 'Bearer ' + token });
+const JSON_AUTH_H = () => ({ 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token });
 let createdAgentId = null;
 
 async function createAgent() {
@@ -148,8 +151,8 @@ async function createAgent() {
   try {
     const resp = await fetch('/api/me/agents', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, agent_id: agentId, display_name: name, base_agent: 'main', system_prompt: prompt || null })
+      headers: JSON_AUTH_H(),
+      body: JSON.stringify({ agent_id: agentId, display_name: name, base_agent: 'main', system_prompt: prompt || null })
     });
     const data = await resp.json();
     if (data.ok) {
@@ -177,15 +180,15 @@ async function savePersonality() {
   if (bio) {
     await fetch('/api/me/personality', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, agent_id: aid, doc_type: 'bio', title: 'About Me', content: bio })
+      headers: JSON_AUTH_H(),
+      body: JSON.stringify({ agent_id: aid, doc_type: 'bio', title: 'About Me', content: bio })
     });
   }
   if (prefs) {
     await fetch('/api/me/personality', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, agent_id: aid, doc_type: 'preferences', title: 'Communication Preferences', content: prefs })
+      headers: JSON_AUTH_H(),
+      body: JSON.stringify({ agent_id: aid, doc_type: 'preferences', title: 'Communication Preferences', content: prefs })
     });
   }
   goToDataStep();
@@ -201,15 +204,15 @@ async function saveDataLocation() {
   if (dir) {
     await fetch('/api/me/data-location', {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, path: dir })
+      headers: JSON_AUTH_H(),
+      body: JSON.stringify({ path: dir })
     });
   }
   skipToFinal();
 }
 
 async function skipToFinal() {
-  await fetch('/api/me/onboarding/complete?token=' + encodeURIComponent(token), { method: 'POST' });
+  await fetch('/api/me/onboarding/complete', { method: 'POST', headers: AUTH_H() });
   document.getElementById('step-3').classList.add('hidden');
   document.getElementById('step-4').classList.remove('hidden');
 }
@@ -227,8 +230,8 @@ const AGENT_ROLES = {
 
 async function showTeamStep() {
   // Seed defaults first
-  await fetch('/api/agents/seed_defaults?token=' + encodeURIComponent(token), { method: 'POST' });
-  const data = await (await fetch('/api/agents/list?token=' + encodeURIComponent(token))).json();
+  await fetch('/api/agents/seed_defaults', { method: 'POST', headers: AUTH_H() });
+  const data = await (await fetch('/api/agents/list', { headers: AUTH_H() })).json();
   const agents = data.agents || [];
   const listEl = document.getElementById('team-list');
 
@@ -260,8 +263,8 @@ async function saveTeamNames() {
     if (newName && newName.length <= 50) {
       await fetch('/api/agents/rename', {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token, agent_id: agentId, name: newName })
+        headers: JSON_AUTH_H(),
+        body: JSON.stringify({ agent_id: agentId, name: newName })
       });
     }
   }
@@ -271,7 +274,7 @@ async function saveTeamNames() {
 
 // Check if already onboarded
 (async function() {
-  const data = await (await fetch('/api/me/onboarding?token=' + encodeURIComponent(token))).json();
+  const data = await (await fetch('/api/me/onboarding', { headers: AUTH_H() })).json();
   if (data.complete) { window.location.href = '/'; }
 })();
 "##;

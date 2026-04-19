@@ -1265,7 +1265,7 @@ async function loadNowPlaying() {
   // let the server poll overwrite what setLocalNowPlaying just wrote.
   if (localPlaybackActive) return;
   try {
-    const resp = await authFetch(`/api/music/now_playing?token=${token}`);
+    const resp = await authFetch(`/api/music/now_playing`);
     const data = await resp.json();
     lastNowPlaying = data;
     const song = data.song || '';
@@ -1351,7 +1351,7 @@ async function control(action) {
     const resp = await authFetch('/api/music/control', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, action, entity_id }),
+      body: JSON.stringify({ action, entity_id }),
     });
     const data = await resp.json();
     if (data.error) alert(data.error + (data.hint ? '\n' + data.hint : ''));
@@ -1366,7 +1366,7 @@ async function onVolumeChange(v) {
     await authFetch('/api/music/control', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, action: 'volume', entity_id: lastNowPlaying.entity_id, value: parseInt(v)/100 }),
+      body: JSON.stringify({ action: 'volume', entity_id: lastNowPlaying.entity_id, value: parseInt(v)/100 }),
     });
   } catch(e) { /* ignore */ }
 }
@@ -1374,7 +1374,7 @@ async function onVolumeChange(v) {
 async function loadSpeakers() {
   const list = document.getElementById('speakers-list');
   try {
-    const resp = await authFetch(`/api/music/speakers?token=${token}`);
+    const resp = await authFetch(`/api/music/speakers`);
     const data = await resp.json();
     speakersData = data.speakers || [];
     if (speakersData.length === 0) {
@@ -1423,7 +1423,7 @@ async function setDefaultTarget(id, name) {
     await authFetch('/api/music/set_preferred_target', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, entity_id: id, name }),
+      body: JSON.stringify({ entity_id: id, name }),
     });
   } catch(e) { /* server-side is best-effort */ }
   loadSpeakers();
@@ -1445,7 +1445,7 @@ async function groupSelected() {
   try {
     const resp = await authFetch('/api/music/group', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, action: 'join', entity_id: leader, group_members: members }),
+      body: JSON.stringify({ action: 'join', entity_id: leader, group_members: members }),
     });
     if (resp.ok) { alert('Grouped!'); await loadSpeakers(); }
     else alert('Group failed — Home Assistant required for grouping.');
@@ -1456,7 +1456,7 @@ async function ungroupSelected() {
   for (const id of selectedSpeakers) {
     await authFetch('/api/music/group', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, action: 'unjoin', entity_id: id }),
+      body: JSON.stringify({ action: 'unjoin', entity_id: id }),
     }).catch(() => {});
   }
   selectedSpeakers.clear();
@@ -1489,7 +1489,7 @@ async function setEq(entity_id, sound_mode) {
   try {
     const resp = await authFetch('/api/music/eq', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, entity_id, sound_mode }),
+      body: JSON.stringify({ entity_id, sound_mode }),
     });
     if (resp.ok) alert(`EQ set to ${sound_mode}`);
   } catch(e) { /* ignore */ }
@@ -1567,9 +1567,8 @@ async function playSpotifyTrack(trackId) {
   try {
     const resp = await fetch('/api/music/spotify_play', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
       body: JSON.stringify({
-        token: token,
         uri: uri,
         device_id: spotifyReady ? spotifyDeviceId : null,
       }),
@@ -1591,7 +1590,7 @@ async function playSpotifyTrack(trackId) {
 
 async function checkMusicProvider() {
   try {
-    const resp = await authFetch(`/api/sync/providers?token=${token}`);
+    const resp = await authFetch(`/api/sync/providers`);
     const data = await resp.json();
     // All music catalog providers in priority order (user's preferred → others)
     const musicIds = ['apple_music', 'spotify', 'youtube_music', 'tidal'];
@@ -1764,7 +1763,6 @@ async function runDj(overridePrompt, displayText) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        token,
         prompt,
         count: parseInt(document.getElementById('dj-count').value),
         create_playlist: document.getElementById('dj-create-playlist').checked,
@@ -1923,7 +1921,7 @@ async function startDjStt(e) {
     const source = djAudioCtx.createMediaStreamSource(stream);
     djProcessor = djAudioCtx.createScriptProcessor(4096, 1, 1);
     const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    djSttWs = new WebSocket(`${wsProto}//${location.host}/ws/stt?token=${token}`);
+    djSttWs = new WebSocket(`${wsProto}//${location.host}/ws/stt`);
     djSttWs.binaryType = 'arraybuffer';
     djSttWs.onmessage = (msg) => {
       try {
@@ -1970,7 +1968,7 @@ function stopDjStt(e) {
 let lastDuckState = false;
 async function pollDuckState() {
   try {
-    const r = await fetch(`/api/music/duck_state?token=${token}`, { headers: { 'Authorization': 'Bearer ' + token } });
+    const r = await fetch(`/api/music/duck_state`, { headers: { 'Authorization': 'Bearer ' + token } });
     const d = await r.json();
     const ducking = !!d.ducking;
     if (ducking !== lastDuckState) {
@@ -2065,9 +2063,8 @@ async function playOnThisComputer(provider, trackId, uri, name, artist) {
     }
     fetch('/api/music/spotify_play', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
       body: JSON.stringify({
-        token: token,
         uri: uri || ('spotify:track:' + trackId),
         device_id: spotifyDeviceId,
       }),
@@ -2179,7 +2176,7 @@ function debouncedLocalSearch() {
 
 async function loadLocalFolders() {
   try {
-    const r = await fetch('/api/music/local/folders?token=' + encodeURIComponent(token));
+    const r = await authFetch('/api/music/local/folders');
     if (!r.ok) return;
     const d = await r.json();
     const folders = d.folders || [];
@@ -2228,7 +2225,7 @@ async function addLocalFolder() {
     const r = await fetch('/api/music/local/folders', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, path }),
+      body: JSON.stringify({ path }),
     });
     if (!r.ok) {
       const txt = await r.text();
@@ -2359,7 +2356,7 @@ async function fsPickerSelectCurrent() {
     const r = await fetch('/api/music/local/folders', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, path: fsPickerCurrent }),
+      body: JSON.stringify({ path: fsPickerCurrent }),
     });
     if (!r.ok) {
       const txt = await r.text();
@@ -2545,7 +2542,7 @@ async function toggleFavorite() {
   const isLoved = btn && btn.classList.contains('active');
   try {
     await fetch('/api/music/local/favorite/' + localPlaybackCurrent, { method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ token, favorite: !isLoved }) });
+      body: JSON.stringify({ favorite: !isLoved }) });
     btn?.classList.toggle('active', !isLoved);
   } catch(e) {}
 }
@@ -2645,7 +2642,7 @@ function setLocalNowPlaying(title, artist, trackId, extra) {
   // Log the play after a couple of seconds (skip scrubbing bounces).
   setTimeout(() => {
     if (localPlaybackCurrent === trackId) {
-      fetch('/api/music/local/played/' + trackId + '?token=' + encodeURIComponent(token), { method: 'POST' }).catch(()=>{});
+      authFetch('/api/music/local/played/' + trackId, { method: 'POST' }).catch(()=>{});
     }
   }, 2500);
 }
@@ -3247,7 +3244,7 @@ function renderTrackRow(t) {
     ? '<button class="text-[11px] text-pink-400 flex-shrink-0 local-fav-btn" data-track-id="' + t.id + '" title="Unlove">♥</button>'
     : '<button class="text-[11px] text-gray-600 hover:text-pink-400 opacity-0 group-hover:opacity-100 transition-opacity local-fav-btn flex-shrink-0" data-track-id="' + t.id + '" title="Love">♡</button>';
   const art = t.has_art
-    ? '<span class="row-art" style="background-image:url(/api/music/local/art/' + t.id + '?token=' + encodeURIComponent(token) + ')"></span>'
+    ? '<span class="row-art" style="background-image:url(/api/music/local/art/' + t.id + ')"></span>'
     : '<span class="row-art placeholder"></span>';
   return '<div class="flex items-center gap-2 px-2 py-1 rounded hover:bg-gray-900 group" data-track-row="' + t.id + '" style="user-select:none;-webkit-user-select:none;">'
     + art
@@ -3274,7 +3271,7 @@ async function openAddToPlaylist(trackId, anchor) {
   document.querySelectorAll('.add-to-pl-pop').forEach(el => el.remove());
   let pls = [];
   try {
-    const r = await fetch('/api/music/local/playlists?token=' + encodeURIComponent(token));
+    const r = await authFetch('/api/music/local/playlists');
     const d = await r.json();
     pls = d.playlists || [];
   } catch(e) {}
@@ -3296,7 +3293,7 @@ async function openAddToPlaylist(trackId, anchor) {
   const close = () => pop.remove();
   const addToExisting = async (plId) => {
     await fetch(`/api/music/local/playlists/${plId}/tracks`, { method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ token, track_id: trackId }) });
+      body: JSON.stringify({ track_id: trackId }) });
     showMusicNotice('Added to playlist', false);
     close();
   };
@@ -3309,7 +3306,7 @@ async function openAddToPlaylist(trackId, anchor) {
     const name = input.value.trim();
     if (!name) return;
     const r = await fetch('/api/music/local/playlists', { method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ token, name }) });
+      body: JSON.stringify({ name }) });
     if (!r.ok) return;
     const d = await r.json();
     await addToExisting(d.id);
@@ -3342,7 +3339,7 @@ function switchLibView(view) {
 }
 async function loadFavoritesView() {
   try {
-    const r = await fetch('/api/music/local/tracks?token=' + encodeURIComponent(token) + '&limit=200');
+    const r = await fetch('/api/music/local/tracks&limit=200');
     if (!r.ok) return;
     const d = await r.json();
     const favs = (d.tracks || []).filter(t => t.favorite);
@@ -3355,7 +3352,7 @@ async function loadRecentView() {
   // Use tracks endpoint sorted by last_played_at via a simple NL call
   try {
     const r = await fetch('/api/music/local/nl_search', { method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ token, query: 'most recently played' }) });
+      body: JSON.stringify({ query: 'most recently played' }) });
     const d = await r.json();
     const el = document.getElementById('local-lib-tracks');
     const rows = d.tracks || [];
@@ -3365,14 +3362,14 @@ async function loadRecentView() {
 }
 async function loadAlbumsView() {
   try {
-    const r = await fetch('/api/music/local/albums?token=' + encodeURIComponent(token));
+    const r = await authFetch('/api/music/local/albums');
     const d = await r.json();
     const el = document.getElementById('local-lib-tracks');
     const albums = d.albums || [];
     if (!albums.length) { el.innerHTML = '<p class="text-xs text-gray-500 italic p-4 text-center">No albums yet — scan a folder first.</p>'; return; }
     el.innerHTML = '<div class="alb-grid">' + albums.map(a => {
       const art = a.art_track_id
-        ? '<img src="/api/music/local/art/' + a.art_track_id + '?token=' + encodeURIComponent(token) + '" onerror="this.remove()">'
+        ? '<img src="/api/music/local/art/' + a.art_track_id + '" onerror="this.remove()">'
         : '';
       return '<div class="alb-tile" onclick="openAlbum(' + JSON.stringify(a.album).replace(/"/g,'&quot;') + ',' + JSON.stringify(a.artist).replace(/"/g,'&quot;') + ')">'
         + '<div class="alb-art">' + art + '</div>'
@@ -3390,7 +3387,7 @@ async function openAlbum(album, artist) {
   await loadLocalTracks();
   // Load liner notes in the background for this album
   try {
-    const r = await fetch('/api/music/local/album_notes?token=' + encodeURIComponent(token) + '&artist=' + encodeURIComponent(artist) + '&album=' + encodeURIComponent(album));
+    const r = await fetch('/api/music/local/album_notes&artist=' + encodeURIComponent(artist) + '&album=' + encodeURIComponent(album));
     if (r.ok) {
       const d = await r.json();
       const notice = document.getElementById('music-notice');
@@ -3404,7 +3401,7 @@ async function openAlbum(album, artist) {
 }
 async function loadArtistsView() {
   try {
-    const r = await fetch('/api/music/local/artists?token=' + encodeURIComponent(token));
+    const r = await authFetch('/api/music/local/artists');
     const d = await r.json();
     const el = document.getElementById('local-lib-tracks');
     const artists = d.artists || [];
@@ -3430,7 +3427,7 @@ async function loadPlaylistsView(hostEl) {
   const el = hostEl || document.getElementById('local-lib-tracks');
   if (!el) return;
   try {
-    const r = await fetch('/api/music/local/playlists?token=' + encodeURIComponent(token));
+    const r = await authFetch('/api/music/local/playlists');
     const d = await r.json();
     const pls = d.playlists || [];
     let html = '<div class="flex gap-2 mb-2"><input class="pl-new-name flex-1 bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-gray-200 outline-none" placeholder="New playlist name"><button class="pl-create bg-oc-600 hover:bg-oc-700 text-white px-3 rounded-lg text-xs">Create</button></div>';
@@ -3450,7 +3447,7 @@ async function loadPlaylistsView(hostEl) {
         const name = input.value.trim();
         if (!name) return;
         const r = await fetch('/api/music/local/playlists', { method: 'POST', headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({ token, name }) });
+          body: JSON.stringify({ name }) });
         if (r.ok) loadPlaylistsView(el);
       };
       createBtn.addEventListener('click', submit);
@@ -3466,7 +3463,7 @@ async function openPlaylist(id, name, hostEl) {
   const el = hostEl || document.getElementById('local-lib-tracks');
   if (!el) return;
   try {
-    const r = await fetch('/api/music/local/playlists/' + id + '?token=' + encodeURIComponent(token));
+    const r = await authFetch('/api/music/local/playlists/' + id);
     const d = await r.json();
     const tracks = d.tracks || [];
     // Header with playlist name, track count, and the four primary actions.
@@ -3504,13 +3501,13 @@ async function openPlaylist(id, name, hostEl) {
       const newName = prompt('Rename playlist:', name);
       if (!newName || newName.trim() === name) return;
       const r = await fetch('/api/music/local/playlists/' + id, { method: 'PATCH', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ token, name: newName.trim() }) });
+        body: JSON.stringify({ name: newName.trim() }) });
       if (r.ok) openPlaylist(id, newName.trim(), el);
     });
     // Delete.
     el.querySelector('.pl-delete').addEventListener('click', async () => {
       if (!confirm(`Delete playlist "${name}"? The tracks themselves stay in your library.`)) return;
-      const r = await fetch('/api/music/local/playlists/' + id + '?token=' + encodeURIComponent(token), { method: 'DELETE' });
+      const r = await authFetch('/api/music/local/playlists/' + id, { method: 'DELETE' });
       if (r.ok) loadPlaylistsView(el);
     });
     // Remove-from-playlist buttons.
@@ -3547,7 +3544,7 @@ function renderPlaylistTrackRow(t, plId) {
 }
 async function loadDuplicatesView() {
   try {
-    const r = await fetch('/api/music/local/duplicates?token=' + encodeURIComponent(token));
+    const r = await authFetch('/api/music/local/duplicates');
     const d = await r.json();
     const el = document.getElementById('local-lib-tracks');
     const groups = d.groups || [];
@@ -3567,7 +3564,7 @@ async function runNLSearch() {
   el.innerHTML = '<p class="text-xs text-gray-500 italic p-4 text-center">Thinking…</p>';
   try {
     const r = await fetch('/api/music/local/nl_search', { method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ token, query: q }) });
+      body: JSON.stringify({ query: q }) });
     const d = await r.json();
     const tracks = d.tracks || [];
     if (!tracks.length) { el.innerHTML = '<p class="text-xs text-gray-500 italic p-4 text-center">Couldn\'t match that query. Try different words.</p>'; return; }
@@ -3614,7 +3611,7 @@ async function runNLSearch() {
       const isLoved = favBtn.textContent.trim() === '♥';
       try {
         await fetch('/api/music/local/favorite/' + id, { method: 'POST', headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({ token, favorite: !isLoved }) });
+          body: JSON.stringify({ favorite: !isLoved }) });
         favBtn.textContent = isLoved ? '♡' : '♥';
         favBtn.className = isLoved
           ? 'text-[11px] text-gray-600 hover:text-pink-400 opacity-0 group-hover:opacity-100 transition-opacity local-fav-btn flex-shrink-0'
@@ -3722,8 +3719,7 @@ async function revertLocal() {
   if (!localDetailsState.trackId) return;
   if (!confirm('Revert this track to its original file tags? Any LLM / MusicBrainz edits will be discarded.')) return;
   try {
-    const r = await fetch('/api/music/local/revert/' + localDetailsState.trackId, { method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ token }) });
+    const r = await authFetch('/api/music/local/revert/' + localDetailsState.trackId, { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     showMusicNotice('Reverted to file tags', false);
     closeLocalDetails();
@@ -3788,7 +3784,7 @@ async function saveLocalEdit() {
     const r = await fetch('/api/music/local/match/' + localDetailsState.trackId, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, title: t, artist: a, album: al || null, source: 'user_edit' }),
+      body: JSON.stringify({ title: t, artist: a, album: al || null, source: 'user_edit' }),
     });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     showMusicNotice('\u2713 Saved', false);
@@ -3808,7 +3804,7 @@ async function cleanUpTags() {
     const r = await fetch('/api/music/local/retag_all', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, limit: 100 }),
+      body: JSON.stringify({ limit: 100 }),
     });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json();

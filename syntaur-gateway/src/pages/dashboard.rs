@@ -883,7 +883,7 @@ function showChatTab(tab) {
 async function loadTelegramMessages() {
   const container = document.getElementById('telegram-messages');
   try {
-    const resp = await authFetch(`/messages?token=${authToken}&n=50`);
+    const resp = await authFetch(`/messages?n=50`);
     const messages = await resp.json();
     telegramLoaded = true;
     if (!messages || messages.length === 0) {
@@ -918,7 +918,7 @@ let todos = [];
 
 async function loadTodos() {
   try {
-    const resp = await authFetch(`/api/todos?token=${authToken}`);
+    const resp = await authFetch('/api/todos');
     const data = await resp.json();
     todos = data.todos || [];
     renderTodos();
@@ -970,10 +970,7 @@ async function deleteCompleted() {
   const done = todos.filter(t => t.done);
   for (const t of done) {
     try {
-      await authFetch(`/api/todos/${t.id}`, {
-        method: 'DELETE', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ token: authToken })
-      });
+      await authFetch(`/api/todos/${t.id}`, { method: 'DELETE' });
     } catch(e) {}
   }
   await loadTodos();
@@ -987,7 +984,7 @@ async function addTodo() {
   try {
     await authFetch('/api/todos', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ token: authToken, text })
+      body: JSON.stringify({ text })
     });
     await loadTodos();
   } catch(e) { console.log('todo add:', e); }
@@ -999,7 +996,7 @@ async function toggleTodo(id) {
   try {
     await authFetch(`/api/todos/${id}`, {
       method: 'PUT', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ token: authToken, done: !todo.done })
+      body: JSON.stringify({ done: !todo.done })
     });
     await loadTodos();
   } catch(e) { console.log('todo toggle:', e); }
@@ -1007,10 +1004,7 @@ async function toggleTodo(id) {
 
 async function deleteTodo(id) {
   try {
-    await authFetch(`/api/todos/${id}`, {
-      method: 'DELETE', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ token: authToken })
-    });
+    await authFetch(`/api/todos/${id}`, { method: 'DELETE' });
     await loadTodos();
   } catch(e) { console.log('todo delete:', e); }
 }
@@ -1029,7 +1023,7 @@ async function loadCalendarEvents() {
   const endDate = new Date(year, month+1, 0);
   const end = `${year}-${String(month+1).padStart(2,'0')}-${endDate.getDate()}`;
   try {
-    const resp = await authFetch(`/api/calendar?token=${authToken}&start=${start}&end=${end}`);
+    const resp = await authFetch(`/api/calendar?start=${start}&end=${end}`);
     const data = await resp.json();
     calEvents = data.events || [];
   } catch(e) { calEvents = []; }
@@ -1265,7 +1259,6 @@ async function saveEvent() {
   const startTime = allDay || !time ? date : `${date}T${time}:00`;
 
   const payload = {
-    token: authToken,
     title: title,
     description: desc || null,
     start_time: startTime,
@@ -1323,7 +1316,7 @@ async function handleDropOnDay(ev, day) {
     await authFetch(`/api/calendar/${dragEventId}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: authToken, start_time: newStart })
+      body: JSON.stringify({ start_time: newStart })
     });
     await loadCalendarEvents();
   } catch(e) { console.log('drag reschedule:', e); }
@@ -1339,7 +1332,7 @@ async function importIcs(ev) {
     const resp = await authFetch('/api/calendar/import', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: authToken, ics_content: text })
+      body: JSON.stringify({ ics_content: text })
     });
     if (resp.ok) {
       const data = await resp.json();
@@ -1357,7 +1350,7 @@ async function importIcs(ev) {
 async function deleteEvent(id) {
   if (!confirm('Delete this event?')) return;
   try {
-    await authFetch(`/api/calendar/${id}?token=${authToken}`, { method: 'DELETE' });
+    await authFetch(`/api/calendar/${id}`, { method: 'DELETE' });
     await loadCalendarEvents();
   } catch(e) { console.log('delete event:', e); }
 }
@@ -1416,7 +1409,7 @@ function doLogout() {
 // ── Tax Summary Widget ──
 async function loadTaxSummary() {
   try {
-    const resp = await authFetch(`/api/tax/summary?token=${authToken}`);
+    const resp = await authFetch('/api/tax/summary');
     const data = await resp.json();
     const el = document.getElementById('tax-summary-content');
     if (!data.total_cents && data.total_cents !== 0) {
@@ -1557,12 +1550,11 @@ function attachFiles(fileList) {
 
 async function uploadChatFile(entry) {
   const fd = new FormData();
-  fd.append('token', authToken);
   fd.append('agent_id', getDashAgentId(dashCurrentAgent));
   fd.append('file', entry.file);
   fd.append('return_text', '1');
   try {
-    const r = await fetch('/api/knowledge/upload', { method: 'POST', body: fd });
+    const r = await fetch('/api/knowledge/upload', { method: 'POST', headers: { 'Authorization': 'Bearer ' + authToken }, body: fd });
     const data = await r.json();
     if (data.ok) {
       entry.status = 'ready';
@@ -1695,8 +1687,8 @@ async function sendMessage() {
   try {
     const resp = await fetch('/api/message', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: msg, agent: getDashAgentId(dashCurrentAgent), token: authToken })
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
+      body: JSON.stringify({ message: msg, agent: getDashAgentId(dashCurrentAgent) })
     });
     const data = await resp.json();
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -1934,7 +1926,7 @@ async function loadDashboard() {
       return a;
     });
     try {
-      const me = await (await authFetch('/api/me?token=' + encodeURIComponent(authToken))).json();
+      const me = await (await authFetch('/api/me')).json();
       if (me.user && me.user.name) setText('user-label', me.user.name);
       for (const ua of (me.agents || [])) {
         if (!dashAgents.includes(ua.display_name)) {
@@ -2090,7 +2082,7 @@ function showPhoneAccess() {
     const si = { userAgent: navigator.userAgent, screen: screen.width+'x'+screen.height, window: innerWidth+'x'+innerHeight, page: location.href, time: new Date().toISOString() };
     try { const r = await fetch('/health'); if (r.ok) si.gateway = await r.json(); } catch(e) {}
     try {
-      const res = await fetch('/api/bug-reports', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ token: BUG_TOKEN, description: desc, system_info: si, page_url: location.href }) });
+      const res = await fetch('/api/bug-reports', { method:'POST', headers:{'Content-Type':'application/json', 'Authorization': 'Bearer ' + BUG_TOKEN}, body: JSON.stringify({ description: desc, system_info: si, page_url: location.href }) });
       const data = await res.json();
       if (data.id) { fb.className='text-sm text-green-400'; fb.textContent='Bug report #'+data.id+' submitted. Thank you!'; fb.classList.remove('hidden'); btn.textContent='Submitted'; setTimeout(function(){ document.getElementById('bug-report-overlay').classList.add('hidden'); }, 2000); }
       else { fb.className='text-sm text-red-400'; fb.textContent=data.error||'Submission failed.'; fb.classList.remove('hidden'); btn.disabled=false; btn.textContent='Submit'; }
@@ -2105,7 +2097,7 @@ let mpLastEntityId = null;
 async function mpPoll() {
   if (typeof authToken === 'undefined' || !authToken) return;
   try {
-    const resp = await fetch(`/api/music/now_playing?token=${authToken}`, { headers: { 'Authorization': 'Bearer ' + authToken } });
+    const resp = await fetch('/api/music/now_playing', { headers: { 'Authorization': 'Bearer ' + authToken } });
     const data = await resp.json();
     const mp = document.getElementById('mini-player');
     if (!mp) return;
@@ -2147,8 +2139,8 @@ async function mpControl(action) {
   try {
     await fetch('/api/music/control', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: authToken, action, entity_id: mpLastEntityId }),
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken },
+      body: JSON.stringify({ action, entity_id: mpLastEntityId }),
     });
     setTimeout(mpPoll, 500);
   } catch(e) { console.log('mp-control:', e); }
@@ -2385,7 +2377,7 @@ async function ccLoadRecentThreads() {
   const box = document.getElementById('recent-threads-list');
   if (!box) return;
   try {
-    const r = await authFetch('/api/conversations/recent?token=' + encodeURIComponent(authToken) + '&limit=6');
+    const r = await authFetch('/api/conversations/recent?limit=6');
     if (!r.ok) return;
     const data = await r.json();
     const rows = data.conversations || data.items || data || [];
@@ -2430,7 +2422,7 @@ async function ccRefreshModuleBadges() {
   }
   // Tax badge — try to fetch pending-count; silent if endpoint missing.
   try {
-    const r = await authFetch('/api/tax/deductions/pending/count?token=' + encodeURIComponent(authToken));
+    const r = await authFetch('/api/tax/deductions/pending/count');
     if (r.ok) {
       const d = await r.json();
       const b = document.getElementById('mod-badge-tax');

@@ -1707,6 +1707,16 @@ const NEW_JS: &str = r##"
 // Settings index for the ⌘K palette. Generated server-side.
 window.SS_INDEX = %%SS_INDEX%%;
 
+// Phase 1.1: shared auth helpers. Every /api fetch goes through these so
+// the session token travels in Authorization: Bearer, never in a URL or
+// JSON body. Server middleware `security::lift_bearer_to_body_and_query`
+// copies the header back into query+body for handlers that still read
+// those positions.
+function _ssTok() { return sessionStorage.getItem('syntaur_token') || ''; }
+function ssAuthH() { return { 'Authorization': 'Bearer ' + _ssTok() }; }
+function ssJsonAuthH() { return { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _ssTok() }; }
+
+
 // Old section/page slugs (pre-2026-04-18 restructure). Any hash that
 // matches a key here is silently rewritten to its new destination so
 // bookmarks, checklist links, and shared URLs keep working.
@@ -2236,7 +2246,7 @@ function ssConfirmDestructive(title, detail, onConfirm) {
 // ── Privacy preferences (persist via /api/settings/preferences) ──────
 async function ssLoadPreferences() {
   try {
-    const r = await fetch('/api/settings/preferences?token=' + encodeURIComponent(sessionStorage.getItem('syntaur_token') || ''));
+    const r = await fetch('/api/settings/preferences', { headers: ssAuthH() });
     if (!r.ok) return;
     const prefs = await r.json();
     document.querySelectorAll('input[data-pref]').forEach(inp => {
@@ -2253,8 +2263,8 @@ async function ssSavePref(inp) {
   try {
     const r = await fetch('/api/settings/preferences', {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: sessionStorage.getItem('syntaur_token'), key, value }),
+      headers: ssJsonAuthH(),
+      body: JSON.stringify({ key, value }),
     });
     if (!r.ok) throw new Error('save failed');
     localStorage.setItem('ss_privacy_reviewed', '1');
@@ -2269,7 +2279,7 @@ async function ssExportConfig() {
   const status = document.getElementById('ss-export-status');
   if (status) { status.textContent = 'Preparing…'; status.style.color = 'var(--ss-ink-mute)'; }
   try {
-    const r = await fetch('/api/settings/export?token=' + encodeURIComponent(sessionStorage.getItem('syntaur_token') || ''));
+    const r = await fetch('/api/settings/export', { headers: ssAuthH() });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const data = await r.json();
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -2304,8 +2314,8 @@ async function ssHandleImport(file) {
     for (const [key, val] of Object.entries(data.preferences || {})) {
       await fetch('/api/settings/preferences', {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: sessionStorage.getItem('syntaur_token'), key, value: String(val) }),
+        headers: ssJsonAuthH(),
+        body: JSON.stringify({ key, value: String(val) }),
       });
     }
     // Agents: use the existing /api/agents/create endpoint — secrets are never in the export.
@@ -2314,9 +2324,8 @@ async function ssHandleImport(file) {
       try {
         await fetch('/api/agents/create', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: ssJsonAuthH(),
           body: JSON.stringify({
-            token: sessionStorage.getItem('syntaur_token'),
             display_name: a.display_name,
             description: a.description || null,
             system_prompt: a.system_prompt,
@@ -2368,8 +2377,8 @@ async function ssResetPreferences() {
     try {
       await fetch('/api/settings/preferences', {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: sessionStorage.getItem('syntaur_token'), key, value: null }),
+        headers: ssJsonAuthH(),
+        body: JSON.stringify({ key, value: null }),
       });
     } catch(e) {}
   }
@@ -2379,8 +2388,8 @@ async function ssWipeMemories() {
   try {
     const r = await fetch('/api/settings/wipe_memories', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: sessionStorage.getItem('syntaur_token'), confirm: 'wipe all memories' }),
+      headers: ssJsonAuthH(),
+      body: JSON.stringify({ confirm: 'wipe all memories' }),
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || data.message || 'wipe failed');
@@ -2391,8 +2400,8 @@ async function ssFactoryReset() {
   try {
     const r = await fetch('/api/settings/factory_reset', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: sessionStorage.getItem('syntaur_token'), confirm: 'factory reset' }),
+      headers: ssJsonAuthH(),
+      body: JSON.stringify({ confirm: 'factory reset' }),
     });
     if (r.status === 403) {
       ssToast('Factory reset is admin-only.', 'error', { fix: 'Ask the gateway admin to run it.' });
@@ -2415,14 +2424,13 @@ async function ssFactoryReset() {
 async function ssRefreshConnections() {
   const rows = document.querySelectorAll('[data-conn-status]');
   if (!rows.length) return;
-  const token = sessionStorage.getItem('syntaur_token') || '';
   let agg = null, sync = null;
   try {
-    const r = await fetch('/api/settings/integration_status?token=' + encodeURIComponent(token));
+    const r = await fetch('/api/settings/integration_status', { headers: ssAuthH() });
     if (r.ok) agg = await r.json();
   } catch(e) {}
   try {
-    const r = await fetch('/api/sync/providers?token=' + encodeURIComponent(token));
+    const r = await fetch('/api/sync/providers', { headers: ssAuthH() });
     if (r.ok) sync = await r.json();
   } catch(e) {}
   const connected = sync && sync.connections ? sync.connections : {};
@@ -2460,7 +2468,7 @@ async function ssRefreshConnections() {
 // Live integration status pills — updates every 30s.
 async function ssRefreshIntegrationStatus() {
   try {
-    const r = await fetch('/api/settings/integration_status?token=' + encodeURIComponent(sessionStorage.getItem('syntaur_token') || ''));
+    const r = await fetch('/api/settings/integration_status', { headers: ssAuthH() });
     if (!r.ok) return;
     const data = await r.json();
     const map = {

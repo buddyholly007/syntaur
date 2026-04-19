@@ -155,6 +155,9 @@ const BODY_HTML: &str = r##"<!-- Agent strip (chips + new-chat) — lives inside
 <script>
 const token = sessionStorage.getItem('syntaur_token') || '';
 if (!token) { window.location.href = '/'; }
+// Phase 1.1 helpers — Authorization: Bearer on every /api fetch.
+const AUTH_H = () => ({ 'Authorization': 'Bearer ' + token });
+const JSON_AUTH_H = () => ({ 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token });
 let sending = false;
 let voiceInitiated = false;
 let pendingFiles = [];
@@ -235,7 +238,7 @@ async function loadLastConversation() {
     // Try agent ID first, then display name (for conversations created before ID fix)
     let convs = [];
     for (const name of [agentId, currentAgent]) {
-      const resp = await fetch(`/api/conversations?token=${token}&agent=${encodeURIComponent(name)}&limit=1`);
+      const resp = await fetch(`/api/conversations?agent=${encodeURIComponent(name)}&limit=1`, { headers: AUTH_H() });
       const data = await resp.json();
       convs = data.conversations || [];
       if (convs.length > 0) break;
@@ -259,7 +262,7 @@ function getAgentId(displayName) {
 
 async function loadConversationMessages(convId) {
   try {
-    const resp = await fetch(`/api/conversations/${convId}?token=${token}`);
+    const resp = await fetch(`/api/conversations/${convId}`, { headers: AUTH_H() });
     const data = await resp.json();
     const messages = data.messages || [];
     if (messages.length === 0) return;
@@ -322,7 +325,7 @@ async function loadConversationMessages(convId) {
 async function pollForResponse(convId, lastCount) {
   const poll = async () => {
     try {
-      const resp = await fetch(`/api/conversations/${convId}?token=${token}`);
+      const resp = await fetch(`/api/conversations/${convId}`, { headers: AUTH_H() });
       const data = await resp.json();
       const messages = data.messages || [];
       if (messages.length > lastCount) {
@@ -456,8 +459,8 @@ async function send(msg) {
       try {
         const cr = await fetch('/api/conversations', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token, agent: getAgentId(currentAgent) })
+          headers: JSON_AUTH_H(),
+          body: JSON.stringify({ agent: getAgentId(currentAgent) })
         });
         const cd = await cr.json();
         if (cd.id) conversationId = cd.id;
@@ -466,8 +469,8 @@ async function send(msg) {
 
     const startResp = await fetch('/api/message/start', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: msg, agent: getAgentId(currentAgent), token, conversation_id: conversationId })
+      headers: JSON_AUTH_H(),
+      body: JSON.stringify({ message: msg, agent: getAgentId(currentAgent), conversation_id: conversationId })
     });
     const startData = await startResp.json();
     const turnId = startData.turn_id;
@@ -476,8 +479,8 @@ async function send(msg) {
       // Fallback to non-streaming
       const resp = await fetch('/api/message', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: msg, agent: getAgentId(currentAgent), token, conversation_id: conversationId })
+        headers: JSON_AUTH_H(),
+        body: JSON.stringify({ message: msg, agent: getAgentId(currentAgent), conversation_id: conversationId })
       });
       const data = await resp.json();
       const secs = ((Date.now() - t0) / 1000).toFixed(1);
@@ -501,7 +504,9 @@ async function send(msg) {
       }
       responseEl.innerHTML = replyHtml;
     } else {
-      // Stream events via SSE
+      // Stream events via SSE. EventSource can't set Authorization headers
+      // so token stays in the query for SSE only; /api/* is cache-control:
+      // no-store and SSE URLs aren't surfaced in the history bar.
       const evtSource = new EventSource(`/api/message/${turnId}/stream?token=${token}`);
       let toolsUsed = [];
 
@@ -610,9 +615,8 @@ async function acceptHandoff(module) {
       try {
         const r = await fetch('/api/agents/handoff', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: JSON_AUTH_H(),
           body: JSON.stringify({
-            token,
             from_conversation_id: conversationId || 'ephemeral',
             to_module: module,
             context_messages: 8,
@@ -633,11 +637,10 @@ async function acceptHandoff(module) {
     }
     function dismissEscalation(module) {
       // Tell the backend to suppress this escalation
-      const token = localStorage.getItem('syntaur_token') || '';
       fetch('/api/agents/dismiss_escalation', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token, conversation_id: conversationId || 'ephemeral', module })
+        headers: JSON_AUTH_H(),
+        body: JSON.stringify({ conversation_id: conversationId || 'ephemeral', module })
       }).catch(() => {});
       // Remove the escalation UI from the current message
       event.target.closest('.border-sky-800\\/50')?.remove();
@@ -902,9 +905,9 @@ async function showDocumentDetection(file) {
 
   // Use smart upload to classify
   try {
-    const resp = await fetch(`/api/tax/upload?token=${token}`, {
+    const resp = await fetch('/api/tax/upload', {
       method: 'POST',
-      headers: { 'Content-Type': file.type },
+      headers: { 'Content-Type': file.type, 'Authorization': 'Bearer ' + token },
       body: file
     });
     const data = await resp.json();
@@ -988,7 +991,7 @@ async function showDocumentDetection(file) {
 async function pollReceiptInline(receiptId, el, previewUrl) {
   const poll = async () => {
     try {
-      const resp = await fetch(`/api/tax/receipts?token=${token}`);
+      const resp = await fetch('/api/tax/receipts', { headers: AUTH_H() });
       const data = await resp.json();
       const receipt = (data.receipts || []).find(r => r.id === receiptId);
       if (receipt && receipt.status === 'scanned') {
@@ -1040,8 +1043,8 @@ async function startTrialFromChat(btn) {
   try {
     const resp = await fetch('/api/modules/trial', {
       method: 'POST',
-      headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token},
-      body: JSON.stringify({ token, module: 'tax' })
+      headers: JSON_AUTH_H(),
+      body: JSON.stringify({ module: 'tax' })
     });
     const data = await resp.json();
     if (data.granted) {
@@ -1435,13 +1438,14 @@ async function handleVmTranscript(e) {
     // Call agent
     const startResp = await fetch('/api/message/start', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text, agent: 'main', token })
+      headers: JSON_AUTH_H(),
+      body: JSON.stringify({ message: text, agent: 'main' })
     });
     const startData = await startResp.json();
     const turnId = startData.turn_id;
 
     if (turnId) {
+      // SSE: Authorization header not supported by EventSource, token stays in query.
       const evtSource = new EventSource(`/api/message/${turnId}/stream?token=${token}`);
       evtSource.onmessage = async (event) => {
         const ev = JSON.parse(event.data);
@@ -1473,10 +1477,10 @@ async function handleVmTranscript(e) {
               vmLastTtsDuration = Math.max(2, Math.round(words * 0.15));
 
               audio.onplay = () => {
-                fetch('/api/music/duck', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({token: authToken, state: 'on', duration_secs: vmLastTtsDuration + 5}) }).catch(()=>{});
+                fetch('/api/music/duck', { method: 'POST', headers: JSON_AUTH_H(), body: JSON.stringify({state: 'on', duration_secs: vmLastTtsDuration + 5}) }).catch(()=>{});
               };
               audio.onended = () => {
-                fetch('/api/music/duck', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({token: authToken, state: 'off'}) }).catch(()=>{});
+                fetch('/api/music/duck', { method: 'POST', headers: JSON_AUTH_H(), body: JSON.stringify({state: 'off'}) }).catch(()=>{});
                 // Enter cooldown, then resume listening
                 setVmState('cooldown');
                 vmCooldownTimer = setTimeout(() => {
@@ -1526,10 +1530,10 @@ async function playTts(text) {
       const audio = new Audio(data.audio_url);
       const estDur = data.estimated_duration_secs || 10;
       audio.onplay = () => {
-        fetch('/api/music/duck', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({token: authToken, state: 'on', duration_secs: estDur + 5}) }).catch(()=>{});
+        fetch('/api/music/duck', { method: 'POST', headers: JSON_AUTH_H(), body: JSON.stringify({state: 'on', duration_secs: estDur + 5}) }).catch(()=>{});
       };
       audio.onended = () => {
-        fetch('/api/music/duck', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({token: authToken, state: 'off'}) }).catch(()=>{});
+        fetch('/api/music/duck', { method: 'POST', headers: JSON_AUTH_H(), body: JSON.stringify({state: 'off'}) }).catch(()=>{});
       };
       audio.play().catch(e => console.log('audio play blocked:', e));
     }
@@ -1541,6 +1545,7 @@ async function playTts(text) {
 (function() {
   const BUG_TOKEN = sessionStorage.getItem('syntaur_token') || '';
   if (!BUG_TOKEN) return;
+  const BUG_HEADERS = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + BUG_TOKEN };
   const topBar = document.querySelector('.border-b.border-gray-800 .flex.items-center.justify-between');
   if (!topBar) return;
   const rightNav = topBar.lastElementChild;
@@ -1580,7 +1585,7 @@ async function playTts(text) {
     const si = { userAgent: navigator.userAgent, screen: screen.width+'x'+screen.height, window: innerWidth+'x'+innerHeight, page: location.href, time: new Date().toISOString() };
     try { const r = await fetch('/health'); if (r.ok) si.gateway = await r.json(); } catch(e) {}
     try {
-      const res = await fetch('/api/bug-reports', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ token: BUG_TOKEN, description: desc, system_info: si, page_url: location.href }) });
+      const res = await fetch('/api/bug-reports', { method:'POST', headers: BUG_HEADERS, body: JSON.stringify({ description: desc, system_info: si, page_url: location.href }) });
       const data = await res.json();
       if (data.id) { fb.className='text-sm text-green-400'; fb.textContent='Bug report #'+data.id+' submitted. Thank you!'; fb.classList.remove('hidden'); btn.textContent='Submitted'; setTimeout(function(){ document.getElementById('bug-report-overlay').classList.add('hidden'); }, 2000); }
       else { fb.className='text-sm text-red-400'; fb.textContent=data.error||'Submission failed.'; fb.classList.remove('hidden'); btn.disabled=false; btn.textContent='Submit'; }

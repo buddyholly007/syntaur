@@ -1145,7 +1145,7 @@ function socRenderPlatforms(connMap) {
 async function socLoadDescriptors() {
   try {
     const tok = socAuthToken();
-    const r = await socAuthFetch(`/api/social/platforms?token=${encodeURIComponent(tok)}`);
+    const r = await socAuthFetch(`/api/social/platforms`);
     if (!r.ok) return;
     const data = await r.json();
     const map = {};
@@ -1364,7 +1364,7 @@ async function socModalSubmit() {
     const r = await socAuthFetch(`/api/social/connections/reconnect/${encodeURIComponent(platformId)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: socAuthToken(), fields: fields }),
+      body: JSON.stringify({ fields: fields }),
     });
     const data = await r.json();
     if (!r.ok || !data.ok) {
@@ -1387,7 +1387,7 @@ async function socRefreshConnections() {
   }
   socRenderPlatforms(SOC_CONNECTIONS_MAP);
   try {
-    const r = await socAuthFetch(`/api/social/connections?token=${encodeURIComponent(socAuthToken())}`);
+    const r = await socAuthFetch(`/api/social/connections`);
     if (!r.ok) return;
     const rows = await r.json();
     const map = {};
@@ -1545,7 +1545,7 @@ function socMarkDirty() {
 async function socLoadSettings() {
   try {
     const tok = socAuthToken();
-    const r = await socAuthFetch(`/api/settings/preferences?token=${encodeURIComponent(tok)}`);
+    const r = await socAuthFetch(`/api/settings/preferences`);
     if (!r.ok) return;
     const prefs = await r.json();
     SOC_SETTINGS_BASELINE = {};
@@ -1618,7 +1618,7 @@ async function socComposeGenerate() {
   try {
     const r = await socAuthFetch('/api/social/drafts', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: socAuthToken(), platform: platform, generate: true, source: 'manual' }),
+      body: JSON.stringify({ platform: platform, generate: true, source: 'manual' }),
     });
     const data = await r.json();
     if (!r.ok || !data.ok) { socComposeStatus('error', data.error || 'Draft failed.'); return; }
@@ -1643,7 +1643,7 @@ async function socComposeSaveDraft() {
     try {
       const r = await socAuthFetch('/api/social/drafts', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: socAuthToken(), platform: platform, text: text, source: 'manual' }),
+        body: JSON.stringify({ platform: platform, text: text, source: 'manual' }),
       });
       if (r.ok) savedCount++;
     } catch (_) {}
@@ -1665,13 +1665,13 @@ async function socComposePostNow() {
     try {
       const r = await socAuthFetch('/api/social/drafts', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: socAuthToken(), platform: platform, text: text, source: 'manual' }),
+        body: JSON.stringify({ platform: platform, text: text, source: 'manual' }),
       });
       const data = await r.json();
       if (!r.ok || !data.ok) { failed.push(`${platform}: ${data.error || 'create failed'}`); continue; }
       const r2 = await socAuthFetch(`/api/social/drafts/${data.id}/approve`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: socAuthToken() }),
+        body: JSON.stringify({}),
       });
       const d2 = await r2.json();
       if (r2.ok && d2.ok) posted++; else failed.push(`${platform}: ${d2.error || 'post failed'}`);
@@ -1702,7 +1702,7 @@ async function socRefreshQueue() {
   const el = document.getElementById('soc-queue-list');
   if (!el) return;
   try {
-    const r = await socAuthFetch(`/api/social/drafts?token=${encodeURIComponent(socAuthToken())}`);
+    const r = await socAuthFetch(`/api/social/drafts`);
     if (!r.ok) return;
     const drafts = await r.json();
     if (!drafts.length) {
@@ -1756,7 +1756,7 @@ async function socQueueApprove(id) {
   const edited = ta ? ta.value : undefined;
   const r = await socAuthFetch(`/api/social/drafts/${id}/approve`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token: socAuthToken(), edited_text: edited }),
+    body: JSON.stringify({ edited_text: edited }),
   });
   const d = await r.json();
   if (r.ok && d.ok) socToast(`Posted → ${d.uri || 'done'}`);
@@ -1768,7 +1768,7 @@ async function socQueueRedraft(id) {
   const hint = prompt('Redraft hint (optional — what should Nyota try differently?):') || '';
   const r = await socAuthFetch(`/api/social/drafts/${id}/redraft`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token: socAuthToken(), hint: hint }),
+    body: JSON.stringify({ hint: hint }),
   });
   const d = await r.json();
   if (r.ok && d.ok) socToast('Redrafted.');
@@ -1780,7 +1780,7 @@ async function socQueueReject(id) {
   if (!confirm('Reject this draft?')) return;
   const r = await socAuthFetch(`/api/social/drafts/${id}`, {
     method: 'DELETE', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token: socAuthToken() }),
+    body: JSON.stringify({}),
   });
   if (r.ok) socToast('Rejected.');
   socRefreshQueue();
@@ -1792,7 +1792,7 @@ async function socRefreshInbox() {
   const el = document.getElementById('soc-inbox-list');
   if (!el) return;
   try {
-    const r = await socAuthFetch(`/api/social/replies?token=${encodeURIComponent(socAuthToken())}`);
+    const r = await socAuthFetch(`/api/social/replies`);
     if (!r.ok) return;
     const replies = await r.json();
     if (!replies.length) {
@@ -1831,7 +1831,7 @@ async function socInboxApprove(id) {
   const edited = ta ? ta.value : undefined;
   const r = await socAuthFetch(`/api/social/replies/${id}/approve`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token: socAuthToken(), edited_text: edited }),
+    body: JSON.stringify({ edited_text: edited }),
   });
   const d = await r.json();
   if (r.ok && d.ok) socToast('Reply posted.');
@@ -1842,7 +1842,7 @@ async function socInboxApprove(id) {
 async function socInboxReject(id) {
   const r = await socAuthFetch(`/api/social/replies/${id}`, {
     method: 'DELETE', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token: socAuthToken() }),
+    body: JSON.stringify({}),
   });
   if (r.ok) socToast('Skipped.');
   socRefreshInbox();
@@ -1855,7 +1855,7 @@ async function socRefreshAnalytics() {
   const alerts = document.getElementById('soc-alerts-list');
   if (!stats) return;
   try {
-    const r = await socAuthFetch(`/api/social/stats?token=${encodeURIComponent(socAuthToken())}`);
+    const r = await socAuthFetch(`/api/social/stats`);
     const data = r.ok ? await r.json() : { snapshots: [] };
     const snaps = data.snapshots || [];
     if (!snaps.length) {
@@ -1882,7 +1882,7 @@ async function socRefreshAnalytics() {
   } catch (_) {}
   // Alerts
   try {
-    const r = await socAuthFetch(`/api/social/alerts?token=${encodeURIComponent(socAuthToken())}`);
+    const r = await socAuthFetch(`/api/social/alerts`);
     const data = r.ok ? await r.json() : { alerts: [] };
     const list = data.alerts || [];
     if (!list.length) { alerts.innerHTML = ''; return; }
@@ -1929,7 +1929,7 @@ async function socSaveSettings() {
       const r = await socAuthFetch('/api/settings/preferences', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: tok, key: key, value: now[key] }),
+        body: JSON.stringify({ key: key, value: now[key] }),
       });
       if (!r.ok) { ok = false; break; }
     } catch (_) { ok = false; break; }
@@ -2035,7 +2035,7 @@ async function socAssistSend() {
   const submit = document.getElementById('soc-assist-submit');
   submit.disabled = true; submit.textContent = 'Drafting…';
   socAssistStatus('busy', 'Listening…');
-  const body = { token: socAuthToken(), intent: intent };
+  const body = { intent: intent };
   if (cfg.key === 'sample_posts') {
     body.sample_posts = val.split(/\n\n+|\n/).map(s => s.trim()).filter(s => s.length > 0);
   } else {
@@ -2110,7 +2110,7 @@ async function socOpenPlatformPanel(platformId) {
   // Load current prefs (from the global preferences fetch)
   const tok = socAuthToken();
   try {
-    const r = await socAuthFetch(`/api/settings/preferences?token=${encodeURIComponent(tok)}`);
+    const r = await socAuthFetch(`/api/settings/preferences`);
     const prefs = r.ok ? await r.json() : {};
     SOC_PANEL_BASELINE = {};
     for (const suffix of SOC_PLATFORM_KEYS) {
@@ -2188,7 +2188,7 @@ async function socPlatformPanelSave() {
       const r = await socAuthFetch('/api/settings/preferences', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: tok, key: socPlatformPrefKey(platformId, suffix), value: now[suffix] }),
+        body: JSON.stringify({ key: socPlatformPrefKey(platformId, suffix), value: now[suffix] }),
       });
       if (!r.ok) { ok = false; break; }
     } catch (_) { ok = false; break; }
@@ -2213,7 +2213,7 @@ async function socPlatformDisconnect() {
     const r = await socAuthFetch(`/api/social/connections/${conn.id}`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: socAuthToken() }),
+      body: JSON.stringify({}),
     });
     if (r.ok) {
       socToast(`${platformId} disconnected.`);
@@ -2435,7 +2435,7 @@ async function socChatSend(ev) {
     if (!SOC_CHAT_CONV_ID) {
       const cr = await socAuthFetch('/api/conversations', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: socAuthToken(), agent: 'social' }),
+        body: JSON.stringify({ agent: 'social' }),
       });
       const cd = cr.ok ? await cr.json() : {};
       if (cd.id) SOC_CHAT_CONV_ID = cd.id;
@@ -2443,7 +2443,6 @@ async function socChatSend(ev) {
     const r = await socAuthFetch('/api/message', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        token: socAuthToken(),
         agent: 'social',
         message: text,
         conversation_id: SOC_CHAT_CONV_ID,
