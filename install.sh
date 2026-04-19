@@ -107,6 +107,90 @@ if [ -f "$INSTALL_DIR/$VIEWER_BINARY" ]; then
   chmod +x "$INSTALL_DIR/$VIEWER_BINARY"
 fi
 
+# Ensure the WebKitGTK viewer can actually decode audio. On many distros
+# the base `webkit2gtk` / `webkitgtk-6.0` package does NOT pull in
+# `gst-plugins-good`, which is where autoaudiosink / pulsesink live.
+# Without them, the first <audio>.play() call segfaults the WebKit
+# render process (confirmed on CachyOS 2026-04-19). Detect the package
+# manager and install the known-required GStreamer plugins.
+#
+# We treat three packages as the baseline:
+#   gst-plugins-good  — audiosinks + mp3/wav/flac parsers
+#   gst-plugins-bad   — extra decoders (aac, more)
+#   gst-libav         — ffmpeg-backed decoders, covers everything else
+#
+# All three are in the standard repos of the distros Syntaur supports.
+if [ "$PLATFORM" = "linux" ]; then
+  echo "  Checking GStreamer audio plugins…"
+  NEED_INSTALL=""
+  NEED_PKGS=""
+  MGR=""
+
+  if command -v pacman >/dev/null 2>&1; then
+    # Arch / CachyOS / Manjaro / EndeavourOS
+    MGR="pacman"
+    for pkg in gst-plugins-good gst-plugins-bad gst-libav; do
+      if ! pacman -Q "$pkg" >/dev/null 2>&1; then
+        NEED_PKGS="$NEED_PKGS $pkg"
+      fi
+    done
+  elif command -v apt-get >/dev/null 2>&1; then
+    # Debian / Ubuntu / Linux Mint
+    MGR="apt"
+    for pkg in gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav; do
+      if ! dpkg -s "$pkg" >/dev/null 2>&1; then
+        NEED_PKGS="$NEED_PKGS $pkg"
+      fi
+    done
+  elif command -v dnf >/dev/null 2>&1; then
+    # Fedora / RHEL / Rocky / Alma
+    MGR="dnf"
+    for pkg in gstreamer1-plugins-good gstreamer1-plugins-bad-free gstreamer1-libav; do
+      if ! rpm -q "$pkg" >/dev/null 2>&1; then
+        NEED_PKGS="$NEED_PKGS $pkg"
+      fi
+    done
+  elif command -v zypper >/dev/null 2>&1; then
+    # openSUSE
+    MGR="zypper"
+    for pkg in gstreamer-plugins-good gstreamer-plugins-bad gstreamer-plugins-libav; do
+      if ! rpm -q "$pkg" >/dev/null 2>&1; then
+        NEED_PKGS="$NEED_PKGS $pkg"
+      fi
+    done
+  fi
+
+  if [ -n "$NEED_PKGS" ] && [ -n "$MGR" ]; then
+    echo "  Missing audio plugins:$NEED_PKGS"
+    echo "  Installing so music playback works out of the box…"
+    case "$MGR" in
+      pacman) sudo pacman -S --needed --noconfirm $NEED_PKGS 2>&1 | tail -3 || INSTALL_FAILED=1 ;;
+      apt)    sudo apt-get install -y $NEED_PKGS 2>&1 | tail -3 || INSTALL_FAILED=1 ;;
+      dnf)    sudo dnf install -y $NEED_PKGS 2>&1 | tail -3 || INSTALL_FAILED=1 ;;
+      zypper) sudo zypper install -y $NEED_PKGS 2>&1 | tail -3 || INSTALL_FAILED=1 ;;
+    esac
+    if [ -n "$INSTALL_FAILED" ]; then
+      echo ""
+      echo "  Couldn't install audio plugins automatically."
+      echo "  Music playback will crash the viewer until these are installed:"
+      case "$MGR" in
+        pacman) echo "    sudo pacman -S $NEED_PKGS" ;;
+        apt)    echo "    sudo apt-get install $NEED_PKGS" ;;
+        dnf)    echo "    sudo dnf install $NEED_PKGS" ;;
+        zypper) echo "    sudo zypper install $NEED_PKGS" ;;
+      esac
+      echo ""
+    else
+      echo "  ✓ Audio plugins ready"
+    fi
+  elif [ -z "$MGR" ]; then
+    echo "  (unfamiliar package manager — if audio playback crashes, install"
+    echo "   gst-plugins-good / gst-plugins-bad / gst-libav via your distro)"
+  else
+    echo "  ✓ Audio plugins already installed"
+  fi
+fi
+
 # Check if install dir is in PATH
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;

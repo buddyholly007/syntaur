@@ -919,6 +919,9 @@ async function authFetch(url, opts) {
 }
 
 async function loadNowPlaying() {
+  // Local playback owns the Now Playing card while it's active — don't
+  // let the server poll overwrite what setLocalNowPlaying just wrote.
+  if (localPlaybackActive) return;
   try {
     const resp = await authFetch(`/api/music/now_playing?token=${token}`);
     const data = await resp.json();
@@ -984,6 +987,20 @@ function applyMarquee(wrapId, textId) {
 }
 
 async function control(action) {
+  // If local audio is active, drive it directly instead of asking the
+  // server to command a cloud player. Prev/next for local isn't wired
+  // yet (no queue yet), so those fall through to the server path.
+  if (localPlaybackActive && (action === 'play_pause' || action === 'pause' || action === 'play')) {
+    const a = document.getElementById('local-audio');
+    if (a) {
+      if (a.paused) {
+        try { await a.play(); } catch(e) { console.warn('[local-control] play', e); }
+      } else {
+        try { a.pause(); } catch(e) {}
+      }
+    }
+    return;
+  }
   try {
     const entity_id = lastNowPlaying?.entity_id || null;
     const resp = await authFetch('/api/music/control', {
@@ -2112,6 +2129,20 @@ async function loadLocalTracks() {
 //   • swallows AbortError (expected when src changes mid-load).
 let lastLocalPlayAt = 0;
 let localPlayGeneration = 0;
+// Active-local-playback flag — when true, loadNowPlaying() leaves the
+// Now Playing card alone so the cloud poll doesn't overwrite local
+// state. Cleared on 'ended' / 'error' / when the user kicks off a
+// cloud playback.
+let localPlaybackActive = false;
+// Web Audio graph — built lazily on the first successful play() so we
+// don't ask for an AudioContext before a user gesture. The real
+// equalizer in the Now Playing card reads frequency data from the
+// analyser every animation frame.
+let webAudioCtx = null;
+let webAudioSource = null;
+let webAudioAnalyser = null;
+let vizFrameId = null;
+
 function playLocalTrack(trackId, title, artist) {
   const now = Date.now();
   if (now - lastLocalPlayAt < 400) return;   // lockout window
@@ -2123,7 +2154,9 @@ function playLocalTrack(trackId, title, artist) {
   try { a.pause(); } catch(e) {}
   try { a.removeAttribute('src'); } catch(e) {}
   try { a.load(); } catch(e) {}
-  showMusicNotice('▶ ' + (title || 'Track ' + trackId) + (artist ? ' — ' + artist : ''), false);
+  // Reflect the new track on the big player immediately so the UI
+  // changes with the click even before the bytes arrive.
+  setLocalNowPlaying(title, artist, trackId);
   // Yield one tick before re-arming so the element fully settles.
   setTimeout(() => {
     if (myGen !== localPlayGeneration) return;  // superseded
@@ -2135,11 +2168,166 @@ function playLocalTrack(trackId, title, artist) {
         if (e && e.name !== 'AbortError') {
           console.warn('[local-play]', e);
           showMusicNotice("Couldn't play that track. " + (e.message || ''), true);
+          clearLocalNowPlaying();
         }
       });
     }
   }, 50);
 }
+
+// ── Mirror local playback into the big Now Playing card ─────────────
+// Updates title / artist / source / play-button icon, and swaps the
+// CSS-pulse visualizer out for the real audio-reactive one.
+function setLocalNowPlaying(title, artist, trackId) {
+  localPlaybackActive = true;
+  const songEl = document.getElementById('np-song');
+  if (songEl) {
+    songEl.textContent = title || 'Track ' + trackId;
+    applyMarquee('np-song-wrap', 'np-song');
+  }
+  const artistEl = document.getElementById('np-artist');
+  if (artistEl) artistEl.textContent = artist || '—';
+  const srcEl = document.getElementById('np-source');
+  if (srcEl) srcEl.textContent = '💾 Your library';
+  const playBtn = document.getElementById('np-play');
+  if (playBtn) playBtn.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
+  const viz = document.getElementById('np-viz');
+  if (viz) viz.classList.remove('viz-paused');
+  // Clear artwork — local tracks don't have art in the current schema.
+  // Still show the neutral placeholder so the big tile isn't empty.
+  const artEl = document.getElementById('np-art');
+  if (artEl && !artEl.querySelector('svg')) {
+    artEl.innerHTML = '<svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.25" class="text-gray-700"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>';
+  }
+  // Hide the HA volume row — we control volume via the <audio> element.
+  const volRow = document.getElementById('volume-row');
+  if (volRow) volRow.classList.add('hidden');
+}
+
+function clearLocalNowPlaying() {
+  localPlaybackActive = false;
+  const songEl = document.getElementById('np-song');
+  if (songEl) songEl.textContent = 'Nothing playing';
+  const artistEl = document.getElementById('np-artist');
+  if (artistEl) artistEl.textContent = '—';
+  const srcEl = document.getElementById('np-source');
+  if (srcEl) srcEl.textContent = '';
+  const playBtn = document.getElementById('np-play');
+  if (playBtn) playBtn.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>';
+  const viz = document.getElementById('np-viz');
+  if (viz) {
+    viz.classList.add('viz-paused');
+    // Reset any inline transforms the analyser loop may have set.
+    viz.querySelectorAll('span').forEach(s => s.style.transform = '');
+  }
+  stopRealEqualizer();
+}
+
+// ── Real audio-reactive equalizer ───────────────────────────────────
+// On the first successful local play, wire the <audio> element through
+// a Web Audio AnalyserNode and drive the 8 .np-viz bars off its
+// frequency bins every animation frame. Bar height = normalised log-
+// scaled amplitude; scaleY range [0.15, 1.0] matches the CSS fallback.
+function ensureRealEqualizer(audioEl) {
+  try {
+    if (!webAudioCtx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      webAudioCtx = new AC();
+    }
+    if (webAudioCtx.state === 'suspended') {
+      webAudioCtx.resume().catch(()=>{});
+    }
+    if (!webAudioSource || webAudioSource.mediaElement !== audioEl) {
+      try {
+        webAudioSource = webAudioCtx.createMediaElementSource(audioEl);
+        webAudioAnalyser = webAudioCtx.createAnalyser();
+        webAudioAnalyser.fftSize = 64;
+        webAudioAnalyser.smoothingTimeConstant = 0.82;
+        webAudioSource.connect(webAudioAnalyser);
+        webAudioAnalyser.connect(webAudioCtx.destination);
+      } catch(e) {
+        console.warn('[viz] AudioContext wiring failed:', e);
+        return;
+      }
+    }
+  } catch(e) {
+    console.warn('[viz] ensureRealEqualizer:', e);
+    return;
+  }
+  startRealEqualizer();
+}
+
+function startRealEqualizer() {
+  if (!webAudioAnalyser) return;
+  if (vizFrameId) cancelAnimationFrame(vizFrameId);
+  const viz = document.getElementById('np-viz');
+  if (!viz) return;
+  // Kill CSS keyframe animation so our transforms aren't fighting it.
+  viz.querySelectorAll('span').forEach(s => s.style.animation = 'none');
+  const bars = Array.from(viz.querySelectorAll('span'));
+  const bins = new Uint8Array(webAudioAnalyser.frequencyBinCount);
+  // Map 8 bars across the low-to-mid range where musical energy lives.
+  const binIdx = bars.map((_, i) => Math.floor(Math.pow(i / bars.length, 1.2) * bins.length));
+  const loop = () => {
+    webAudioAnalyser.getByteFrequencyData(bins);
+    for (let i = 0; i < bars.length; i++) {
+      const v = bins[binIdx[i]] / 255;
+      const h = 0.15 + v * 0.85;   // 0.15 floor so silent bars still register
+      bars[i].style.transform = 'scaleY(' + h.toFixed(3) + ')';
+    }
+    vizFrameId = requestAnimationFrame(loop);
+  };
+  loop();
+}
+
+function stopRealEqualizer() {
+  if (vizFrameId) { cancelAnimationFrame(vizFrameId); vizFrameId = null; }
+  // Let CSS take over again for the cloud-playback pulse fallback.
+  const viz = document.getElementById('np-viz');
+  if (viz) {
+    viz.querySelectorAll('span').forEach(s => {
+      s.style.animation = '';
+      s.style.transform = '';
+    });
+  }
+}
+
+// Keep the Now Playing UI in sync with the <audio> element's own
+// state events. Covers cases the user pauses via media keys, the
+// stream ends naturally, or an error fires mid-playback.
+(function wireLocalAudioEvents() {
+  const bind = () => {
+    const a = document.getElementById('local-audio');
+    if (!a || a.dataset.wired === '1') return;
+    a.dataset.wired = '1';
+    a.addEventListener('play', () => {
+      ensureRealEqualizer(a);
+      const playBtn = document.getElementById('np-play');
+      if (playBtn) playBtn.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
+      const viz = document.getElementById('np-viz');
+      if (viz) viz.classList.remove('viz-paused');
+    });
+    a.addEventListener('pause', () => {
+      // Pause ≠ stop. Keep track info visible, just pause the viz.
+      const viz = document.getElementById('np-viz');
+      if (viz) viz.classList.add('viz-paused');
+      const playBtn = document.getElementById('np-play');
+      if (playBtn) playBtn.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>';
+    });
+    a.addEventListener('ended', clearLocalNowPlaying);
+    a.addEventListener('error', () => {
+      if (a.error) console.warn('[local-audio] error', a.error.code, a.error.message);
+      clearLocalNowPlaying();
+    });
+  };
+  bind();
+  // Also re-bind whenever loadLocalFolders re-renders (in case the
+  // <audio> element ever gets replaced).
+  const obs = new MutationObserver(bind);
+  const root = document.getElementById('local-library-card');
+  if (root) obs.observe(root, { childList: true, subtree: true });
+})();
 
 // Top-level click delegation on the local track list. Two classes:
 // .local-play-btn (row-play) and .local-details-btn (opens the MB
