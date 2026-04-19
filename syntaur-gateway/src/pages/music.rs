@@ -2450,31 +2450,55 @@ function startRealEqualizer() {
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
   const bins = new Uint8Array(webAudioAnalyser.frequencyBinCount);
-  const barCount = 40;
+
+  // Mirrored spectrum — classic car-stereo / Winamp look. The left
+  // and right halves are a reflection of each other: bass in the
+  // center, mids + highs radiating outward to both edges. We compute
+  // heights for the inner half only (HALF bars) then paint them
+  // twice, once walking outward-right from center and once
+  // outward-left.
+  const BAR_COUNT = 38;                  // total across the full width
+  const HALF = Math.floor(BAR_COUNT / 2);
+  // Headroom: peak amplitude fills only 78 % of the canvas height so
+  // loud passages don't slam into the top edge. The remaining 22 % is
+  // negative space that makes the motion feel alive instead of clipped.
+  const CEILING = 0.78;
+
   const loop = () => {
-    // Resize canvas to its CSS width each frame — cheap because only set if changed.
     const cssW = canvas.clientWidth;
     if (cssW > 0 && canvas.width !== cssW) canvas.width = cssW;
     const W = canvas.width, H = canvas.height;
     webAudioAnalyser.getByteFrequencyData(bins);
     ctx.clearRect(0, 0, W, H);
     const gap = 2;
-    const barW = Math.max(2, (W - gap * (barCount + 1)) / barCount);
-    for (let i = 0; i < barCount; i++) {
-      // Logarithmic bin mapping — low frequencies get more bars than highs.
-      const lo = Math.floor(Math.pow(i / barCount, 2.3) * bins.length);
-      const hi = Math.floor(Math.pow((i + 1) / barCount, 2.3) * bins.length);
+    const barW = Math.max(2, (W - gap * (BAR_COUNT + 1)) / BAR_COUNT);
+
+    // Compute HALF heights. Index 0 = bass (center), HALF-1 = treble
+    // (edges). Logarithmic bin mapping so bass gets more resolution.
+    const heights = new Array(HALF);
+    for (let i = 0; i < HALF; i++) {
+      const lo = Math.floor(Math.pow(i / HALF, 2.3) * bins.length);
+      const hi = Math.floor(Math.pow((i + 1) / HALF, 2.3) * bins.length);
       let peak = 0;
       for (let b = lo; b <= hi && b < bins.length; b++) { if (bins[b] > peak) peak = bins[b]; }
       const v = peak / 255;
-      const h = Math.max(2, v * H);
-      const x = gap + i * (barW + gap);
+      heights[i] = Math.max(2, v * H * CEILING);
+    }
+
+    // Paint bars[HALF..BAR_COUNT] going right from center (low→high freq).
+    for (let i = 0; i < HALF; i++) {
+      const rightIdx = HALF + i;         // HALF, HALF+1, ..., BAR_COUNT-1
+      const leftIdx  = HALF - 1 - i;     // HALF-1, HALF-2, ..., 0
+      const h = heights[i];
       const y = H - h;
+      const xR = gap + rightIdx * (barW + gap);
+      const xL = gap + leftIdx  * (barW + gap);
       const grad = ctx.createLinearGradient(0, y, 0, H);
       grad.addColorStop(0, '#0cf8f0');
       grad.addColorStop(1, '#ff2cdf');
       ctx.fillStyle = grad;
-      ctx.fillRect(x, y, barW, h);
+      ctx.fillRect(xR, y, barW, h);
+      ctx.fillRect(xL, y, barW, h);
     }
     vizFrameId = requestAnimationFrame(loop);
   };
