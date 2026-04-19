@@ -353,6 +353,7 @@ const TOP_BAR_SCRIPT: &str = r##"
   const SYNTAUR_MODULES = [
     { path: '/chat',       name: 'Chat',      sub: 'Main agent' },
     { path: '/coders',     name: 'Coders',    sub: 'Maurice' },
+    { path: '/scheduler',  name: 'Scheduler', sub: 'Thaddeus' },
     { path: '/tax',        name: 'Tax',       sub: 'Positron' },
     { path: '/knowledge',  name: 'Knowledge', sub: 'Cortex' },
     { path: '/music',      name: 'Music',     sub: 'Silvr' },

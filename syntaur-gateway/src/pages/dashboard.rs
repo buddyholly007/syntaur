@@ -537,6 +537,11 @@ const BODY_HTML: &str = r##"<!-- Login overlay -->
       <!-- Modules navigation -->
       <div class="cc-section-title">Modules</div>
       <div id="module-nav-list">
+        <a href="/scheduler" class="cc-row">
+          <span class="cc-row-icon" style="color:#84a98c">&#128197;</span>
+          <span class="cc-row-label">Scheduler</span>
+          <span class="cc-row-badge hidden" id="mod-badge-scheduler"></span>
+        </a>
         <a href="/tax" class="cc-row">
           <span class="cc-row-icon" style="color:#4ade80">&#128176;</span>
           <span class="cc-row-label">Tax</span>
