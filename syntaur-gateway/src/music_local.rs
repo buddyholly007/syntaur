@@ -854,8 +854,12 @@ pub async fn serve_art(
 /// (return artistLinkUrl → fetch first album from that artist's page, or
 /// just use the first lookup result's artwork if present).
 async fn itunes_fetch_art(client: &reqwest::Client, term: &str, entity: &str) -> Option<Vec<u8>> {
+    // Strip common suffixes that break iTunes match: "(disc 1)",
+    // "[FLAC]", "(Deluxe)", "(50th Anniversary)", etc. These are
+    // rip-time metadata noise that real catalogs don't include.
+    let cleaned_term = clean_search_term(term);
     let params = [
-        ("term", term),
+        ("term", cleaned_term.as_str()),
         ("entity", entity),
         ("limit", "1"),
         ("media", "music"),
@@ -864,40 +868,74 @@ async fn itunes_fetch_art(client: &reqwest::Client, term: &str, entity: &str) ->
         .query(&params)
         .timeout(std::time::Duration::from_secs(6))
         .send().await.ok()?;
-    if !resp.status().is_success() { return None; }
+    if !resp.status().is_success() {
+        log::debug!("[itunes] search {:?} {:?}: http {}", cleaned_term, entity, resp.status());
+        return None;
+    }
     let j: serde_json::Value = resp.json().await.ok()?;
-    let first = j.get("results").and_then(|v| v.as_array())?.first()?.clone();
+    let first = match j.get("results").and_then(|v| v.as_array()).and_then(|a| a.first()) {
+        Some(v) => v.clone(),
+        None => { log::debug!("[itunes] search {:?} {:?}: empty results", cleaned_term, entity); return None; }
+    };
 
-    // For musicArtist entity, there's no artworkUrl — the result has
-    // an artistId we can look up to get the artist's top album art.
-    // Perform a second request: lookup?id=<artistId>&entity=album&limit=1
+    // For musicArtist entity, there's no artworkUrl — follow artistId
+    // to the artist's top album via lookup().
     let art_url = if entity == "musicArtist" {
-        let artist_id = first.get("artistId").and_then(|v| v.as_i64())?;
+        let artist_id = first.get("artistId").and_then(|v| v.as_i64());
+        let Some(aid) = artist_id else {
+            log::debug!("[itunes] {:?} musicArtist: no artistId in result", cleaned_term);
+            return None;
+        };
+        let aid_str = aid.to_string();
         let lookup = client.get("https://itunes.apple.com/lookup")
-            .query(&[("id", artist_id.to_string().as_str()), ("entity", "album"), ("limit", "2")])
+            .query(&[("id", aid_str.as_str()), ("entity", "album"), ("limit", "3")])
             .timeout(std::time::Duration::from_secs(6))
             .send().await.ok()?;
-        if !lookup.status().is_success() { return None; }
+        if !lookup.status().is_success() {
+            log::debug!("[itunes] lookup {}: http {}", aid, lookup.status());
+            return None;
+        }
         let lj: serde_json::Value = lookup.json().await.ok()?;
-        // lookup returns [artist, album1, album2, ...] — pick the
-        // first album (skip the artist row).
         let results = lj.get("results").and_then(|v| v.as_array())?;
-        results.iter()
-            .find(|r| r.get("wrapperType").and_then(|v| v.as_str()) == Some("collection"))
-            .and_then(|r| r.get("artworkUrl100").or_else(|| r.get("artworkUrl60")))
-            .and_then(|v| v.as_str())
-            .map(|s| s.replace("100x100bb", "600x600bb").replace("100x100-75", "600x600-75"))?
+        let album = results.iter()
+            .find(|r| r.get("wrapperType").and_then(|v| v.as_str()) == Some("collection"));
+        match album {
+            None => { log::debug!("[itunes] lookup {}: no collection in results", aid); return None; }
+            Some(r) => {
+                let art = r.get("artworkUrl100").or_else(|| r.get("artworkUrl60")).and_then(|v| v.as_str());
+                match art {
+                    None => { log::debug!("[itunes] lookup {}: album has no artworkUrl", aid); return None; }
+                    Some(s) => s.replace("100x100bb", "600x600bb").replace("100x100-75", "600x600-75"),
+                }
+            }
+        }
     } else {
-        first.get("artworkUrl100").or_else(|| first.get("artworkUrl60"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.replace("100x100bb", "600x600bb").replace("100x100-75", "600x600-75"))?
+        let art = first.get("artworkUrl100").or_else(|| first.get("artworkUrl60"))
+            .and_then(|v| v.as_str());
+        match art {
+            None => { log::debug!("[itunes] search {:?} {:?}: first hit has no artworkUrl", cleaned_term, entity); return None; }
+            Some(s) => s.replace("100x100bb", "600x600bb").replace("100x100-75", "600x600-75"),
+        }
     };
 
     let imgresp = client.get(&art_url)
-        .timeout(std::time::Duration::from_secs(6))
+        .timeout(std::time::Duration::from_secs(8))
         .send().await.ok()?;
-    if !imgresp.status().is_success() { return None; }
+    if !imgresp.status().is_success() {
+        log::debug!("[itunes] image fetch {}: http {}", art_url, imgresp.status());
+        return None;
+    }
     imgresp.bytes().await.ok().map(|b| b.to_vec())
+}
+
+/// Drop rip-time noise from a search term so iTunes's exact-match
+/// algorithm has a chance. "Sublime Gold (disc 1)" → "Sublime Gold".
+fn clean_search_term(t: &str) -> String {
+    let re = regex::Regex::new(
+        r"(?i)\s*(\[[^\]]*\]|\([^)]*(?:disc|cd|vinyl|flac|24.bit|deluxe|anniversary|special|edition|remaster(ed)?|instrumental|bonus)[^)]*\))",
+    ).unwrap();
+    let cleaned = re.replace_all(t, "").trim().to_string();
+    if cleaned.is_empty() { t.trim().to_string() } else { cleaned }
 }
 
 /// After fetching art from a remote source (MB / iTunes), persist it
