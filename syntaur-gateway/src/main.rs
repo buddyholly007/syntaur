@@ -4797,8 +4797,17 @@ async fn main() {
         return;
     }
 
-    let data_dir_str = crate::resolve_data_dir().to_string_lossy().to_string();
+    let data_dir_pb = crate::resolve_data_dir();
+    let data_dir_str = data_dir_pb.to_string_lossy().to_string();
     info!("syntaur v{} starting", env!("CARGO_PKG_VERSION"));
+
+    // Refuse to start if security-sensitive files are world/group-readable.
+    // Message from this call names the exact chmod command to run.
+    if let Err(msg) = security::assert_startup_permissions(&data_dir_pb) {
+        eprintln!("{msg}");
+        error!("{msg}");
+        std::process::exit(1);
+    }
 
     // Load config
     let config_path = std::env::args()

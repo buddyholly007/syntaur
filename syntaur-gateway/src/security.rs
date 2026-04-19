@@ -322,19 +322,23 @@ pub async fn security_headers(req: Request, next: Next) -> Response {
     };
 
     // CSP: allow same-origin + inline (the module pages use inline script
-    // literals). Over time we'll hash inline scripts and drop unsafe-inline.
+    // literals). `unsafe-eval` dropped — nothing in the shipped JS uses
+    // eval() / new Function(). If a future library needs it, add it back
+    // explicitly rather than leaving the door open by default. Over time
+    // we'll hash inline scripts and drop unsafe-inline too.
     insert(
         headers,
         "content-security-policy",
         "default-src 'self'; \
-         script-src 'self' 'unsafe-inline' 'unsafe-eval'; \
+         script-src 'self' 'unsafe-inline'; \
          style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
          img-src 'self' data: blob: https:; \
          font-src 'self' data: https://fonts.gstatic.com; \
          connect-src 'self' https: wss: ws:; \
          frame-ancestors 'none'; \
          base-uri 'self'; \
-         form-action 'self'",
+         form-action 'self'; \
+         object-src 'none'",
     );
     insert(headers, "x-content-type-options", "nosniff");
     insert(headers, "x-frame-options", "DENY");
@@ -421,15 +425,68 @@ pub async fn api_rate_limit(
             key, path, wait_secs
         );
         let retry_after = wait_secs.ceil().max(1.0) as u64;
+        let reset_epoch = chrono::Utc::now().timestamp() + retry_after as i64;
         return Ok(Response::builder()
             .status(StatusCode::TOO_MANY_REQUESTS)
             .header("Retry-After", retry_after.to_string())
-            .header("X-RateLimit-Key", &key)
+            .header("X-RateLimit-Limit", "300")
+            .header("X-RateLimit-Remaining", "0")
+            .header("X-RateLimit-Reset", reset_epoch.to_string())
+            .header("X-RateLimit-Policy", "300;w=60")
             .body(Body::empty())
             .unwrap_or_else(|_| Response::new(Body::empty())));
     }
 
     Ok(next.run(req).await)
+}
+
+// ── 7. startup permission check ────────────────────────────────────────────
+
+/// Called once at startup by `main`. Refuses to proceed if security-sensitive
+/// files have wider-than-0600 permissions. Prints the exact `chmod` command
+/// the operator needs to run. Covers `master.key` + `vault.json`; future
+/// additions (TLS keypair when Phase 4.1 lands) extend this list.
+#[cfg(unix)]
+pub fn assert_startup_permissions(data_dir: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let targets: &[(&str, bool)] = &[
+        ("master.key", true),   // mandatory
+        ("vault.json", false),  // optional — skip if absent
+    ];
+
+    for (fname, mandatory) in targets {
+        let p = data_dir.join(fname);
+        if !p.exists() {
+            if *mandatory {
+                return Err(format!(
+                    "[security] startup: expected {} to exist but it doesn't. \
+                     Did the data directory move? Check HOME + resolve_data_dir().",
+                    p.display()
+                ));
+            }
+            continue;
+        }
+        let meta = std::fs::metadata(&p)
+            .map_err(|e| format!("[security] startup: stat {}: {e}", p.display()))?;
+        let mode = meta.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return Err(format!(
+                "[security] startup: {} has mode {:o}; must be 0600 (owner-only). Fix with: chmod 600 {}",
+                p.display(),
+                mode,
+                p.display()
+            ));
+        }
+    }
+    log::info!("[security] startup: {} permissions OK (0600)", data_dir.display());
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn assert_startup_permissions(_data_dir: &std::path::Path) -> Result<(), String> {
+    log::info!("[security] startup: non-unix platform, skipping permission check");
+    Ok(())
 }
 
 // ── 6. audit_log helpers — Phase 3.3 ───────────────────────────────────────
