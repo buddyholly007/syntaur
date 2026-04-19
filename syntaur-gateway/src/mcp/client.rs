@@ -97,8 +97,22 @@ impl McpClient {
     ) -> Result<Arc<Self>, String> {
         info!("[mcp:{}] spawning: {} {:?}", name, command, args);
 
-        let mut cmd = Command::new(command);
-        cmd.args(args);
+        // Phase 4.6: wrap the child with bubblewrap when available. A
+        // non-Linux host or a minimal container without `bwrap` falls back
+        // to an unwrapped Command with a warning logged.
+        #[cfg(unix)]
+        let mut cmd = crate::mcp_sandbox::wrap_command(
+            &name,
+            command,
+            args,
+            &crate::mcp_sandbox::Policy::default(),
+        );
+        #[cfg(not(unix))]
+        let mut cmd = {
+            let mut c = Command::new(command);
+            c.args(args);
+            c
+        };
         for (k, v) in env {
             cmd.env(k, v);
         }
