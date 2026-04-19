@@ -1956,6 +1956,53 @@ const MIGRATIONS: &[&str] = &[
         updated_at         INTEGER NOT NULL DEFAULT 0
     );
     "#,
+
+    // Scheduler Tier 2 #10 (meeting prep), Tier 3 #17 (meal->grocery),
+    // Tier 3 #20 (school ICS auto-import).
+    //
+    // meal_grocery_links: per-user binding between a "meals" custom_list and
+    // a "groceries" custom_list. When a meal item is added, the linked
+    // grocery list is auto-populated with LLM-extracted ingredients.
+    //
+    // school_ics_feeds: per-user ICS feed URLs (school calendars etc.) that
+    // auto-resync every 6h. Each fetched event is written to calendar_events
+    // with source='ics:school' and external_id='<feed_id>:<hash>' so repeat
+    // syncs dedup instead of duplicating.
+    //
+    // meeting_prep_cards: cached prep card (attendees, past gmail, journal
+    // entries) per calendar_event. Precomputed 3-60 min before event start
+    // by a background task so the 5-min-before surfacing is instant.
+    r#"
+    CREATE TABLE IF NOT EXISTS meal_grocery_links (
+        user_id          INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        meal_list_id     INTEGER NOT NULL REFERENCES custom_lists(id) ON DELETE CASCADE,
+        grocery_list_id  INTEGER NOT NULL REFERENCES custom_lists(id) ON DELETE CASCADE,
+        created_at       INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS school_ics_feeds (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        label            TEXT NOT NULL,
+        feed_url         TEXT NOT NULL,
+        color            TEXT NOT NULL DEFAULT '#b4572e',
+        last_synced_at   INTEGER,
+        last_result      TEXT,
+        created_at       INTEGER NOT NULL,
+        UNIQUE(user_id, feed_url)
+    );
+    CREATE INDEX IF NOT EXISTS idx_school_ics_user ON school_ics_feeds(user_id);
+
+    CREATE TABLE IF NOT EXISTS meeting_prep_cards (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        event_id        INTEGER NOT NULL REFERENCES calendar_events(id) ON DELETE CASCADE,
+        card_json       TEXT NOT NULL,
+        generated_at    INTEGER NOT NULL,
+        UNIQUE(user_id, event_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_meeting_prep_user ON meeting_prep_cards(user_id);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

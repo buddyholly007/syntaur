@@ -5247,6 +5247,14 @@ async fn main() {
         info!("[calendar-reminder] spawned background reminder task");
     }
 
+    // Scheduler Tier 3 #20 — school ICS feeds resync every 6h per feed.
+    spawn_school_ics_resync_task(Arc::clone(&state));
+    info!("[sch/school-ics] spawned resync task");
+
+    // Scheduler Tier 2 #10 — precompute meeting prep cards 3-60 min ahead.
+    spawn_meeting_prep_precompute_task(Arc::clone(&state));
+    info!("[sch/meeting-prep] spawned precompute task");
+
     // Sync auto-renewal: OAuth refresh (5min), API-key health check (daily)
     crate::sync::spawn_sync_renewal_task(Arc::clone(&state));
     info!("[sync-renewal] spawned background renewal task");
@@ -5348,6 +5356,20 @@ async fn main() {
         .route("/api/scheduler/schedule_todos", post(handle_scheduler_schedule_todos))
         .route("/api/scheduler/patterns", get(handle_scheduler_patterns_get))
         .route("/api/scheduler/patterns/{id}/dismiss", post(handle_scheduler_pattern_dismiss))
+        .route("/api/scheduler/lists/{list_id}/items", get(handle_scheduler_list_items_get))
+        .route("/api/scheduler/lists/{list_id}/items", post(handle_scheduler_list_items_post))
+        .route("/api/scheduler/list_items/{id}", axum::routing::delete(handle_scheduler_list_items_delete))
+        .route("/api/scheduler/list_items/{id}/toggle", post(handle_scheduler_list_items_toggle))
+        .route("/api/scheduler/meal_link", get(handle_scheduler_meal_link_get))
+        .route("/api/scheduler/meal_link", post(handle_scheduler_meal_link_post))
+        .route("/api/scheduler/meal_setup", post(handle_scheduler_meal_setup))
+        .route("/api/scheduler/meal_add", post(handle_scheduler_meal_add))
+        .route("/api/scheduler/school_feeds", get(handle_scheduler_school_feeds_get))
+        .route("/api/scheduler/school_feeds", post(handle_scheduler_school_feeds_post))
+        .route("/api/scheduler/school_feeds/{id}", axum::routing::delete(handle_scheduler_school_feeds_delete))
+        .route("/api/scheduler/school_feeds/{id}/sync", post(handle_scheduler_school_feeds_sync))
+        .route("/api/scheduler/meeting_prep", get(handle_scheduler_meeting_prep_upcoming))
+        .route("/api/scheduler/meeting_prep/{event_id}", get(handle_scheduler_meeting_prep_event))
         .route("/api/voice/transcribe", post(handle_voice_transcribe))
         .route("/api/conversations", post(handle_conv_create))
         .route("/api/conversations", get(handle_conv_list))
@@ -7194,6 +7216,855 @@ async fn handle_scheduler_pattern_dismiss(
         }
     }).await.ok();
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Scheduler — list items CRUD (for meal/grocery/kids/bucket-style lists)
+// ══════════════════════════════════════════════════════════════════════
+// custom_lists rows have existed since the initial scheduler migration;
+// list_items CRUD went unwired until the meal-planner work landed. Each
+// endpoint here is token-scoped and guarded by ownership of the parent
+// list via a single join to custom_lists.
+
+async fn handle_scheduler_list_items_get(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(list_id): axum::extract::Path<i64>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let items = tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<serde_json::Value>> {
+        let conn = rusqlite::Connection::open(&db)?;
+        let mut stmt = conn.prepare(
+            "SELECT id, text, checked, sort_order FROM list_items \
+             WHERE list_id = ? AND user_id = ? ORDER BY checked, sort_order, id",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![list_id, uid], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?,
+                "text": r.get::<_, String>(1)?,
+                "checked": r.get::<_, i64>(2)? != 0,
+                "sort_order": r.get::<_, i64>(3)?,
+            }))
+        })?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }).await.ok().and_then(|r| r.ok()).unwrap_or_default();
+    Ok(Json(serde_json::json!({ "items": items })))
+}
+
+async fn handle_scheduler_list_items_post(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(list_id): axum::extract::Path<i64>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let text = body["text"].as_str().unwrap_or("").trim().to_string();
+    if text.is_empty() { return Err(axum::http::StatusCode::BAD_REQUEST); }
+    let db = state.db_path.clone();
+    let id = tokio::task::spawn_blocking(move || -> rusqlite::Result<i64> {
+        let conn = rusqlite::Connection::open(&db)?;
+        // Guard: list must belong to user.
+        let owned: Option<i64> = conn.query_row(
+            "SELECT id FROM custom_lists WHERE id = ? AND user_id = ?",
+            rusqlite::params![list_id, uid], |r| r.get(0)
+        ).ok();
+        if owned.is_none() { return Ok(0); }
+        let now = chrono::Utc::now().timestamp();
+        conn.execute(
+            "INSERT INTO list_items (list_id, user_id, text, checked, sort_order, created_at, updated_at) \
+             VALUES (?, ?, ?, 0, 0, ?, ?)",
+            rusqlite::params![list_id, uid, text, now, now],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }).await.ok().and_then(|r| r.ok()).unwrap_or(0);
+    if id == 0 { return Err(axum::http::StatusCode::NOT_FOUND); }
+    Ok(Json(serde_json::json!({ "id": id })))
+}
+
+async fn handle_scheduler_list_items_delete(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(item_id): axum::extract::Path<i64>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Ok(conn) = rusqlite::Connection::open(&db) {
+            let _ = conn.execute(
+                "DELETE FROM list_items WHERE id = ? AND user_id = ?",
+                rusqlite::params![item_id, uid],
+            );
+        }
+    }).await.ok();
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn handle_scheduler_list_items_toggle(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(item_id): axum::extract::Path<i64>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Ok(conn) = rusqlite::Connection::open(&db) {
+            let _ = conn.execute(
+                "UPDATE list_items SET checked = 1 - checked, updated_at = ? WHERE id = ? AND user_id = ?",
+                rusqlite::params![chrono::Utc::now().timestamp(), item_id, uid],
+            );
+        }
+    }).await.ok();
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Scheduler Tier 3 #17 — Meal planner → auto-grocery linking
+// ══════════════════════════════════════════════════════════════════════
+// One-shot setup creates a "Meals" list and a "Groceries" list and
+// records the link. Adding a meal item runs an LLM pass to extract
+// ingredients and appends each one as a grocery list_item, skipping
+// dupes case-insensitively.
+
+async fn handle_scheduler_meal_link_get(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let row = tokio::task::spawn_blocking(move || -> Option<(i64, i64)> {
+        let conn = rusqlite::Connection::open(&db).ok()?;
+        conn.query_row(
+            "SELECT meal_list_id, grocery_list_id FROM meal_grocery_links WHERE user_id = ?",
+            rusqlite::params![uid],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+        ).ok()
+    }).await.ok().flatten();
+    match row {
+        Some((m, g)) => Ok(Json(serde_json::json!({ "linked": true, "meal_list_id": m, "grocery_list_id": g }))),
+        None => Ok(Json(serde_json::json!({ "linked": false }))),
+    }
+}
+
+async fn handle_scheduler_meal_link_post(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let meal_id = body["meal_list_id"].as_i64().unwrap_or(0);
+    let groc_id = body["grocery_list_id"].as_i64().unwrap_or(0);
+    if meal_id == 0 || groc_id == 0 || meal_id == groc_id {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+    let db = state.db_path.clone();
+    let ok = tokio::task::spawn_blocking(move || -> rusqlite::Result<bool> {
+        let conn = rusqlite::Connection::open(&db)?;
+        // Verify both lists belong to the user.
+        let m: Option<i64> = conn.query_row(
+            "SELECT id FROM custom_lists WHERE id = ? AND user_id = ?",
+            rusqlite::params![meal_id, uid], |r| r.get(0)).ok();
+        let g: Option<i64> = conn.query_row(
+            "SELECT id FROM custom_lists WHERE id = ? AND user_id = ?",
+            rusqlite::params![groc_id, uid], |r| r.get(0)).ok();
+        if m.is_none() || g.is_none() { return Ok(false); }
+        conn.execute(
+            "INSERT INTO meal_grocery_links (user_id, meal_list_id, grocery_list_id, created_at) \
+             VALUES (?, ?, ?, ?) \
+             ON CONFLICT(user_id) DO UPDATE SET meal_list_id = excluded.meal_list_id, grocery_list_id = excluded.grocery_list_id",
+            rusqlite::params![uid, meal_id, groc_id, chrono::Utc::now().timestamp()],
+        )?;
+        Ok(true)
+    }).await.ok().and_then(|r| r.ok()).unwrap_or(false);
+    if !ok { return Err(axum::http::StatusCode::BAD_REQUEST); }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn handle_scheduler_meal_setup(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let (meal_id, groc_id) = tokio::task::spawn_blocking(move || -> rusqlite::Result<(i64, i64)> {
+        let conn = rusqlite::Connection::open(&db)?;
+        let now = chrono::Utc::now().timestamp();
+        // Reuse existing link target if present — idempotent.
+        if let Ok((m, g)) = conn.query_row(
+            "SELECT meal_list_id, grocery_list_id FROM meal_grocery_links WHERE user_id = ?",
+            rusqlite::params![uid], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))) {
+            return Ok((m, g));
+        }
+        // Find or create a "Meals" list.
+        let find_or_create = |conn: &rusqlite::Connection, name: &str, icon: &str, color: &str| -> rusqlite::Result<i64> {
+            if let Ok(id) = conn.query_row(
+                "SELECT id FROM custom_lists WHERE user_id = ? AND lower(name) = lower(?)",
+                rusqlite::params![uid, name], |r| r.get::<_, i64>(0)) {
+                return Ok(id);
+            }
+            conn.execute(
+                "INSERT INTO custom_lists (user_id, name, icon, color, sort_order, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, 0, ?, ?)",
+                rusqlite::params![uid, name, icon, color, now, now],
+            )?;
+            Ok(conn.last_insert_rowid())
+        };
+        let meal_id = find_or_create(&conn, "Meals", "🍽", "#b4572e")?;
+        let groc_id = find_or_create(&conn, "Groceries", "🛒", "#84a98c")?;
+        conn.execute(
+            "INSERT OR REPLACE INTO meal_grocery_links (user_id, meal_list_id, grocery_list_id, created_at) VALUES (?, ?, ?, ?)",
+            rusqlite::params![uid, meal_id, groc_id, now],
+        )?;
+        Ok((meal_id, groc_id))
+    }).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({ "meal_list_id": meal_id, "grocery_list_id": groc_id })))
+}
+
+async fn handle_scheduler_meal_add(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let meal = body["meal"].as_str().unwrap_or("").trim().to_string();
+    if meal.is_empty() { return Err(axum::http::StatusCode::BAD_REQUEST); }
+    // Resolve link.
+    let db = state.db_path.clone();
+    let link: Option<(i64, i64)> = tokio::task::spawn_blocking(move || {
+        rusqlite::Connection::open(&db).ok().and_then(|c| c.query_row(
+            "SELECT meal_list_id, grocery_list_id FROM meal_grocery_links WHERE user_id = ?",
+            rusqlite::params![uid],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+        ).ok())
+    }).await.ok().flatten();
+    let (meal_list_id, grocery_list_id) = match link {
+        Some(pair) => pair,
+        None => return Err(axum::http::StatusCode::FAILED_DEPENDENCY),
+    };
+    // LLM: extract ingredients. Keep deterministic, short, deduplicated.
+    let chain = llm::LlmChain::from_config(&state.config, "main", state.client.clone());
+    let sys = "You extract grocery shopping items from a dish name. Return JSON only: {\"ingredients\":[...]}. Lowercase, singular, 1-3 words each, no quantities, no brand names. Omit pantry staples (salt, pepper, oil, water). 4-10 items.";
+    let user = format!("Dish: {meal}\n\nReturn JSON only.");
+    let messages = vec![llm::ChatMessage::system(sys), llm::ChatMessage::user(&user)];
+    let ingredients: Vec<String> = match chain.call(&messages).await {
+        Ok(reply) => {
+            let slice = match (reply.find('{'), reply.rfind('}')) {
+                (Some(s), Some(e)) if e > s => reply[s..e + 1].to_string(),
+                _ => "{}".to_string(),
+            };
+            serde_json::from_str::<serde_json::Value>(&slice)
+                .ok()
+                .and_then(|v| v.get("ingredients").and_then(|a| a.as_array()).cloned())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_lowercase().trim().to_string())).filter(|s| !s.is_empty()).collect())
+                .unwrap_or_default()
+        }
+        Err(_) => Vec::new(),
+    };
+    // Persist: add meal item, then each new ingredient to grocery list.
+    let db2 = state.db_path.clone();
+    let meal_clone = meal.clone();
+    let ing_clone = ingredients.clone();
+    let (meal_item_id, added) = tokio::task::spawn_blocking(move || -> rusqlite::Result<(i64, usize)> {
+        let conn = rusqlite::Connection::open(&db2)?;
+        let now = chrono::Utc::now().timestamp();
+        conn.execute(
+            "INSERT INTO list_items (list_id, user_id, text, checked, sort_order, created_at, updated_at) \
+             VALUES (?, ?, ?, 0, 0, ?, ?)",
+            rusqlite::params![meal_list_id, uid, meal_clone, now, now],
+        )?;
+        let meal_item = conn.last_insert_rowid();
+        // Existing grocery items (uncheck-existing, case-insensitive dedup).
+        let mut existing: std::collections::HashSet<String> = std::collections::HashSet::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT lower(text) FROM list_items WHERE list_id = ? AND user_id = ?",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![grocery_list_id, uid], |r| r.get::<_, String>(0))?;
+            for r in rows.flatten() { existing.insert(r); }
+        }
+        let mut added = 0usize;
+        for ing in &ing_clone {
+            let key = ing.to_lowercase();
+            if existing.contains(&key) { continue; }
+            conn.execute(
+                "INSERT INTO list_items (list_id, user_id, text, checked, sort_order, created_at, updated_at) \
+                 VALUES (?, ?, ?, 0, 0, ?, ?)",
+                rusqlite::params![grocery_list_id, uid, ing, now, now],
+            )?;
+            existing.insert(key);
+            added += 1;
+        }
+        Ok((meal_item, added))
+    }).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({
+        "meal_item_id": meal_item_id,
+        "ingredients": ingredients,
+        "added_to_groceries": added,
+    })))
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Scheduler Tier 3 #20 — School ICS auto-import
+// ══════════════════════════════════════════════════════════════════════
+// User adds one or more ICS feed URLs (school, league, etc.); each gets
+// fetched + parsed into calendar_events using the existing ICS parser.
+// Background task re-runs every 6h per feed. Events are tagged with
+// source='ics:school' and external_id='<feed_id>:<uid>' so repeat syncs
+// upsert rather than duplicating.
+
+async fn handle_scheduler_school_feeds_get(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let feeds = tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<serde_json::Value>> {
+        let conn = rusqlite::Connection::open(&db)?;
+        let mut stmt = conn.prepare(
+            "SELECT id, label, feed_url, color, last_synced_at, last_result \
+             FROM school_ics_feeds WHERE user_id = ? ORDER BY id",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![uid], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?,
+                "label": r.get::<_, String>(1)?,
+                "feed_url": r.get::<_, String>(2)?,
+                "color": r.get::<_, String>(3)?,
+                "last_synced_at": r.get::<_, Option<i64>>(4)?,
+                "last_result": r.get::<_, Option<String>>(5)?,
+            }))
+        })?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }).await.ok().and_then(|r| r.ok()).unwrap_or_default();
+    Ok(Json(serde_json::json!({ "feeds": feeds })))
+}
+
+async fn handle_scheduler_school_feeds_post(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let label = body["label"].as_str().unwrap_or("").trim().to_string();
+    let feed_url = body["feed_url"].as_str().unwrap_or("").trim().to_string();
+    let color = body["color"].as_str().unwrap_or("#b4572e").to_string();
+    if label.is_empty() || !(feed_url.starts_with("http://") || feed_url.starts_with("https://") || feed_url.starts_with("webcal://")) {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+    // Normalize webcal:// → https://.
+    let feed_url_norm = if feed_url.starts_with("webcal://") {
+        format!("https://{}", &feed_url["webcal://".len()..])
+    } else {
+        feed_url.clone()
+    };
+    let db = state.db_path.clone();
+    let label_c = label.clone();
+    let url_c = feed_url_norm.clone();
+    let color_c = color.clone();
+    let id = tokio::task::spawn_blocking(move || -> rusqlite::Result<i64> {
+        let conn = rusqlite::Connection::open(&db)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO school_ics_feeds (user_id, label, feed_url, color, created_at) VALUES (?, ?, ?, ?, ?)",
+            rusqlite::params![uid, label_c, url_c, color_c, chrono::Utc::now().timestamp()],
+        )?;
+        let id: i64 = conn.query_row(
+            "SELECT id FROM school_ics_feeds WHERE user_id = ? AND feed_url = ?",
+            rusqlite::params![uid, url_c], |r| r.get(0)
+        ).unwrap_or(0);
+        Ok(id)
+    }).await.ok().and_then(|r| r.ok()).unwrap_or(0);
+    if id == 0 { return Err(axum::http::StatusCode::CONFLICT); }
+    // Sync once, right now. Errors are recorded on the feed row; the HTTP
+    // response stays 200 so the UI can show "scheduled, fetching…".
+    let imported = sync_one_school_feed(&state, uid, id).await.unwrap_or(0);
+    Ok(Json(serde_json::json!({ "id": id, "imported": imported })))
+}
+
+async fn handle_scheduler_school_feeds_delete(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Ok(conn) = rusqlite::Connection::open(&db) {
+            // Remove imported events for this feed and the feed row itself.
+            let prefix = format!("{id}:");
+            let _ = conn.execute(
+                "DELETE FROM calendar_events WHERE user_id = ? AND source = 'ics:school' AND external_id LIKE ?",
+                rusqlite::params![uid, format!("{prefix}%")],
+            );
+            let _ = conn.execute(
+                "DELETE FROM school_ics_feeds WHERE id = ? AND user_id = ?",
+                rusqlite::params![id, uid],
+            );
+        }
+    }).await.ok();
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn handle_scheduler_school_feeds_sync(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = body["token"].as_str().unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let imported = sync_one_school_feed(&state, uid, id).await.unwrap_or(0);
+    Ok(Json(serde_json::json!({ "imported": imported })))
+}
+
+async fn sync_one_school_feed(state: &Arc<AppState>, uid: i64, feed_id: i64) -> Result<i64, String> {
+    let db = state.db_path.clone();
+    let row: Option<(String, String, String)> = tokio::task::spawn_blocking(move || {
+        rusqlite::Connection::open(&db).ok().and_then(|c| c.query_row(
+            "SELECT label, feed_url, color FROM school_ics_feeds WHERE id = ? AND user_id = ?",
+            rusqlite::params![feed_id, uid],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)),
+        ).ok())
+    }).await.map_err(|e| format!("join: {e}"))?;
+    let Some((_label, feed_url, color)) = row else {
+        return Err("feed not found".to_string());
+    };
+    // Fetch the ICS body.
+    let client = state.client.clone();
+    let resp = client.get(&feed_url)
+        .timeout(std::time::Duration::from_secs(30))
+        .send().await.map_err(|e| format!("fetch: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        // Stamp the row with failure so the UI surfaces it.
+        let db2 = state.db_path.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Ok(conn) = rusqlite::Connection::open(&db2) {
+                let _ = conn.execute(
+                    "UPDATE school_ics_feeds SET last_synced_at = ?, last_result = ? WHERE id = ?",
+                    rusqlite::params![chrono::Utc::now().timestamp(), format!("HTTP {status}"), feed_id],
+                );
+            }
+        }).await.ok();
+        return Err(format!("status {status}"));
+    }
+    let body = resp.text().await.map_err(|e| format!("body: {e}"))?;
+    // Parse + upsert.
+    let db3 = state.db_path.clone();
+    let color_c = color.clone();
+    let imported = tokio::task::spawn_blocking(move || -> i64 {
+        let Ok(conn) = rusqlite::Connection::open(&db3) else { return 0; };
+        // Unfold lines.
+        let mut lines: Vec<String> = Vec::new();
+        for raw in body.lines() {
+            let raw = raw.trim_end_matches('\r');
+            if (raw.starts_with(' ') || raw.starts_with('\t')) && !lines.is_empty() {
+                lines.last_mut().unwrap().push_str(&raw[1..]);
+            } else {
+                lines.push(raw.to_string());
+            }
+        }
+        let now = chrono::Utc::now().timestamp();
+        let mut imported = 0i64;
+        let mut in_event = false;
+        let mut uid_str = String::new();
+        let mut title = String::new();
+        let mut desc: Option<String> = None;
+        let mut start_time = String::new();
+        let mut end_time: Option<String> = None;
+        let mut all_day = false;
+        let mut location: Option<String> = None;
+        for line in &lines {
+            if line == "BEGIN:VEVENT" {
+                in_event = true;
+                uid_str.clear(); title.clear(); desc = None; start_time.clear();
+                end_time = None; all_day = false; location = None;
+            } else if line == "END:VEVENT" {
+                if in_event && !title.is_empty() && !start_time.is_empty() {
+                    let ext_id = if uid_str.is_empty() {
+                        format!("{feed_id}:{}:{}", title, start_time)
+                    } else {
+                        format!("{feed_id}:{uid_str}")
+                    };
+                    // Upsert: delete any prior import with same external_id then insert.
+                    let _ = conn.execute(
+                        "DELETE FROM calendar_events WHERE user_id = ? AND source = 'ics:school' AND external_id = ?",
+                        rusqlite::params![uid, ext_id],
+                    );
+                    let mut full_desc = desc.clone().unwrap_or_default();
+                    if let Some(loc) = &location {
+                        if !full_desc.is_empty() { full_desc.push_str("\n\n"); }
+                        full_desc.push_str(&format!("Location: {loc}"));
+                    }
+                    let res = conn.execute(
+                        "INSERT INTO calendar_events (user_id, title, description, start_time, end_time, all_day, source, created_at, updated_at, source_calendar_id, color, external_id) \
+                         VALUES (?, ?, ?, ?, ?, ?, 'ics:school', ?, ?, ?, ?, ?)",
+                        rusqlite::params![uid, &title, &full_desc, &start_time, &end_time, all_day as i64, now, now, feed_id.to_string(), &color_c, &ext_id],
+                    );
+                    if res.is_ok() { imported += 1; }
+                }
+                in_event = false;
+            } else if in_event {
+                if let Some(colon_idx) = line.find(':') {
+                    let (key_part, val) = line.split_at(colon_idx);
+                    let val = &val[1..];
+                    let key = key_part.split(';').next().unwrap_or(key_part);
+                    match key {
+                        "UID"         => uid_str = val.to_string(),
+                        "SUMMARY"     => title = ics_unescape(val),
+                        "DESCRIPTION" => desc = Some(ics_unescape(val)),
+                        "LOCATION"    => location = Some(ics_unescape(val)),
+                        "DTSTART"     => {
+                            if let Some((t, ad)) = parse_ics_date(val) {
+                                start_time = t; all_day = ad;
+                            }
+                        }
+                        "DTEND" => {
+                            if let Some((t, _)) = parse_ics_date(val) {
+                                end_time = Some(t);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let _ = conn.execute(
+            "UPDATE school_ics_feeds SET last_synced_at = ?, last_result = ? WHERE id = ?",
+            rusqlite::params![now, format!("imported {imported}"), feed_id],
+        );
+        imported
+    }).await.map_err(|e| format!("parse: {e}"))?;
+    Ok(imported)
+}
+
+// Background task: every 6h, resync any feed whose last_synced_at is older
+// than 6h (or never-synced). Kept intentionally simple — no per-user
+// parallelism; school feeds rarely number more than a few per family.
+pub fn spawn_school_ics_resync_task(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        // Warm-up pause so we don't collide with startup work.
+        tokio::time::sleep(std::time::Duration::from_secs(90)).await;
+        loop {
+            let cutoff = chrono::Utc::now().timestamp() - 6 * 3600;
+            let db = state.db_path.clone();
+            let due: Vec<(i64, i64)> = tokio::task::spawn_blocking(move || -> Vec<(i64, i64)> {
+                let Ok(conn) = rusqlite::Connection::open(&db) else { return Vec::new(); };
+                let mut stmt = match conn.prepare(
+                    "SELECT id, user_id FROM school_ics_feeds WHERE last_synced_at IS NULL OR last_synced_at < ?",
+                ) { Ok(s) => s, Err(_) => return Vec::new() };
+                let rows = match stmt.query_map(rusqlite::params![cutoff], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))) {
+                    Ok(r) => r, Err(_) => return Vec::new()
+                };
+                rows.filter_map(Result::ok).collect()
+            }).await.unwrap_or_default();
+            for (feed_id, user_id) in due {
+                if let Err(e) = sync_one_school_feed(&state, user_id, feed_id).await {
+                    log::warn!("[sch/school-ics] feed {feed_id} user {user_id}: {e}");
+                }
+            }
+            // Sleep 1h between sweeps. Cheap compared to an actual fetch cycle.
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        }
+    });
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Scheduler Tier 2 #10 — Meeting prep cards
+// ══════════════════════════════════════════════════════════════════════
+// For each upcoming event, surface: attendees (parsed from title + desc
+// + location), recent emails with attendees, linked journal entries on
+// that date. Cached in meeting_prep_cards; precomputed for events
+// starting in 3-60 min by a background task; fetched by the client.
+
+// Minimal query-string escape for gmail `?q=...`. We accept the
+// handful of characters Gmail's search accepts directly and percent-
+// encode the rest. Good enough — Gmail tolerates lax encoding on `q`.
+fn simple_query_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
+            | b'-' | b'_' | b'.' | b'~' | b':' | b'(' | b')' => out.push(b as char),
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+fn extract_attendee_names(title: &str, description: Option<&str>) -> Vec<String> {
+    // Heuristic: split on "with", "w/", "+", "&"; keep tokens that look
+    // like a name (2+ chars, no digits, first-letter-uppercase is a plus
+    // but not required — we accept "mom"/"dad" too).
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut push = |s: &str| {
+        let t = s.trim().trim_matches(|c: char| c == ',' || c == '.' || c == ';');
+        if t.len() < 2 || t.len() > 40 { return; }
+        if t.chars().any(|c| c.is_ascii_digit()) { return; }
+        let lower = t.to_lowercase();
+        if matches!(lower.as_str(), "and" | "the" | "at" | "re" | "for" | "on" | "in" | "to") { return; }
+        if !seen.insert(lower) { return; }
+        out.push(t.to_string());
+    };
+    for hay in [title, description.unwrap_or("")] {
+        let lower = hay.to_lowercase();
+        let markers = [" with ", " w/ ", "w/ ", " & ", " and ", ", "];
+        let mut rest = hay.to_string();
+        for m in &markers {
+            if let Some(pos) = lower.find(m) {
+                let tail = &hay[pos + m.len()..];
+                rest = tail.to_string();
+                break;
+            }
+        }
+        for tok in rest.split([',', '&', ';', '+']) {
+            let first = tok.split_whitespace().next().unwrap_or("");
+            push(first);
+        }
+    }
+    out.into_iter().take(5).collect()
+}
+
+async fn build_meeting_prep_card(
+    state: &Arc<AppState>,
+    uid: i64,
+    event: &serde_json::Value,
+) -> serde_json::Value {
+    let title = event["title"].as_str().unwrap_or("(event)").to_string();
+    let desc = event["description"].as_str().map(|s| s.to_string());
+    let start = event["start_time"].as_str().unwrap_or("").to_string();
+    let attendees = extract_attendee_names(&title, desc.as_deref());
+    // Recent emails mentioning attendees — best-effort, non-fatal on failure.
+    let mut recent_emails: Vec<serde_json::Value> = Vec::new();
+    if !attendees.is_empty() {
+        if let Ok(gmail_tok) = crate::tools::calendar::google_get_token_public().await {
+            let q = attendees.iter().take(3).map(|a| format!("from:{a} OR to:{a}")).collect::<Vec<_>>().join(" OR ");
+            let raw_q = format!("({q}) newer_than:30d");
+            let list_url = format!(
+                "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=3&q={}",
+                simple_query_escape(&raw_q)
+            );
+            if let Ok(resp) = state.client.get(&list_url).bearer_auth(&gmail_tok).send().await {
+                if let Ok(body) = resp.json::<serde_json::Value>().await {
+                    if let Some(msgs) = body.get("messages").and_then(|m| m.as_array()) {
+                        for m in msgs.iter().take(3) {
+                            let Some(id) = m.get("id").and_then(|v| v.as_str()) else { continue; };
+                            let full_url = format!(
+                                "https://gmail.googleapis.com/gmail/v1/users/me/messages/{id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From"
+                            );
+                            let Ok(r) = state.client.get(&full_url).bearer_auth(&gmail_tok).send().await else { continue; };
+                            let Ok(msg): Result<serde_json::Value, _> = r.json().await else { continue; };
+                            let headers = msg["payload"]["headers"].as_array().cloned().unwrap_or_default();
+                            let get_hdr = |n: &str| -> String {
+                                headers.iter().find(|h| h["name"].as_str().map(|x| x.eq_ignore_ascii_case(n)).unwrap_or(false))
+                                    .and_then(|h| h["value"].as_str()).unwrap_or("").to_string()
+                            };
+                            recent_emails.push(serde_json::json!({
+                                "subject": get_hdr("Subject"),
+                                "from": get_hdr("From"),
+                                "snippet": msg["snippet"].as_str().unwrap_or(""),
+                                "id": id,
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Journal entries for that date — read from the journal table via
+    // voice_api's day index. Fall back to empty list on error.
+    let date_key = start.chars().take(10).collect::<String>();
+    let journal_hits: Vec<serde_json::Value> = {
+        let db = state.db_path.clone();
+        let dk = date_key.clone();
+        tokio::task::spawn_blocking(move || -> Vec<serde_json::Value> {
+            let Ok(conn) = rusqlite::Connection::open(&db) else { return Vec::new(); };
+            // journal tables vary — probe common shapes.
+            let mut hits: Vec<serde_json::Value> = Vec::new();
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT id, substr(text, 1, 200) FROM journal_entries WHERE user_id = ? AND substr(created_at_local, 1, 10) = ? ORDER BY id DESC LIMIT 3"
+            ) {
+                if let Ok(rows) = stmt.query_map(rusqlite::params![uid, dk], |r| Ok(serde_json::json!({
+                    "id": r.get::<_, i64>(0)?,
+                    "excerpt": r.get::<_, String>(1)?,
+                }))) {
+                    hits = rows.filter_map(Result::ok).collect();
+                }
+            }
+            hits
+        }).await.unwrap_or_default()
+    };
+    serde_json::json!({
+        "event_id": event["id"],
+        "title": title,
+        "start_time": start,
+        "attendees": attendees,
+        "recent_emails": recent_emails,
+        "journal_hits": journal_hits,
+    })
+}
+
+async fn cache_meeting_prep_card(state: &Arc<AppState>, uid: i64, event_id: i64, card: &serde_json::Value) {
+    let db = state.db_path.clone();
+    let json = serde_json::to_string(card).unwrap_or_default();
+    tokio::task::spawn_blocking(move || {
+        if let Ok(conn) = rusqlite::Connection::open(&db) {
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO meeting_prep_cards (user_id, event_id, card_json, generated_at) VALUES (?, ?, ?, ?)",
+                rusqlite::params![uid, event_id, json, chrono::Utc::now().timestamp()],
+            );
+        }
+    }).await.ok();
+}
+
+async fn handle_scheduler_meeting_prep_upcoming(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    // Upcoming events in the next 30 min — meetings only, so skip all-day.
+    let db = state.db_path.clone();
+    let now = chrono::Utc::now();
+    let horizon = now + chrono::Duration::minutes(30);
+    let now_s = now.format("%Y-%m-%dT%H:%M").to_string();
+    let horizon_s = horizon.format("%Y-%m-%dT%H:%M").to_string();
+    let rows: Vec<serde_json::Value> = tokio::task::spawn_blocking(move || -> Vec<serde_json::Value> {
+        let Ok(conn) = rusqlite::Connection::open(&db) else { return Vec::new(); };
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT e.id, e.title, e.start_time, e.end_time, e.description, m.card_json \
+             FROM calendar_events e \
+             LEFT JOIN meeting_prep_cards m ON m.user_id = e.user_id AND m.event_id = e.id \
+             WHERE e.user_id = ? AND e.all_day = 0 AND e.start_time >= ? AND e.start_time <= ? \
+             ORDER BY e.start_time"
+        ) else { return Vec::new(); };
+        let Ok(rs) = stmt.query_map(rusqlite::params![uid, now_s, horizon_s], |r| Ok(serde_json::json!({
+            "event_id": r.get::<_, i64>(0)?,
+            "title": r.get::<_, String>(1)?,
+            "start_time": r.get::<_, String>(2)?,
+            "end_time": r.get::<_, Option<String>>(3)?,
+            "description": r.get::<_, Option<String>>(4)?,
+            "cached_card": r.get::<_, Option<String>>(5)?,
+        }))) else { return Vec::new(); };
+        rs.filter_map(Result::ok).collect()
+    }).await.unwrap_or_default();
+    let mut out = Vec::new();
+    for row in rows {
+        let event_id = row["event_id"].as_i64().unwrap_or(0);
+        let card = if let Some(cached_s) = row["cached_card"].as_str() {
+            serde_json::from_str::<serde_json::Value>(cached_s).unwrap_or(serde_json::Value::Null)
+        } else {
+            serde_json::Value::Null
+        };
+        let card = if !card.is_null() {
+            card
+        } else {
+            // Build on-the-fly so the client always has something useful.
+            let ev = serde_json::json!({
+                "id": event_id,
+                "title": row["title"],
+                "description": row["description"],
+                "start_time": row["start_time"],
+            });
+            let built = build_meeting_prep_card(&state, uid, &ev).await;
+            cache_meeting_prep_card(&state, uid, event_id, &built).await;
+            built
+        };
+        out.push(card);
+    }
+    Ok(Json(serde_json::json!({ "cards": out })))
+}
+
+async fn handle_scheduler_meeting_prep_event(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(event_id): axum::extract::Path<i64>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let ev_row: Option<serde_json::Value> = tokio::task::spawn_blocking(move || {
+        rusqlite::Connection::open(&db).ok().and_then(|c| c.query_row(
+            "SELECT id, title, description, start_time FROM calendar_events WHERE id = ? AND user_id = ?",
+            rusqlite::params![event_id, uid], |r| Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?,
+                "title": r.get::<_, String>(1)?,
+                "description": r.get::<_, Option<String>>(2)?,
+                "start_time": r.get::<_, String>(3)?,
+            }))
+        ).ok())
+    }).await.ok().flatten();
+    let Some(ev) = ev_row else { return Err(axum::http::StatusCode::NOT_FOUND); };
+    let card = build_meeting_prep_card(&state, uid, &ev).await;
+    cache_meeting_prep_card(&state, uid, event_id, &card).await;
+    Ok(Json(card))
+}
+
+// Background task: every 2 min, precompute prep cards for events
+// starting in 3-60 min. Skips events whose cached card is less than
+// 10 min old.
+pub fn spawn_meeting_prep_precompute_task(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(45)).await;
+        loop {
+            let now = chrono::Utc::now();
+            let soon = now + chrono::Duration::minutes(3);
+            let far  = now + chrono::Duration::minutes(60);
+            let db = state.db_path.clone();
+            let soon_s = soon.format("%Y-%m-%dT%H:%M").to_string();
+            let far_s  = far .format("%Y-%m-%dT%H:%M").to_string();
+            let stale_cutoff = now.timestamp() - 600; // 10 min
+            let candidates: Vec<(i64, i64, String, Option<String>, String)> = tokio::task::spawn_blocking(move || {
+                let Ok(conn) = rusqlite::Connection::open(&db) else { return Vec::new(); };
+                let Ok(mut stmt) = conn.prepare(
+                    "SELECT e.id, e.user_id, e.title, e.description, e.start_time \
+                     FROM calendar_events e \
+                     LEFT JOIN meeting_prep_cards m ON m.event_id = e.id AND m.user_id = e.user_id \
+                     WHERE e.all_day = 0 AND e.start_time >= ? AND e.start_time <= ? \
+                     AND (m.generated_at IS NULL OR m.generated_at < ?)"
+                ) else { return Vec::new(); };
+                let Ok(rs) = stmt.query_map(rusqlite::params![soon_s, far_s, stale_cutoff], |r| Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, String>(4)?,
+                ))) else { return Vec::new(); };
+                rs.filter_map(Result::ok).collect()
+            }).await.unwrap_or_default();
+            for (event_id, user_id, title, desc, start) in candidates {
+                let ev = serde_json::json!({
+                    "id": event_id, "title": title, "description": desc, "start_time": start,
+                });
+                let card = build_meeting_prep_card(&state, user_id, &ev).await;
+                cache_meeting_prep_card(&state, user_id, event_id, &card).await;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+        }
+    });
 }
 
 // ── Voice transcription endpoint (multipart audio → text) ───────────

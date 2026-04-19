@@ -54,6 +54,7 @@ pub async fn render() -> Html<String> {
         (theme_picker_modal())
         (event_modal())
         (proposal_modal())
+        (list_items_modal())
         script { (PreEscaped(PAGE_JS)) }
     };
     Html(shell(page, body).into_string())
@@ -80,6 +81,7 @@ fn left_sidebar() -> Markup {
             section class="sch-left-section" {
                 div class="sch-section-head" {
                     h3 { "Lists" }
+                    button class="sch-small-btn" onclick="schMealSetup()" title="Set up meal planner + auto-grocery" { "🍽" }
                     button class="sch-small-btn" onclick="schNewList()" title="New list" { "+" }
                 }
                 ul class="sch-list-list" id="sch-lists" {
@@ -96,6 +98,16 @@ fn left_sidebar() -> Markup {
                     button class="sch-small-btn" onclick="schNewHabit()" title="New habit" { "+" }
                 }
                 div id="sch-habits" class="sch-habits" {}
+            }
+
+            section class="sch-left-section" {
+                div class="sch-section-head" {
+                    h3 { "School feeds" }
+                    button class="sch-small-btn" onclick="schNewSchoolFeed()" title="Add a school ICS feed" { "+" }
+                }
+                div id="sch-school-feeds" class="sch-school-feeds" {
+                    p class="sch-empty" { "No feeds yet." }
+                }
             }
 
             section class="sch-left-section sch-left-footer" {
@@ -177,6 +189,15 @@ fn right_rail() -> Markup {
                     p class="sch-empty" { "Nothing noticed yet." }
                 }
             }
+            div class="sch-meetprep" id="sch-meetprep" {
+                div class="sch-proposals-head" {
+                    h3 { "Meeting prep" }
+                    span class="sch-proposals-count" id="sch-meetprep-count" { "0" }
+                }
+                div class="sch-meetprep-list" id="sch-meetprep-list" {
+                    p class="sch-empty" { "Nothing upcoming." }
+                }
+            }
         }
     }
 }
@@ -251,6 +272,27 @@ fn proposal_modal() -> Markup {
                 }
                 div class="sch-modal-body" id="sch-proposal-body" {}
                 div class="sch-modal-foot" id="sch-proposal-foot" {}
+            }
+        }
+    }
+}
+
+fn list_items_modal() -> Markup {
+    html! {
+        div id="sch-listitems-modal" class="sch-modal" hidden {
+            div class="sch-modal-box" {
+                div class="sch-modal-head" {
+                    h2 id="sch-listitems-title" { "List" }
+                    button class="sch-modal-close" onclick="schCloseListItems()" { "×" }
+                }
+                div class="sch-modal-body" {
+                    div id="sch-listitems-hint" class="sch-listitems-hint" hidden {}
+                    ul id="sch-listitems" class="sch-listitems" {}
+                    div class="sch-listitems-add" {
+                        input id="sch-listitems-input" type="text" class="sch-input" placeholder="Add an item…" onkeydown="schListItemsKey(event)";
+                        button id="sch-listitems-add-btn" class="sch-btn-primary" onclick="schListItemsAdd()" { "Add" }
+                    }
+                }
             }
         }
     }
@@ -693,6 +735,71 @@ body.sch-print-mode .sch-subbar { display: none !important; }
   .sch-month-cell { min-height: 64px; padding: 4px 5px; }
   .sch-view-btn { padding: 5px 10px; font-size: 12px; }
 }
+
+/* ══ School feeds (left sidebar) ══ */
+.sch-school-feeds { display: flex; flex-direction: column; gap: 4px; }
+.sch-school-feed-row {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 6px; border-radius: 4px;
+  font-size: 12px; color: var(--sch-ink-dim);
+}
+.sch-school-feed-row:hover { background: color-mix(in srgb, var(--sch-accent) 10%, transparent); }
+.sch-school-feed-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.sch-school-feed-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sch-school-feed-btn {
+  background: transparent; border: none; color: var(--sch-ink-faint);
+  cursor: pointer; padding: 0 3px; font-size: 12px;
+}
+.sch-school-feed-btn:hover { color: var(--sch-accent); }
+
+/* ══ Meeting prep cards (right rail) ══ */
+.sch-meetprep { margin-top: 16px; }
+.sch-meetprep-list { display: flex; flex-direction: column; gap: 8px; }
+.sch-meetprep-card {
+  border: 1px solid var(--sch-border); border-left: 3px solid var(--sch-accent);
+  border-radius: 6px; padding: 10px 12px;
+  background: color-mix(in srgb, var(--sch-accent) 5%, var(--sch-paper));
+}
+.sch-meetprep-title { font-weight: 600; color: var(--sch-ink); font-size: 13px; line-height: 1.3; }
+.sch-meetprep-when  { font-size: 11px; color: var(--sch-ink-dim); margin-top: 2px; }
+.sch-meetprep-sect  { margin-top: 8px; font-size: 11px; color: var(--sch-ink-dim); }
+.sch-meetprep-sect strong { color: var(--sch-ink); font-weight: 500; margin-right: 4px; }
+.sch-meetprep-email { display: block; padding: 3px 0; color: var(--sch-ink); font-size: 11px; }
+.sch-meetprep-email em { color: var(--sch-ink-faint); font-style: normal; }
+
+/* ══ List-items modal (meal planner + any list) ══ */
+.sch-listitems-hint {
+  background: color-mix(in srgb, var(--sch-accent) 8%, transparent);
+  border-left: 3px solid var(--sch-accent);
+  padding: 8px 10px; margin-bottom: 10px; font-size: 12px;
+  color: var(--sch-ink-dim); border-radius: 4px;
+}
+.sch-listitems {
+  list-style: none; padding: 0; margin: 0 0 12px;
+  display: flex; flex-direction: column; gap: 4px;
+  max-height: 360px; overflow-y: auto;
+}
+.sch-listitem {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px; border: 1px solid var(--sch-border);
+  border-radius: 4px; background: var(--sch-paper);
+}
+.sch-listitem.checked { opacity: 0.55; }
+.sch-listitem.checked .sch-listitem-text { text-decoration: line-through; }
+.sch-listitem-check {
+  width: 16px; height: 16px; border: 1px solid var(--sch-ink-dim);
+  border-radius: 3px; cursor: pointer; background: transparent;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0; font-size: 11px; line-height: 1; color: var(--sch-accent);
+}
+.sch-listitem-text { flex: 1; font-size: 13px; color: var(--sch-ink); }
+.sch-listitem-del {
+  background: transparent; border: none; color: var(--sch-ink-faint);
+  cursor: pointer; font-size: 14px; padding: 0 4px;
+}
+.sch-listitem-del:hover { color: #e11d48; }
+.sch-listitems-add { display: flex; gap: 6px; align-items: stretch; }
+.sch-listitems-add .sch-input { flex: 1; }
 "##;
 
 // ══════════════════════════════════════════════════════════════════════
@@ -716,6 +823,8 @@ const PAGE_JS: &str = r##"
     habitEntries: {},      // habit_id → Set of YYYY-MM-DD
     approvals: [],
     patterns: [],
+    schoolFeeds: [],
+    meetingPrep: [],
     prefs: { theme: 'garden', default_view: 'month', week_starts_on: 1 },
     editEvent: null,       // event being edited in the modal
   };
@@ -783,6 +892,9 @@ const PAGE_JS: &str = r##"
       const r = await api('/api/approvals?status=pending');
       S.approvals = (r && r.approvals) || [];
     } catch(e) { console.warn('[sch] approvals load:', e); }
+
+    try { await loadSchoolFeeds(); } catch(e) {}
+    try { await loadMeetingPrep(); } catch(e) {}
 
     renderAll();
   }
@@ -1111,13 +1223,218 @@ const PAGE_JS: &str = r##"
     ));
     el.innerHTML = rows.join('');
   }
-  window.schSelectList = function(id) { /* future: filter the view */ };
+  window.schSelectList = function(id) {
+    if (id === 'todos') { /* todos handled by the dedicated todos view */ return; }
+    schOpenListItems(id);
+  };
   window.schNewList = async function() {
     const name = prompt('New list name:');
     if (!name) return;
     try { await api('/api/scheduler/lists', { method: 'POST', body: JSON.stringify({ name, icon: '📋', color: '#94a3b8' }) }); await loadAll(); }
     catch(e) { alert('Create failed: ' + e.message); }
   };
+
+  // ── T3 #17 — Meal planner → auto-grocery linking ─────────────────
+  let MEAL_LINK = null;  // { linked: bool, meal_list_id, grocery_list_id }
+  async function loadMealLink() {
+    try { MEAL_LINK = await api('/api/scheduler/meal_link'); }
+    catch(e) { MEAL_LINK = { linked: false }; }
+  }
+  window.schMealSetup = async function() {
+    try {
+      const r = await api('/api/scheduler/meal_setup', { method: 'POST', body: JSON.stringify({}) });
+      MEAL_LINK = { linked: true, meal_list_id: r.meal_list_id, grocery_list_id: r.grocery_list_id };
+      schToast('Meals + Groceries linked. Add a meal to auto-populate the shopping list.', 3500);
+      await loadAll();
+      schOpenListItems(r.meal_list_id);
+    } catch(e) { schToast('Setup failed: ' + e.message, 3000); }
+  };
+
+  // ── List-items modal (shared across all custom lists) ─────────────
+  let CURRENT_LIST = null;  // { id, name, icon, color, items: [], is_meal, is_grocery }
+  async function schOpenListItems(listId) {
+    await loadMealLink();
+    const list = S.lists.find(l => l.id === listId);
+    if (!list) { schToast('List not found', 1500); return; }
+    const is_meal    = MEAL_LINK && MEAL_LINK.linked && MEAL_LINK.meal_list_id    === listId;
+    const is_grocery = MEAL_LINK && MEAL_LINK.linked && MEAL_LINK.grocery_list_id === listId;
+    CURRENT_LIST = { id: listId, name: list.name, icon: list.icon, color: list.color, items: [], is_meal, is_grocery };
+    document.getElementById('sch-listitems-title').textContent = `${list.icon || '•'} ${list.name}`;
+    const hint = document.getElementById('sch-listitems-hint');
+    const input = document.getElementById('sch-listitems-input');
+    const addBtn = document.getElementById('sch-listitems-add-btn');
+    if (is_meal) {
+      hint.hidden = false;
+      hint.innerHTML = `🤖 Thaddeus extracts ingredients from each meal and adds them to your Groceries list automatically.`;
+      input.placeholder = 'Add a meal (e.g., chicken tacos)…';
+      addBtn.textContent = 'Add meal';
+    } else if (is_grocery) {
+      hint.hidden = false;
+      hint.innerHTML = `🛒 Linked to Meals — new meal items auto-populate here. Add one-offs directly with the box below.`;
+      input.placeholder = 'Add a grocery item…';
+      addBtn.textContent = 'Add';
+    } else {
+      hint.hidden = true;
+      input.placeholder = 'Add an item…';
+      addBtn.textContent = 'Add';
+    }
+    input.value = '';
+    await loadListItems();
+    document.getElementById('sch-listitems-modal').hidden = false;
+    setTimeout(() => input.focus(), 50);
+  }
+  window.schCloseListItems = function() {
+    document.getElementById('sch-listitems-modal').hidden = true;
+    CURRENT_LIST = null;
+  };
+  async function loadListItems() {
+    if (!CURRENT_LIST) return;
+    try {
+      const r = await api(`/api/scheduler/lists/${CURRENT_LIST.id}/items`);
+      CURRENT_LIST.items = (r && r.items) || [];
+    } catch(e) { CURRENT_LIST.items = []; }
+    renderListItems();
+  }
+  function renderListItems() {
+    const ul = document.getElementById('sch-listitems');
+    if (!CURRENT_LIST.items.length) {
+      ul.innerHTML = '<li class="sch-empty">No items yet.</li>';
+      return;
+    }
+    ul.innerHTML = CURRENT_LIST.items.map(it => `
+      <li class="sch-listitem${it.checked ? ' checked' : ''}" data-id="${it.id}">
+        <button class="sch-listitem-check" onclick="schListItemsToggle(${it.id})" title="Toggle">${it.checked ? '✓' : ''}</button>
+        <span class="sch-listitem-text">${escHtml(it.text)}</span>
+        <button class="sch-listitem-del" onclick="schListItemsDelete(${it.id})" title="Delete">×</button>
+      </li>
+    `).join('');
+  }
+  window.schListItemsKey = function(ev) {
+    if (ev.key === 'Enter') { ev.preventDefault(); schListItemsAdd(); }
+  };
+  window.schListItemsAdd = async function() {
+    const input = document.getElementById('sch-listitems-input');
+    const text = (input.value || '').trim();
+    if (!text || !CURRENT_LIST) return;
+    input.disabled = true;
+    try {
+      if (CURRENT_LIST.is_meal) {
+        schToast('Thaddeus is extracting ingredients…', 2500);
+        const r = await api('/api/scheduler/meal_add', { method: 'POST', body: JSON.stringify({ meal: text }) });
+        const ing = (r.ingredients || []).slice(0, 6).join(', ');
+        const n = r.added_to_groceries || 0;
+        schToast(n > 0 ? `Added "${text}" + ${n} ingredient${n===1?'':'s'} to Groceries: ${ing}` : `Added "${text}"`, 4500);
+      } else {
+        await api(`/api/scheduler/lists/${CURRENT_LIST.id}/items`, { method: 'POST', body: JSON.stringify({ text }) });
+      }
+      input.value = '';
+      await loadListItems();
+    } catch(e) {
+      if (e.message && e.message.indexOf('424') >= 0) {
+        schToast('Set up the meal planner first (🍽 icon above Lists)', 3500);
+      } else {
+        schToast('Add failed: ' + e.message, 3000);
+      }
+    } finally {
+      input.disabled = false;
+      input.focus();
+    }
+  };
+  window.schListItemsToggle = async function(id) {
+    try { await api(`/api/scheduler/list_items/${id}/toggle`, { method: 'POST', body: JSON.stringify({}) }); await loadListItems(); }
+    catch(e) { schToast('Toggle failed', 1500); }
+  };
+  window.schListItemsDelete = async function(id) {
+    try { await api(`/api/scheduler/list_items/${id}`, { method: 'DELETE' }); await loadListItems(); }
+    catch(e) { schToast('Delete failed', 1500); }
+  };
+
+  // ── T3 #20 — School ICS feeds ─────────────────────────────────────
+  async function loadSchoolFeeds() {
+    try {
+      const r = await api('/api/scheduler/school_feeds');
+      S.schoolFeeds = (r && r.feeds) || [];
+    } catch(e) { S.schoolFeeds = []; }
+    renderSchoolFeeds();
+  }
+  function renderSchoolFeeds() {
+    const el = document.getElementById('sch-school-feeds');
+    if (!el) return;
+    if (!S.schoolFeeds || !S.schoolFeeds.length) {
+      el.innerHTML = '<p class="sch-empty" style="font-size:11px">No feeds yet. <span class="sch-empty-sub">Paste an ICS URL to auto-import + sync.</span></p>';
+      return;
+    }
+    el.innerHTML = S.schoolFeeds.map(f => {
+      const last = f.last_synced_at ? new Date(f.last_synced_at * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'never';
+      const result = f.last_result || 'pending';
+      return `<div class="sch-school-feed-row" title="${escAttr(f.feed_url)} · last ${last} · ${escAttr(result)}">
+        <span class="sch-school-feed-dot" style="background:${f.color}"></span>
+        <span class="sch-school-feed-label">${escHtml(f.label)}</span>
+        <button class="sch-school-feed-btn" onclick="schSchoolFeedSync(${f.id})" title="Re-sync now">↻</button>
+        <button class="sch-school-feed-btn" onclick="schSchoolFeedDelete(${f.id})" title="Remove">×</button>
+      </div>`;
+    }).join('');
+  }
+  window.schNewSchoolFeed = async function() {
+    const label = prompt('School / calendar label (e.g., "Jamie\'s 4th grade"):');
+    if (!label || !label.trim()) return;
+    const feed_url = prompt('ICS feed URL:\n(Paste the "Subscribe / iCal" link from the school portal. webcal:// is fine.)');
+    if (!feed_url || !feed_url.trim()) return;
+    schToast('Fetching feed…', 3000);
+    try {
+      const r = await api('/api/scheduler/school_feeds', { method: 'POST', body: JSON.stringify({ label: label.trim(), feed_url: feed_url.trim() }) });
+      schToast(`Imported ${r.imported || 0} events. Auto-resyncs every 6h.`, 3500);
+      await loadSchoolFeeds();
+      await loadAll();
+    } catch(e) { schToast('Feed setup failed: ' + e.message, 3500); }
+  };
+  window.schSchoolFeedSync = async function(id) {
+    schToast('Re-syncing…', 2000);
+    try {
+      const r = await api(`/api/scheduler/school_feeds/${id}/sync`, { method: 'POST', body: JSON.stringify({}) });
+      schToast(`Re-imported ${r.imported || 0} events`, 2500);
+      await loadSchoolFeeds();
+      await loadAll();
+    } catch(e) { schToast('Sync failed', 2000); }
+  };
+  window.schSchoolFeedDelete = async function(id) {
+    if (!confirm('Remove this feed? Its imported events will be deleted.')) return;
+    try { await api(`/api/scheduler/school_feeds/${id}`, { method: 'DELETE' }); await loadSchoolFeeds(); await loadAll(); }
+    catch(e) { schToast('Delete failed', 1500); }
+  };
+
+  // ── T2 #10 — Meeting prep cards ────────────────────────────────────
+  async function loadMeetingPrep() {
+    try {
+      const r = await api('/api/scheduler/meeting_prep');
+      S.meetingPrep = (r && r.cards) || [];
+    } catch(e) { S.meetingPrep = []; }
+    renderMeetingPrep();
+  }
+  function renderMeetingPrep() {
+    const list = document.getElementById('sch-meetprep-list');
+    const cnt  = document.getElementById('sch-meetprep-count');
+    const cards = S.meetingPrep || [];
+    cnt.textContent = cards.length;
+    cnt.classList.toggle('zero', cards.length === 0);
+    if (!cards.length) { list.innerHTML = '<p class="sch-empty">Nothing upcoming.</p>'; return; }
+    const now = Date.now();
+    list.innerHTML = cards.map(c => {
+      const t = new Date(c.start_time);
+      const mins = Math.round((t - now) / 60000);
+      const when = mins <= 0 ? 'starting now' : `in ${mins} min`;
+      const att = (c.attendees || []).length ? `<div class="sch-meetprep-sect"><strong>With</strong> ${(c.attendees||[]).map(escHtml).join(', ')}</div>` : '';
+      const emails = (c.recent_emails || []).slice(0, 3).map(m => `<span class="sch-meetprep-email">${escHtml(m.subject || '(no subject)')} <em>— ${escHtml((m.from || '').split('<')[0].trim())}</em></span>`).join('');
+      const emailsBlock = emails ? `<div class="sch-meetprep-sect"><strong>Recent emails</strong>${emails}</div>` : '';
+      const jh = (c.journal_hits || []).slice(0, 2).map(j => `<span class="sch-meetprep-email">${escHtml((j.excerpt || '').slice(0, 120))}${(j.excerpt||'').length > 120 ? '…' : ''}</span>`).join('');
+      const jhBlock = jh ? `<div class="sch-meetprep-sect"><strong>From journal</strong>${jh}</div>` : '';
+      return `<div class="sch-meetprep-card">
+        <div class="sch-meetprep-title">${escHtml(c.title || '(event)')}</div>
+        <div class="sch-meetprep-when">${when}</div>
+        ${att}${emailsBlock}${jhBlock}
+      </div>`;
+    }).join('');
+  }
   window.schNewHabit = async function() {
     const name = prompt('New habit name:');
     if (!name) return;
@@ -1633,5 +1950,7 @@ const PAGE_JS: &str = r##"
   loadAll();
   // Refresh now-line every 30s in week/day view
   setInterval(() => { if (S.view === 'week' || S.view === 'day') renderAll(); }, 30000);
+  // Poll meeting prep every 60s — cheap, cached server-side.
+  setInterval(() => { loadMeetingPrep().catch(() => {}); }, 60000);
 })();
 "##;

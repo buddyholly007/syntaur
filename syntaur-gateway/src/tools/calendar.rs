@@ -144,6 +144,12 @@ impl Tool for CalendarTool {
 
 /// Check if Google Calendar OAuth2 is connected. Returns the access token
 /// if available, or a helpful error message if not.
+/// Public wrapper exposing the cached Google OAuth access token to callers
+/// outside this module (meeting-prep card builder, etc.).
+pub async fn google_get_token_public() -> Result<String, String> {
+    google_get_token().await
+}
+
 async fn google_get_token() -> Result<String, String> {
     // The OAuth2 token cache is in the process-global state. We need to
     // access it via the AppState, but tools don't have a direct AppState
