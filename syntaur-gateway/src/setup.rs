@@ -1045,19 +1045,15 @@ fn sanitize_agent_id(id: &str) -> Result<&str, (StatusCode, String)> {
     Ok(id)
 }
 
-/// GET /agent-avatar/{agent_id} — serve custom agent avatar or default
+/// GET /agent-avatar/{agent_id} — serve agent avatar. Public so `<img>`
+/// tags can load without attaching a bearer token (browsers don't forward
+/// Authorization headers on image subresources). Avatars are brand/persona
+/// illustrations, not sensitive user data. Upload endpoint remains admin-only.
 pub async fn handle_agent_avatar(
-    State(state): State<Arc<AppState>>,
+    State(_state): State<Arc<AppState>>,
     axum::extract::Path(agent_id): axum::extract::Path<String>,
-    headers: axum::http::HeaderMap,
+    _headers: axum::http::HeaderMap,
 ) -> Result<(axum::http::HeaderMap, Vec<u8>), StatusCode> {
-    // Auth: require valid token
-    let token = headers.get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .unwrap_or("");
-    crate::resolve_principal(&state, token).await?;
-
     let agent_id = sanitize_agent_id(&agent_id).map_err(|_| StatusCode::BAD_REQUEST)?;
     let mut h = axum::http::HeaderMap::new();
     h.insert("cache-control", "public, max-age=300".parse().unwrap());
