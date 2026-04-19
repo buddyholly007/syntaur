@@ -15,6 +15,7 @@ members = [
     "syntaur-viewer",
     "rust-media-bridge",
     "mace",
+    "syntaur-isolation-tests",
 ]
 
 [workspace.package]

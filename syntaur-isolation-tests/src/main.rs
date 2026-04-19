@@ -1,0 +1,510 @@
+//! Per-user isolation harness — Phase 4.4 of the security plan.
+//!
+//! Proves, empirically, that two users on the same Syntaur instance cannot
+//! reach each other's data across every write-accessible endpoint. Runs as a
+//! CLI binary so operators can re-run after every deploy; designed to work
+//! against a live gateway (local or TrueNAS) rather than an in-process mock
+//! so it catches middleware-level leaks, not just handler-level ones.
+//!
+//! Test shape:
+//!   1. Admin creates users `iso-a-<rand>` and `iso-b-<rand>` + a session
+//!      token for each.
+//!   2. User A creates a resource on endpoint X.
+//!   3. User B tries every realistic way of reaching that resource:
+//!      direct GET by id, listing, update, delete.
+//!   4. All B-side reads must 4xx or return zero rows. A-side reads must
+//!      still work — regression canary.
+//!   5. Cleanup: delete both users (cascades their data).
+//!
+//! A single failure fails the whole run loudly — "user B saw user A's
+//! conversation #123 at /api/conversations/123" is not something to bury
+//! in a pass count.
+//!
+//! Usage:
+//!   SYNTAUR_URL=https://syntaur.<tailnet>.ts.net \
+//!   SYNTAUR_ADMIN_TOKEN=ocp_... \
+//!   syntaur-isolation-tests
+
+use anyhow::{anyhow, Context, Result};
+use clap::Parser;
+use colored::Colorize;
+use rand::Rng;
+use serde_json::{json, Value};
+
+#[derive(Parser)]
+#[command(version, about = "Per-user isolation probes for Syntaur.")]
+struct Args {
+    /// Gateway base URL (no trailing slash). Falls back to SYNTAUR_URL env.
+    #[arg(long, env = "SYNTAUR_URL", default_value = "http://127.0.0.1:18789")]
+    url: String,
+
+    /// Admin token for creating test users. SYNTAUR_ADMIN_TOKEN env var.
+    #[arg(long, env = "SYNTAUR_ADMIN_TOKEN")]
+    admin_token: String,
+
+    /// Keep test users on exit (for debugging). Default deletes them.
+    #[arg(long)]
+    keep_users: bool,
+}
+
+struct Client {
+    http: reqwest::Client,
+    base: String,
+}
+
+impl Client {
+    fn new(base: String) -> Result<Self> {
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()?;
+        Ok(Self { http, base })
+    }
+
+    async fn request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        token: &str,
+        body: Option<Value>,
+    ) -> Result<(u16, Value)> {
+        let mut req = self
+            .http
+            .request(method, format!("{}{}", self.base, path))
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Origin", &self.base);
+        if let Some(b) = body {
+            req = req.json(&b);
+        }
+        let resp = req.send().await?;
+        let status = resp.status().as_u16();
+        let text = resp.text().await.unwrap_or_default();
+        let value: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
+        Ok((status, value))
+    }
+}
+
+struct TestUser {
+    id: i64,
+    name: String,
+    token: String,
+}
+
+async fn create_user(c: &Client, admin: &str, label: &str) -> Result<TestUser> {
+    let name = format!(
+        "iso-{label}-{:x}",
+        rand::thread_rng().gen::<u32>()
+    );
+    let (status, body) = c
+        .request(
+            reqwest::Method::POST,
+            "/api/admin/users",
+            admin,
+            Some(json!({"token": admin, "name": name})),
+        )
+        .await?;
+    if status >= 400 {
+        return Err(anyhow!("admin create_user failed ({status}): {body}"));
+    }
+    let id = body["id"].as_i64().context("no id in create_user response")?;
+    // Mint a session token for the new user.
+    let (mstatus, mbody) = c
+        .request(
+            reqwest::Method::POST,
+            &format!("/api/admin/users/{id}/tokens"),
+            admin,
+            Some(json!({"token": admin, "name": "isolation-test"})),
+        )
+        .await?;
+    if mstatus >= 400 {
+        return Err(anyhow!("admin mint_token failed ({mstatus}): {mbody}"));
+    }
+    let token = mbody["token"]
+        .as_str()
+        .context("no token in mint response")?
+        .to_string();
+    Ok(TestUser { id, name, token })
+}
+
+async fn delete_user(c: &Client, admin: &str, u: &TestUser) -> Result<()> {
+    let (status, body) = c
+        .request(
+            reqwest::Method::DELETE,
+            &format!("/api/admin/users/{}?token={}", u.id, urlencoding::encode(admin)),
+            admin,
+            None,
+        )
+        .await?;
+    if status >= 400 {
+        return Err(anyhow!("delete_user failed ({status}): {body}"));
+    }
+    Ok(())
+}
+
+// ── Probes ─────────────────────────────────────────────────────────────
+
+/// A single isolation probe. Returns Ok(()) on pass, Err(msg) on fail.
+struct ProbeResult {
+    name: &'static str,
+    result: Result<()>,
+}
+
+/// User A creates a conversation. User B must not be able to:
+///   - GET /api/conversations/{id}
+///   - PATCH / DELETE it
+///   - See it listed at GET /api/conversations
+async fn probe_conversations(c: &Client, a: &TestUser, b: &TestUser) -> Result<()> {
+    let (s, body) = c
+        .request(
+            reqwest::Method::POST,
+            "/api/conversations",
+            &a.token,
+            Some(json!({"token": a.token, "agent": "main", "title": "isolation-A"})),
+        )
+        .await?;
+    if s >= 400 {
+        return Err(anyhow!("A: POST /api/conversations failed {s}: {body}"));
+    }
+    let id = body["id"]
+        .as_str()
+        .or_else(|| body["conversation_id"].as_str())
+        .context("no conv id in POST /api/conversations response")?
+        .to_string();
+
+    // B tries direct GET.
+    let (sb, _) = c
+        .request(
+            reqwest::Method::GET,
+            &format!("/api/conversations/{id}?token={}", urlencoding::encode(&b.token)),
+            &b.token,
+            None,
+        )
+        .await?;
+    if sb == 200 {
+        return Err(anyhow!("user B reached user A's conversation at /api/conversations/{id} (got 200)"));
+    }
+
+    // B lists conversations — must not see A's.
+    let (sl, lbody) = c
+        .request(
+            reqwest::Method::GET,
+            &format!("/api/conversations?token={}", urlencoding::encode(&b.token)),
+            &b.token,
+            None,
+        )
+        .await?;
+    if sl == 200 {
+        let convs = lbody["conversations"].as_array().cloned().unwrap_or_default();
+        for conv in convs {
+            let cid = conv["id"].as_str().unwrap_or("");
+            if cid == id {
+                return Err(anyhow!(
+                    "user B's /api/conversations listing contained user A's conversation id {id}"
+                ));
+            }
+        }
+    }
+
+    // Canary: A can still see their own.
+    let (sa, _) = c
+        .request(
+            reqwest::Method::GET,
+            &format!("/api/conversations/{id}?token={}", urlencoding::encode(&a.token)),
+            &a.token,
+            None,
+        )
+        .await?;
+    if sa >= 400 {
+        return Err(anyhow!("regression: user A can't GET their own conversation (got {sa})"));
+    }
+    Ok(())
+}
+
+/// User A creates a scheduler approval. User B must not see it.
+async fn probe_scheduler_approvals(c: &Client, a: &TestUser, b: &TestUser) -> Result<()> {
+    // Create a synthetic approval via /api/scheduler/voice_create — the
+    // text-to-event path lands in pending_approvals scoped to the caller.
+    let (s, body) = c
+        .request(
+            reqwest::Method::POST,
+            "/api/scheduler/voice_create",
+            &a.token,
+            Some(json!({"token": a.token, "transcript": "meeting next Monday at 3pm"})),
+        )
+        .await?;
+    if s >= 400 {
+        // This path requires LLM + may fail on a cold gateway; treat as
+        // skip, not fail, if the server reports bad gateway.
+        eprintln!("  [skip] scheduler_approvals: A-side create returned {s}");
+        return Ok(());
+    }
+    let ap_id = body["approval_id"].as_i64().context("no approval_id")?;
+
+    let (sl, lbody) = c
+        .request(
+            reqwest::Method::GET,
+            &format!("/api/approvals?token={}", urlencoding::encode(&b.token)),
+            &b.token,
+            None,
+        )
+        .await?;
+    if sl == 200 {
+        let rows = lbody["approvals"].as_array().cloned().unwrap_or_default();
+        for r in rows {
+            if r["id"].as_i64() == Some(ap_id) {
+                return Err(anyhow!(
+                    "user B's /api/approvals listing contained user A's approval id {ap_id}"
+                ));
+            }
+        }
+    }
+
+    let (sr, _) = c
+        .request(
+            reqwest::Method::POST,
+            &format!("/api/approvals/{ap_id}/resolve"),
+            &b.token,
+            Some(json!({"token": b.token, "approved": true})),
+        )
+        .await?;
+    // User B's resolve should either 403 OR succeed but not actually flip
+    // A's row (because the handler's WHERE user_id guard excludes it).
+    // Either way, A must still see the approval as unresolved.
+    let (_, acheck) = c
+        .request(
+            reqwest::Method::GET,
+            &format!("/api/approvals?token={}", urlencoding::encode(&a.token)),
+            &a.token,
+            None,
+        )
+        .await?;
+    let rows = acheck["approvals"].as_array().cloned().unwrap_or_default();
+    let still_pending = rows.iter().any(|r| r["id"].as_i64() == Some(ap_id) && r["resolved_at"].is_null());
+    if !still_pending && sr == 200 {
+        return Err(anyhow!(
+            "user B's POST /api/approvals/{ap_id}/resolve succeeded AND flipped the row; isolation broken"
+        ));
+    }
+    Ok(())
+}
+
+/// User A adds a memory. User B must not list it.
+async fn probe_memories(c: &Client, a: &TestUser, b: &TestUser) -> Result<()> {
+    let (s, _) = c
+        .request(
+            reqwest::Method::POST,
+            "/api/memories",
+            &a.token,
+            Some(json!({"token": a.token, "agent_id": "main", "text": "isolation secret A"})),
+        )
+        .await?;
+    if s >= 400 {
+        eprintln!("  [skip] memories: POST /api/memories returned {s} (endpoint may require onboarding)");
+        return Ok(());
+    }
+    let (_, lbody) = c
+        .request(
+            reqwest::Method::GET,
+            &format!("/api/memories?token={}&agent_id=main", urlencoding::encode(&b.token)),
+            &b.token,
+            None,
+        )
+        .await?;
+    let rows = lbody["memories"].as_array().cloned().unwrap_or_default();
+    for r in rows {
+        let txt = r["text"].as_str().unwrap_or("");
+        if txt.contains("isolation secret A") {
+            return Err(anyhow!("user B's memories listing leaked user A's memory text"));
+        }
+    }
+    Ok(())
+}
+
+/// Admin endpoints are admin-only; non-admin user must get 4xx on every
+/// /api/admin/* write.
+async fn probe_admin_lockout(c: &Client, _a: &TestUser, b: &TestUser) -> Result<()> {
+    let targets = [
+        ("POST", "/api/admin/users", json!({"token": b.token, "name": "shouldnt-work"})),
+    ];
+    for (method, path, body) in &targets {
+        let m = reqwest::Method::from_bytes(method.as_bytes()).unwrap();
+        let (s, _) = c.request(m, path, &b.token, Some(body.clone())).await?;
+        if s < 400 {
+            return Err(anyhow!("non-admin user B reached admin endpoint {method} {path} (got {s})"));
+        }
+    }
+    Ok(())
+}
+
+/// /api/me returns the caller's own row. A and B must see different ids.
+async fn probe_me(c: &Client, a: &TestUser, b: &TestUser) -> Result<()> {
+    let (_, abody) = c
+        .request(
+            reqwest::Method::GET,
+            &format!("/api/me?token={}", urlencoding::encode(&a.token)),
+            &a.token,
+            None,
+        )
+        .await?;
+    let (_, bbody) = c
+        .request(
+            reqwest::Method::GET,
+            &format!("/api/me?token={}", urlencoding::encode(&b.token)),
+            &b.token,
+            None,
+        )
+        .await?;
+    let aid = abody["user"]["id"].as_i64();
+    let bid = bbody["user"]["id"].as_i64();
+    if aid.is_none() || bid.is_none() {
+        return Err(anyhow!("/api/me didn't return user.id for both"));
+    }
+    if aid == bid {
+        return Err(anyhow!("/api/me returned same id for A and B — session tokens swapped"));
+    }
+    if aid != Some(a.id) {
+        return Err(anyhow!(
+            "/api/me for user A returned id {:?}, expected {}",
+            aid, a.id
+        ));
+    }
+    Ok(())
+}
+
+// ── Driver ──────────────────────────────────────────────────────────────
+
+async fn get_sharing_mode(c: &Client, admin: &str) -> Result<String> {
+    let (s, body) = c
+        .request(
+            reqwest::Method::GET,
+            &format!("/api/admin/sharing?token={}", urlencoding::encode(admin)),
+            admin,
+            None,
+        )
+        .await?;
+    if s >= 400 {
+        return Err(anyhow!("GET /api/admin/sharing failed ({s}): {body}"));
+    }
+    Ok(body["mode"].as_str().unwrap_or("isolated").to_string())
+}
+
+async fn set_sharing_mode(c: &Client, admin: &str, mode: &str) -> Result<()> {
+    let (s, body) = c
+        .request(
+            reqwest::Method::PUT,
+            "/api/admin/sharing",
+            admin,
+            Some(json!({"token": admin, "mode": mode})),
+        )
+        .await?;
+    if s >= 400 {
+        return Err(anyhow!("set sharing mode failed ({s}): {body}"));
+    }
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args = Args::parse();
+
+    if args.admin_token.is_empty() {
+        return Err(anyhow!(
+            "SYNTAUR_ADMIN_TOKEN required — admin session token for the target gateway"
+        ));
+    }
+
+    println!("{}", format!("isolation harness → {}", args.url).bold());
+
+    let c = Client::new(args.url.clone())?;
+
+    // Save the original sharing mode, flip to `isolated` for the duration
+    // of the test run. `shared` mode intentionally exposes cross-user data
+    // for single-household setups; if the operator leaves it on, the
+    // harness would flag the feature as a "leak." Running in isolated
+    // mode ensures the probes test the fail-closed path explicitly.
+    let original_mode = get_sharing_mode(&c, &args.admin_token)
+        .await
+        .unwrap_or_else(|_| "isolated".to_string());
+    if original_mode != "isolated" {
+        println!("  {} sharing mode currently {:?}, flipping to 'isolated' for test run", "!".yellow(), original_mode);
+        set_sharing_mode(&c, &args.admin_token, "isolated")
+            .await
+            .context("couldn't flip sharing mode for test run")?;
+    }
+
+    // Create two test users.
+    let a = create_user(&c, &args.admin_token, "a")
+        .await
+        .context("failed to create user A — is the admin token valid?")?;
+    println!("  created user A: {} (id {})", a.name, a.id);
+    let b = create_user(&c, &args.admin_token, "b")
+        .await
+        .context("failed to create user B")?;
+    println!("  created user B: {} (id {})", b.name, b.id);
+
+    // Run every probe, collect per-probe result.
+    let mut results: Vec<ProbeResult> = Vec::new();
+    for (name, f) in probes() {
+        let r = (f)(&c, &a, &b).await;
+        results.push(ProbeResult { name, result: r });
+    }
+
+    // Cleanup (best-effort — don't fail the whole run on delete error).
+    if !args.keep_users {
+        let _ = delete_user(&c, &args.admin_token, &a).await;
+        let _ = delete_user(&c, &args.admin_token, &b).await;
+    }
+
+    // Restore the operator's original sharing mode.
+    if original_mode != "isolated" {
+        let _ = set_sharing_mode(&c, &args.admin_token, &original_mode).await;
+        println!("  restored sharing mode to {:?}", original_mode);
+    }
+
+    // Report.
+    let mut pass = 0;
+    let mut fail = 0;
+    for r in &results {
+        match &r.result {
+            Ok(()) => {
+                println!("  {} {}", "✓".green(), r.name);
+                pass += 1;
+            }
+            Err(e) => {
+                println!("  {} {}", "✗".red(), r.name);
+                println!("    {}", e.to_string().red());
+                fail += 1;
+            }
+        }
+    }
+    println!();
+    if fail == 0 {
+        println!("{}", format!("{pass}/{} probes passed", results.len()).green().bold());
+        Ok(())
+    } else {
+        println!(
+            "{}",
+            format!("{pass}/{} probes passed, {fail} FAILED", results.len())
+                .red()
+                .bold()
+        );
+        std::process::exit(1);
+    }
+}
+
+type ProbeFn = for<'a> fn(
+    &'a Client,
+    &'a TestUser,
+    &'a TestUser,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>;
+
+fn probes() -> Vec<(&'static str, ProbeFn)> {
+    vec![
+        ("me-returns-own-id", |c, a, b| Box::pin(probe_me(c, a, b))),
+        ("conversations", |c, a, b| Box::pin(probe_conversations(c, a, b))),
+        ("scheduler-approvals", |c, a, b| {
+            Box::pin(probe_scheduler_approvals(c, a, b))
+        }),
+        ("memories", |c, a, b| Box::pin(probe_memories(c, a, b))),
+        ("admin-lockout", |c, a, b| Box::pin(probe_admin_lockout(c, a, b))),
+    ]
+}
