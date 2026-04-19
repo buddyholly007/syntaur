@@ -42,6 +42,7 @@ pub mod terminal;
 mod agents;
 mod background_tasks;
 mod security;
+mod vault;
 
 /// Brand name constant — used in user-facing messages.
 pub const BRAND: &str = "Syntaur";
@@ -319,6 +320,166 @@ async fn run_mint_token(args: &[String]) {
     println!("Minted token for user id={} name={} label={}", user.id, user.name, label);
     println!("Token (shown once — save it now):");
     println!("{}", token);
+}
+
+/// `syntaur-gateway vault <cmd>` — encrypted secrets store (Phase 3.1).
+/// Dispatches to the Vault API. Every sub-command uses the master key
+/// at `~/.syntaur/master.key`; the vault file lives at `~/.syntaur/vault.json`.
+fn run_vault(args: &[String]) {
+    // Argv layout: ["vault", "<subcmd>", ...rest]
+    let mut it = args.iter().skip(1); // skip "vault"
+    let sub = it.next().cloned().unwrap_or_default();
+
+    let data_dir = crate::resolve_data_dir();
+    let mut vault = match vault::Vault::open(&data_dir) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error: open vault: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    match sub.as_str() {
+        "set" => {
+            let name = match it.next() {
+                Some(n) => n.clone(),
+                None => {
+                    eprintln!("usage: syntaur-gateway vault set <name> [value]");
+                    std::process::exit(2);
+                }
+            };
+            // Value from argv OR stdin when omitted. For scripts piping
+            // secrets in, read stdin exactly (no trim — a secret might
+            // legitimately have trailing whitespace).
+            let value = match it.next() {
+                Some(v) => v.clone(),
+                None => {
+                    // Prompt on a TTY, read-once from stdin.
+                    eprint!("Value for {name} (input not echoed): ");
+                    use std::io::Read;
+                    let mut buf = String::new();
+                    std::io::stdin().read_to_string(&mut buf).unwrap_or(0);
+                    // Strip one trailing newline if present (common when
+                    // users hit enter). Keep everything else verbatim.
+                    if buf.ends_with('\n') { buf.pop(); if buf.ends_with('\r') { buf.pop(); } }
+                    buf
+                }
+            };
+            if let Err(e) = vault.set(&name, &value) {
+                eprintln!("error: set: {e}");
+                std::process::exit(1);
+            }
+            eprintln!("✓ set {name} in {}", vault.path().display());
+        }
+        "get" => {
+            let name = match it.next() {
+                Some(n) => n.clone(),
+                None => {
+                    eprintln!("usage: syntaur-gateway vault get <name>");
+                    std::process::exit(2);
+                }
+            };
+            match vault.get(&name) {
+                Ok(Some(v)) => {
+                    // Print with no trailing newline so piping to another
+                    // command is clean.
+                    print!("{v}");
+                }
+                Ok(None) => {
+                    eprintln!("(not set)");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("error: get: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "list" | "ls" => {
+            let keys = vault.list_keys();
+            if keys.is_empty() {
+                eprintln!("(vault is empty)");
+            } else {
+                for k in keys {
+                    println!("{k}");
+                }
+            }
+        }
+        "delete" | "del" | "rm" => {
+            let name = match it.next() {
+                Some(n) => n.clone(),
+                None => {
+                    eprintln!("usage: syntaur-gateway vault delete <name>");
+                    std::process::exit(2);
+                }
+            };
+            match vault.delete(&name) {
+                Ok(true) => eprintln!("✓ deleted {name}"),
+                Ok(false) => {
+                    eprintln!("(not found: {name})");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("error: delete: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "import" => {
+            let path = match it.next() {
+                Some(p) => std::path::PathBuf::from(p),
+                None => {
+                    eprintln!("usage: syntaur-gateway vault import <env-file>");
+                    std::process::exit(2);
+                }
+            };
+            match vault.import_env_file(&path) {
+                Ok(report) => {
+                    eprintln!("✓ imported {} keys from {}", report.imported, path.display());
+                    for s in &report.skipped {
+                        eprintln!("  skipped: {s}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("error: import: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "rotate" => {
+            match vault.rotate() {
+                Ok(report) => {
+                    eprintln!("✓ rotated {} entries", report.rotated);
+                    if !report.failed.is_empty() {
+                        eprintln!("  failed to rotate (likely stale keys): {}", report.failed.join(", "));
+                        std::process::exit(1);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("error: rotate: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "path" => {
+            println!("{}", vault.path().display());
+        }
+        _ => {
+            eprintln!("syntaur-gateway vault — encrypted secrets store");
+            eprintln!();
+            eprintln!("commands:");
+            eprintln!("  set <name> [value]   set a secret (reads stdin if value omitted)");
+            eprintln!("  get <name>           print decrypted value");
+            eprintln!("  list                 list secret names");
+            eprintln!("  delete <name>        remove a secret");
+            eprintln!("  import <env-file>    bulk-load KEY=VALUE lines");
+            eprintln!("  rotate               re-encrypt all under current master key");
+            eprintln!("  path                 print the vault file path");
+            eprintln!();
+            eprintln!("Secrets are referenced in config as {{{{vault.NAME}}}}.");
+            std::process::exit(2);
+        }
+    }
 }
 
 /// Resolve an incoming raw bearer token to a `Principal`. Mirrors the
@@ -4600,6 +4761,11 @@ async fn main() {
     // admin access — e.g. user_id=1 (sean) needs a fresh credential.
     if matches!(raw_args.first().map(|s| s.as_str()), Some("mint-token")) {
         run_mint_token(&raw_args).await;
+        return;
+    }
+    // `syntaur vault …` — encrypted secrets store (Phase 3.1).
+    if matches!(raw_args.first().map(|s| s.as_str()), Some("vault")) {
+        run_vault(&raw_args);
         return;
     }
 
