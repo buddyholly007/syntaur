@@ -645,6 +645,66 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   .music-col .card:hover .panel-resize,
   .music-col .card.resizing .panel-resize { opacity: 1; }
 
+  /* Per-panel close (×) — sits to the left of the grip. */
+  .music-col .card .panel-close {
+    position: absolute; top: 8px; right: 32px; z-index: 5;
+    width: 20px; height: 20px;
+    display: flex; align-items: center; justify-content: center;
+    color: rgba(255,255,255,0.25);
+    cursor: pointer; user-select: none;
+    opacity: 0; transition: opacity 0.15s, color 0.15s;
+    background: transparent; border: none; padding: 0; font-size: 14px;
+    line-height: 1;
+  }
+  .music-col .card:hover .panel-close { opacity: 1; }
+  .music-col .card .panel-close:hover { color: var(--c-mag); }
+
+  /* Floating "Panels" menu — top-right of the music page. Shows
+     panel count, opens a popover with Add / Hide / Reset controls. */
+  .music-panel-menu {
+    position: absolute; top: 14px; right: 20px; z-index: 20;
+  }
+  .music-panel-menu-btn {
+    background: rgba(12, 16, 24, 0.85); backdrop-filter: blur(8px);
+    border: 1px solid var(--c-line); color: var(--c-text, #c5cbd3);
+    font: inherit; font-size: 11px;
+    padding: 5px 12px; border-radius: 6px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+    letter-spacing: 0.05em; text-transform: uppercase;
+  }
+  .music-panel-menu-btn:hover { color: var(--c-cy); border-color: var(--c-cy); }
+  .music-panel-menu-pop {
+    position: absolute; top: calc(100% + 6px); right: 0;
+    min-width: 240px; max-height: 60vh; overflow-y: auto;
+    background: rgba(12, 16, 24, 0.96); backdrop-filter: blur(10px);
+    border: 1px solid var(--c-line); border-radius: 8px;
+    padding: 8px;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+  }
+  .music-panel-menu-pop[hidden] { display: none; }
+  .music-panel-menu-pop .mpm-group { font-size: 10px; text-transform: uppercase; letter-spacing: 0.09em; color: var(--c-text-mute, #6a7280); padding: 6px 8px 4px; }
+  .music-panel-menu-pop .mpm-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 6px 8px; border-radius: 5px; font-size: 12.5px;
+    color: var(--c-text, #c5cbd3);
+  }
+  .music-panel-menu-pop .mpm-row:hover { background: rgba(255,255,255,0.04); }
+  .music-panel-menu-pop .mpm-row button {
+    background: transparent; border: 1px solid var(--c-line); color: var(--c-text-mute, #6a7280);
+    font: inherit; font-size: 10.5px;
+    padding: 3px 9px; border-radius: 4px; cursor: pointer;
+  }
+  .music-panel-menu-pop .mpm-row button:hover { color: var(--c-mag); border-color: var(--c-mag); }
+  .music-panel-menu-pop .mpm-reset {
+    margin-top: 6px; padding-top: 8px; border-top: 1px solid var(--c-line);
+    text-align: center;
+  }
+  .music-panel-menu-pop .mpm-reset button {
+    color: var(--c-text-mute, #6a7380); background: transparent; border: none;
+    font: inherit; font-size: 11px; cursor: pointer; padding: 4px 10px;
+  }
+  .music-panel-menu-pop .mpm-reset button:hover { color: var(--c-mag); }
+
   /* Drag ghost + drop indicator */
   .music-col .card.dragging {
     opacity: 0.5;
@@ -678,6 +738,17 @@ const BODY_HTML: &str = r##"<!-- Module sub-bar — "Bridge live" indicator + re
      User can drag the column splitter to rebalance; grips on each
      card reorder within a column; bottom-right resize handles set
      per-panel max-height. All persisted in localStorage. -->
+<!-- Floating Panels menu — lists hidden panels to restore, offers a
+     one-click Reset. Opens over the splitter corner so it doesn't
+     take space from any card. -->
+<div class="music-panel-menu">
+  <button class="music-panel-menu-btn" onclick="toggleMusicPanelMenu()" id="music-panel-menu-btn" type="button" aria-expanded="false">
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+    Panels
+  </button>
+  <div class="music-panel-menu-pop" id="music-panel-menu-pop" hidden role="menu" aria-label="Panel manager"></div>
+</div>
+
 <div class="flex h-[calc(100vh-45px)]" id="music-split-root">
 
   <!-- LEFT: Listening -->
@@ -3617,6 +3688,16 @@ function initMusicLayoutPanels() {
 
 function addPanelHandles(card) {
   if (card.querySelector(':scope > .panel-grip')) return;
+  const close = document.createElement('button');
+  close.className = 'panel-close';
+  close.title = 'Hide this panel (restore from Panels menu)';
+  close.type = 'button';
+  close.innerHTML = '&times;';
+  close.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    hidePanel(card.dataset.panelId);
+  });
+  card.appendChild(close);
   const grip = document.createElement('div');
   grip.className = 'panel-grip';
   grip.title = 'Drag to reorder';
@@ -3626,6 +3707,110 @@ function addPanelHandles(card) {
   resz.className = 'panel-resize';
   resz.title = 'Drag to resize';
   card.appendChild(resz);
+}
+
+// Friendly label for a panel — derive from its first heading / eyebrow
+// so the add-menu lists "AI DJ", "Local library", "Now playing" etc.
+// rather than internal panel IDs.
+function labelForPanel(card) {
+  const candidates = [
+    card.querySelector(':scope h3'),
+    card.querySelector(':scope h2'),
+    card.querySelector(':scope .np-eyebrow'),
+    card.querySelector(':scope .panel-eyebrow'),
+    card.querySelector(':scope p.font-medium'),
+  ].filter(Boolean);
+  for (const el of candidates) {
+    const t = (el.textContent || '').trim();
+    if (t) return t;
+  }
+  return card.dataset.panelId || 'Panel';
+}
+
+function hidePanel(id) {
+  const card = document.querySelector(`.music-panel[data-panel-id="${id}"]`);
+  if (!card) return;
+  card.style.display = 'none';
+  const column = card.parentElement.classList.contains('music-col-left') ? 'left' : 'right';
+  updatePanelState(id, { visible: false, column });
+  renderPanelMenu();
+}
+function showPanel(id) {
+  const card = document.querySelector(`.music-panel[data-panel-id="${id}"]`);
+  if (!card) return;
+  card.style.display = '';
+  const column = card.parentElement.classList.contains('music-col-left') ? 'left' : 'right';
+  updatePanelState(id, { visible: true, column });
+  renderPanelMenu();
+}
+function resetMusicLayout() {
+  try { localStorage.removeItem(MUSIC_LAYOUT_KEY); } catch(_e) {}
+  // Undo every inline change we applied.
+  document.querySelectorAll('.music-panel').forEach(c => {
+    c.style.display = '';
+    c.style.height = '';
+    c.style.overflowY = '';
+  });
+  applySplit(60);
+  renderPanelMenu();
+}
+
+function toggleMusicPanelMenu() {
+  const pop = document.getElementById('music-panel-menu-pop');
+  const btn = document.getElementById('music-panel-menu-btn');
+  if (!pop || !btn) return;
+  const opening = pop.hasAttribute('hidden');
+  if (opening) {
+    renderPanelMenu();
+    pop.removeAttribute('hidden');
+    btn.setAttribute('aria-expanded', 'true');
+    setTimeout(() => document.addEventListener('click', closeOnOutside, { once: true }), 0);
+  } else {
+    pop.setAttribute('hidden', '');
+    btn.setAttribute('aria-expanded', 'false');
+  }
+}
+function closeOnOutside(ev) {
+  const pop = document.getElementById('music-panel-menu-pop');
+  const btn = document.getElementById('music-panel-menu-btn');
+  if (!pop || !btn) return;
+  if (pop.contains(ev.target) || btn.contains(ev.target)) {
+    // Still within the menu — re-arm.
+    setTimeout(() => document.addEventListener('click', closeOnOutside, { once: true }), 0);
+    return;
+  }
+  pop.setAttribute('hidden', '');
+  btn.setAttribute('aria-expanded', 'false');
+}
+function renderPanelMenu() {
+  const pop = document.getElementById('music-panel-menu-pop');
+  if (!pop) return;
+  const panels = Array.from(document.querySelectorAll('.music-panel'));
+  const layout = readMusicLayout();
+  const panelsState = layout.panels || {};
+  const hidden = [];
+  const shown = [];
+  panels.forEach(card => {
+    const id = card.dataset.panelId;
+    const state = panelsState[id] || {};
+    const row = { id, label: labelForPanel(card), card };
+    if (state.visible === false) hidden.push(row); else shown.push(row);
+  });
+  let html = '';
+  if (hidden.length) {
+    html += '<div class="mpm-group">Hidden — click to restore</div>';
+    html += hidden.map(h =>
+      `<div class="mpm-row"><span>${escapeHtml(h.label)}</span>` +
+      `<button onclick="showPanel('${h.id}')" type="button">+ Add</button></div>`
+    ).join('');
+  }
+  html += '<div class="mpm-group">Visible</div>';
+  html += shown.map(s =>
+    `<div class="mpm-row"><span>${escapeHtml(s.label)}</span>` +
+    `<button onclick="hidePanel('${s.id}')" type="button">Hide</button></div>`
+  ).join('');
+  html += '<div class="mpm-reset"><button onclick="resetMusicLayout(); toggleMusicPanelMenu();" type="button">Reset layout to default</button></div>';
+  pop.innerHTML = html;
 }
 
 function applySavedLayout() {
@@ -3649,13 +3834,15 @@ function applySavedLayout() {
   }
   byCol.left.sort((a, b) => a.order - b.order).forEach(p => leftCol.appendChild(p.card));
   byCol.right.sort((a, b) => a.order - b.order).forEach(p => rightCol.appendChild(p.card));
-  // Apply heights.
+  // Apply heights + visibility.
   for (const col of [byCol.left, byCol.right]) {
     for (const p of col) {
       if (p.height && p.height > 0) {
         p.card.style.height = p.height + 'px';
         p.card.style.overflowY = 'auto';
       }
+      const state = layout.panels[p.id] || {};
+      if (state.visible === false) p.card.style.display = 'none';
     }
   }
 }
