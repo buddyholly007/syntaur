@@ -976,22 +976,23 @@ body:not([data-sch-border]) .sch-main {
     linear-gradient(180deg, #f9f7f1 0%, #f0ebdd 100%);
   border-radius: 6px 10px 10px 6px;
   box-shadow: 0 2px 4px rgba(40,30,15,0.1), 0 14px 38px rgba(40,30,15,0.18);
-  padding-right: 12px;
+  padding-right: 16px;
 }
-[data-sch-border="moleskine"] .sch-shell::before {
-  /* elastic closure band crossing vertically */
-  content: ''; position: absolute; top: 0; bottom: 0; right: 36px;
-  width: 8px; background: #1c1c1c;
-  box-shadow: 0 0 6px rgba(0,0,0,0.3);
-  z-index: 3; pointer-events: none;
-}
+/* Thin red ribbon peeking down below the page — a stub, not a
+ * full-height bar. Top end emerges from under a "spine" at the top of
+ * the shell; bottom end trails below with a V-cut. No ribbon runs
+ * through the content area. */
 [data-sch-border="moleskine"] .sch-shell::after {
-  /* red ribbon bookmark trailing off the bottom */
-  content: ''; position: absolute; top: 0; bottom: -36px; left: 18%;
-  width: 6px; background: #9c1f24;
-  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 8px), 50% 100%, 0 calc(100% - 8px));
-  box-shadow: 1px 0 2px rgba(0,0,0,0.25);
-  z-index: 2; pointer-events: none;
+  content: ''; position: absolute;
+  top: -4px; bottom: -22px;
+  right: 18%; width: 5px;
+  background: linear-gradient(90deg, #7a161b 0%, #9c1f24 40%, #bd2930 100%);
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 12px), 50% 100%, 0 calc(100% - 12px));
+  box-shadow: 1px 0 2px rgba(0,0,0,0.35);
+  z-index: 1; pointer-events: none;
+  /* Only visible in a thin band near the top + below the page */
+  mask-image: linear-gradient(to bottom, black 0 18px, transparent 18px calc(100% - 34px), black calc(100% - 34px) 100%);
+  -webkit-mask-image: linear-gradient(to bottom, black 0 18px, transparent 18px calc(100% - 34px), black calc(100% - 34px) 100%);
 }
 
 /* ─── Washi collage — multiply-blended tapes with torn edges ───
@@ -1008,22 +1009,24 @@ body:not([data-sch-border]) .sch-main {
   padding-top: 28px;
   padding-bottom: 28px;
 }
-[data-sch-border="washi"] .sch-shell::before,
-[data-sch-border="washi"] .sch-shell::after {
-  content: ''; position: absolute; width: 180px; height: 44px;
+/* Single ::before holds all 4 corner tapes as stacked multi-backgrounds
+ * — sidesteps the "only 2 pseudo-elements" limit. Tape tilts are baked
+ * into each SVG via transform=rotate on an inner <g>.
+ */
+[data-sch-border="washi"] .sch-shell::before {
+  content: ''; position: absolute; inset: -16px;
   pointer-events: none; z-index: 3;
   mix-blend-mode: multiply;
   filter: drop-shadow(0 2px 3px rgba(0,0,0,0.18));
-}
-[data-sch-border="washi"] .sch-shell::before {
-  /* top-left: coral polka w/ torn edge */
-  top: -14px; left: 60px; transform: rotate(-5deg);
-  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='44' viewBox='0 0 180 44' preserveAspectRatio='none'%3E%3Cpath d='M0,5 Q20,3 40,5 T80,5 T120,5 T160,5 L180,6 L180,38 Q160,40 140,38 T100,38 T60,38 T20,38 L0,39 Z' fill='%23e8a5a5' opacity='.88'/%3E%3Cg fill='%23fff' opacity='.55'%3E%3Ccircle cx='18' cy='16' r='2.8'/%3E%3Ccircle cx='42' cy='28' r='2.8'/%3E%3Ccircle cx='66' cy='16' r='2.8'/%3E%3Ccircle cx='90' cy='28' r='2.8'/%3E%3Ccircle cx='114' cy='16' r='2.8'/%3E%3Ccircle cx='138' cy='28' r='2.8'/%3E%3Ccircle cx='162' cy='16' r='2.8'/%3E%3C/g%3E%3C/svg%3E") center / contain no-repeat;
-}
-[data-sch-border="washi"] .sch-shell::after {
-  /* bottom-right: sage floral w/ torn edge */
-  bottom: -14px; right: 60px; transform: rotate(-4deg);
-  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='44' viewBox='0 0 180 44' preserveAspectRatio='none'%3E%3Cpath d='M0,5 Q20,3 40,5 T80,5 T120,5 T160,5 L180,6 L180,38 Q160,40 140,38 T100,38 T60,38 T20,38 L0,39 Z' fill='%23a8b89a' opacity='.88'/%3E%3Cg fill='%23fff' opacity='.65'%3E%3Cg transform='translate(30 22)'%3E%3Ccircle cx='0' cy='-4' r='2.2'/%3E%3Ccircle cx='3.8' cy='-1' r='2.2'/%3E%3Ccircle cx='2.3' cy='3.5' r='2.2'/%3E%3Ccircle cx='-2.3' cy='3.5' r='2.2'/%3E%3Ccircle cx='-3.8' cy='-1' r='2.2'/%3E%3Ccircle cx='0' cy='0' r='1.3' fill='%23e6c25a'/%3E%3C/g%3E%3Cg transform='translate(75 22)'%3E%3Ccircle cx='0' cy='-4' r='2.2'/%3E%3Ccircle cx='3.8' cy='-1' r='2.2'/%3E%3Ccircle cx='2.3' cy='3.5' r='2.2'/%3E%3Ccircle cx='-2.3' cy='3.5' r='2.2'/%3E%3Ccircle cx='-3.8' cy='-1' r='2.2'/%3E%3Ccircle cx='0' cy='0' r='1.3' fill='%23e6c25a'/%3E%3C/g%3E%3Cg transform='translate(120 22)'%3E%3Ccircle cx='0' cy='-4' r='2.2'/%3E%3Ccircle cx='3.8' cy='-1' r='2.2'/%3E%3Ccircle cx='2.3' cy='3.5' r='2.2'/%3E%3Ccircle cx='-2.3' cy='3.5' r='2.2'/%3E%3Ccircle cx='-3.8' cy='-1' r='2.2'/%3E%3Ccircle cx='0' cy='0' r='1.3' fill='%23e6c25a'/%3E%3C/g%3E%3Cg transform='translate(155 22)'%3E%3Ccircle cx='0' cy='-4' r='2.2'/%3E%3Ccircle cx='3.8' cy='-1' r='2.2'/%3E%3Ccircle cx='2.3' cy='3.5' r='2.2'/%3E%3Ccircle cx='-2.3' cy='3.5' r='2.2'/%3E%3Ccircle cx='-3.8' cy='-1' r='2.2'/%3E%3Ccircle cx='0' cy='0' r='1.3' fill='%23e6c25a'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E") center / contain no-repeat;
+  background:
+    /* top-left: coral polka, tilted -5 */
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='44' viewBox='0 0 180 44'%3E%3Cg transform='rotate(-5 90 22)'%3E%3Cpath d='M0,5 Q20,3 40,5 T80,5 T120,5 T160,5 L180,6 L180,38 Q160,40 140,38 T100,38 T60,38 T20,38 L0,39 Z' fill='%23e8a5a5'/%3E%3Cg fill='%23fff' opacity='.55'%3E%3Ccircle cx='18' cy='16' r='2.8'/%3E%3Ccircle cx='42' cy='28' r='2.8'/%3E%3Ccircle cx='66' cy='16' r='2.8'/%3E%3Ccircle cx='90' cy='28' r='2.8'/%3E%3Ccircle cx='114' cy='16' r='2.8'/%3E%3Ccircle cx='138' cy='28' r='2.8'/%3E%3Ccircle cx='162' cy='16' r='2.8'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E") 60px 0 / 180px 44px no-repeat,
+    /* top-right: sage diag stripes, tilted 6 */
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='44' viewBox='0 0 180 44'%3E%3Cg transform='rotate(6 90 22)'%3E%3Cdefs%3E%3Cpattern id='ss' width='10' height='10' patternUnits='userSpaceOnUse' patternTransform='rotate(45)'%3E%3Crect width='5' height='10' fill='%23ffffff' opacity='.35'/%3E%3C/pattern%3E%3C/defs%3E%3Cpath d='M0,5 Q20,3 40,5 T80,5 T120,5 T160,5 L180,6 L180,38 Q160,40 140,38 T100,38 T60,38 T20,38 L0,39 Z' fill='%23a8b89a'/%3E%3Cpath d='M0,5 Q20,3 40,5 T80,5 T120,5 T160,5 L180,6 L180,38 Q160,40 140,38 T100,38 T60,38 T20,38 L0,39 Z' fill='url(%23ss)'/%3E%3C/g%3E%3C/svg%3E") calc(100% - 60px) 0 / 180px 44px no-repeat,
+    /* bottom-left: mustard gingham, tilted 7 */
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='44' viewBox='0 0 180 44'%3E%3Cg transform='rotate(7 90 22)'%3E%3Cdefs%3E%3Cpattern id='gg' width='8' height='8' patternUnits='userSpaceOnUse'%3E%3Crect width='4' height='4' fill='rgba(255,255,255,.5)'/%3E%3Crect x='4' y='4' width='4' height='4' fill='rgba(255,255,255,.5)'/%3E%3C/pattern%3E%3C/defs%3E%3Cpath d='M0,5 Q20,3 40,5 T80,5 T120,5 T160,5 L180,6 L180,38 Q160,40 140,38 T100,38 T60,38 T20,38 L0,39 Z' fill='%23e6c25a'/%3E%3Cpath d='M0,5 Q20,3 40,5 T80,5 T120,5 T160,5 L180,6 L180,38 Q160,40 140,38 T100,38 T60,38 T20,38 L0,39 Z' fill='url(%23gg)'/%3E%3C/g%3E%3C/svg%3E") 60px 100% / 180px 44px no-repeat,
+    /* bottom-right: lavender floral, tilted -6 */
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='44' viewBox='0 0 180 44'%3E%3Cg transform='rotate(-6 90 22)'%3E%3Cpath d='M0,5 Q20,3 40,5 T80,5 T120,5 T160,5 L180,6 L180,38 Q160,40 140,38 T100,38 T60,38 T20,38 L0,39 Z' fill='%23b8a5d8'/%3E%3Cg fill='white' opacity='.6'%3E%3Cg transform='translate(28 22)'%3E%3Ccircle cx='0' cy='-4' r='2.2'/%3E%3Ccircle cx='3.8' cy='-1' r='2.2'/%3E%3Ccircle cx='2.3' cy='3.5' r='2.2'/%3E%3Ccircle cx='-2.3' cy='3.5' r='2.2'/%3E%3Ccircle cx='-3.8' cy='-1' r='2.2'/%3E%3Ccircle cx='0' cy='0' r='1.3' fill='%23e6c25a'/%3E%3C/g%3E%3Cg transform='translate(68 22)'%3E%3Ccircle cx='0' cy='-4' r='2.2'/%3E%3Ccircle cx='3.8' cy='-1' r='2.2'/%3E%3Ccircle cx='2.3' cy='3.5' r='2.2'/%3E%3Ccircle cx='-2.3' cy='3.5' r='2.2'/%3E%3Ccircle cx='-3.8' cy='-1' r='2.2'/%3E%3Ccircle cx='0' cy='0' r='1.3' fill='%23e6c25a'/%3E%3C/g%3E%3Cg transform='translate(108 22)'%3E%3Ccircle cx='0' cy='-4' r='2.2'/%3E%3Ccircle cx='3.8' cy='-1' r='2.2'/%3E%3Ccircle cx='2.3' cy='3.5' r='2.2'/%3E%3Ccircle cx='-2.3' cy='3.5' r='2.2'/%3E%3Ccircle cx='-3.8' cy='-1' r='2.2'/%3E%3Ccircle cx='0' cy='0' r='1.3' fill='%23e6c25a'/%3E%3C/g%3E%3Cg transform='translate(148 22)'%3E%3Ccircle cx='0' cy='-4' r='2.2'/%3E%3Ccircle cx='3.8' cy='-1' r='2.2'/%3E%3Ccircle cx='2.3' cy='3.5' r='2.2'/%3E%3Ccircle cx='-2.3' cy='3.5' r='2.2'/%3E%3Ccircle cx='-3.8' cy='-1' r='2.2'/%3E%3Ccircle cx='0' cy='0' r='1.3' fill='%23e6c25a'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E") calc(100% - 60px) 100% / 180px 44px no-repeat;
 }
 
 /* ─── Legal pad — authentic yellow + wire-o at top ───
@@ -1080,17 +1083,55 @@ body:not([data-sch-border]) .sch-main {
 
 /* ─── Vintage parchment — aged gradient + Victorian corners ───
  */
+/* Parchment applies to the whole scheduler surface — left/main/right
+ * child columns have their own opaque backgrounds by default, so make
+ * them transparent here so the aged paper tone and inset keyline show
+ * across the full canvas. */
 [data-sch-border="vintage"] .sch-shell {
   background:
-    radial-gradient(ellipse at center, #f3e8c8 0%, #e8d7a6 75%, #d9c37f 100%);
+    radial-gradient(ellipse at center, #ebdbb0 0%, #d9c37f 70%, #b8a055 100%);
   box-shadow:
     inset 0 0 0 2px #6b4f2a,
-    inset 0 0 0 3px #f3e8c8,
+    inset 0 0 0 3px #ebdbb0,
     inset 0 0 0 5px #6b4f2a,
     0 2px 4px rgba(30,20,10,0.1),
     0 12px 36px rgba(30,20,10,0.22);
   border-radius: 6px;
 }
+[data-sch-border="vintage"] .sch-left,
+[data-sch-border="vintage"] .sch-main,
+[data-sch-border="vintage"] .sch-right,
+[data-sch-border="vintage"] .sch-month-cell,
+[data-sch-border="vintage"] .sch-week-head,
+[data-sch-border="vintage"] .sch-week-body,
+[data-sch-border="vintage"] .sch-day-body { background: transparent !important; border-color: rgba(107,79,42,0.25) !important; }
+[data-sch-border="vintage"] .sch-month-grid { background: transparent !important; }
+/* Do the same transparency pass for notebook + floral so their paper
+ * tones show across the whole scheduler, not just under the coils. */
+[data-sch-border="notebook"] .sch-left,
+[data-sch-border="notebook"] .sch-main,
+[data-sch-border="notebook"] .sch-right,
+body:not([data-sch-border]) .sch-left,
+body:not([data-sch-border]) .sch-main,
+body:not([data-sch-border]) .sch-right,
+[data-sch-border="pressed-flowers"] .sch-left,
+[data-sch-border="pressed-flowers"] .sch-main,
+[data-sch-border="pressed-flowers"] .sch-right,
+[data-sch-border="gold-corners"] .sch-left,
+[data-sch-border="gold-corners"] .sch-main,
+[data-sch-border="gold-corners"] .sch-right,
+[data-sch-border="washi"] .sch-left,
+[data-sch-border="washi"] .sch-main,
+[data-sch-border="washi"] .sch-right,
+[data-sch-border="disc"] .sch-left,
+[data-sch-border="disc"] .sch-main,
+[data-sch-border="disc"] .sch-right,
+[data-sch-border="moleskine"] .sch-left,
+[data-sch-border="moleskine"] .sch-main,
+[data-sch-border="moleskine"] .sch-right,
+[data-sch-border="ruled"] .sch-left,
+[data-sch-border="ruled"] .sch-main,
+[data-sch-border="ruled"] .sch-right { background: transparent !important; }
 [data-sch-border="vintage"] .sch-shell::before {
   content: ''; position: absolute; inset: 0; pointer-events: none; z-index: 4;
   background:
@@ -1100,7 +1141,14 @@ body:not([data-sch-border]) .sch-main {
     url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='110' height='110' viewBox='0 0 110 110'%3E%3Cg transform='translate(110 110) scale(-1 -1)'%3E%3Cg fill='none' stroke='%234a3426' stroke-width='1.8' stroke-linecap='round'%3E%3Cpath d='M10 44 Q 10 10 44 10'/%3E%3Cpath d='M20 44 Q 20 20 44 20'/%3E%3Ccircle cx='30' cy='30' r='2' fill='%234a3426'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E") bottom right / 110px 110px no-repeat;
 }
 
-/* Preview tiles in the border picker modal */
+/* Preview tiles in the border picker modal.
+ * Every style gets a dedicated mini-preview background so the picker
+ * actually SHOWS the style rather than listing labels next to empty
+ * paper rectangles. Tiles don't reuse the full frame CSS because those
+ * decorations (full-height coils, 130px florals, 20px border-image) do
+ * not scale cleanly into a 180×110 tile. Purpose-built small art
+ * instead.
+ */
 .sch-border-tile {
   background: var(--sch-paper); border: 1px solid var(--sch-border);
   border-radius: 8px; padding: 0; cursor: pointer;
@@ -1112,16 +1160,101 @@ body:not([data-sch-border]) .sch-main {
 .sch-border-tile:hover { border-color: var(--sch-accent); transform: translateY(-2px); }
 .sch-border-preview {
   height: 130px; position: relative;
-  display: flex; align-items: center; justify-content: center;
-  background: var(--sch-bg); overflow: hidden; padding: 8px;
+  background: var(--sch-bg); overflow: hidden; padding: 10px;
 }
-.sch-border-preview .sch-shell {
-  width: 92%; height: 92%; min-height: 0; position: relative;
-  padding: 6px; margin: 0; font-size: 10px;
-  display: flex; align-items: center; justify-content: center;
-  color: var(--sch-ink-dim);
-  background: var(--sch-paper);
+.sch-preview-paper {
+  position: absolute; inset: 10px; border-radius: 2px;
+  background: linear-gradient(180deg, #faf6ee 0%, #f4ead5 100%);
+  box-shadow: 0 1px 2px rgba(92,74,58,0.08), 0 4px 10px rgba(92,74,58,0.1);
 }
+.sch-preview-paper::before { content: ''; position: absolute; inset: 0; pointer-events: none; }
+
+.sch-border-preview[data-preview="notebook"] .sch-preview-paper {
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='22' viewBox='0 0 22 22'%3E%3Cdefs%3E%3ClinearGradient id='m' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%238a8a8e'/%3E%3Cstop offset='.3' stop-color='%23ededf0'/%3E%3Cstop offset='.5' stop-color='%235f5f63'/%3E%3Cstop offset='1' stop-color='%234a4a4e'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cg transform='rotate(-18 11 11)'%3E%3Cpath d='M 2 11 Q 11 5 20 11' fill='none' stroke='url(%23m)' stroke-width='2' stroke-linecap='round'/%3E%3Cpath d='M 4 9 Q 11 6 18 9' fill='none' stroke='rgba(255,255,255,.85)' stroke-width='.6' stroke-linecap='round'/%3E%3C/g%3E%3C/svg%3E") left center / 22px 22px repeat-y,
+    linear-gradient(180deg, #faf6ee 0%, #f4ead5 100%);
+  padding-left: 26px;
+}
+.sch-border-preview[data-preview="notebook"] .sch-preview-paper::before {
+  background: linear-gradient(to bottom, transparent 19px, rgba(74,105,172,0.18) 19px, rgba(74,105,172,0.18) 20px);
+  background-size: 100% 20px; left: 26px;
+}
+
+.sch-border-preview[data-preview="disc"] .sch-preview-paper {
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='30' height='34' viewBox='0 0 30 34'%3E%3Cdefs%3E%3CradialGradient id='dg' cx='.45' cy='.4' r='.6'%3E%3Cstop offset='0' stop-color='%23f4dfa5'/%3E%3Cstop offset='.5' stop-color='%23d4b87a'/%3E%3Cstop offset='1' stop-color='%239a7b3d'/%3E%3C/radialGradient%3E%3C/defs%3E%3Ccircle cx='15' cy='17' r='11' fill='url(%23dg)'/%3E%3Ccircle cx='15' cy='17' r='11' fill='none' stroke='rgba(70,50,20,.3)' stroke-width='.8'/%3E%3Ccircle cx='15' cy='17' r='7' fill='none' stroke='rgba(255,255,255,.5)' stroke-width='.6'/%3E%3C/svg%3E") left center / 30px 34px repeat-y,
+    linear-gradient(180deg, #faf6ee 0%, #f4ead5 100%);
+  padding-left: 32px;
+}
+
+.sch-border-preview[data-preview="moleskine"] .sch-preview-paper {
+  background:
+    repeating-linear-gradient(90deg, transparent 0 calc(100% - 4px), rgba(160,140,100,0.35) calc(100% - 4px) calc(100% - 3px), transparent calc(100% - 3px) calc(100% - 2px), rgba(160,140,100,0.35) calc(100% - 2px) calc(100% - 1px)),
+    linear-gradient(180deg, #f9f7f1 0%, #f0ebdd 100%);
+  border-radius: 3px 5px 5px 3px;
+}
+.sch-border-preview[data-preview="moleskine"] .sch-preview-paper::after {
+  content: ''; position: absolute;
+  top: -3px; bottom: -12px; right: 18%;
+  width: 3px;
+  background: linear-gradient(90deg, #7a161b 0%, #bd2930 100%);
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 7px), 50% 100%, 0 calc(100% - 7px));
+  mask-image: linear-gradient(to bottom, black 0 10px, transparent 10px calc(100% - 20px), black calc(100% - 20px) 100%);
+  -webkit-mask-image: linear-gradient(to bottom, black 0 10px, transparent 10px calc(100% - 20px), black calc(100% - 20px) 100%);
+}
+
+.sch-border-preview[data-preview="washi"] .sch-preview-paper {
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='70' height='18' viewBox='0 0 70 18'%3E%3Cg transform='rotate(-6 35 9)'%3E%3Crect x='0' y='2' width='70' height='14' rx='1' fill='%23e8a5a5'/%3E%3Cg fill='%23fff' opacity='.55'%3E%3Ccircle cx='10' cy='7' r='1.4'/%3E%3Ccircle cx='22' cy='12' r='1.4'/%3E%3Ccircle cx='34' cy='7' r='1.4'/%3E%3Ccircle cx='46' cy='12' r='1.4'/%3E%3Ccircle cx='58' cy='7' r='1.4'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E") 14px 6px / 70px 18px no-repeat,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='70' height='18' viewBox='0 0 70 18'%3E%3Cg transform='rotate(6 35 9)'%3E%3Cdefs%3E%3Cpattern id='s' width='6' height='6' patternUnits='userSpaceOnUse' patternTransform='rotate(45)'%3E%3Crect width='3' height='6' fill='%23ffffff' opacity='.4'/%3E%3C/pattern%3E%3C/defs%3E%3Crect x='0' y='2' width='70' height='14' rx='1' fill='%23a8b89a'/%3E%3Crect x='0' y='2' width='70' height='14' rx='1' fill='url(%23s)'/%3E%3C/g%3E%3C/svg%3E") calc(100% - 14px) 6px / 70px 18px no-repeat,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='70' height='18' viewBox='0 0 70 18'%3E%3Cg transform='rotate(7 35 9)'%3E%3Cdefs%3E%3Cpattern id='g' width='4' height='4' patternUnits='userSpaceOnUse'%3E%3Crect width='2' height='2' fill='rgba(255,255,255,.5)'/%3E%3Crect x='2' y='2' width='2' height='2' fill='rgba(255,255,255,.5)'/%3E%3C/pattern%3E%3C/defs%3E%3Crect x='0' y='2' width='70' height='14' rx='1' fill='%23e6c25a'/%3E%3Crect x='0' y='2' width='70' height='14' rx='1' fill='url(%23g)'/%3E%3C/g%3E%3C/svg%3E") 14px calc(100% - 6px) / 70px 18px no-repeat,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='70' height='18' viewBox='0 0 70 18'%3E%3Cg transform='rotate(-6 35 9)'%3E%3Crect x='0' y='2' width='70' height='14' rx='1' fill='%23b8a5d8'/%3E%3Cg fill='white' opacity='.6'%3E%3Ccircle cx='14' cy='9' r='1.2'/%3E%3Ccircle cx='30' cy='9' r='1.2'/%3E%3Ccircle cx='46' cy='9' r='1.2'/%3E%3Ccircle cx='60' cy='9' r='1.2'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E") calc(100% - 14px) calc(100% - 6px) / 70px 18px no-repeat,
+    linear-gradient(180deg, #faf6ee 0%, #f4ead5 100%);
+}
+
+.sch-border-preview[data-preview="ruled"] .sch-preview-paper {
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='18' viewBox='0 0 22 18'%3E%3Cdefs%3E%3ClinearGradient id='wo' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%23d4d4d8'/%3E%3Cstop offset='.5' stop-color='%236e6e72'/%3E%3Cstop offset='1' stop-color='%232e2e32'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath d='M 7 12 L 7 4 Q 11 1 15 4 L 15 12' fill='none' stroke='url(%23wo)' stroke-width='1.8' stroke-linecap='round'/%3E%3C/svg%3E") top left / 22px 18px repeat-x,
+    repeating-linear-gradient(180deg, transparent 0 15px, rgba(60,110,180,0.3) 15px 16px),
+    linear-gradient(90deg, transparent 28px, rgba(200,60,60,0.5) 28px 29px, transparent 29px),
+    linear-gradient(180deg, #fff5c8 0%, #fcecb0 100%);
+  padding-top: 18px;
+}
+
+.sch-border-preview[data-preview="gold-corners"] .sch-preview-paper {
+  background:
+    linear-gradient(180deg, #faf6ee 0%, #f4ead5 100%) padding-box,
+    linear-gradient(135deg, #d4af37 0%, #f5d370 30%, #9a7b1f 55%, #f5d370 80%, #d4af37 100%) border-box;
+  border: 3px solid transparent;
+}
+
+.sch-border-preview[data-preview="pressed-flowers"] .sch-preview-paper {
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='80' height='70' viewBox='0 0 80 70'%3E%3Cg fill='none' stroke='%235f7a56' stroke-width='1.2' stroke-linecap='round'%3E%3Cpath d='M2 20 C 14 14 28 22 44 32 C 58 40 70 42 80 44'/%3E%3Cpath d='M8 6 C 18 12 26 22 32 30'/%3E%3C/g%3E%3Cg fill='%238fa889'%3E%3Cellipse cx='14' cy='14' rx='4' ry='2' transform='rotate(25 14 14)'/%3E%3Cellipse cx='24' cy='22' rx='5' ry='2.5' transform='rotate(30 24 22)'/%3E%3Cellipse cx='38' cy='30' rx='5' ry='2.5' transform='rotate(-10 38 30)'/%3E%3C/g%3E%3Cg fill='%23d48fa5'%3E%3Cg transform='translate(28 34)'%3E%3Ccircle cx='0' cy='-2.4' r='1.6'/%3E%3Ccircle cx='2.3' cy='-.7' r='1.6'/%3E%3Ccircle cx='1.4' cy='2.1' r='1.6'/%3E%3Ccircle cx='-1.4' cy='2.1' r='1.6'/%3E%3Ccircle cx='-2.3' cy='-.7' r='1.6'/%3E%3Ccircle cx='0' cy='0' r='1' fill='%23e6c25a'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E") top left / 80px 70px no-repeat,
+    linear-gradient(180deg, #faf6ee 0%, #f4ead5 100%);
+}
+
+.sch-border-preview[data-preview="vintage"] .sch-preview-paper {
+  background: radial-gradient(ellipse at center, #ebdbb0 0%, #d9c37f 70%, #b8a055 100%);
+  box-shadow:
+    inset 0 0 0 1px #6b4f2a,
+    inset 0 0 0 2px #ebdbb0,
+    inset 0 0 0 3px #6b4f2a;
+}
+.sch-border-preview[data-preview="vintage"] .sch-preview-paper::before {
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='30' height='30' viewBox='0 0 30 30'%3E%3Cg fill='none' stroke='%234a3426' stroke-width='1' stroke-linecap='round'%3E%3Cpath d='M4 14 Q 4 4 14 4'/%3E%3Cpath d='M8 14 Q 8 8 14 8'/%3E%3Ccircle cx='10' cy='10' r='.8' fill='%234a3426'/%3E%3C/g%3E%3C/svg%3E") top left / 30px 30px no-repeat,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='30' height='30' viewBox='0 0 30 30'%3E%3Cg transform='translate(30 0) scale(-1 1)'%3E%3Cg fill='none' stroke='%234a3426' stroke-width='1' stroke-linecap='round'%3E%3Cpath d='M4 14 Q 4 4 14 4'/%3E%3Cpath d='M8 14 Q 8 8 14 8'/%3E%3Ccircle cx='10' cy='10' r='.8' fill='%234a3426'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E") top right / 30px 30px no-repeat,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='30' height='30' viewBox='0 0 30 30'%3E%3Cg transform='translate(0 30) scale(1 -1)'%3E%3Cg fill='none' stroke='%234a3426' stroke-width='1' stroke-linecap='round'%3E%3Cpath d='M4 14 Q 4 4 14 4'/%3E%3Cpath d='M8 14 Q 8 8 14 8'/%3E%3Ccircle cx='10' cy='10' r='.8' fill='%234a3426'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E") bottom left / 30px 30px no-repeat,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='30' height='30' viewBox='0 0 30 30'%3E%3Cg transform='translate(30 30) scale(-1 -1)'%3E%3Cg fill='none' stroke='%234a3426' stroke-width='1' stroke-linecap='round'%3E%3Cpath d='M4 14 Q 4 4 14 4'/%3E%3Cpath d='M8 14 Q 8 8 14 8'/%3E%3Ccircle cx='10' cy='10' r='.8' fill='%234a3426'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E") bottom right / 30px 30px no-repeat;
+}
+
+.sch-border-preview[data-preview="none"] .sch-preview-paper {
+  background: var(--sch-bg);
+  border: 1px dashed var(--sch-ink-faint);
+  box-shadow: none;
+}
+
 .sch-border-label { padding: 8px 10px; font-size: 13px; color: var(--sch-ink); font-family: var(--sch-font-heading); background: var(--sch-paper); text-align: center; }
 
 /* ══ List-items modal (meal planner + any list) ══ */
@@ -2148,15 +2281,12 @@ const PAGE_JS: &str = r##"
     const grid = document.getElementById('sch-border-grid');
     grid.innerHTML = BORDERS.map(b => `
       <button class="sch-border-tile${b.key === (S.prefs.border || 'notebook') ? ' active' : ''}" onclick="schPickBorder('${b.key}')" data-border="${b.key}">
-        <div class="sch-border-preview" data-sch-border-preview="${b.key}"></div>
+        <div class="sch-border-preview" data-preview="${b.key}">
+          <div class="sch-preview-paper"></div>
+        </div>
         <div class="sch-border-label">${escHtml(b.name)}</div>
       </button>
     `).join('');
-    // Paint each preview by cloning the border rules onto a scoped wrapper.
-    grid.querySelectorAll('.sch-border-preview').forEach(el => {
-      const key = el.getAttribute('data-sch-border-preview');
-      el.innerHTML = `<div class="sch-shell" data-sch-border="${key}" style="position:relative;width:100%;height:100%;background:var(--sch-bg);padding:0"><div class="sch-left" style="position:absolute;inset:0"></div><div class="sch-right" style="position:absolute;inset:0"></div><div class="sch-main" style="position:absolute;inset:10px;padding:0;border:1px dashed var(--sch-border);background:var(--sch-paper)"></div></div>`;
-    });
     document.getElementById('sch-border-modal').hidden = false;
   };
   window.schCloseBorders = function() { document.getElementById('sch-border-modal').hidden = true; };
