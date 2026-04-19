@@ -770,18 +770,41 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
 
   /* Drag ghost + drop indicator */
   .music-col .card.dragging {
-    opacity: 0.5;
+    opacity: 0.45;
+    transform: scale(0.98);
+    transition: transform 0.1s;
   }
-  .music-col .card.drop-before {
-    box-shadow: 0 -2px 0 var(--c-cy);
+  /* Dedicated drop-marker bar that lives outside any card — floats
+     in between where the panel will land. Much more visible than the
+     old 2px box-shadow trick. */
+  .drop-marker {
+    position: absolute;
+    left: 12px; right: 12px;
+    height: 4px;
+    background: linear-gradient(90deg, var(--c-mag) 0%, var(--c-cy) 100%);
+    border-radius: 3px;
+    box-shadow: 0 0 12px rgba(255, 44, 223, 0.7), 0 0 20px rgba(0, 240, 255, 0.4);
+    pointer-events: none;
+    z-index: 50;
   }
-  .music-col .card.drop-after {
-    box-shadow: 0 2px 0 var(--c-cy);
+  .drop-marker::before, .drop-marker::after {
+    content: ''; position: absolute; top: 50%; width: 0; height: 0;
+    border-top: 5px solid transparent;
+    border-bottom: 5px solid transparent;
+    transform: translateY(-50%);
+  }
+  .drop-marker::before {
+    left: -6px;
+    border-right: 7px solid var(--c-mag);
+  }
+  .drop-marker::after {
+    right: -6px;
+    border-left: 7px solid var(--c-cy);
   }
   /* Column hover cue while a cross-column drag is in progress. */
   .music-col.drop-col {
     background: rgba(0, 240, 255, 0.03);
-    box-shadow: inset 0 0 0 1px rgba(0, 240, 255, 0.25);
+    box-shadow: inset 0 0 0 1px rgba(0, 240, 255, 0.3);
     transition: background 0.1s, box-shadow 0.1s;
   }
   .border-b.border-gray-800 { border-bottom-color: var(--c-line) !important; }"##;
@@ -4082,6 +4105,14 @@ function bindPanelHandlers(card) {
   if (resz) bindResize(card, resz);
 }
 
+// Auto-scroll edge band + max speed. When the pointer is within
+// EDGE_PX of a column's top or bottom, the column scrolls at a rate
+// proportional to how close the pointer is. Keeps going as long as
+// the pointer stays in the band — lets the user drag a panel from
+// the bottom of a long column to the top without ever releasing.
+const DRAG_EDGE_PX = 70;
+const DRAG_MAX_SPEED = 22;   // px per frame at peak proximity
+
 function bindDrag(card, grip) {
   grip.addEventListener('pointerdown', (ev) => {
     ev.preventDefault();
@@ -4092,12 +4123,27 @@ function bindDrag(card, grip) {
     const rightCol = document.querySelector('.music-col-right');
     const allCols = [leftCol, rightCol].filter(Boolean);
 
-    // Highlight a column while the pointer is hovering it (subtle
-    // visual cue that a cross-column drop will land there).
     const clearColHighlight = () => allCols.forEach(c => c.classList.remove('drop-col'));
 
-    const clearDropMarkers = () => {
-      document.querySelectorAll('.music-panel').forEach(s => s.classList.remove('drop-before', 'drop-after'));
+    // Dedicated floating drop marker (no more faint box-shadows).
+    let marker = document.getElementById('music-drop-marker');
+    if (!marker) {
+      marker = document.createElement('div');
+      marker.id = 'music-drop-marker';
+      marker.className = 'drop-marker';
+      marker.style.display = 'none';
+      document.body.appendChild(marker);
+    }
+    const hideMarker = () => { marker.style.display = 'none'; marker.dataset.target = ''; marker.dataset.position = ''; };
+    const showMarkerAt = (col, y, targetId, position) => {
+      const colRect = col.getBoundingClientRect();
+      marker.style.display = 'block';
+      marker.style.left = (colRect.left + 12) + 'px';
+      marker.style.width = (colRect.width - 24) + 'px';
+      marker.style.top = (y - 2) + 'px';
+      marker.dataset.target = targetId || '';
+      marker.dataset.position = position;
+      marker.dataset.column = col === leftCol ? 'left' : 'right';
     };
 
     const colUnderPointer = (x, y) => {
@@ -4108,63 +4154,107 @@ function bindDrag(card, grip) {
       return null;
     };
 
-    const onMove = (e) => {
-      clearDropMarkers();
+    // Auto-scroll state — a requestAnimationFrame loop that runs as
+    // long as the pointer is in the edge band.
+    let lastPointer = { x: ev.clientX, y: ev.clientY };
+    let scrollRaf = null;
+    const scrollLoop = () => {
+      const col = colUnderPointer(lastPointer.x, lastPointer.y);
+      if (!col) { scrollRaf = requestAnimationFrame(scrollLoop); return; }
+      const r = col.getBoundingClientRect();
+      const distTop = lastPointer.y - r.top;
+      const distBottom = r.bottom - lastPointer.y;
+      let dy = 0;
+      if (distTop < DRAG_EDGE_PX && distTop > -DRAG_EDGE_PX * 2) {
+        // within top band — scroll up
+        dy = -DRAG_MAX_SPEED * Math.max(0, Math.min(1, (DRAG_EDGE_PX - distTop) / DRAG_EDGE_PX));
+      } else if (distBottom < DRAG_EDGE_PX && distBottom > -DRAG_EDGE_PX * 2) {
+        // within bottom band — scroll down
+        dy = DRAG_MAX_SPEED * Math.max(0, Math.min(1, (DRAG_EDGE_PX - distBottom) / DRAG_EDGE_PX));
+      }
+      if (dy !== 0) {
+        col.scrollTop += dy;
+        // Recompute drop marker at the same pointer position — the
+        // sibling the pointer is "over" may have changed as we scrolled.
+        updateMarker(lastPointer.x, lastPointer.y);
+      }
+      scrollRaf = requestAnimationFrame(scrollLoop);
+    };
+
+    // Compute & render the drop marker at a given pointer location.
+    const updateMarker = (x, y) => {
       clearColHighlight();
-      const col = colUnderPointer(e.clientX, e.clientY);
-      if (!col) return;
+      const col = colUnderPointer(x, y);
+      if (!col) { hideMarker(); return; }
       col.classList.add('drop-col');
-      // Siblings in the HOVERED column (not just the start column) —
-      // this is what enables cross-column moves.
-      const siblings = Array.from(col.querySelectorAll(':scope > .music-panel')).filter(c => c !== card);
-      const y = e.clientY;
-      let marked = false;
-      for (const s of siblings) {
-        if (s.style.display === 'none') continue;
-        const r = s.getBoundingClientRect();
-        if (y >= r.top && y <= r.bottom) {
-          const before = (y - r.top) < r.height / 2;
-          s.classList.add(before ? 'drop-before' : 'drop-after');
-          marked = true;
-          break;
+      const siblings = Array.from(col.querySelectorAll(':scope > .music-panel'))
+        .filter(c => c !== card && c.style.display !== 'none');
+      if (siblings.length === 0) {
+        // Empty column → marker at the top of the column's visible area.
+        const colRect = col.getBoundingClientRect();
+        showMarkerAt(col, colRect.top + 10, null, 'append');
+        return;
+      }
+      // Find the sibling whose mid-Y is closest to the pointer — that
+      // dictates the insertion point. If pointer is below everyone,
+      // marker sits under the last panel.
+      let targetIdx = -1;
+      let before = true;
+      for (let i = 0; i < siblings.length; i++) {
+        const sr = siblings[i].getBoundingClientRect();
+        if (y < sr.top + sr.height / 2) {
+          targetIdx = i; before = true; break;
         }
       }
-      // If pointer is below the last panel, we'll append; no marker
-      // needed — cleared already.
-      if (!marked) {
-        // Leaving the 'drop-col' highlight is enough to signal "drop
-        // at end of this column."
+      if (targetIdx === -1) {
+        // Past the last panel: marker sits just below the last sibling.
+        const last = siblings[siblings.length - 1];
+        const r = last.getBoundingClientRect();
+        showMarkerAt(col, r.bottom + 2, last.dataset.panelId, 'after');
+      } else {
+        const target = siblings[targetIdx];
+        const r = target.getBoundingClientRect();
+        showMarkerAt(col, (before ? r.top : r.bottom) - 2, target.dataset.panelId, before ? 'before' : 'after');
       }
+    };
+
+    const onMove = (e) => {
+      lastPointer = { x: e.clientX, y: e.clientY };
+      updateMarker(e.clientX, e.clientY);
     };
 
     const onUp = (e) => {
       grip.releasePointerCapture(ev.pointerId);
+      if (scrollRaf) cancelAnimationFrame(scrollRaf);
       card.classList.remove('dragging');
-      const col = colUnderPointer(e.clientX, e.clientY);
       const sourceCol = card.parentElement;
-      if (col) {
-        // Find which sibling (if any) has a drop marker.
-        const target = Array.from(col.querySelectorAll(':scope > .music-panel'))
-          .find(s => s.classList.contains('drop-before') || s.classList.contains('drop-after'));
-        if (target) {
-          const before = target.classList.contains('drop-before');
-          col.insertBefore(card, before ? target : target.nextSibling);
-        } else {
-          // No sibling under pointer — append to end of hovered column.
+      const col = colUnderPointer(e.clientX, e.clientY);
+      if (col && marker.style.display !== 'none') {
+        const pos = marker.dataset.position;
+        const targetId = marker.dataset.target;
+        if (pos === 'append' || !targetId) {
           col.appendChild(card);
+        } else {
+          const target = col.querySelector(`[data-panel-id="${targetId}"]`);
+          if (target) {
+            col.insertBefore(card, pos === 'before' ? target : target.nextSibling);
+          } else {
+            col.appendChild(card);
+          }
         }
-        // Persist order for both columns (source + destination — they
-        // both changed when cross-column).
         if (sourceCol !== col) persistColumnOrder(sourceCol);
         persistColumnOrder(col);
       }
-      clearDropMarkers();
+      hideMarker();
       clearColHighlight();
       grip.removeEventListener('pointermove', onMove);
       grip.removeEventListener('pointerup', onUp);
     };
     grip.addEventListener('pointermove', onMove);
     grip.addEventListener('pointerup', onUp);
+    scrollRaf = requestAnimationFrame(scrollLoop);
+    // Paint initial marker as soon as drag starts.
+    updateMarker(ev.clientX, ev.clientY);
   });
 }
 
