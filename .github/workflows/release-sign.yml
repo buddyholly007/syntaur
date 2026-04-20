@@ -141,7 +141,12 @@ jobs:
       - name: Compute checksums
         working-directory: dist
         run: |
-          sha256sum syntaur-gateway-* > checksums.txt
+          # Hash every shipped binary, not just the gateway. Matrix builds
+          # viewer + isolation-tests alongside the gateway (all
+          # `syntaur-*`-prefixed); each must enter the checksum + sign +
+          # provenance pipeline so the published release is actually fully
+          # verifiable.
+          sha256sum syntaur-* > checksums.txt
           cat checksums.txt
 
       - name: Install cosign
@@ -150,7 +155,11 @@ jobs:
       - name: Sign each artifact
         working-directory: dist
         run: |
-          for f in syntaur-gateway-*; do
+          for f in syntaur-*; do
+            # Skip the cosign bundles + checksum file themselves (signed below).
+            case "$f" in
+              *.cosign.bundle|checksums.txt) continue ;;
+            esac
             cosign sign-blob \
               --yes \
               --bundle "${f}.cosign.bundle" \
@@ -164,13 +173,13 @@ jobs:
       - name: Attest SLSA provenance
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: 'dist/syntaur-gateway-*'
+          subject-path: 'dist/syntaur-*'
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/syntaur-gateway-*
+            dist/syntaur-*
             dist/checksums.txt
             dist/*.cosign.bundle
           body: |

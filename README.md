@@ -4,12 +4,24 @@ Your personal AI platform. One binary, runs on your hardware, stays private.
 
 ## Quick Start
 
+**Recommended — verified install (sha256 + cosign):**
+
 ```bash
 # Linux / macOS
-curl -sSL https://get.syntaur.dev | sh
+wget https://github.com/buddyholly007/syntaur/releases/latest/download/install.sh
+sh install.sh --server
 
 # Windows (PowerShell)
-irm https://get.syntaur.dev/install.ps1 | iex
+iwr https://github.com/buddyholly007/syntaur/releases/latest/download/install.ps1 -OutFile install.ps1
+.\install.ps1 --server
+```
+
+The installer downloads each binary alongside its `checksums.txt` + cosign signature bundle from the matching release, verifies both, and aborts loudly on any mismatch. See [SECURITY.md](SECURITY.md) for the verification flow.
+
+**Developer-convenience shortcut (unverified — warns loudly):**
+
+```bash
+curl -sSL https://github.com/buddyholly007/syntaur/releases/latest/download/install.sh | sh
 ```
 
 Your browser opens automatically. Follow the setup wizard.
