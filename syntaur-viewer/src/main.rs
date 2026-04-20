@@ -618,6 +618,12 @@ fn run_viewer(url: &str) -> Result<(), String> {
         window::WindowBuilder,
     };
     use wry::WebViewBuilder;
+    // `with_additional_browser_args` is a Windows-only extension method on
+    // WebViewBuilder — the trait must be in scope for the method to
+    // resolve. Without this import the whole builder chain fails
+    // type-inference (method not found → closure types propagate wrong →
+    // nav handler reports `size for str is unknown`).
+    use wry::WebViewBuilderExtWindows;
 
     let gateway_origin = url.to_string();
     let saved = load_window_state();
