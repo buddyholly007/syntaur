@@ -386,8 +386,13 @@ fn thaddeus_chat() -> Markup {
                 }
             }
             div class="sch-thad-input-row" {
+                // Non-void element — must use `{}` not `;` or maud emits a
+                // self-closing tag which HTML parsers ignore on <textarea>,
+                // leaving it open and swallowing the rest of the body
+                // (including the scheduler <script> block). That took down
+                // the whole module on the first ship of this drawer.
                 textarea id="sch-thad-input" rows="1" placeholder="Ask Thaddeus…"
-                         onkeydown="schThadKey(event)";
+                         onkeydown="schThadKey(event)" {}
                 button id="sch-thad-send" onclick="schThadSend()" title="Send" {
                     svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" {
                         path d="M22 2L11 13" {}
