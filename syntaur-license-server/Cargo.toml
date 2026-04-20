@@ -27,7 +27,7 @@ async-stream = "0.3"
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 native-tls = "0.2"
 urlencoding = "2"
-rumqttc = "0.24"
+rumqttc = { version = "0.25", default-features = false }
 socket2 = "0.5"
 
 [profile.release]

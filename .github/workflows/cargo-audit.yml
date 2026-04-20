@@ -24,8 +24,36 @@ jobs:
       - name: Install cargo-audit
         run: cargo install --locked cargo-audit
 
+      # Real vulnerabilities always fail. The `--ignore` list below is a
+      # documented allowlist of *upstream-only* unmaintained/unsound/yanked
+      # warnings in deep transitive dependencies we cannot fix without
+      # waiting on upstream (wry's GTK3 chain via webkit2gtk, chromiumoxide
+      # → tungstenite → rand, indicatif → number_prefix, etc). Review and
+      # trim this list every release cycle. Any entry that acquires an
+      # exploit advisory must move out of this list immediately.
       - name: Run cargo audit
-        run: cargo audit --deny warnings
+        run: |
+          cargo audit --deny warnings \
+            --ignore RUSTSEC-2025-0052 \
+            --ignore RUSTSEC-2024-0411 \
+            --ignore RUSTSEC-2024-0412 \
+            --ignore RUSTSEC-2024-0413 \
+            --ignore RUSTSEC-2024-0414 \
+            --ignore RUSTSEC-2024-0415 \
+            --ignore RUSTSEC-2024-0416 \
+            --ignore RUSTSEC-2024-0417 \
+            --ignore RUSTSEC-2024-0418 \
+            --ignore RUSTSEC-2024-0419 \
+            --ignore RUSTSEC-2024-0420 \
+            --ignore RUSTSEC-2025-0057 \
+            --ignore RUSTSEC-2024-0384 \
+            --ignore RUSTSEC-2025-0119 \
+            --ignore RUSTSEC-2024-0436 \
+            --ignore RUSTSEC-2026-0097 \
+            --ignore RUSTSEC-2026-0002 \
+            --ignore RUSTSEC-2024-0370 \
+            --ignore RUSTSEC-2025-0134 \
+            --ignore RUSTSEC-2024-0429
 
   dependency-review:
     name: Dependency review
