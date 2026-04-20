@@ -1807,6 +1807,19 @@ async fn handle_api_message(
             system_prompt.push_str(&personality);
         }
     }
+    // Today's date — unconditional. See handle_message_start for the
+    // full rationale: workspace-based prompts (STYLE.md etc.) skip the
+    // persona template's {{current_date_human}} substitution, so agents
+    // guess on relative dates. Appending here keeps both prompt paths
+    // anchored on the same reference date.
+    {
+        let now_dt = chrono::Utc::now();
+        system_prompt.push_str(&format!(
+            "\n\n---\n\nToday is {} ({}). When the user says \"tomorrow\", \"next Tuesday\", \"in two weeks\", or any relative date, resolve it against today's date above — never guess. If a date is ambiguous, ask rather than assume.",
+            now_dt.format("%A, %B %-d, %Y"),
+            now_dt.format("%Y-%m-%d"),
+        ));
+    }
     // Inject tax context (skipped on small context models to save budget)
     if ctx_budget.include_tax_context {
         let db = state.db_path.clone();
@@ -2295,6 +2308,20 @@ async fn handle_message_start(
                 system_prompt.push_str(&personality);
             }
         }
+        // Today's date — unconditional append. Persona templates include
+        // this via {{current_date_human}}, but workspace-based prompts
+        // (STYLE.md / SOUL.md / IDENTITY.md etc.) skip the template
+        // entirely, so relative dates ("tomorrow", "next Friday") would
+        // otherwise be guessed. Appending here guarantees every agent
+        // has a date anchor regardless of which prompt path built the
+        // system message. See `templates.rs::base_context` for the ctx
+        // vars that drive the template side of the same grounding.
+        let now_dt = chrono::Utc::now();
+        system_prompt.push_str(&format!(
+            "\n\n---\n\nToday is {} ({}). When the user says \"tomorrow\", \"next Tuesday\", \"in two weeks\", or any relative date, resolve it against today's date above — never guess. If a date is ambiguous, ask rather than assume.",
+            now_dt.format("%A, %B %-d, %Y"),
+            now_dt.format("%Y-%m-%d"),
+        ));
         // Tax context injection
         {
             let db = state_clone.db_path.clone();
