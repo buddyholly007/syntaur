@@ -167,9 +167,9 @@ pub struct AppState {
 /// args, opens the user store at `~/.syntaur/index.db`, creates a new
 /// user, mints their first token, and prints the token once to stdout.
 ///
-/// The first bootstrap is the **transition point** from legacy-admin mode
-/// to real per-user auth: once any user exists in the table, the legacy
-/// global token stops being honored (see `auth::legacy_admin_enabled`).
+/// Creates the first admin user, mints their first token, prints it once
+/// to stdout. Fresh-install bootstrap entrypoint; after this runs, every
+/// request goes through `user_api_tokens`.
 ///
 /// v5 Item 3 Stage 5.
 async fn run_bootstrap_admin(args: &[String]) {
@@ -653,11 +653,6 @@ fn run_vault(args: &[String]) {
 /// full axum extractor's logic but works with the current token-in-body
 /// style most handlers use (`ApiMessageRequest { token, ... }`).
 ///
-/// Lookup order:
-///   1. `user_api_tokens` via `UserStore::resolve_token`
-///   2. Legacy global token in `gateway.auth.token` — only if the users
-///      table is empty (`legacy_admin_enabled`)
-///
 /// Returns `Err(StatusCode::UNAUTHORIZED)` on miss so handlers can
 /// `?`-propagate straight into an HTTP response.
 ///
@@ -665,6 +660,10 @@ fn run_vault(args: &[String]) {
 /// Resolves a raw bearer token with NO scope filtering — every other
 /// caller should use `resolve_principal` (deny-by-default for scoped
 /// tokens) or `resolve_principal_scoped` (allowlist one scope).
+///
+/// The pre-v0.5.0 legacy `gateway.auth.token` fallback was removed.
+/// Fresh installs bootstrap through `/setup/register` which creates
+/// the admin user row directly.
 async fn resolve_principal_any(
     state: &AppState,
     raw: &str,
@@ -683,21 +682,6 @@ async fn resolve_principal_any(
                 .filter(|s| !s.is_empty())
                 .collect(),
         });
-    }
-    if auth::legacy_admin_enabled(&state.users).await {
-        // Constant-time comparison to prevent timing side-channels on the
-        // legacy global token.
-        let expected = state.config.gateway.auth.token.as_bytes();
-        let given = raw.as_bytes();
-        if expected.len() == given.len() {
-            let mut diff: u8 = 0;
-            for (a, b) in expected.iter().zip(given.iter()) {
-                diff |= a ^ b;
-            }
-            if diff == 0 {
-                return Ok(auth::Principal::LegacyAdmin);
-            }
-        }
     }
     Err(StatusCode::UNAUTHORIZED)
 }
@@ -1088,7 +1072,6 @@ async fn handle_bug_report_submit(
     let user_id = principal.user_id();
     let user_name = match &principal {
         auth::Principal::User { name, .. } => name.clone(),
-        auth::Principal::LegacyAdmin => "admin".to_string(),
     };
     let description = req.description.clone();
     let system_info = req.system_info.as_ref().map(|v| v.to_string());
@@ -1113,7 +1096,6 @@ async fn handle_bug_report_submit(
 
     let user_display = match &principal {
         auth::Principal::User { name, .. } => name.clone(),
-        auth::Principal::LegacyAdmin => "admin".to_string(),
     };
     info!("[bug-report] #{} from {}", report_id, user_display);
 

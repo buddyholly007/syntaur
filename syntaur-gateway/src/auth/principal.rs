@@ -1,21 +1,23 @@
-//! Principal extractor + legacy admin fallback.
+//! Principal extractor.
 //!
-//! Every HTTP request to syntaur resolves to a `Principal` before
-//! its handler runs. Principal is the answer to "who is this?" and is
-//! the key we use to scope conversations, pending approvals, and OAuth
+//! Every HTTP request to syntaur resolves to a `Principal` before its
+//! handler runs. Principal is the answer to "who is this?" and is the
+//! key we use to scope conversations, pending approvals, and OAuth
 //! tokens.
 //!
 //! ## Resolution order
 //!
 //! 1. Parse `Authorization: Bearer <token>` (or `?token=<token>` in the
-//!    query string — kept for back-compat with curl-style scripts).
-//! 2. Try to resolve the raw token against `user_api_tokens` via
+//!    query string — kept for back-compat with SSE/WS/media-element
+//!    paths where browser APIs force the query form).
+//! 2. Resolve the raw token against `user_api_tokens` via
 //!    `UserStore::resolve_token`. On hit, return `Principal::User`.
-//! 3. If the `users` table is *empty* AND the token matches the legacy
-//!    `gateway.auth.token` from the config file, return
-//!    `Principal::LegacyAdmin`. The legacy fallback only runs when no real
-//!    users are configured so a fresh install keeps working.
-//! 4. Otherwise, return 401.
+//! 3. Otherwise, return 401.
+//!
+//! The pre-v0.5.0 `LegacyAdmin` path (match the literal
+//! `gateway.auth.token` string when the users table was empty) was
+//! removed. Bootstrap flow now routes every fresh install through
+//! `/setup/register` which creates the admin user row directly.
 
 use std::sync::Arc;
 
@@ -24,17 +26,13 @@ use axum::http::{request::Parts, StatusCode};
 
 use crate::auth::users::UserStore;
 
-/// Synthetic user_id for the legacy global-token admin. All rows
-/// predating Item 3 are stamped with 0 during the v7 migration, so reads
-/// from any existing table pre-filter to this id when the admin is the
-/// caller.
+/// Retained as the synthetic user_id for rows created before the
+/// Item-3 migration (v7). Those rows are still readable by admin
+/// principals; no new rows ever reference it.
 pub const ADMIN_USER_ID: i64 = 0;
 
 #[derive(Debug, Clone)]
 pub enum Principal {
-    /// Pre-Item-3 admin — the system is still running in "legacy" mode
-    /// (empty users table) and the caller presented the global token.
-    LegacyAdmin,
     /// Real user row from the `users` table.
     User {
         id: i64,
@@ -50,7 +48,6 @@ impl Principal {
     /// The effective user_id used to stamp writes and filter reads.
     pub fn user_id(&self) -> i64 {
         match self {
-            Self::LegacyAdmin => ADMIN_USER_ID,
             Self::User { id, .. } => *id,
         }
     }
@@ -58,27 +55,22 @@ impl Principal {
     /// Human-readable label used in logs and audit entries.
     pub fn label(&self) -> &str {
         match self {
-            Self::LegacyAdmin => "legacy-admin",
             Self::User { name, .. } => name.as_str(),
         }
     }
 
     /// True iff the caller can hit admin endpoints.
-    /// Role-based: admin role or LegacyAdmin.
     pub fn is_admin(&self) -> bool {
         match self {
-            Self::LegacyAdmin => true,
             Self::User { role, .. } => role == "admin",
         }
     }
 
-    /// True iff this principal's token is unscoped (web session, admin CLI,
-    /// or legacy global token). Scoped tokens (MACE sessions etc.) return
-    /// false. The mint endpoint uses this to refuse scoped tokens from
-    /// minting further scoped tokens.
+    /// True iff this principal's token is unscoped (web session, admin CLI).
+    /// Scoped tokens (MACE sessions etc.) return false. The mint endpoint
+    /// uses this to refuse scoped tokens from minting further scoped tokens.
     pub fn is_unscoped(&self) -> bool {
         match self {
-            Self::LegacyAdmin => true,
             Self::User { scopes, .. } => scopes.is_empty(),
         }
     }
@@ -89,7 +81,6 @@ impl Principal {
     /// or the wildcard `*`.
     pub fn has_scope(&self, scope: &str) -> bool {
         match self {
-            Self::LegacyAdmin => true,
             Self::User { scopes, .. } => {
                 scopes.is_empty()
                     || scopes.iter().any(|s| s == scope || s == "*")
@@ -108,7 +99,6 @@ impl Principal {
     /// `Some(uid)` = `WHERE user_id = uid`.
     pub fn scope(&self) -> Option<i64> {
         match self {
-            Self::LegacyAdmin => None,
             Self::User { role, .. } if role == "admin" => None,
             Self::User { id, .. } => Some(*id),
         }
@@ -118,7 +108,6 @@ impl Principal {
     /// In "isolated" mode, non-admin users see only their own data.
     pub fn scope_with_sharing(&self, sharing_mode: &str) -> Option<i64> {
         match self {
-            Self::LegacyAdmin => None,
             Self::User { role, .. } if role == "admin" => None,
             _ if sharing_mode == "shared" => None,
             Self::User { id, .. } => Some(*id),
@@ -128,17 +117,9 @@ impl Principal {
     /// The user's role string.
     pub fn role(&self) -> &str {
         match self {
-            Self::LegacyAdmin => "admin",
             Self::User { role, .. } => role.as_str(),
         }
     }
-}
-
-/// True if the "legacy admin" token should still be honored. Returns
-/// true iff the users table is empty — as soon as the first real user
-/// lands, the legacy path is permanently disabled.
-pub async fn legacy_admin_enabled(users: &UserStore) -> bool {
-    users.is_empty().await.unwrap_or(true)
 }
 
 // ── axum extractor ────────────────────────────────────────────────────
@@ -147,7 +128,6 @@ pub async fn legacy_admin_enabled(users: &UserStore) -> bool {
 #[derive(Clone)]
 pub struct AuthContext {
     pub users: Arc<UserStore>,
-    pub legacy_token: Option<String>,
     pub allow_query_string_tokens: bool,
 }
 
@@ -204,45 +184,29 @@ where
             ));
         };
 
-        // 1. Try the user tokens table first.
+        // Only valid path: user_api_tokens lookup.
         match ctx.users.resolve_token(&raw).await {
-            Ok(Some(resolved)) => {
-                return Ok(Principal::User {
-                    id: resolved.user_id,
-                    name: resolved.user_name,
-                    role: resolved.user_role,
-                    scopes: resolved.scopes
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect(),
-                });
-            }
-            Ok(None) => {}
+            Ok(Some(resolved)) => Ok(Principal::User {
+                id: resolved.user_id,
+                name: resolved.user_name,
+                role: resolved.user_role,
+                scopes: resolved.scopes
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect(),
+            }),
+            Ok(None) => Err((
+                StatusCode::UNAUTHORIZED,
+                "invalid or revoked token".to_string(),
+            )),
             Err(e) => {
                 log::warn!("[auth] token lookup error: {}", e);
+                Err((
+                    StatusCode::UNAUTHORIZED,
+                    "invalid or revoked token".to_string(),
+                ))
             }
         }
-
-        // 2. Legacy admin fallback — only when users table is empty.
-        if legacy_admin_enabled(&ctx.users).await {
-            if let Some(legacy) = ctx.legacy_token.as_deref() {
-                let a = raw.as_bytes();
-                let b = legacy.as_bytes();
-                let len_match = a.len() == b.len();
-                let mut diff: u8 = 0;
-                for (x, y) in a.iter().zip(b.iter()) {
-                    diff |= x ^ y;
-                }
-                if len_match && diff == 0 {
-                    return Ok(Principal::LegacyAdmin);
-                }
-            }
-        }
-
-        Err((
-            StatusCode::UNAUTHORIZED,
-            "invalid or revoked token".to_string(),
-        ))
     }
 }

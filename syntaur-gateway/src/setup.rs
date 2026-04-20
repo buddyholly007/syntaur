@@ -494,9 +494,12 @@ pub async fn handle_login(
     // Try 3: if no username was supplied, try the primary admin user's
     // password (user id=1). Lets `password-only` login forms keep working
     // without the user having to remember their own username — the common
-    // solo-install case. The user table is the source of truth; the
-    // gateway password field in syntaur.json is kept in sync by
-    // handle_change_password but treated as a fallback only.
+    // solo-install case.
+    //
+    // The pre-v0.5.0 legacy paths (Try 4 / Try 5 against
+    // `gateway.auth.password` / `gateway.auth.token`) were removed. Every
+    // login must now hit a real user row. Fresh installs land on
+    // `/setup/register` instead.
     let mut admin_password_match = false;
     if req.username.is_none() {
         if let Ok(Some(admin)) = state.users.get_user(1).await {
@@ -508,45 +511,8 @@ pub async fn handle_login(
         }
     }
 
-    // Try 4: legacy gateway password (constant-time comparison). Only used
-    // when no users exist yet (fresh install) or as a fallback if the
-    // gateway password somehow drifted ahead of the admin user password.
-    let gw_auth = &state.config.gateway.auth;
-    let password_match = gw_auth.extra.get("password")
-        .and_then(|v| v.as_str())
-        .map(|p| constant_time_eq(p.as_bytes(), req.password.as_bytes()))
-        .unwrap_or(false);
-
-    // Try 5: check gateway token directly (constant-time comparison)
-    let token_match = constant_time_eq(gw_auth.token.as_bytes(), req.password.as_bytes());
-
-    if admin_password_match || password_match || token_match {
+    if admin_password_match {
         state.login_limiter.note_login_success(&identity);
-        // Deprecation signal — the legacy gateway.auth.token / gateway.auth.password
-        // fallback only fires when `admin_password_match` didn't match first, i.e.
-        // the operator is logging in with the config-file secret rather than
-        // their user password. This path is scheduled for removal in v0.5.0.
-        // Log every use so the operator sees it in the container log + audit.
-        if !admin_password_match && (password_match || token_match) {
-            log::warn!(
-                "[auth] DEPRECATED legacy gateway-auth login succeeded ({}). \
-                 This path will be removed in v0.5.0 — set a password for user id=1 \
-                 (via /settings/account/password) and log in with that instead.",
-                if token_match { "via gateway.auth.token" } else { "via gateway.auth.password" }
-            );
-            crate::security::audit_log(
-                &state,
-                Some(1),
-                "auth.login.legacy_deprecated",
-                None,
-                serde_json::json!({
-                    "variant": if token_match { "token" } else { "password" },
-                    "removal_version": "0.5.0",
-                }),
-                None, None,
-            ).await;
-        }
-        // Mint a session token for the first user (admin)
         if let Ok(users) = state.users.list_users().await {
             if let Some(user) = users.first() {
                 if let Ok(token) = state.users.mint_token_with_expiry(user.id, "dashboard-session", Some(48)).await {
@@ -558,11 +524,11 @@ pub async fn handle_login(
                 }
             }
         }
-        // Fallback to gateway token (works when no users exist)
+        // mint_token failure is a real server error — don't silently succeed.
         return Ok(Json(LoginResponse {
-            success: true,
-            token: Some(gw_auth.token.clone()),
-            error: None,
+            success: false,
+            token: None,
+            error: Some("Login succeeded but token mint failed. Check gateway logs.".to_string()),
         }));
     }
 
@@ -1029,18 +995,6 @@ fn slug(name: &str) -> String {
         .collect::<String>()
         .trim_matches('-')
         .to_string()
-}
-
-/// Constant-time byte comparison to prevent timing side-channels.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }
 
 fn generate_token() -> String {
