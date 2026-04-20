@@ -3270,6 +3270,89 @@ async fn handle_audit_log_get(
     Ok(Json(serde_json::json!({ "events": rows, "scope": if is_admin { "all" } else { "self" } })))
 }
 
+/// GET /api/audit/verify — admin-only audit-log tamper check. Walks the
+/// full chain from the first row that has a `prev_hash` set (rows before
+/// the hash-chain migration are grandfathered + ignored) and recomputes
+/// each row_hash. Returns the id + reason of the first break, or
+/// `{ok: true, verified_rows: N}` on a clean chain.
+async fn handle_audit_log_verify(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let principal = resolve_principal_scoped(&state, token, "admin").await?;
+    require_admin(&principal)?;
+
+    let db = state.db_path.clone();
+    let result = tokio::task::spawn_blocking(move || -> rusqlite::Result<serde_json::Value> {
+        let conn = rusqlite::Connection::open(&db)?;
+        let mut stmt = conn.prepare(
+            "SELECT id, ts, user_id, action, target, metadata, ip, user_agent, prev_hash, row_hash \
+             FROM audit_log WHERE row_hash IS NOT NULL ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, Option<i64>>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, Option<String>>(6)?,
+                r.get::<_, Option<String>>(7)?,
+                r.get::<_, Option<String>>(8)?,
+                r.get::<_, String>(9)?,
+            ))
+        })?;
+
+        let mut expected_prev: Option<String> = None;
+        let mut count: i64 = 0;
+        for row in rows {
+            let (id, ts, user_id, action, target, metadata, ip, ua, prev_hash, row_hash) = row?;
+            // First row in the chain: seed expected_prev from what the
+            // writer recorded. Subsequent rows must match the previous
+            // row's row_hash.
+            if count == 0 {
+                expected_prev = prev_hash.clone();
+            } else if prev_hash != expected_prev {
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "break_at_row_id": id,
+                    "reason": "prev_hash mismatch — a row was deleted or inserted before this one",
+                    "verified_before_break": count,
+                }));
+            }
+            let recomputed = crate::security::compute_audit_row_hash(
+                prev_hash.as_deref(),
+                id, ts, user_id,
+                &action,
+                target.as_deref(),
+                &metadata,
+                ip.as_deref(),
+                ua.as_deref(),
+            );
+            if recomputed != row_hash {
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "break_at_row_id": id,
+                    "reason": "row_hash mismatch — fields were modified after write",
+                    "verified_before_break": count,
+                }));
+            }
+            expected_prev = Some(row_hash);
+            count += 1;
+        }
+        Ok(serde_json::json!({
+            "ok": true,
+            "verified_rows": count,
+        }))
+    }).await;
+    match result {
+        Ok(Ok(v)) => Ok(Json(v)),
+        _ => Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct AdminRevokeRequest {
     token: String,
@@ -6029,6 +6112,7 @@ async fn main() {
         .route("/api/auth/refresh", post(handle_auth_refresh))
         .route("/api/auth/pair-client", post(handle_auth_pair_client))
         .route("/api/audit", get(handle_audit_log_get))
+        .route("/api/audit/verify", get(handle_audit_log_verify))
         .route("/api/journal/ingest", post(handle_journal_ingest))
         .route("/api/setup/status", get(setup::handle_setup_status))
         .route("/api/setup/scan", get(setup::handle_hardware_scan))
@@ -6943,7 +7027,7 @@ async fn handle_scheduler_prefs_get(
         let conn = rusqlite::Connection::open(&db).ok()?;
         conn.query_row(
             "SELECT theme, default_view, week_starts_on, show_weekends, work_hours_start, work_hours_end, border, \
-                    backdrop_x, backdrop_y, backdrop_scale, backdrop_scale_x, backdrop_scale_y \
+                    backdrop_x, backdrop_y, backdrop_scale \
              FROM scheduler_prefs WHERE user_id = ?",
             rusqlite::params![uid],
             |r| Ok(serde_json::json!({
@@ -6957,8 +7041,6 @@ async fn handle_scheduler_prefs_get(
                 "backdrop_x":       r.get::<_, f64>(7)?,
                 "backdrop_y":       r.get::<_, f64>(8)?,
                 "backdrop_scale":   r.get::<_, f64>(9)?,
-                "backdrop_scale_x": r.get::<_, f64>(10)?,
-                "backdrop_scale_y": r.get::<_, f64>(11)?,
             })),
         ).ok()
     }).await.ok().flatten();
@@ -6967,7 +7049,6 @@ async fn handle_scheduler_prefs_get(
         "show_weekends": true, "work_hours_start": "08:00", "work_hours_end": "18:00",
         "border": "notebook",
         "backdrop_x": 0.5, "backdrop_y": 0.5, "backdrop_scale": 1.0,
-        "backdrop_scale_x": 1.0, "backdrop_scale_y": 0.0,
     }))))
 }
 
@@ -7025,16 +7106,6 @@ async fn handle_scheduler_prefs_put(
         }
         if let Some(v) = body.get("backdrop_scale").and_then(|v| v.as_f64()) {
             sets.push("backdrop_scale = ?"); params.push(Box::new(v.max(0.25).min(4.0)));
-        }
-        // Per-axis scales. scale_x is a straight multiplier (clamped 0.25..4).
-        // scale_y=0 means "auto — aspect-preserve" and is the sentinel for
-        // the default aspect-respecting behavior. Any other value is a
-        // straight multiplier on shell height.
-        if let Some(v) = body.get("backdrop_scale_x").and_then(|v| v.as_f64()) {
-            sets.push("backdrop_scale_x = ?"); params.push(Box::new(v.max(0.25).min(4.0)));
-        }
-        if let Some(v) = body.get("backdrop_scale_y").and_then(|v| v.as_f64()) {
-            sets.push("backdrop_scale_y = ?"); params.push(Box::new(v.max(0.0).min(4.0)));
         }
         if sets.is_empty() {
             return Ok(());

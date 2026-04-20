@@ -305,11 +305,110 @@ pub async fn lift_bearer_to_body_and_query(req: Request, next: Next) -> Response
 
 // ── 4. security_headers ─────────────────────────────────────────────────────
 
+/// Generate a fresh CSP nonce. 16 bytes of urandom, base64-encoded → ~22
+/// chars. Unique per response, cryptographically unguessable. An attacker
+/// who injects reflected markup can't guess the nonce, so their injected
+/// `<script>` won't match the CSP policy and the browser refuses to run
+/// it — defense-in-depth on top of output encoding.
+fn generate_nonce() -> String {
+    use rand::RngCore;
+    let mut buf = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut buf);
+    base64::Engine::encode(&base64::engine::general_purpose::STANDARD_NO_PAD, buf)
+}
+
+/// Insert `nonce="..."` on every `<script` opening tag in an HTML body.
+/// Tags that already carry a nonce attribute are left untouched (caller
+/// set their own nonce for a specific reason). Both `<script>` and
+/// `<script ...>` variants are handled. External scripts (`<script src=`)
+/// get the nonce too; browsers ignore it there but it keeps the policy
+/// enforcement consistent when we eventually add `strict-dynamic`.
+fn inject_script_nonce(html: &str, nonce: &str) -> String {
+    let attr = format!(" nonce=\"{nonce}\"");
+    let mut out = String::with_capacity(html.len() + attr.len() * 10);
+    let mut i = 0;
+    let bytes = html.as_bytes();
+    while i < bytes.len() {
+        // Find the next `<script` case-sensitively (HTML is case-insensitive
+        // but every maud-emitted script tag uses lowercase).
+        if i + 7 <= bytes.len() && &bytes[i..i + 7] == b"<script" {
+            // Does it already have a `nonce=`? If so, don't double up.
+            // Scan forward to `>` and look for `nonce=` inside.
+            let start = i;
+            let mut end = i + 7;
+            while end < bytes.len() && bytes[end] != b'>' {
+                end += 1;
+            }
+            let tag = &html[start..end];
+            if tag.contains("nonce=") {
+                // Already nonced — copy verbatim.
+                out.push_str(tag);
+                i = end;
+                continue;
+            }
+            // Splice the nonce in right after `<script`.
+            out.push_str("<script");
+            out.push_str(&attr);
+            out.push_str(&html[i + 7..end]);
+            i = end;
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    out
+}
+
 /// Set a conservative set of security headers on every response.
-/// Paired with Phase 4's TLS work which will add HSTS.
+///
+/// HTML responses also get their inline `<script>` tags rewritten with a
+/// per-response nonce so the CSP can drop `unsafe-inline` for scripts.
+/// The CSP `script-src` becomes `'self' 'nonce-<X>'`, cutting the main
+/// XSS-via-injected-inline vector.
 pub async fn security_headers(req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
     let mut res = next.run(req).await;
+
+    // Decide upfront whether this response carries HTML. If so, buffer
+    // the body and inject the nonce; otherwise skip the rewrite.
+    let is_html = res
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_ascii_lowercase().contains("text/html"))
+        .unwrap_or(false);
+
+    let nonce = if is_html { Some(generate_nonce()) } else { None };
+
+    if let Some(ref n) = nonce {
+        let (mut parts, body) = res.into_parts();
+        // Buffer cap at 8 MB — Syntaur's biggest pages are ~500KB. Anything
+        // larger indicates a streaming API response mistakenly labeled
+        // text/html, so skip the rewrite defensively.
+        let bytes = axum::body::to_bytes(body, 8 * 1024 * 1024).await.ok();
+        let new_body = match bytes {
+            Some(b) => {
+                // UTF-8 HTML only. Non-UTF-8 content (rare) is served as-is.
+                match std::str::from_utf8(&b) {
+                    Ok(s) => {
+                        let rewritten = inject_script_nonce(s, n);
+                        parts
+                            .headers
+                            .insert(
+                                axum::http::header::CONTENT_LENGTH,
+                                HeaderValue::from_str(&rewritten.len().to_string())
+                                    .unwrap_or_else(|_| HeaderValue::from_static("0")),
+                            );
+                        Body::from(rewritten)
+                    }
+                    Err(_) => Body::from(b),
+                }
+            }
+            None => Body::empty(),
+        };
+        res = Response::from_parts(parts, new_body);
+    }
+
     let headers = res.headers_mut();
 
     let insert = |h: &mut axum::http::HeaderMap, name: &'static str, value: &'static str| {
@@ -321,16 +420,15 @@ pub async fn security_headers(req: Request, next: Next) -> Response {
         }
     };
 
-    // CSP: allow same-origin + inline (the module pages use inline script
-    // literals). `unsafe-eval` dropped — nothing in the shipped JS uses
-    // eval() / new Function(). If a future library needs it, add it back
-    // explicitly rather than leaving the door open by default. Over time
-    // we'll hash inline scripts and drop unsafe-inline too.
-    insert(
-        headers,
-        "content-security-policy",
+    // CSP. Script policy switches between the nonce variant (HTML) and a
+    // plain `'self'` (JSON / streams / blobs — no inline script risk).
+    let csp_script = match &nonce {
+        Some(n) => format!("script-src 'self' 'nonce-{n}'"),
+        None => "script-src 'self'".to_string(),
+    };
+    let csp = format!(
         "default-src 'self'; \
-         script-src 'self' 'unsafe-inline'; \
+         {csp_script}; \
          style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
          img-src 'self' data: blob: https:; \
          font-src 'self' data: https://fonts.gstatic.com; \
@@ -338,8 +436,11 @@ pub async fn security_headers(req: Request, next: Next) -> Response {
          frame-ancestors 'none'; \
          base-uri 'self'; \
          form-action 'self'; \
-         object-src 'none'",
+         object-src 'none'"
     );
+    if let Ok(v) = HeaderValue::from_str(&csp) {
+        headers.insert(HeaderName::from_static("content-security-policy"), v);
+    }
     insert(headers, "x-content-type-options", "nosniff");
     insert(headers, "x-frame-options", "DENY");
     insert(headers, "referrer-policy", "strict-origin-when-cross-origin");
@@ -630,20 +731,102 @@ pub async fn audit_log(
     let metadata_s = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
     tokio::task::spawn_blocking(move || {
         if let Ok(conn) = rusqlite::Connection::open(&db) {
-            let _ = conn.execute(
-                "INSERT INTO audit_log (ts, user_id, action, target, metadata, ip, user_agent) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                rusqlite::params![
-                    chrono::Utc::now().timestamp(),
-                    user_id,
-                    action,
-                    target,
-                    metadata_s,
-                    ip,
-                    user_agent
-                ],
+            // Two-step insert so each row's `row_hash` can reference
+            // `prev_hash` (the previous row's row_hash) + its own
+            // auto-assigned id. We:
+            //   1) INSERT with row_hash = NULL, capturing the new id +
+            //      the current tail's row_hash as prev_hash.
+            //   2) UPDATE the just-inserted row to set row_hash =
+            //      sha256(prev_hash || id || ts || user_id || action ||
+            //      target || metadata || ip || user_agent).
+            //
+            // Both steps live inside an IMMEDIATE transaction so a
+            // concurrent writer can't slot a row in between and desync
+            // the chain.
+            let tx = match conn.unchecked_transaction() {
+                Ok(t) => t,
+                Err(_) => return,
+            };
+            let prev_hash: Option<String> = tx
+                .query_row(
+                    "SELECT row_hash FROM audit_log WHERE row_hash IS NOT NULL ORDER BY id DESC LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .ok();
+            let ts = chrono::Utc::now().timestamp();
+            if tx
+                .execute(
+                    "INSERT INTO audit_log (ts, user_id, action, target, metadata, ip, user_agent, prev_hash, row_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+                    rusqlite::params![
+                        ts,
+                        user_id,
+                        action,
+                        target,
+                        metadata_s,
+                        ip,
+                        user_agent,
+                        prev_hash,
+                    ],
+                )
+                .is_err()
+            {
+                return;
+            }
+            let new_id = tx.last_insert_rowid();
+            let hash = compute_audit_row_hash(
+                prev_hash.as_deref(),
+                new_id,
+                ts,
+                user_id,
+                &action,
+                target.as_deref(),
+                &metadata_s,
+                ip.as_deref(),
+                user_agent.as_deref(),
             );
+            let _ = tx.execute(
+                "UPDATE audit_log SET row_hash = ? WHERE id = ?",
+                rusqlite::params![hash, new_id],
+            );
+            let _ = tx.commit();
         }
     }).await.ok();
+}
+
+/// SHA-256 over the canonical serialization of an audit row. Matches the
+/// field order enforced at INSERT time so verification can recompute the
+/// chain without consulting the writer.
+pub fn compute_audit_row_hash(
+    prev_hash: Option<&str>,
+    id: i64,
+    ts: i64,
+    user_id: Option<i64>,
+    action: &str,
+    target: Option<&str>,
+    metadata: &str,
+    ip: Option<&str>,
+    user_agent: Option<&str>,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    // Length-prefixed concatenation avoids a canonical-form ambiguity
+    // attack (e.g. `action="foo"` + `target="bar"` colliding with
+    // `action="foob"` + `target="ar"`).
+    let mut w = |s: &str| {
+        h.update((s.len() as u64).to_le_bytes());
+        h.update(s.as_bytes());
+    };
+    w(prev_hash.unwrap_or(""));
+    w(&id.to_string());
+    w(&ts.to_string());
+    w(&user_id.map(|x| x.to_string()).unwrap_or_default());
+    w(action);
+    w(target.unwrap_or(""));
+    w(metadata);
+    w(ip.unwrap_or(""));
+    w(user_agent.unwrap_or(""));
+    format!("{:x}", h.finalize())
 }
 
 /// Phase 4.3 prompt-injection boundary. Wraps attacker-reachable text

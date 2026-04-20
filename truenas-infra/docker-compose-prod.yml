@@ -23,6 +23,16 @@ services:
     image: syntaur-gateway:latest
     container_name: syntaur
     restart: unless-stopped
+    # The Dockerfile builds syntaur as UID 568 — TrueNAS SCALE's reserved
+    # `apps` user. Pre-built images from nightly GHCR bake this in; fresh
+    # installs run as an unprivileged user that doesn't overlap with any
+    # human host account. Operators migrating from an older UID must
+    # `chown -R 568:568 <bind-mount root>` before enabling this override:
+    #
+    #   user: "568:568"
+    #
+    # Left commented out so existing deployments with data dirs owned by
+    # a different UID don't break on the next `docker compose up`.
     command: ["/config/syntaur.json"]
     network_mode: host
     environment:

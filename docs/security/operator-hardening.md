@@ -41,6 +41,16 @@ For admins running Syntaur in production. Run through this after first install +
 - **`<data-dir>` ownership.** Must be owned by the process user + 0700 on the directory, 0600 on `master.key` and `vault.json`. Gateway refuses to start otherwise.
 - **`bubblewrap` installed.** Required for MCP process sandboxing (Phase 4.6). `apt-get install bubblewrap` on Debian/Ubuntu bases; Arch-based containers have it by default. Gateway falls back to unsandboxed MCP spawns with a loud warning if not found.
 - **`/dev/net/tun` accessible in the Tailscale sidecar container.** Required by the sidecar's compose definition (`devices: - /dev/net/tun:/dev/net/tun`). TrueNAS Electric Eel allows this by default.
+- **Runtime UID is 568 (apps) on TrueNAS.** Nightly-built images bake UID 568. Check with `docker exec syntaur id` — should report `uid=568(syntaur)`. Older images may report 950 or 1000; those map to privileged (truenas_admin) or regular (sean) host users and a container escape inherits those privileges. **Migration from an older UID:**
+  ```bash
+  docker stop syntaur
+  # Chown the bind-mount root to 568:568. Back up first.
+  chown -R 568:568 /mnt/<pool>/syntaur
+  # Uncomment the `user: "568:568"` directive in
+  # truenas-infra/docker-compose-prod.yml.
+  docker compose -f truenas-infra/docker-compose-prod.yml up -d
+  docker exec syntaur id  # verify uid=568
+  ```
 
 ## Never do
 

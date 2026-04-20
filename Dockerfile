@@ -50,8 +50,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl bubblewrap xdg-utils sqlite3 tzdata \
   && rm -rf /var/lib/apt/lists/*
 
-# Non-root runtime user. All Syntaur state lives under /home/syntaur.
-RUN useradd --create-home --uid 1000 --user-group syntaur
+# Non-root runtime user. UID 568 lines up with TrueNAS SCALE's reserved
+# `apps` user (TrueNAS assigns 568 to every containerized app by default),
+# so the host-side files created by Syntaur have the right ownership for
+# the platform's app-management tooling. On other platforms (plain Docker
+# on Linux, macOS, Windows) 568 is also almost certainly unused — it
+# avoids accidental collision with any pre-existing human user since
+# standard user accounts start at 1000.
+RUN useradd --create-home --uid 568 --user-group syntaur
 
 # Binaries. In the bind-mount deploy path these get shadowed by the host's
 # compiled binaries; the COPY lines below ensure a standalone `docker run`

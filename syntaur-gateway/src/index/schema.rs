@@ -2069,6 +2069,41 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE scheduler_prefs ADD COLUMN backdrop_scale_x REAL NOT NULL DEFAULT 1.0;
     ALTER TABLE scheduler_prefs ADD COLUMN backdrop_scale_y REAL NOT NULL DEFAULT 0.0;
     "#,
+
+    // Per-user backdrop customization.
+    //   pane_opacity — single knob driving alpha of the rails / cells /
+    //                  cards so users can tune how much of the painted
+    //                  backdrop shows through their content. 0 = fully
+    //                  transparent; 1 = fully opaque. Default 0.35 is
+    //                  what was hardcoded in CSS previously.
+    //   custom_backdrop_file — filename (not path) of a user-uploaded
+    //                          background. Filename has an unguessable
+    //                          random suffix so the public GET route can
+    //                          serve it without auth. NULL/empty = no
+    //                          upload; the built-in frame art is used.
+    r#"
+    ALTER TABLE scheduler_prefs ADD COLUMN pane_opacity REAL NOT NULL DEFAULT 0.35;
+    ALTER TABLE scheduler_prefs ADD COLUMN custom_backdrop_file TEXT NOT NULL DEFAULT '';
+    "#,
+
+    // Audit log hash chain (threat-model item). Any attacker with SQL
+    // access (container escape, backup leak) could previously redact or
+    // forge audit rows silently. `prev_hash` + `row_hash` make the table
+    // tamper-evident: each row's `row_hash = sha256(prev_hash || id || ts
+    // || user_id || action || target || metadata || ip || user_agent)`,
+    // and the chain is walked by /api/audit/verify. Any break (a deleted,
+    // modified, or inserted row) surfaces the first broken link.
+    //
+    // Existing rows pre-migration are grandfathered with NULL prev_hash —
+    // they form their own "pre-chain" region. Verification starts from
+    // the first row where prev_hash IS NOT NULL.
+    //
+    // Storage: two TEXT columns (64-char hex SHA-256 digests), ~128 bytes
+    // per row additional. Negligible compared to `metadata`.
+    r#"
+    ALTER TABLE audit_log ADD COLUMN prev_hash TEXT;
+    ALTER TABLE audit_log ADD COLUMN row_hash  TEXT;
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
