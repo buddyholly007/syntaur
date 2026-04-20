@@ -799,27 +799,24 @@ impl Default for LoginLimiter {
 
 /// Called once at startup by `main`. Refuses to proceed if security-sensitive
 /// files have wider-than-0600 permissions. Prints the exact `chmod` command
-/// the operator needs to run. Covers `master.key` + `vault.json`; future
-/// additions (TLS keypair when Phase 4.1 lands) extend this list.
+/// the operator needs to run. Covers `master.key` + `vault.json`.
+///
+/// Both files are treated as optional at startup — a fresh install has
+/// neither (the vault creates `master.key` on first use, `vault.json` on
+/// first `vault set`). The permission check only engages once the files
+/// exist on disk. This function's value is catching **regressed
+/// permissions** (someone `chmod 644 master.key` by accident) on an
+/// already-configured install, not gating cold starts.
 #[cfg(unix)]
 pub fn assert_startup_permissions(data_dir: &std::path::Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
 
-    let targets: &[(&str, bool)] = &[
-        ("master.key", true),   // mandatory
-        ("vault.json", false),  // optional — skip if absent
-    ];
+    let targets: &[&str] = &["master.key", "vault.json"];
 
-    for (fname, mandatory) in targets {
+    for fname in targets {
         let p = data_dir.join(fname);
         if !p.exists() {
-            if *mandatory {
-                return Err(format!(
-                    "[security] startup: expected {} to exist but it doesn't. \
-                     Did the data directory move? Check HOME + resolve_data_dir().",
-                    p.display()
-                ));
-            }
+            // Skip absent files. Auto-created on first use by the vault.
             continue;
         }
         let meta = std::fs::metadata(&p)
