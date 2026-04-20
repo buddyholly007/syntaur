@@ -223,17 +223,24 @@ async fn probe_conversations(c: &Client, a: &TestUser, b: &TestUser) -> Result<(
 async fn probe_scheduler_approvals(c: &Client, a: &TestUser, b: &TestUser) -> Result<()> {
     // Create a synthetic approval via /api/scheduler/voice_create — the
     // text-to-event path lands in pending_approvals scoped to the caller.
-    let (s, body) = c
+    // This hits an LLM + may time out on a cold gateway or a degraded
+    // upstream. Skip (not fail) on network error or bad gateway.
+    let res = c
         .request(
             reqwest::Method::POST,
             "/api/scheduler/voice_create",
             &a.token,
             Some(json!({"token": a.token, "transcript": "meeting next Monday at 3pm"})),
         )
-        .await?;
+        .await;
+    let (s, body) = match res {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!("  [skip] scheduler_approvals: transport error ({e})");
+            return Ok(());
+        }
+    };
     if s >= 400 {
-        // This path requires LLM + may fail on a cold gateway; treat as
-        // skip, not fail, if the server reports bad gateway.
         eprintln!("  [skip] scheduler_approvals: A-side create returned {s}");
         return Ok(());
     }
@@ -314,6 +321,192 @@ async fn probe_memories(c: &Client, a: &TestUser, b: &TestUser) -> Result<()> {
         let txt = r["text"].as_str().unwrap_or("");
         if txt.contains("isolation secret A") {
             return Err(anyhow!("user B's memories listing leaked user A's memory text"));
+        }
+    }
+    Ok(())
+}
+
+/// Tax module — per-user expense isolation.
+async fn probe_tax_expenses(c: &Client, a: &TestUser, b: &TestUser) -> Result<()> {
+    let body = json!({
+        "token": a.token,
+        "vendor": "Isolation Harness Coffee",
+        "amount_cents": 12345,
+        "expense_date": "2026-04-19",
+        "category": "meals",
+    });
+    let (s, _) = c.request(reqwest::Method::POST, "/api/tax/expenses", &a.token, Some(body)).await?;
+    if s >= 400 { eprintln!("  [skip] tax_expenses: POST returned {s}"); return Ok(()); }
+    let (_, lb) = c.request(
+        reqwest::Method::GET,
+        &format!("/api/tax/expenses?token={}&start=2026-01-01&end=2026-12-31", urlencoding::encode(&b.token)),
+        &b.token, None,
+    ).await?;
+    for r in lb["expenses"].as_array().cloned().unwrap_or_default() {
+        if r["vendor"].as_str().unwrap_or("").contains("Isolation Harness Coffee") {
+            return Err(anyhow!("user B's /api/tax/expenses listing leaked user A's vendor"));
+        }
+    }
+    Ok(())
+}
+
+/// Journal moments — per-user daily view isolation.
+async fn probe_journal_moments(c: &Client, a: &TestUser, b: &TestUser) -> Result<()> {
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let (s, _) = c.request(
+        reqwest::Method::POST, "/api/journal/moments", &a.token,
+        Some(json!({ "token": a.token, "date": today, "text": "isolation-A moment secret", "source": "harness" })),
+    ).await?;
+    if s >= 400 { eprintln!("  [skip] journal_moments: POST returned {s}"); return Ok(()); }
+    let (_, lb) = c.request(
+        reqwest::Method::GET,
+        &format!("/api/journal/moments?token={}&date={}", urlencoding::encode(&b.token), today),
+        &b.token, None,
+    ).await?;
+    for r in lb["moments"].as_array().cloned().unwrap_or_default() {
+        if r["text"].as_str().unwrap_or("").contains("isolation-A moment secret") {
+            return Err(anyhow!("user B's journal moments listing leaked user A's text"));
+        }
+    }
+    Ok(())
+}
+
+/// Knowledge docs — upload-then-list scope.
+async fn probe_knowledge_docs(c: &Client, a: &TestUser, b: &TestUser) -> Result<()> {
+    let (sa, abody) = c.request(
+        reqwest::Method::GET,
+        &format!("/api/knowledge/docs?token={}", urlencoding::encode(&a.token)),
+        &a.token, None,
+    ).await?;
+    if sa >= 400 { eprintln!("  [skip] knowledge_docs: A-side GET returned {sa}"); return Ok(()); }
+    let (_, bbody) = c.request(
+        reqwest::Method::GET,
+        &format!("/api/knowledge/docs?token={}", urlencoding::encode(&b.token)),
+        &b.token, None,
+    ).await?;
+    let a_ids: Vec<i64> = abody["docs"].as_array().cloned().unwrap_or_default().iter().filter_map(|d| d["id"].as_i64()).collect();
+    let b_ids: Vec<i64> = bbody["docs"].as_array().cloned().unwrap_or_default().iter().filter_map(|d| d["id"].as_i64()).collect();
+    for id in &a_ids {
+        if b_ids.contains(id) {
+            return Err(anyhow!("user B's knowledge docs contain user A's doc id {id}"));
+        }
+    }
+    Ok(())
+}
+
+/// Music local folders — per-user folder scope.
+async fn probe_music_folders(c: &Client, a: &TestUser, b: &TestUser) -> Result<()> {
+    let (sa, abody) = c.request(
+        reqwest::Method::GET,
+        &format!("/api/music/local/folders?token={}", urlencoding::encode(&a.token)),
+        &a.token, None,
+    ).await?;
+    if sa >= 400 { eprintln!("  [skip] music_folders: A-side GET returned {sa}"); return Ok(()); }
+    let (_, bbody) = c.request(
+        reqwest::Method::GET,
+        &format!("/api/music/local/folders?token={}", urlencoding::encode(&b.token)),
+        &b.token, None,
+    ).await?;
+    let a_ids: Vec<i64> = abody["folders"].as_array().cloned().unwrap_or_default().iter().filter_map(|f| f["id"].as_i64()).collect();
+    let b_ids: Vec<i64> = bbody["folders"].as_array().cloned().unwrap_or_default().iter().filter_map(|f| f["id"].as_i64()).collect();
+    for id in &a_ids {
+        if b_ids.contains(id) {
+            return Err(anyhow!("user B's music folders contain user A's folder id {id}"));
+        }
+    }
+    Ok(())
+}
+
+/// Social drafts — rust-social-manager scope enforcement at the read path.
+async fn probe_social_drafts(c: &Client, a: &TestUser, b: &TestUser) -> Result<()> {
+    let (sa, abody) = c.request(
+        reqwest::Method::GET,
+        &format!("/api/social/drafts?token={}", urlencoding::encode(&a.token)),
+        &a.token, None,
+    ).await?;
+    if sa >= 400 { eprintln!("  [skip] social_drafts: A-side GET returned {sa}"); return Ok(()); }
+    let (_, bbody) = c.request(
+        reqwest::Method::GET,
+        &format!("/api/social/drafts?token={}", urlencoding::encode(&b.token)),
+        &b.token, None,
+    ).await?;
+    let a_ids: Vec<i64> = abody["drafts"].as_array().cloned().unwrap_or_default().iter().filter_map(|d| d["id"].as_i64()).collect();
+    let b_ids: Vec<i64> = bbody["drafts"].as_array().cloned().unwrap_or_default().iter().filter_map(|d| d["id"].as_i64()).collect();
+    for id in &a_ids {
+        if b_ids.contains(id) {
+            return Err(anyhow!("user B's social drafts contain user A's draft id {id}"));
+        }
+    }
+    Ok(())
+}
+
+/// Calendar events — scope on range queries.
+async fn probe_calendar(c: &Client, a: &TestUser, b: &TestUser) -> Result<()> {
+    let (s, body) = c.request(
+        reqwest::Method::POST, "/api/calendar", &a.token,
+        Some(json!({
+            "token": a.token, "title": "Isolation-A only event",
+            "start_time": "2026-04-19T12:00", "end_time": null, "all_day": false,
+        })),
+    ).await?;
+    if s >= 400 { eprintln!("  [skip] calendar: POST returned {s}"); return Ok(()); }
+    let ev_id = body["id"].as_i64().or_else(|| body["event_id"].as_i64());
+    let (_, lb) = c.request(
+        reqwest::Method::GET,
+        &format!("/api/calendar?token={}&start=2026-04-01&end=2026-04-30", urlencoding::encode(&b.token)),
+        &b.token, None,
+    ).await?;
+    for r in lb["events"].as_array().cloned().unwrap_or_default() {
+        if r["title"].as_str().unwrap_or("").contains("Isolation-A only event") {
+            return Err(anyhow!("user B's calendar listing leaked user A's event title"));
+        }
+        if let Some(id) = ev_id {
+            if r["id"].as_i64() == Some(id) {
+                return Err(anyhow!("user B's calendar listing contained user A's event id {id}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Scheduler lists (shopping, to-do).
+async fn probe_scheduler_lists(c: &Client, a: &TestUser, b: &TestUser) -> Result<()> {
+    let (s, _) = c.request(
+        reqwest::Method::POST, "/api/scheduler/lists", &a.token,
+        Some(json!({ "token": a.token, "name": "isolation-A-grocery", "kind": "shopping" })),
+    ).await?;
+    if s >= 400 { eprintln!("  [skip] scheduler_lists: POST returned {s}"); return Ok(()); }
+    let (_, lb) = c.request(
+        reqwest::Method::GET,
+        &format!("/api/scheduler/lists?token={}", urlencoding::encode(&b.token)),
+        &b.token, None,
+    ).await?;
+    for r in lb["lists"].as_array().cloned().unwrap_or_default() {
+        if r["name"].as_str().unwrap_or("") == "isolation-A-grocery" {
+            return Err(anyhow!("user B's scheduler lists include user A's list"));
+        }
+    }
+    Ok(())
+}
+
+/// Research sessions.
+async fn probe_research_sessions(c: &Client, a: &TestUser, b: &TestUser) -> Result<()> {
+    let (sa, abody) = c.request(
+        reqwest::Method::GET,
+        &format!("/api/research?token={}", urlencoding::encode(&a.token)),
+        &a.token, None,
+    ).await?;
+    if sa >= 400 { eprintln!("  [skip] research_sessions: A-side GET returned {sa}"); return Ok(()); }
+    let (_, bbody) = c.request(
+        reqwest::Method::GET,
+        &format!("/api/research?token={}", urlencoding::encode(&b.token)),
+        &b.token, None,
+    ).await?;
+    let a_ids: Vec<String> = abody["sessions"].as_array().cloned().unwrap_or_default().iter().filter_map(|s| s["id"].as_str().map(|s| s.to_string())).collect();
+    let b_ids: Vec<String> = bbody["sessions"].as_array().cloned().unwrap_or_default().iter().filter_map(|s| s["id"].as_str().map(|s| s.to_string())).collect();
+    for id in &a_ids {
+        if b_ids.contains(id) {
+            return Err(anyhow!("user B's research sessions contain user A's session id {id}"));
         }
     }
     Ok(())
@@ -501,10 +694,16 @@ fn probes() -> Vec<(&'static str, ProbeFn)> {
     vec![
         ("me-returns-own-id", |c, a, b| Box::pin(probe_me(c, a, b))),
         ("conversations", |c, a, b| Box::pin(probe_conversations(c, a, b))),
-        ("scheduler-approvals", |c, a, b| {
-            Box::pin(probe_scheduler_approvals(c, a, b))
-        }),
+        ("scheduler-approvals", |c, a, b| Box::pin(probe_scheduler_approvals(c, a, b))),
+        ("scheduler-lists", |c, a, b| Box::pin(probe_scheduler_lists(c, a, b))),
         ("memories", |c, a, b| Box::pin(probe_memories(c, a, b))),
+        ("calendar", |c, a, b| Box::pin(probe_calendar(c, a, b))),
+        ("tax-expenses", |c, a, b| Box::pin(probe_tax_expenses(c, a, b))),
+        ("journal-moments", |c, a, b| Box::pin(probe_journal_moments(c, a, b))),
+        ("knowledge-docs", |c, a, b| Box::pin(probe_knowledge_docs(c, a, b))),
+        ("music-folders", |c, a, b| Box::pin(probe_music_folders(c, a, b))),
+        ("social-drafts", |c, a, b| Box::pin(probe_social_drafts(c, a, b))),
+        ("research-sessions", |c, a, b| Box::pin(probe_research_sessions(c, a, b))),
         ("admin-lockout", |c, a, b| Box::pin(probe_admin_lockout(c, a, b))),
     ]
 }

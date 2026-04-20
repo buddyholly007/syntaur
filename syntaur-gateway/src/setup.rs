@@ -387,7 +387,7 @@ pub async fn handle_login(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, StatusCode> {
-    // Rate limit login attempts
+    // Global login rate limit (legacy — cheap first gate).
     let limit = state.config.security.rate_limit_login_per_minute;
     if limit > 0 {
         let mut rl = state.tool_rate_limiter.lock().await;
@@ -397,8 +397,32 @@ pub async fn handle_login(
         }
     }
 
+    // Per-account login limiter. Blocks distributed password guesses
+    // against a single username that the global token-bucket doesn't see.
+    // Returns the same generic error as a bad-password attempt so the
+    // attacker can't probe whether a lockout is active.
+    let identity = req.username.clone().unwrap_or_default();
+    let wait = state.login_limiter.login_wait_seconds(&identity);
+    if wait > 0 {
+        log::warn!("[auth] login lockout active identity={:?} {}s", identity, wait);
+        crate::security::audit_log(
+            &state,
+            None,
+            "auth.login.locked",
+            None,
+            serde_json::json!({ "identity": identity, "wait_secs": wait }),
+            None, None,
+        ).await;
+        return Ok(Json(LoginResponse {
+            success: false,
+            token: None,
+            error: Some("Too many failed attempts. Please wait a few minutes and try again.".to_string()),
+        }));
+    }
+
     // Try 1: check if it's a valid user API token (ocp_*)
     if let Ok(Some(_resolved)) = state.users.resolve_token(&req.password).await {
+        state.login_limiter.note_login_success(&identity);
         return Ok(Json(LoginResponse {
             success: true,
             token: Some(req.password.clone()),
@@ -418,6 +442,7 @@ pub async fn handle_login(
             }
             if state.users.verify_password(user.id, &req.password).await.unwrap_or(false) {
                 if let Ok(token) = state.users.mint_token_with_expiry(user.id, "dashboard-session", Some(48)).await {
+                    state.login_limiter.note_login_success(&identity);
                     crate::security::audit_log(
                         &state,
                         Some(user.id),
@@ -433,6 +458,7 @@ pub async fn handle_login(
                     }));
                 }
             }
+            state.login_limiter.note_login_failure(&identity);
             crate::security::audit_log(
                 &state,
                 Some(user.id),
@@ -447,6 +473,9 @@ pub async fn handle_login(
                 error: Some("Invalid username or password".to_string()),
             }));
         }
+        // Unknown username. Still notes a failure against the typed
+        // identity so enumeration + guess is throttled together.
+        state.login_limiter.note_login_failure(&identity);
         crate::security::audit_log(
             &state,
             None,
@@ -492,6 +521,7 @@ pub async fn handle_login(
     let token_match = constant_time_eq(gw_auth.token.as_bytes(), req.password.as_bytes());
 
     if admin_password_match || password_match || token_match {
+        state.login_limiter.note_login_success(&identity);
         // Mint a session token for the first user (admin)
         if let Ok(users) = state.users.list_users().await {
             if let Some(user) = users.first() {
@@ -512,6 +542,7 @@ pub async fn handle_login(
         }));
     }
 
+    state.login_limiter.note_login_failure(&identity);
     Ok(Json(LoginResponse {
         success: false,
         token: None,

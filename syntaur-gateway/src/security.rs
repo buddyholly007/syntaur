@@ -348,6 +348,20 @@ pub async fn security_headers(req: Request, next: Next) -> Response {
         "permissions-policy",
         "geolocation=(self), microphone=(self), camera=(self), payment=()",
     );
+    // HSTS (Phase 4.1 follow-up). Emitted unconditionally — the canonical
+    // production URL for Syntaur is the Tailscale-Serve-terminated
+    // https://<host>.<tailnet>.ts.net, and every browser that reaches us
+    // there sees real Let's Encrypt TLS. A user who happens to type the
+    // plain-HTTP LAN IP gets a 301 cost-free when their browser caches
+    // the HSTS entry from their first HTTPS visit. `includeSubDomains`
+    // preserves the property across any future syntaur-* subdomains on
+    // the tailnet. 1-year max-age is the standard preload threshold even
+    // though we don't submit to Chrome's preload list.
+    insert(
+        headers,
+        "strict-transport-security",
+        "max-age=31536000; includeSubDomains",
+    );
 
     // API responses must never be cached — they commonly contain tokens,
     // PII, or user-scoped data that would bleed across sessions otherwise.
@@ -438,6 +452,108 @@ pub async fn api_rate_limit(
     }
 
     Ok(next.run(req).await)
+}
+
+// ── 5b. per-account login rate limit ───────────────────────────────────────
+
+/// Per-identity login-failure counter with exponential backoff. The
+/// `api_rate_limit` middleware caps request volume per token + per IP, but
+/// that's blind to distributed password-guessing against a single user
+/// account from a botnet of rotating IPs — each IP might send only 5
+/// requests per minute, staying well under any per-IP limit, while the
+/// target account racks up thousands of attempts per hour.
+///
+/// This tracker keys on the normalized username (or the special value
+/// `__pw_only__` for the no-username bootstrap login path). After 5
+/// failures the account is locked out for a backoff window that doubles
+/// on each subsequent failure, capped at 1 hour. Counter resets on
+/// success. Windows are ephemeral (in-memory, gateway-lifetime) — a
+/// gateway restart forgives past failures, which is acceptable for a
+/// household-scale deploy and avoids persistent-lockout-by-malice.
+///
+/// Thread-safe via a `Mutex<HashMap>`. Call sites:
+///   - `note_login_failure(user_or_empty)` — increment + return the
+///     current mandatory wait in seconds (0 if not locked yet).
+///   - `note_login_success(user_or_empty)` — reset the counter.
+///   - `login_wait_seconds(user_or_empty)` — read-only check; 0 means
+///     "proceed to verify", non-zero means "reject with that wait".
+pub struct LoginLimiter {
+    inner: std::sync::Mutex<std::collections::HashMap<String, (u32, std::time::Instant)>>,
+}
+
+impl LoginLimiter {
+    pub fn new() -> Self {
+        Self {
+            inner: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// How long (seconds) the caller must wait before a fresh attempt on
+    /// this identity is allowed. 0 = proceed. Never poisons the mutex.
+    pub fn login_wait_seconds(&self, identity: &str) -> u64 {
+        let key = Self::key(identity);
+        let guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        match guard.get(&key) {
+            Some((fails, until)) if *fails >= 5 => {
+                let now = std::time::Instant::now();
+                if *until > now {
+                    (*until - now).as_secs().max(1)
+                } else {
+                    0
+                }
+            }
+            _ => 0,
+        }
+    }
+
+    /// Record a failure; returns the resulting lockout-seconds (0 if still
+    /// below the 5-failure threshold).
+    pub fn note_login_failure(&self, identity: &str) -> u64 {
+        let key = Self::key(identity);
+        let mut guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let entry = guard.entry(key).or_insert((0, std::time::Instant::now()));
+        entry.0 = entry.0.saturating_add(1);
+        if entry.0 >= 5 {
+            // Exponential backoff: 2^(fails-5) minutes, capped at 60 min.
+            let shift = (entry.0 - 5).min(6) as u32;
+            let minutes: u64 = 1u64.checked_shl(shift).unwrap_or(60).min(60);
+            let wait = std::time::Duration::from_secs(minutes * 60);
+            entry.1 = std::time::Instant::now() + wait;
+            return wait.as_secs();
+        }
+        0
+    }
+
+    /// Successful login clears the counter for this identity.
+    pub fn note_login_success(&self, identity: &str) {
+        let key = Self::key(identity);
+        let mut guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard.remove(&key);
+    }
+
+    fn key(identity: &str) -> String {
+        let s = identity.trim().to_lowercase();
+        if s.is_empty() {
+            "__pw_only__".to_string()
+        } else {
+            s
+        }
+    }
+}
+
+impl Default for LoginLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ── 7. startup permission check ────────────────────────────────────────────

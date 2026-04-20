@@ -91,6 +91,10 @@ pub struct AppState {
     /// Per-tool rate limiter (token bucket) shared across requests so that
     /// per-tool quotas survive registry rebuilds. v5 Item 1 Stage 4.
     pub tool_rate_limiter: Arc<tokio::sync::Mutex<crate::rate_limit::RateLimiter>>,
+    /// Per-account login-failure counter with exponential backoff. Closes
+    /// the distributed-password-guess gap that `tool_rate_limiter`
+    /// doesn't see (that one is keyed by IP/token, not by username).
+    pub login_limiter: Arc<crate::security::LoginLimiter>,
     /// Per-circuit-name circuit breakers shared across requests. Tools with
     /// the same `capabilities().circuit_name` share one breaker so a single
     /// failure cluster opens the whole group. v5 Item 1 Stage 4.
@@ -5652,6 +5656,7 @@ async fn main() {
         tool_rate_limiter: Arc::new(tokio::sync::Mutex::new(
             crate::rate_limit::RateLimiter::new(),
         )),
+        login_limiter: Arc::new(crate::security::LoginLimiter::new()),
         tool_circuit_breakers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         db_path: PathBuf::from(format!("{}/index.db", data_dir_str)),
         config_path: config_path.clone(),
@@ -6938,7 +6943,7 @@ async fn handle_scheduler_prefs_get(
         let conn = rusqlite::Connection::open(&db).ok()?;
         conn.query_row(
             "SELECT theme, default_view, week_starts_on, show_weekends, work_hours_start, work_hours_end, border, \
-                    backdrop_x, backdrop_y, backdrop_scale \
+                    backdrop_x, backdrop_y, backdrop_scale, backdrop_scale_x, backdrop_scale_y \
              FROM scheduler_prefs WHERE user_id = ?",
             rusqlite::params![uid],
             |r| Ok(serde_json::json!({
@@ -6952,6 +6957,8 @@ async fn handle_scheduler_prefs_get(
                 "backdrop_x":       r.get::<_, f64>(7)?,
                 "backdrop_y":       r.get::<_, f64>(8)?,
                 "backdrop_scale":   r.get::<_, f64>(9)?,
+                "backdrop_scale_x": r.get::<_, f64>(10)?,
+                "backdrop_scale_y": r.get::<_, f64>(11)?,
             })),
         ).ok()
     }).await.ok().flatten();
@@ -6960,6 +6967,7 @@ async fn handle_scheduler_prefs_get(
         "show_weekends": true, "work_hours_start": "08:00", "work_hours_end": "18:00",
         "border": "notebook",
         "backdrop_x": 0.5, "backdrop_y": 0.5, "backdrop_scale": 1.0,
+        "backdrop_scale_x": 1.0, "backdrop_scale_y": 0.0,
     }))))
 }
 
@@ -7017,6 +7025,16 @@ async fn handle_scheduler_prefs_put(
         }
         if let Some(v) = body.get("backdrop_scale").and_then(|v| v.as_f64()) {
             sets.push("backdrop_scale = ?"); params.push(Box::new(v.max(0.25).min(4.0)));
+        }
+        // Per-axis scales. scale_x is a straight multiplier (clamped 0.25..4).
+        // scale_y=0 means "auto — aspect-preserve" and is the sentinel for
+        // the default aspect-respecting behavior. Any other value is a
+        // straight multiplier on shell height.
+        if let Some(v) = body.get("backdrop_scale_x").and_then(|v| v.as_f64()) {
+            sets.push("backdrop_scale_x = ?"); params.push(Box::new(v.max(0.25).min(4.0)));
+        }
+        if let Some(v) = body.get("backdrop_scale_y").and_then(|v| v.as_f64()) {
+            sets.push("backdrop_scale_y = ?"); params.push(Box::new(v.max(0.0).min(4.0)));
         }
         if sets.is_empty() {
             return Ok(());
