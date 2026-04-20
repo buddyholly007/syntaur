@@ -90,17 +90,20 @@ pub async fn extract_tasks_with_llm(
     let input = if text.len() > 3000 { &text[..3000] } else { text };
 
     let chain = crate::llm::LlmChain::from_config_fast(config, "main", client.clone());
+    let system_prompt = format!(
+        "Extract actionable tasks from this journal entry. Return ONLY a JSON array of short task strings.\n\
+         Rules:\n\
+         - Include: things to do, buy, call, fix, schedule, remember, send, finish\n\
+         - Exclude: feelings, reflections, observations, wishes without action\n\
+         - Keep each task under 100 characters\n\
+         - If no tasks found, return []\n\
+         Example: [\"call the dentist\", \"buy groceries\", \"fix kitchen faucet\"]\n\n{}",
+        crate::security::UNTRUSTED_INPUT_SYSTEM_DIRECTIVE
+    );
+    let wrapped = crate::security::wrap_untrusted_input("journal_entry", input);
     let messages = vec![
-        crate::llm::ChatMessage::system(
-            "Extract actionable tasks from this journal entry. Return ONLY a JSON array of short task strings.
-             Rules:
-             - Include: things to do, buy, call, fix, schedule, remember, send, finish
-             - Exclude: feelings, reflections, observations, wishes without action
-             - Keep each task under 100 characters
-             - If no tasks found, return []
-             Example: [\"call the dentist\", \"buy groceries\", \"fix kitchen faucet\"]"
-        ),
-        crate::llm::ChatMessage::user(input),
+        crate::llm::ChatMessage::system(&system_prompt),
+        crate::llm::ChatMessage::user(&wrapped),
     ];
 
     let result = match timeout(Duration::from_secs(8), chain.call(&messages)).await {

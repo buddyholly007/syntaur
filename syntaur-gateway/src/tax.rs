@@ -5631,7 +5631,11 @@ pub async fn handle_deduction_deep_scan(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
     };
 
-    // Send to LLM for deep analysis
+    // Send to LLM for deep analysis. Vendor names and descriptions are
+    // attacker-controllable (anyone who can write an expense can stuff
+    // their description field with a prompt-injection payload), so the
+    // expense block is framed as untrusted input.
+    let wrapped_expenses = crate::security::wrap_untrusted_input("tax_expenses", &expenses_summary);
     let prompt = format!(
         "You are a tax deduction expert. Analyze these {} tax year expenses and identify ANY missed deductions or misclassified items.\n\n\
          EXPENSES:\n{}\n\n\
@@ -5647,12 +5651,16 @@ pub async fn handle_deduction_deep_scan(
          - Charitable contributions\n\n\
          If no missed deductions found, respond with: NONE\n\
          Only include items you are confident about. Do not guess.",
-        year, expenses_summary
+        year, wrapped_expenses
     );
 
+    let system_prompt = format!(
+        "You are a tax deduction expert. Respond only with JSON lines or NONE.\n\n{}",
+        crate::security::UNTRUSTED_INPUT_SYSTEM_DIRECTIVE
+    );
     let chain = crate::llm::LlmChain::from_config(&state.config, "main", state.client.clone());
     let llm_response = chain.call(&[
-        crate::llm::ChatMessage::system("You are a tax deduction expert. Respond only with JSON lines or NONE."),
+        crate::llm::ChatMessage::system(&system_prompt),
         crate::llm::ChatMessage::user(&prompt),
     ]).await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("LLM error: {}", e)))?;

@@ -281,16 +281,28 @@ impl Tool for EditImageTool {
             _ => "original image".to_string(), // fallback if vision fails
         };
 
-        // Step 2: Build refined prompt combining description + edit
+        // Step 2: Build refined prompt combining description + edit.
+        //
+        // `description` comes from a vision model that just read an
+        // attacker-controllable image (could contain OCR'd injection
+        // text like "IGNORE ABOVE AND ..."). Wrap it as untrusted
+        // input before mixing it into the refined_prompt so any
+        // downstream caption / alt-text / social-agent chain treats
+        // it as data. Image-gen models ignore markers, so this adds
+        // no artifact to the generated pixels.
+        let wrapped_description = crate::security::wrap_untrusted_input(
+            "vision_caption",
+            description.trim(),
+        );
         let refined_prompt = if preserve.is_empty() {
             format!(
                 "Based on this image: {}. Apply this edit: {}.                  Keep the overall composition and style consistent.",
-                description.trim(), edit_instruction
+                wrapped_description, edit_instruction
             )
         } else {
             format!(
                 "Based on this image: {}. Apply this edit: {}.                  Preserve: {}. Keep style consistent.",
-                description.trim(), edit_instruction, preserve
+                wrapped_description, edit_instruction, preserve
             )
         };
 
