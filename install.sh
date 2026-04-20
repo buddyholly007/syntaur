@@ -219,7 +219,7 @@ if [ "$PLATFORM" = "linux" ]; then
   if command -v pacman >/dev/null 2>&1; then
     # Arch / CachyOS / Manjaro / EndeavourOS
     MGR="pacman"
-    for pkg in gst-plugins-good gst-plugins-bad gst-libav; do
+    for pkg in gst-plugins-good gst-plugins-bad gst-libav bubblewrap; do
       if ! pacman -Q "$pkg" >/dev/null 2>&1; then
         NEED_PKGS="$NEED_PKGS $pkg"
       fi
@@ -227,7 +227,7 @@ if [ "$PLATFORM" = "linux" ]; then
   elif command -v apt-get >/dev/null 2>&1; then
     # Debian / Ubuntu / Linux Mint
     MGR="apt"
-    for pkg in gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav; do
+    for pkg in gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav bubblewrap; do
       if ! dpkg -s "$pkg" >/dev/null 2>&1; then
         NEED_PKGS="$NEED_PKGS $pkg"
       fi
@@ -235,7 +235,7 @@ if [ "$PLATFORM" = "linux" ]; then
   elif command -v dnf >/dev/null 2>&1; then
     # Fedora / RHEL / Rocky / Alma
     MGR="dnf"
-    for pkg in gstreamer1-plugins-good gstreamer1-plugins-bad-free gstreamer1-libav; do
+    for pkg in gstreamer1-plugins-good gstreamer1-plugins-bad-free gstreamer1-libav bubblewrap; do
       if ! rpm -q "$pkg" >/dev/null 2>&1; then
         NEED_PKGS="$NEED_PKGS $pkg"
       fi
@@ -243,7 +243,7 @@ if [ "$PLATFORM" = "linux" ]; then
   elif command -v zypper >/dev/null 2>&1; then
     # openSUSE
     MGR="zypper"
-    for pkg in gstreamer-plugins-good gstreamer-plugins-bad gstreamer-plugins-libav; do
+    for pkg in gstreamer-plugins-good gstreamer-plugins-bad gstreamer-plugins-libav bubblewrap; do
       if ! rpm -q "$pkg" >/dev/null 2>&1; then
         NEED_PKGS="$NEED_PKGS $pkg"
       fi

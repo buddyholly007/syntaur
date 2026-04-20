@@ -65,10 +65,36 @@ pub fn wrap_command(
     policy: &Policy,
 ) -> Command {
     if !bwrap_available() {
-        log::warn!(
-            "[mcp:{server_name}] bubblewrap not installed — spawning '{program}' \
-             unsandboxed. Install `bubblewrap` for process isolation."
+        // On Linux we expect bubblewrap — install.sh adds it alongside the
+        // gstreamer deps, the Dockerfile bakes it in. Absence on Linux is a
+        // real operator-level gap, not a platform limitation, so log at
+        // ERROR level and point at the fix. The fallback still spawns so
+        // existing deployments don't break mid-session, but the noise level
+        // is meant to motivate the install.
+        //
+        // SYNTAUR_STRICT_MCP_SANDBOX=1 flips fail-open to fail-closed: the
+        // returned Command is /bin/false so the child exits immediately and
+        // the MCP server is unusable rather than unsandboxed. Recommended
+        // for operators running anything sensitive through MCP.
+        let strict = std::env::var("SYNTAUR_STRICT_MCP_SANDBOX")
+            .map(|v| v == "1" || v == "true")
+            .unwrap_or(false);
+        #[cfg(target_os = "linux")]
+        log::error!(
+            "[mcp:{server_name}] bubblewrap NOT installed on Linux — spawning '{program}' \
+             unsandboxed. Fix: apt/dnf/pacman install bubblewrap (install.sh does this now). \
+             Set SYNTAUR_STRICT_MCP_SANDBOX=1 to fail-closed instead."
         );
+        #[cfg(not(target_os = "linux"))]
+        log::warn!(
+            "[mcp:{server_name}] bubblewrap not available on this OS — spawning '{program}' \
+             unsandboxed. Linux is the only platform with a sandbox backend today."
+        );
+        if strict {
+            let mut c = Command::new("/bin/false");
+            c.arg("--syntaur-strict-mcp-sandbox-refused");
+            return c;
+        }
         let mut c = Command::new(program);
         c.args(args);
         return c;
