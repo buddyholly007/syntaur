@@ -3578,42 +3578,60 @@ const PAGE_JS: &str = r##"
       // SSE: EventSource can't set headers, so token goes in the URL
       // query string for this endpoint only. /api/* is cache-control:
       // no-store and SSE URLs aren't surfaced in history.
+      //
+      // Important: the server emits untyped `data:` frames. The JSON
+      // payload's `event` field names the type. `onmessage` fires for
+      // every frame; switch on ev.event. `addEventListener('thinking',
+      // ...)` does NOT work here — it only fires for frames with an
+      // explicit `event: thinking` line, which the server doesn't emit.
+      // This pattern is copied from /chat's own SSE handler.
       const es = new EventSource(`/api/message/${turnId}/stream?token=${encodeURIComponent(TOKEN)}`);
       let gotComplete = false;
-      es.addEventListener('thinking', (ev) => {
-        try {
-          const d = JSON.parse(ev.data);
-          if (thought && d.text) thought.textContent = d.text;
-        } catch (e) {}
-      });
-      es.addEventListener('complete', (ev) => {
-        try {
-          const d = JSON.parse(ev.data);
-          gotComplete = true;
-          if (thought && thought.parentElement) thought.parentElement.remove();
-          if (d.response) schThadAppend('bot', d.response);
-          else schThadAppend('bot', 'Thaddeus had no reply.');
-        } catch (e) {}
+      const finish = () => {
         es.close();
         thadSending = false;
         if (btn) btn.disabled = false;
         if (input) input.focus();
-      });
-      es.addEventListener('error', (ev) => {
-        if (gotComplete) return;
-        try {
-          const d = JSON.parse(ev.data);
-          if (thought && thought.parentElement) thought.parentElement.remove();
-          schThadAppend('bot', 'Error: ' + (d.message || 'connection lost'));
-        } catch (e) {
-          if (thought && thought.parentElement) thought.parentElement.remove();
-          schThadAppend('bot', 'Connection error.');
+      };
+      es.onmessage = (event) => {
+        let ev;
+        try { ev = JSON.parse(event.data); } catch (e) { return; }
+        switch (ev.event) {
+          case 'thinking':
+            if (thought && ev.text) thought.textContent = ev.text;
+            break;
+          case 'llm_call_started':
+            // If no persona-thinking text landed this round, leave whatever
+            // prior thought is in place. No-op.
+            break;
+          case 'tool_call_started':
+            if (thought) thought.textContent = 'Using ' + (ev.tool_name || 'a tool') + '…';
+            break;
+          case 'complete':
+            gotComplete = true;
+            if (thought && thought.parentElement) thought.parentElement.remove();
+            // Strip [HANDBACK] control marker same way /chat does.
+            const displayResp = (ev.response || '').replace(/\s*\[HANDBACK\]\s*/gi, '');
+            schThadAppend('bot', displayResp || 'Thaddeus had no reply.');
+            finish();
+            break;
+          case 'error':
+            if (thought && thought.parentElement) thought.parentElement.remove();
+            schThadAppend('bot', 'Error: ' + (ev.message || 'no details'));
+            finish();
+            break;
+          // Other events (started, tool_call_completed) we silently accept.
         }
-        es.close();
-        thadSending = false;
-        if (btn) btn.disabled = false;
-        if (input) input.focus();
-      });
+      };
+      es.onerror = () => {
+        // EventSource fires its OWN error event when the connection is
+        // closed — including after a clean server close following the
+        // `complete` frame. Only surface if we never saw `complete`.
+        if (gotComplete) return;
+        if (thought && thought.parentElement) thought.parentElement.remove();
+        schThadAppend('bot', 'Connection error.');
+        finish();
+      };
     } catch (e) {
       if (thought && thought.parentElement) thought.parentElement.remove();
       schThadAppend('bot', 'Connection error: ' + e.message);
