@@ -95,6 +95,11 @@ pub struct AppState {
     /// the distributed-password-guess gap that `tool_rate_limiter`
     /// doesn't see (that one is keyed by IP/token, not by username).
     pub login_limiter: Arc<crate::security::LoginLimiter>,
+    /// Short-lived URL-scoped tokens for SSE/WS/media paths where the
+    /// browser API can't set an Authorization header. Minted via
+    /// POST /api/auth/stream-token, valid for 60s, bound to a single URL
+    /// prefix. See security::StreamTokenStore docs.
+    pub stream_tokens: Arc<crate::security::StreamTokenStore>,
     /// Per-circuit-name circuit breakers shared across requests. Tools with
     /// the same `capabilities().circuit_name` share one breaker so a single
     /// failure cluster opens the whole group. v5 Item 1 Stage 4.
@@ -2532,12 +2537,12 @@ async fn handle_message_start(
 
 async fn handle_message_stream(
     State(state): State<Arc<AppState>>,
+    uri: axum::http::Uri,
     axum::extract::Path(id): axum::extract::Path<String>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<axum::response::Response, axum::http::StatusCode> {
     use axum::response::IntoResponse;
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
-    let _principal = resolve_principal(&state, token).await?;
+    let (_principal, _via_stream) = resolve_principal_for_stream(&state, &params, uri.path()).await?;
     let receiver = {
         let map = state.message_events.lock().unwrap();
         match map.get(&id) {
@@ -3479,6 +3484,85 @@ async fn handle_auth_refresh(
         "expires_in_hours": 48,
         "rotated": true,
     })))
+}
+
+/// POST /api/auth/stream-token — mint a short-lived URL-scoped token for
+/// browser streaming APIs that can't set Authorization headers
+/// (EventSource, WebSocket, `<audio>`, `<img>`).
+///
+/// Body: `{ "token": "<long-lived>", "url": "/api/xxx/stream?id=42", "ttl_secs": 60 }`.
+/// Returns: `{ "stream_token": "st_<hex>", "expires_in": <secs> }`.
+///
+/// The returned token is multi-use within its TTL (typically 60s) but
+/// bound to the URL prefix — a reconnect with a tweaked query param still
+/// works, opening a different handler does not.
+async fn handle_auth_stream_token(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let long_token = body["token"].as_str().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let url = body["url"].as_str().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
+    let ttl_secs = body["ttl_secs"].as_u64().unwrap_or(60);
+
+    let principal = resolve_principal(&state, long_token).await?;
+    let (id, name, role, scopes) = match &principal {
+        auth::Principal::User { id, name, role, scopes } => {
+            (*id, name.clone(), role.clone(), scopes.clone())
+        }
+    };
+
+    let stream_token = state
+        .stream_tokens
+        .mint(id, name, role, scopes, url, ttl_secs);
+
+    Ok(Json(serde_json::json!({
+        "stream_token": stream_token,
+        "expires_in": ttl_secs.clamp(5, 300),
+        "url_prefix": url.split('?').next().unwrap_or(url),
+    })))
+}
+
+/// Helper for streaming handlers: resolve either a long-lived session
+/// token or a stream_token. Stream-token path is preferred — logs a
+/// DEPRECATED warning when a session token is presented via `?token=`
+/// to a stream endpoint.
+///
+/// Returns `(Principal, via_stream_token)`. The bool lets the caller
+/// decide whether to also run CSRF / origin checks (stream tokens are
+/// exempt — they're already URL-scoped + short-lived).
+pub async fn resolve_principal_for_stream(
+    state: &AppState,
+    params: &HashMap<String, String>,
+    request_path: &str,
+) -> Result<(auth::Principal, bool), axum::http::StatusCode> {
+    // Stream-token path first.
+    if let Some(st) = params.get("stream_token") {
+        if let Some(t) = state.stream_tokens.resolve(st, request_path) {
+            return Ok((
+                auth::Principal::User {
+                    id: t.user_id,
+                    name: t.user_name,
+                    role: t.user_role,
+                    scopes: t.scopes,
+                },
+                true,
+            ));
+        }
+        log::warn!(
+            "[auth/stream] invalid/expired stream_token for {request_path}"
+        );
+        return Err(axum::http::StatusCode::UNAUTHORIZED);
+    }
+    // Long-lived token path with DEPRECATED warning.
+    if let Some(token) = params.get("token") {
+        log::warn!(
+            "[auth/stream] DEPRECATED: long-lived ?token= on stream endpoint \
+             {request_path}. Call POST /api/auth/stream-token first and \
+             pass ?stream_token= instead."
+        );
+        return Ok((resolve_principal(state, token).await?, false));
+    }
+    Err(axum::http::StatusCode::UNAUTHORIZED)
 }
 
 /// GET /api/audit — return the caller's audit log entries. Admin role
@@ -6148,6 +6232,7 @@ async fn main() {
             crate::rate_limit::RateLimiter::new(),
         )),
         login_limiter: Arc::new(crate::security::LoginLimiter::new()),
+        stream_tokens: Arc::new(crate::security::StreamTokenStore::new()),
         tool_circuit_breakers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         db_path: PathBuf::from(format!("{}/index.db", data_dir_str)),
         config_path: config_path.clone(),
@@ -6528,6 +6613,7 @@ async fn main() {
         .route("/profile", get(pages::profile::render))
         .route("/api/auth/login", post(setup::handle_login))
         .route("/api/auth/refresh", post(handle_auth_refresh))
+        .route("/api/auth/stream-token", post(handle_auth_stream_token))
         .route("/api/auth/pair-client", post(handle_auth_pair_client))
         .route("/api/audit", get(handle_audit_log_get))
         .route("/api/audit/verify", get(handle_audit_log_verify))

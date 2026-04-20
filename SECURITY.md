@@ -112,13 +112,17 @@ are known and being worked on:
   Every such lift logs a `DEPRECATED body-token lift` warning. **Scheduled
   removal: v0.5.0** — the middleware + every handler move to a single
   Authorization-header reader at that release.
-- **Legacy gateway.auth.token / gateway.auth.password path still functions**
-  as a fallback when the first user's password isn't set or drifted. Constant-
-  time comparison protects the hot path. Every fallback login logs a
-  `DEPRECATED legacy gateway-auth login succeeded` warning + writes an
-  `auth.login.legacy_deprecated` audit row. **Scheduled removal: v0.5.0** —
-  operators should set a password on user id=1 via `/settings/account/password`
-  and log in with that instead.
+- **Long-lived tokens in SSE / WebSocket / media-element URLs.** Browser
+  streaming APIs can't attach an `Authorization: Bearer` header, so those
+  endpoints currently accept `?token=<long-lived>` in the URL. That's the
+  session token — if it leaks into browser history, proxy access logs, or
+  a referrer header, an attacker gets up to 48 hours of session access.
+  **Mitigation in progress (v0.5.0):** a new `POST /api/auth/stream-token`
+  endpoint mints 60-second URL-scoped tokens, and handlers can opt in via
+  `resolve_principal_for_stream`. The message-stream SSE endpoint is the
+  first converted reference. Remaining ~39 SSE/WS/media handlers migrate
+  in subsequent v0.5.x point releases; until then each emits a
+  `DEPRECATED: long-lived ?token= on stream endpoint` warning.
 - The `/v1/chat/completions` voice-relay endpoint requires an explicit
   `voice_secret` in config; unsetting it is allowed only when the gateway is
   bound to loopback.
@@ -126,6 +130,13 @@ are known and being worked on:
   and SmartScreen will warn on first launch. Sigstore + cosign signatures and
   SHA-256 checksums are published alongside every release artifact; verify
   with `install.sh`'s `--skip-verify=0` path (default).
+
+**Removed in v0.5.0** (previously in this list):
+- ~~Legacy gateway.auth.token / gateway.auth.password fallback.~~ The
+  `LegacyAdmin` principal + every config-file-secret login path were
+  deleted. Every login now hits a real user row. Fresh installs bootstrap
+  through `/setup/register` and the syntaur.json config file no longer
+  carries a usable admin credential.
 
 **Removed in v0.4.0** (previously in this list):
 - ~~URL query-string token injection.~~ The middleware no longer lifts

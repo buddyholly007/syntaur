@@ -1063,3 +1063,109 @@ pub fn spawn_audit_retention(db_path: std::path::PathBuf) {
         }
     });
 }
+
+// ── stream tokens — short-lived URL-scoped auth for SSE/WS/media src ─────
+//
+// Browser APIs that open server streams (EventSource, WebSocket, <audio>,
+// <img> data URLs) cannot attach an `Authorization: Bearer` header. They
+// must encode the auth in the URL itself, which means the long-lived
+// session token lands in: browser history, proxy access logs, reverse-
+// proxy LRU caches, and anywhere `referer` gets sent. A session token
+// leaked that way is valid for up to 48 hours.
+//
+// Mitigation: clients call POST /api/auth/stream-token with their real
+// token + the URL they're about to open. Server mints a 60-second URL-
+// scoped token. Client opens the stream with `?stream_token=...`. A
+// handler that opts into stream-token validation checks the URL prefix
+// matches + the token hasn't expired. Leaked token is valid for 60s
+// and only against the one URL it was minted for.
+//
+// Multi-use within the 60s window is deliberate — SSE clients commonly
+// reconnect on transient failures, and browsers re-open <audio> sources
+// when the element is re-inserted in the DOM. A strict one-shot would
+// break both UX patterns.
+
+#[derive(Clone, Debug)]
+pub struct StreamToken {
+    pub user_id: i64,
+    pub user_name: String,
+    pub user_role: String,
+    pub scopes: Vec<String>,
+    /// Prefix of the URL path this token is bound to. A request at
+    /// /api/x/stream?id=42 mints against url_prefix = "/api/x/stream".
+    pub url_prefix: String,
+    pub expires_at: i64,
+}
+
+#[derive(Default)]
+pub struct StreamTokenStore {
+    inner: std::sync::RwLock<std::collections::HashMap<String, StreamToken>>,
+}
+
+impl StreamTokenStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Mint a new stream token. TTL is clamped to [5, 300] seconds; the
+    /// default of 60 is right for normal SSE / media-element usage. url
+    /// is stored by its path prefix (query string stripped) so a
+    /// reconnect with a slightly different query param still matches.
+    pub fn mint(
+        &self,
+        user_id: i64,
+        user_name: String,
+        user_role: String,
+        scopes: Vec<String>,
+        url: &str,
+        ttl_secs: u64,
+    ) -> String {
+        use rand::Rng;
+        let ttl = ttl_secs.clamp(5, 300) as i64;
+        let url_prefix = url.split('?').next().unwrap_or(url).to_string();
+        let now = chrono::Utc::now().timestamp();
+        let mut raw = [0u8; 24];
+        rand::thread_rng().fill(&mut raw);
+        let token = format!("st_{}", hex::encode(raw));
+        let entry = StreamToken {
+            user_id,
+            user_name,
+            user_role,
+            scopes,
+            url_prefix,
+            expires_at: now + ttl,
+        };
+        let mut g = self.inner.write().unwrap();
+        // Opportunistic prune of expired entries — keeps the map small.
+        g.retain(|_, t| t.expires_at > now);
+        g.insert(token.clone(), entry);
+        token
+    }
+
+    /// Resolve a stream token against the URL it was minted for. Returns
+    /// `None` on: unknown token, expired, or URL-prefix mismatch.
+    pub fn resolve(&self, token: &str, request_url: &str) -> Option<StreamToken> {
+        let now = chrono::Utc::now().timestamp();
+        let want_prefix = request_url.split('?').next().unwrap_or(request_url);
+        let g = self.inner.read().unwrap();
+        let t = g.get(token)?;
+        if t.expires_at <= now {
+            return None;
+        }
+        if t.url_prefix != want_prefix {
+            return None;
+        }
+        Some(t.clone())
+    }
+
+    /// Revoke a token early — used when the client is done streaming and
+    /// wants to shorten the window further.
+    pub fn revoke(&self, token: &str) {
+        self.inner.write().unwrap().remove(token);
+    }
+
+    pub fn active_count(&self) -> usize {
+        let now = chrono::Utc::now().timestamp();
+        self.inner.read().unwrap().values().filter(|t| t.expires_at > now).count()
+    }
+}
