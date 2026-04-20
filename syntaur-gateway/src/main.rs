@@ -6230,6 +6230,12 @@ async fn main() {
     crate::sync::spawn_sync_renewal_task(Arc::clone(&state));
     info!("[sync-renewal] spawned background renewal task");
 
+    // Audit log retention: daily trim of pre-hash-chain rows older than
+    // 90 days. Chain-verified rows are preserved regardless of age so
+    // /api/audit/verify can always walk the full chain.
+    crate::security::spawn_audit_retention(state.db_path.clone());
+    info!("[audit-retention] spawned daily retention task (90d, pre-chain rows only)");
+
     // Initialize the global Home Assistant REST client used by the
     // voice chat tools (control_light, set_thermostat, query_state,
     // call_ha_service). Skipped silently when no connector is configured.

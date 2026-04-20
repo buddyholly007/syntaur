@@ -1014,3 +1014,52 @@ pub fn request_audit_fields(
         .map(|s| s.chars().take(200).collect::<String>());
     (ip, ua)
 }
+
+// ── audit log retention — daily trim of rows older than 90 days ───────────
+
+/// Background task that trims `audit_log` rows older than the retention
+/// window. Spawned once at startup by `main`; runs an initial pass 30s
+/// after boot (so the gateway is healthy before the sweep) then every 24h.
+///
+/// Deletion is scoped to rows whose `row_hash IS NULL` — i.e. rows that
+/// pre-date the Phase 5 hash-chain migration or fell outside the chain
+/// for any reason. Chain-verified rows (those with prev_hash + row_hash
+/// set) are preserved past retention so `/api/audit/verify` can walk the
+/// complete chain regardless of age.
+///
+/// A DELETE that would break the chain (because `row_hash IS NOT NULL`
+/// and a subsequent row references this row's hash as its prev_hash)
+/// is never performed; the retention task only touches chain-absent
+/// rows. That's the trade — we either trim aggressively and verify
+/// nothing, or we keep the chain intact and trim only the pre-chain
+/// tail. We choose the latter since the chain is the stronger security
+/// property.
+pub fn spawn_audit_retention(db_path: std::path::PathBuf) {
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        loop {
+            let cutoff = chrono::Utc::now().timestamp() - (90 * 24 * 3600);
+            let db = db_path.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                if let Ok(conn) = rusqlite::Connection::open(&db) {
+                    match conn.execute(
+                        "DELETE FROM audit_log WHERE ts < ? AND row_hash IS NULL",
+                        rusqlite::params![cutoff],
+                    ) {
+                        Ok(n) if n > 0 => {
+                            log::info!("[audit-retention] trimmed {n} pre-chain rows older than 90 days");
+                        }
+                        Ok(_) => {
+                            log::debug!("[audit-retention] no rows to trim");
+                        }
+                        Err(e) => {
+                            log::warn!("[audit-retention] DELETE failed: {e}");
+                        }
+                    }
+                }
+            })
+            .await;
+            tokio::time::sleep(std::time::Duration::from_secs(24 * 3600)).await;
+        }
+    });
+}

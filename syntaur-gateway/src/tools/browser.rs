@@ -787,6 +787,17 @@ pub async fn browser_open(_agent_id: &str, url: &str) -> Result<String, String> 
         return Err("Only http:// and https:// URLs allowed".to_string());
     }
 
+    // SSRF guard parity with tools::web::web_fetch. Agent-triggered
+    // browser navigation to loopback / RFC1918 / link-local / cloud-
+    // metadata is the same pivot vector. Without this, a prompt-inject
+    // can route a headless Chromium to http://169.254.169.254/... and
+    // read cloud-metadata the same way web_fetch would. about:blank
+    // carries no network request, so it's exempt.
+    if url != "about:blank" {
+        crate::tools::web::check_url_safe(url)
+            .map_err(|e| format!("browser_open blocked: {e}"))?;
+    }
+
     info!("[browser] Opening: {}", url);
     // Force a fresh session for every browser_open: kill the previous chromium,
     // wipe its profile dir, drop the BROWSER global. The follow-up
@@ -1293,6 +1304,14 @@ pub async fn browser_open_and_fill(
     dropdowns: &serde_json::Value,
     submit: bool,
 ) -> Result<String, String> {
+    // Same SSRF guard as browser_open. This compound entrypoint is
+    // reachable by any agent with the browser skill and would otherwise
+    // bypass the check.
+    if url != "about:blank" {
+        crate::tools::web::check_url_safe(url)
+            .map_err(|e| format!("browser_open_and_fill blocked: {e}"))?;
+    }
+
     info!("[browser] Compound: open {} + fill {} fields + {} dropdowns, submit={}",
         url, fields.as_object().map_or(0, |o| o.len()),
         dropdowns.as_object().map_or(0, |o| o.len()), submit);
