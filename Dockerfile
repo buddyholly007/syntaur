@@ -18,14 +18,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
+# Cargo resolves the workspace manifest before building any subset of
+# members, so even though we only `cargo build -p syntaur-gateway ...`
+# below, every member listed in Cargo.toml's `[workspace] members`
+# block must be present on disk. Missing directories -> "failed to read
+# <member>/Cargo.toml" build error. Copy every member; the ones we
+# don't build stay harmlessly in /src as source only.
 COPY syntaur-gateway syntaur-gateway
-COPY mcp-protocol mcp-protocol
-COPY mcp-server-filesystem-rs mcp-server-filesystem-rs
-COPY mcp-server-search-rs mcp-server-search-rs
+COPY syntaur-viewer syntaur-viewer
+COPY syntaur-voice-pipeline syntaur-voice-pipeline
+COPY syntaur-hwscan syntaur-hwscan
+COPY syntaur-setup syntaur-setup
+COPY syntaur-license-server syntaur-license-server
 COPY syntaur-capability-shim syntaur-capability-shim
 COPY syntaur-sdk syntaur-sdk
 COPY syntaur-mod syntaur-mod
 COPY syntaur-isolation-tests syntaur-isolation-tests
+COPY rust-media-bridge rust-media-bridge
+COPY mcp-protocol mcp-protocol
+COPY mcp-server-filesystem-rs mcp-server-filesystem-rs
+COPY mcp-server-search-rs mcp-server-search-rs
 COPY mace mace
 
 RUN cargo build --release \
