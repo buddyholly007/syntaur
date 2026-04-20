@@ -1,6 +1,6 @@
 [package]
 name = "syntaur-viewer"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 description = "Lightweight dashboard viewer for Syntaur — native OS webview, no full browser needed"
 

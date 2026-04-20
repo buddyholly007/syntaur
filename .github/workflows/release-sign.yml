@@ -64,17 +64,28 @@ jobs:
             package: syntaur-viewer
             binary: syntaur-viewer
             artifact_name: syntaur-viewer-macos-arm64
-          # macOS Intel — macos-13 runners still have x86_64; macos-14+ are ARM-only
+          # macOS Intel — macos-13 runners still have x86_64; macos-14+ are
+          # ARM-only. GitHub-hosted macos-13 runner availability is erratic
+          # (hour+ queue times during peak), so these targets are marked
+          # continue-on-error and the sign-and-release job does NOT hard-block
+          # on them (see `if: always()` + success-count gate below). If a
+          # run publishes without Intel binaries the release still ships
+          # with arm64 Mac artifacts; Intel users fall back to Rosetta,
+          # which runs both gateway and viewer correctly. A follow-up
+          # workflow_dispatch once runners free up re-adds the Intel Mac
+          # artifacts to the same tag.
           - os: macos-13
             target: x86_64-apple-darwin
             package: syntaur-gateway
             binary: syntaur-gateway
             artifact_name: syntaur-gateway-macos-x86_64
+            tolerate_queue_shortage: true
           - os: macos-13
             target: x86_64-apple-darwin
             package: syntaur-viewer
             binary: syntaur-viewer
             artifact_name: syntaur-viewer-macos-x86_64
+            tolerate_queue_shortage: true
           # Windows x86_64 (MSVC ABI)
           - os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -87,6 +98,9 @@ jobs:
             binary: syntaur-viewer.exe
             artifact_name: syntaur-viewer-windows-x86_64.exe
     runs-on: ${{ matrix.os }}
+    # Intel Mac targets don't block the release; all other platforms do.
+    continue-on-error: ${{ matrix.tolerate_queue_shortage == true }}
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -170,6 +184,11 @@ jobs:
   sign-and-release:
     name: Sign + publish release
     needs: build
+    # Run even if some matrix entries were marked continue-on-error — the
+    # Intel Mac targets are allowed to lag runner availability. Refuse to
+    # run if the non-tolerant targets actually failed (Linux, Windows,
+    # Mac arm64 are load-bearing).
+    if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -182,6 +201,31 @@ jobs:
 
       - name: List dist
         run: ls -la dist/
+
+      - name: Assert core platforms present
+        working-directory: dist
+        run: |
+          # Intel Mac is optional (runner shortage). Everything else is
+          # mandatory — refuse to publish a partial release that's missing
+          # Linux, Windows, or Apple Silicon Mac.
+          required=(
+            syntaur-gateway-linux-x86_64
+            syntaur-viewer-linux-x86_64
+            syntaur-isolation-tests-linux-x86_64
+            syntaur-gateway-macos-arm64
+            syntaur-viewer-macos-arm64
+            syntaur-gateway-windows-x86_64.exe
+            syntaur-viewer-windows-x86_64.exe
+          )
+          missing=()
+          for f in "${required[@]}"; do
+            [ -f "$f" ] || missing+=("$f")
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing required release artifacts: ${missing[*]}"
+            exit 1
+          fi
+          echo "All core artifacts present ($(ls syntaur-* | wc -l) total)."
 
       - name: Compute checksums
         working-directory: dist

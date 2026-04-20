@@ -70,6 +70,11 @@ COPY --from=builder /src/target/release/mace /usr/local/bin/mace
 # at a bind-mounted syntaur.json; this baked-in path only matters for
 # `docker run` smoke tests.
 ENV HOME=/home/syntaur
+# Fail-closed sandboxing — every MCP server must run under bubblewrap.
+# bwrap IS installed in the runtime stage above; this env flag ensures
+# that if something ever strips it out, MCP spawn returns /bin/false
+# instead of spawning the server unsandboxed. Explicit over implicit.
+ENV SYNTAUR_STRICT_MCP_SANDBOX=1
 USER syntaur
 WORKDIR /home/syntaur
 

@@ -16,7 +16,7 @@
 set -e
 
 BRAND="Syntaur"
-VERSION="0.4.0"
+VERSION="0.4.1"
 BINARY="syntaur"
 INSTALL_DIR="$HOME/.local/bin"
 MODE=""
