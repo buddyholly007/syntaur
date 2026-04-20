@@ -59,6 +59,7 @@ pub async fn render() -> Html<String> {
         (event_modal())
         (proposal_modal())
         (list_items_modal())
+        (thaddeus_chat())
         script { (PreEscaped(PAGE_JS)) }
     };
     Html(shell(page, body).into_string())
@@ -342,6 +343,55 @@ fn list_items_modal() -> Markup {
                     div class="sch-listitems-add" {
                         input id="sch-listitems-input" type="text" class="sch-input" placeholder="Add an item…" onkeydown="schListItemsKey(event)";
                         button id="sch-listitems-add-btn" class="sch-btn-primary" onclick="schListItemsAdd()" { "Add" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Thaddeus floating chat — bubble + drawer
+// ══════════════════════════════════════════════════════════════════════
+// A persistent chat entry point living at the bottom-right of /scheduler.
+// Click the circular avatar → drawer slides in from the right edge with a
+// just-Thaddeus conversation. Messages POST through /api/message with
+// agent=thaddeus; conversation_id is persisted in localStorage so the
+// thread survives page navigation. First module to get this pattern;
+// Positron/tax, Silvr/music, etc. get the same component next.
+
+fn thaddeus_chat() -> Markup {
+    html! {
+        // Floating launcher button.
+        button id="sch-thad-bubble" class="sch-thad-bubble"
+               onclick="schThadToggle()" title="Ask Thaddeus" {
+            img src="/agent-avatar/thaddeus" alt="Thaddeus" loading="lazy";
+        }
+
+        // Slide-out drawer.
+        aside id="sch-thad-drawer" class="sch-thad-drawer" hidden aria-label="Thaddeus chat" {
+            header class="sch-thad-head" {
+                img src="/agent-avatar/thaddeus" alt="" class="sch-thad-head-avatar" loading="lazy";
+                div class="sch-thad-head-text" {
+                    div class="sch-thad-head-name" { "Thaddeus" }
+                    div class="sch-thad-head-sub" { "Calendar & todos" }
+                }
+                button class="sch-thad-head-close" onclick="schThadToggle()" title="Close" { "×" }
+            }
+            div id="sch-thad-messages" class="sch-thad-messages" {
+                div class="sch-thad-msg sch-thad-msg-bot" {
+                    div class="sch-thad-bubble-text" {
+                        "Good day, Sean. What would you like me to look at in your calendar?"
+                    }
+                }
+            }
+            div class="sch-thad-input-row" {
+                textarea id="sch-thad-input" rows="1" placeholder="Ask Thaddeus…"
+                         onkeydown="schThadKey(event)";
+                button id="sch-thad-send" onclick="schThadSend()" title="Send" {
+                    svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" {
+                        path d="M22 2L11 13" {}
+                        path d="M22 2l-7 20-4-9-9-4 20-7z" {}
                     }
                 }
             }
@@ -1275,6 +1325,137 @@ body:not([data-sch-border]) .sch-main {
 .sch-backdrop-toolbar .btn-save { background: #2563eb; border-color: #2563eb; color: #fff; }
 .sch-backdrop-toolbar .btn-save:hover { background: #1d4ed8; }
 .sch-backdrop-toolbar .hint { opacity: 0.7; font-size: 12px; margin-right: 6px; }
+
+/* ═══ Thaddeus floating chat — bubble + drawer ═══
+ * Bottom-right launcher that slides a chat drawer in from the right
+ * edge. Sized to ~380px on desktop, full-screen on narrow viewports.
+ * Uses the Thaddeus persona avatar served at /agent-avatar/thaddeus,
+ * and posts messages through /api/message with agent=thaddeus. The
+ * drawer stays above all other scheduler surfaces via a high z-index
+ * so it's never occluded by the month grid, proposal modal, etc. */
+
+.sch-thad-bubble {
+  position: fixed; bottom: 24px; right: 24px;
+  width: 56px; height: 56px; border-radius: 50%;
+  border: 2px solid rgba(255,255,255,0.85);
+  padding: 0; background: #fff; cursor: pointer;
+  box-shadow: 0 6px 18px rgba(40,30,15,0.35), 0 2px 4px rgba(40,30,15,0.25);
+  z-index: 50;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  overflow: hidden;
+}
+.sch-thad-bubble:hover { transform: scale(1.06); box-shadow: 0 8px 24px rgba(40,30,15,0.4); }
+.sch-thad-bubble img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.sch-thad-bubble.sch-thad-open { transform: scale(0.85); opacity: 0.6; }
+
+.sch-thad-drawer {
+  position: fixed; top: 0; right: 0; bottom: 0;
+  width: 380px; max-width: 96vw;
+  background: var(--sch-paper, #f8f4e4);
+  box-shadow: -4px 0 24px rgba(40,30,15,0.28);
+  z-index: 51;
+  display: flex; flex-direction: column;
+  font-family: inherit;
+  animation: sch-thad-slide-in 0.22s ease-out;
+}
+@keyframes sch-thad-slide-in {
+  from { transform: translateX(100%); }
+  to   { transform: translateX(0); }
+}
+.sch-thad-drawer[hidden] { display: none !important; }
+
+.sch-thad-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--sch-border, #d9d1b8);
+  background: color-mix(in srgb, var(--sch-paper, #f8f4e4) 92%, var(--sch-ink, #2e3a2c));
+}
+.sch-thad-head-avatar {
+  width: 40px; height: 40px; border-radius: 50%;
+  object-fit: cover;
+  box-shadow: 0 2px 4px rgba(40,30,15,0.2);
+}
+.sch-thad-head-text { flex: 1; }
+.sch-thad-head-name {
+  font-family: var(--sch-font-heading, Georgia, serif);
+  font-size: 16px; color: var(--sch-ink, #2e3a2c);
+  line-height: 1.1;
+}
+.sch-thad-head-sub {
+  font-size: 11px; color: var(--sch-ink-faint, #8a9584);
+  margin-top: 2px;
+}
+.sch-thad-head-close {
+  background: transparent; border: none; cursor: pointer;
+  font-size: 22px; line-height: 1; color: var(--sch-ink-dim, #5a6b56);
+  padding: 4px 8px; border-radius: 6px;
+}
+.sch-thad-head-close:hover { background: rgba(0,0,0,0.06); color: var(--sch-ink, #2e3a2c); }
+
+.sch-thad-messages {
+  flex: 1; overflow-y: auto;
+  padding: 14px; display: flex; flex-direction: column; gap: 10px;
+  scroll-behavior: smooth;
+}
+.sch-thad-msg {
+  max-width: 88%; display: flex; flex-direction: column; gap: 2px;
+}
+.sch-thad-msg-bot { align-self: flex-start; }
+.sch-thad-msg-user { align-self: flex-end; }
+.sch-thad-bubble-text {
+  padding: 9px 13px; border-radius: 14px;
+  font-size: 14px; line-height: 1.45;
+  white-space: pre-wrap; word-wrap: break-word;
+}
+.sch-thad-msg-bot .sch-thad-bubble-text {
+  background: color-mix(in srgb, var(--sch-accent, #84a98c) 14%, var(--sch-paper, #f8f4e4));
+  border: 1px solid color-mix(in srgb, var(--sch-accent, #84a98c) 30%, transparent);
+  color: var(--sch-ink, #2e3a2c);
+  border-bottom-left-radius: 4px;
+}
+.sch-thad-msg-user .sch-thad-bubble-text {
+  background: var(--sch-accent, #84a98c); color: var(--sch-paper, #f8f4e4);
+  border-bottom-right-radius: 4px;
+}
+.sch-thad-msg.sch-thad-thinking .sch-thad-bubble-text::after {
+  content: '…'; animation: sch-thad-dot 1.3s infinite;
+}
+@keyframes sch-thad-dot {
+  0%, 20%   { opacity: 0.2; }
+  50%       { opacity: 1; }
+  80%, 100% { opacity: 0.2; }
+}
+
+.sch-thad-input-row {
+  display: flex; gap: 8px; align-items: flex-end;
+  padding: 10px 12px; border-top: 1px solid var(--sch-border, #d9d1b8);
+  background: color-mix(in srgb, var(--sch-paper, #f8f4e4) 94%, var(--sch-ink, #2e3a2c));
+}
+.sch-thad-input-row textarea {
+  flex: 1; border: 1px solid var(--sch-border, #d9d1b8);
+  border-radius: 10px; padding: 8px 10px;
+  font: inherit; font-size: 14px; color: var(--sch-ink, #2e3a2c);
+  background: var(--sch-paper, #f8f4e4);
+  resize: none; min-height: 36px; max-height: 120px;
+  outline: none;
+}
+.sch-thad-input-row textarea:focus {
+  border-color: var(--sch-accent, #84a98c);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--sch-accent, #84a98c) 20%, transparent);
+}
+.sch-thad-input-row button {
+  width: 36px; height: 36px; border-radius: 50%;
+  border: none; background: var(--sch-accent, #84a98c); color: #fff;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.sch-thad-input-row button:hover { filter: brightness(1.1); }
+.sch-thad-input-row button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+@media (max-width: 540px) {
+  .sch-thad-drawer { width: 100vw; max-width: 100vw; }
+  .sch-thad-bubble { bottom: 16px; right: 16px; width: 52px; height: 52px; }
+}
 
 /* ─── Preview tiles with per-style mini illustrations. */
 .sch-border-tile {
@@ -3237,5 +3418,147 @@ const PAGE_JS: &str = r##"
   setInterval(() => { if (S.view === 'week' || S.view === 'day') renderAll(); }, 30000);
   // Poll meeting prep every 60s — cheap, cached server-side.
   setInterval(() => { loadMeetingPrep().catch(() => {}); }, 60000);
+
+  // ── Thaddeus floating chat ──────────────────────────────────────────
+  // Bubble + drawer wiring. Uses the same /api/message endpoint as the
+  // main chat page. Conversation id is persisted per-user in
+  // localStorage so the thread survives navigation. First send of a
+  // session mints a new conversation if none exists.
+  const THAD_CID_KEY = 'syntaur_sch_thad_cid';
+  let thadSending = false;
+
+  window.schThadToggle = function() {
+    const drawer = document.getElementById('sch-thad-drawer');
+    const bubble = document.getElementById('sch-thad-bubble');
+    if (!drawer) return;
+    const isOpen = !drawer.hidden;
+    if (isOpen) {
+      drawer.hidden = true;
+      if (bubble) bubble.classList.remove('sch-thad-open');
+    } else {
+      drawer.hidden = false;
+      if (bubble) bubble.classList.add('sch-thad-open');
+      // Focus input + load history on first open each session.
+      setTimeout(() => {
+        const input = document.getElementById('sch-thad-input');
+        if (input) input.focus();
+      }, 60);
+      schThadLoadHistory();
+    }
+  };
+
+  window.schThadKey = function(e) {
+    // Enter = send, Shift+Enter = newline. Matches main chat page.
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      schThadSend();
+    }
+  };
+
+  async function schThadLoadHistory() {
+    const cid = localStorage.getItem(THAD_CID_KEY);
+    if (!cid) return; // nothing saved yet; welcome message stays
+    const list = document.getElementById('sch-thad-messages');
+    if (!list) return;
+    try {
+      const resp = await fetch(`/api/conversations/${cid}`, {
+        headers: { 'Authorization': 'Bearer ' + token },
+      });
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const messages = data.messages || [];
+      if (messages.length === 0) return;
+      // Replace welcome message with real history.
+      list.innerHTML = '';
+      for (const m of messages) {
+        if (m.role === 'user') schThadAppend('user', m.content);
+        else if (m.role === 'assistant' && m.content) schThadAppend('bot', m.content);
+      }
+      list.scrollTop = list.scrollHeight;
+    } catch (e) { /* fall back to welcome message */ }
+  }
+
+  function schThadAppend(kind, text) {
+    const list = document.getElementById('sch-thad-messages');
+    if (!list) return null;
+    const row = document.createElement('div');
+    row.className = 'sch-thad-msg sch-thad-msg-' + (kind === 'user' ? 'user' : 'bot');
+    const bubble = document.createElement('div');
+    bubble.className = 'sch-thad-bubble-text';
+    bubble.textContent = text;
+    row.appendChild(bubble);
+    list.appendChild(row);
+    list.scrollTop = list.scrollHeight;
+    return row;
+  }
+
+  window.schThadSend = async function() {
+    if (thadSending) return;
+    const input = document.getElementById('sch-thad-input');
+    const btn = document.getElementById('sch-thad-send');
+    if (!input) return;
+    const text = input.value.trim();
+    if (!text) return;
+
+    thadSending = true;
+    if (btn) btn.disabled = true;
+    input.value = '';
+    input.style.height = 'auto';
+    schThadAppend('user', text);
+    const thinking = schThadAppend('bot', 'Thinking');
+    if (thinking) thinking.classList.add('sch-thad-thinking');
+
+    // Mint a conversation if we don't have one yet.
+    let cid = localStorage.getItem(THAD_CID_KEY);
+    if (!cid) {
+      try {
+        const cr = await fetch('/api/conversations', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+          body: JSON.stringify({ agent: 'thaddeus' }),
+        });
+        const cd = await cr.json();
+        if (cd && cd.id) {
+          cid = cd.id;
+          localStorage.setItem(THAD_CID_KEY, cid);
+        }
+      } catch (e) { /* fall through; /api/message may mint implicitly */ }
+    }
+
+    try {
+      const resp = await fetch('/api/message', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+        body: JSON.stringify({
+          message: text,
+          agent: 'thaddeus',
+          conversation_id: cid,
+        }),
+      });
+      const data = await resp.json();
+      if (thinking) thinking.remove();
+      if (data && data.response) {
+        schThadAppend('bot', data.response);
+      } else {
+        schThadAppend('bot', data && data.error ? ('Thaddeus: ' + data.error) : 'Thaddeus had no reply.');
+      }
+    } catch (e) {
+      if (thinking) thinking.remove();
+      schThadAppend('bot', 'Connection error: ' + e.message);
+    } finally {
+      thadSending = false;
+      if (btn) btn.disabled = false;
+      if (input) input.focus();
+    }
+  };
+
+  // Autosize the textarea as the user types.
+  document.addEventListener('input', (e) => {
+    if (e.target && e.target.id === 'sch-thad-input') {
+      e.target.style.height = 'auto';
+      e.target.style.height = Math.min(120, e.target.scrollHeight) + 'px';
+    }
+  });
+
 })();
 "##;
