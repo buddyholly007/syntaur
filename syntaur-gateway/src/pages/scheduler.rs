@@ -1118,21 +1118,25 @@ body:not([data-sch-border]) .sch-main {
  * the shell is taller than the source), the middle is plain cream so
  * any stretching there is invisible.
  */
-/* CSS variables drive backdrop position + scale so users can drag + zoom
- * the painting into place. Values are fractions: bp-x and bp-y in [0,1]
- * are the classic CSS background-position percentages; bp-scale is a
- * multiplier on width. Defaults center the image at 100% width. */
+/* CSS variables drive backdrop position + scale so users can drag, zoom,
+ * and stretch the painting independently on each axis. Values:
+ *   --sch-bp-x / --sch-bp-y  — background-position percentages (pan)
+ *   --sch-bp-w               — computed width string ("150%")
+ *   --sch-bp-h               — computed height string ("120%" or "auto")
+ * JS sets these from scale_x / scale_y so we can express "aspect-preserve"
+ * (height=auto) without losing it in calc(). */
 :root {
   --sch-bp-x: 50%;
   --sch-bp-y: 50%;
-  --sch-bp-scale: 1;
+  --sch-bp-w: 100%;
+  --sch-bp-h: auto;
 }
 [data-sch-border="garden-backdrop"] .sch-shell {
   background-color: #f4ead2;
   background-image: url('/scheduler-frame/garden-backdrop');
   background-repeat: no-repeat;
   background-position: var(--sch-bp-x) var(--sch-bp-y);
-  background-size: calc(100% * var(--sch-bp-scale)) auto;
+  background-size: var(--sch-bp-w) var(--sch-bp-h);
   padding: 24px;
   border-radius: 4px;
   box-shadow: 0 2px 6px rgba(40,30,15,0.12), 0 14px 36px rgba(40,30,15,0.18);
@@ -1406,19 +1410,24 @@ const PAGE_JS: &str = r##"
 
   // Backdrop position/scale — driven by CSS vars on the shell so the
   // painting stays placed correctly as the window resizes. Values are
-  // fractions: x/y in [0,1] become CSS percentages; scale is a multiplier.
-  function applyBackdrop(x, y, scale) {
+  // fractions: x/y in [0,1] are CSS background-position percentages;
+  // sx / sy are per-axis multipliers on shell width/height. sy=0 is a
+  // sentinel meaning "auto — aspect-preserve" (the initial default).
+  function applyBackdrop(x, y, sx, sy) {
     const shell = document.querySelector('.sch-shell');
     if (!shell) return;
-    const clamped_x = Math.max(-1, Math.min(2, x ?? 0.5));
-    const clamped_y = Math.max(-1, Math.min(2, y ?? 0.5));
-    const clamped_s = Math.max(0.25, Math.min(4, scale ?? 1));
+    const clamped_x  = Math.max(-1, Math.min(2, x  ?? 0.5));
+    const clamped_y  = Math.max(-1, Math.min(2, y  ?? 0.5));
+    const clamped_sx = Math.max(0.25, Math.min(4, sx ?? 1));
+    const clamped_sy = Math.max(0,    Math.min(4, sy ?? 0));
     shell.style.setProperty('--sch-bp-x', (clamped_x * 100).toFixed(2) + '%');
     shell.style.setProperty('--sch-bp-y', (clamped_y * 100).toFixed(2) + '%');
-    shell.style.setProperty('--sch-bp-scale', clamped_s.toFixed(3));
+    shell.style.setProperty('--sch-bp-w', (clamped_sx * 100).toFixed(2) + '%');
+    shell.style.setProperty('--sch-bp-h', clamped_sy > 0 ? (clamped_sy * 100).toFixed(2) + '%' : 'auto');
     S.prefs.backdrop_x = clamped_x;
     S.prefs.backdrop_y = clamped_y;
-    S.prefs.backdrop_scale = clamped_s;
+    S.prefs.backdrop_scale_x = clamped_sx;
+    S.prefs.backdrop_scale_y = clamped_sy;
   }
 
   // ── Adjust-backdrop mode ──────────────────────────────────────────
@@ -1435,14 +1444,16 @@ const PAGE_JS: &str = r##"
     }
     schBackdropEditState = {
       original: {
-        x: S.prefs.backdrop_x ?? 0.5,
-        y: S.prefs.backdrop_y ?? 0.5,
-        s: S.prefs.backdrop_scale ?? 1,
+        x:  S.prefs.backdrop_x         ?? 0.5,
+        y:  S.prefs.backdrop_y         ?? 0.5,
+        sx: S.prefs.backdrop_scale_x   ?? 1,
+        sy: S.prefs.backdrop_scale_y   ?? 0,
       },
       current: {
-        x: S.prefs.backdrop_x ?? 0.5,
-        y: S.prefs.backdrop_y ?? 0.5,
-        s: S.prefs.backdrop_scale ?? 1,
+        x:  S.prefs.backdrop_x         ?? 0.5,
+        y:  S.prefs.backdrop_y         ?? 0.5,
+        sx: S.prefs.backdrop_scale_x   ?? 1,
+        sy: S.prefs.backdrop_scale_y   ?? 0,
       },
       dragging: false,
       startMouse: null,
@@ -1472,25 +1483,52 @@ const PAGE_JS: &str = r##"
       // of the image. So we subtract dx to match user intuition.
       schBackdropEditState.current.x = schBackdropEditState.startCurrent.x - dx;
       schBackdropEditState.current.y = schBackdropEditState.startCurrent.y - dy;
-      applyBackdrop(
-        schBackdropEditState.current.x,
-        schBackdropEditState.current.y,
-        schBackdropEditState.current.s,
-      );
+      schBackdropApplyCurrent();
     };
     const onUp = () => {
       if (schBackdropEditState) schBackdropEditState.dragging = false;
     };
+    // Wheel zoom:
+    //   plain      → uniform (width + height)
+    //   shift+wh   → width only
+    //   alt+wh     → height only (starts from 1.0 if currently "auto")
     const onWheel = (e) => {
       if (!schBackdropEditState) return;
       e.preventDefault();
       const delta = e.deltaY < 0 ? 1.05 : 1 / 1.05;
-      schBackdropEditState.current.s *= delta;
-      applyBackdrop(
-        schBackdropEditState.current.x,
-        schBackdropEditState.current.y,
-        schBackdropEditState.current.s,
-      );
+      const cur = schBackdropEditState.current;
+      if (e.shiftKey && !e.altKey) {
+        cur.sx *= delta;
+      } else if (e.altKey && !e.shiftKey) {
+        if (cur.sy === 0) cur.sy = 1; // lift from aspect-auto
+        cur.sy *= delta;
+      } else {
+        cur.sx *= delta;
+        if (cur.sy === 0) cur.sy = 1;
+        cur.sy *= delta;
+      }
+      schBackdropApplyCurrent();
+    };
+
+    function schBackdropApplyCurrent() {
+      const c = schBackdropEditState.current;
+      applyBackdrop(c.x, c.y, c.sx, c.sy);
+    }
+    window.schBackdropNudgeW = function(factor) {
+      if (!schBackdropEditState) return;
+      schBackdropEditState.current.sx *= factor;
+      schBackdropApplyCurrent();
+    };
+    window.schBackdropNudgeH = function(factor) {
+      if (!schBackdropEditState) return;
+      if (schBackdropEditState.current.sy === 0) schBackdropEditState.current.sy = 1;
+      schBackdropEditState.current.sy *= factor;
+      schBackdropApplyCurrent();
+    };
+    window.schBackdropAutoH = function() {
+      if (!schBackdropEditState) return;
+      schBackdropEditState.current.sy = 0;
+      schBackdropApplyCurrent();
     };
     schBackdropEditState.handlers = { onDown, onMove, onUp, onWheel };
     shell.addEventListener('mousedown', onDown);
@@ -1503,7 +1541,12 @@ const PAGE_JS: &str = r##"
     bar.className = 'sch-backdrop-toolbar';
     bar.id = 'sch-backdrop-toolbar';
     bar.innerHTML = `
-      <span class="hint">Drag to pan · scroll to zoom</span>
+      <span class="hint">Drag to pan · scroll = zoom · ⇧+scroll = width · ⌥+scroll = height</span>
+      <button onclick="schBackdropNudgeW(1/1.05)" title="Narrower">−W</button>
+      <button onclick="schBackdropNudgeW(1.05)"  title="Wider">+W</button>
+      <button onclick="schBackdropNudgeH(1/1.05)" title="Shorter">−H</button>
+      <button onclick="schBackdropNudgeH(1.05)"  title="Taller">+H</button>
+      <button onclick="schBackdropAutoH()" title="Lock height to image aspect">Auto H</button>
       <button onclick="schBackdropReset()">Reset</button>
       <button onclick="schBackdropCancel()">Cancel</button>
       <button class="btn-save" onclick="schBackdropSave()">Save</button>
@@ -1531,13 +1574,13 @@ const PAGE_JS: &str = r##"
 
   window.schBackdropReset = function() {
     if (!schBackdropEditState) return;
-    schBackdropEditState.current = { x: 0.5, y: 0.5, s: 1 };
-    applyBackdrop(0.5, 0.5, 1);
+    schBackdropEditState.current = { x: 0.5, y: 0.5, sx: 1, sy: 0 };
+    applyBackdrop(0.5, 0.5, 1, 0);
   };
   window.schBackdropCancel = function() {
     if (!schBackdropEditState) return;
     const o = schBackdropEditState.original;
-    applyBackdrop(o.x, o.y, o.s);
+    applyBackdrop(o.x, o.y, o.sx, o.sy);
     schBackdropExit();
   };
   window.schBackdropSave = async function() {
@@ -1549,7 +1592,8 @@ const PAGE_JS: &str = r##"
         body: JSON.stringify({
           backdrop_x: c.x,
           backdrop_y: c.y,
-          backdrop_scale: c.s,
+          backdrop_scale_x: c.sx,
+          backdrop_scale_y: c.sy,
         }),
       });
     } catch (e) { console.warn('[sch] save backdrop', e); }
@@ -1667,7 +1711,8 @@ const PAGE_JS: &str = r##"
       applyBackdrop(
         prefs && prefs.backdrop_x,
         prefs && prefs.backdrop_y,
-        prefs && prefs.backdrop_scale
+        prefs && prefs.backdrop_scale_x,
+        prefs && prefs.backdrop_scale_y
       );
     } catch(e) { console.warn('[sch] prefs load:', e); applyBorder('garden-backdrop'); }
     if (window.innerWidth <= 900) S.view = 'day';

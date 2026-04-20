@@ -2057,6 +2057,18 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE scheduler_prefs ADD COLUMN backdrop_y     REAL NOT NULL DEFAULT 0.5;
     ALTER TABLE scheduler_prefs ADD COLUMN backdrop_scale REAL NOT NULL DEFAULT 1.0;
     "#,
+
+    // Backdrop needs INDEPENDENT X and Y scaling so users can stretch the
+    // painting along only one axis at a time (watercolor corners want
+    // vertical breathing room without also widening). `backdrop_scale`
+    // from the previous migration was a single uniform multiplier; this
+    // migration splits it into per-axis `scale_x` and `scale_y`. A
+    // `scale_y` value of 0 is the sentinel for "auto" (aspect-preserved)
+    // so existing default behavior is preserved on first load.
+    r#"
+    ALTER TABLE scheduler_prefs ADD COLUMN backdrop_scale_x REAL NOT NULL DEFAULT 1.0;
+    ALTER TABLE scheduler_prefs ADD COLUMN backdrop_scale_y REAL NOT NULL DEFAULT 0.0;
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
