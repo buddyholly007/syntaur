@@ -10806,9 +10806,23 @@ async fn try_default_persona(
     agent_id: &str,
     user_id: i64,
 ) -> Option<String> {
+    // Persona identifier → seeded DB key. Seeded rows use module names
+    // (module_scheduler, module_tax, …) not persona names (thaddeus,
+    // positron, …), so a direct `module_{}` mapping misses every named
+    // persona. Explicit map keeps both surfaces working: clients can
+    // send either form.
     let agent_key = match agent_id {
-        "main" => "main_default".to_string(),
-        other => format!("module_{}", other),
+        "main"                       => "main_default".to_string(),
+        "kyron"                      => "main_default".to_string(),
+        "peter"                      => "main_peter_local".to_string(),
+        "thaddeus" | "scheduler"     => "module_scheduler".to_string(),
+        "positron" | "tax"           => "module_tax".to_string(),
+        "cortex"   | "research"      => "module_research".to_string(),
+        "silvr"    | "music"         => "module_music".to_string(),
+        "maurice"  | "coders"        => "module_coders".to_string(),
+        "nyota"    | "social"        => "module_social".to_string(),
+        "mushi"    | "journal"       => "module_journal".to_string(),
+        other                        => format!("module_{}", other),
     };
     let db = state.db_path.clone();
     let key = agent_key;
