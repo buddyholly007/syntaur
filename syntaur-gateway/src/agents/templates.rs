@@ -89,6 +89,21 @@ pub fn base_context(
         "current_tax_year",
         chrono::Utc::now().format("%Y").to_string(),
     );
+    // Today's date in the user's local timezone. Critical for schedule
+    // personas (Thaddeus) and anyone else who parses relative dates like
+    // "tomorrow" / "Friday". Without this, the LLM guesses — Sean saw
+    // "add take out the trash tomorrow at 5 PM" land on 2026-03-27 (24
+    // days in the past) because Thaddeus had no grounding on today.
+    //
+    // TZ: fall back to UTC until per-user tz is wired; most date math
+    // ("tomorrow" / "next Monday") is tolerant of a few-hour skew but
+    // will want Config.user.timezone once that column exists.
+    let now = chrono::Utc::now();
+    ctx.insert("current_date",        now.format("%Y-%m-%d").to_string());
+    ctx.insert("current_date_human",  now.format("%A, %B %-d, %Y").to_string());
+    ctx.insert("current_time",        now.format("%H:%M UTC").to_string());
+    ctx.insert("current_weekday",     now.format("%A").to_string());
+    ctx.insert("current_year",        now.format("%Y").to_string());
     ctx
 }
 

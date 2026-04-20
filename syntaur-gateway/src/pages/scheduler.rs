@@ -3497,6 +3497,23 @@ const PAGE_JS: &str = r##"
     return row;
   }
 
+  // Append a persona-thought bubble (small grey italic line ABOVE the
+  // bot's actual reply). Lives in its own sch-thad-thought element so
+  // it persists while the main message bubble builds up.
+  function schThadThoughtBubble() {
+    const list = document.getElementById('sch-thad-messages');
+    if (!list) return null;
+    const row = document.createElement('div');
+    row.className = 'sch-thad-msg sch-thad-msg-bot sch-thad-thought';
+    const thought = document.createElement('div');
+    thought.className = 'sch-thad-thought-text';
+    thought.textContent = 'Thinking';
+    row.appendChild(thought);
+    list.appendChild(row);
+    list.scrollTop = list.scrollHeight;
+    return thought;
+  }
+
   window.schThadSend = async function() {
     if (thadSending) return;
     const input = document.getElementById('sch-thad-input');
@@ -3510,8 +3527,7 @@ const PAGE_JS: &str = r##"
     input.value = '';
     input.style.height = 'auto';
     schThadAppend('user', text);
-    const thinking = schThadAppend('bot', 'Thinking');
-    if (thinking) thinking.classList.add('sch-thad-thinking');
+    const thought = schThadThoughtBubble();
 
     // Mint a conversation if we don't have one yet.
     let cid = localStorage.getItem(THAD_CID_KEY);
@@ -3530,27 +3546,77 @@ const PAGE_JS: &str = r##"
       } catch (e) { /* fall through; /api/message may mint implicitly */ }
     }
 
+    // SSE path (same as main /chat). POST /api/message/start to mint a
+    // turn_id, then subscribe to /api/message/{id}/stream for events.
+    // Thinking events (source: "persona") update the thought bubble in
+    // place; the final Complete event carries the full reply. Falls back
+    // to non-streaming /api/message if /start doesn't return a turn_id
+    // (legacy deploys).
     try {
-      const resp = await fetch('/api/message', {
+      const startResp = await fetch('/api/message/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + TOKEN },
-        body: JSON.stringify({
-          message: text,
-          agent: 'thaddeus',
-          conversation_id: cid,
-        }),
+        body: JSON.stringify({ message: text, agent: 'thaddeus', conversation_id: cid }),
       });
-      const data = await resp.json();
-      if (thinking) thinking.remove();
-      if (data && data.response) {
-        schThadAppend('bot', data.response);
-      } else {
-        schThadAppend('bot', data && data.error ? ('Thaddeus: ' + data.error) : 'Thaddeus had no reply.');
+      const startData = await startResp.json();
+      const turnId = startData.turn_id;
+
+      if (!turnId) {
+        // Fallback: single-shot /api/message
+        const resp = await fetch('/api/message', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + TOKEN },
+          body: JSON.stringify({ message: text, agent: 'thaddeus', conversation_id: cid }),
+        });
+        const data = await resp.json();
+        if (thought && thought.parentElement) thought.parentElement.remove();
+        schThadAppend('bot', (data && data.response) || (data && data.error ? 'Thaddeus: ' + data.error : 'Thaddeus had no reply.'));
+        thadSending = false; if (btn) btn.disabled = false; if (input) input.focus();
+        return;
       }
+
+      // SSE: EventSource can't set headers, so token goes in the URL
+      // query string for this endpoint only. /api/* is cache-control:
+      // no-store and SSE URLs aren't surfaced in history.
+      const es = new EventSource(`/api/message/${turnId}/stream?token=${encodeURIComponent(TOKEN)}`);
+      let gotComplete = false;
+      es.addEventListener('thinking', (ev) => {
+        try {
+          const d = JSON.parse(ev.data);
+          if (thought && d.text) thought.textContent = d.text;
+        } catch (e) {}
+      });
+      es.addEventListener('complete', (ev) => {
+        try {
+          const d = JSON.parse(ev.data);
+          gotComplete = true;
+          if (thought && thought.parentElement) thought.parentElement.remove();
+          if (d.response) schThadAppend('bot', d.response);
+          else schThadAppend('bot', 'Thaddeus had no reply.');
+        } catch (e) {}
+        es.close();
+        thadSending = false;
+        if (btn) btn.disabled = false;
+        if (input) input.focus();
+      });
+      es.addEventListener('error', (ev) => {
+        if (gotComplete) return;
+        try {
+          const d = JSON.parse(ev.data);
+          if (thought && thought.parentElement) thought.parentElement.remove();
+          schThadAppend('bot', 'Error: ' + (d.message || 'connection lost'));
+        } catch (e) {
+          if (thought && thought.parentElement) thought.parentElement.remove();
+          schThadAppend('bot', 'Connection error.');
+        }
+        es.close();
+        thadSending = false;
+        if (btn) btn.disabled = false;
+        if (input) input.focus();
+      });
     } catch (e) {
-      if (thinking) thinking.remove();
+      if (thought && thought.parentElement) thought.parentElement.remove();
       schThadAppend('bot', 'Connection error: ' + e.message);
-    } finally {
       thadSending = false;
       if (btn) btn.disabled = false;
       if (input) input.focus();
