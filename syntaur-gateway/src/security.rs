@@ -359,6 +359,101 @@ fn inject_script_nonce(html: &str, nonce: &str) -> String {
     out
 }
 
+/// Return true if `host` is a loopback, RFC1918, link-local, or ULA IPv6
+/// address — i.e. a network Syntaur is likely reached directly on, over
+/// plain HTTP, with no TLS terminator in front. HSTS on such hosts is a
+/// permanent trap (browsers cache "HTTPS only" for up to a year while
+/// the host has no HTTPS listener), so we gate the header off this check.
+///
+/// Strips an optional port suffix before parsing. A hostname (not an IP)
+/// is treated as "not private" except for the literal `localhost` — we
+/// don't do DNS resolution here, since HSTS scoping is a per-request
+/// decision on the hot path.
+fn host_is_private(host: &str) -> bool {
+    if host.is_empty() { return false; }
+    // Strip port. IPv6 literals use brackets, e.g. "[::1]:18789".
+    let raw = if let Some(end) = host.find(']') {
+        // IPv6 literal: keep inside brackets
+        &host[1..end]
+    } else if let Some(colon) = host.find(':') {
+        &host[..colon]
+    } else {
+        host
+    };
+    if raw.eq_ignore_ascii_case("localhost") { return true; }
+    match raw.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => {
+            if v4.is_loopback() { return true; }
+            let o = v4.octets();
+            o[0] == 10
+                || (o[0] == 172 && (16..=31).contains(&o[1]))
+                || (o[0] == 192 && o[1] == 168)
+                || (o[0] == 169 && o[1] == 254)
+        }
+        Ok(std::net::IpAddr::V6(v6)) => {
+            if v6.is_loopback() { return true; }
+            let seg = v6.segments();
+            let link_local = (seg[0] & 0xffc0) == 0xfe80;
+            let ula = (seg[0] & 0xfe00) == 0xfc00;
+            link_local || ula
+        }
+        Err(_) => false, // hostname — no resolution here
+    }
+}
+
+#[cfg(test)]
+mod hsts_tests {
+    use super::host_is_private;
+
+    #[test]
+    fn lan_ipv4_is_private() {
+        assert!(host_is_private("192.168.1.239"));
+        assert!(host_is_private("192.168.1.239:18789"));
+        assert!(host_is_private("10.0.0.5"));
+        assert!(host_is_private("172.16.4.2"));
+        assert!(host_is_private("172.31.255.254"));
+        assert!(host_is_private("169.254.169.254"));
+        assert!(host_is_private("127.0.0.1"));
+        assert!(host_is_private("127.0.0.1:8080"));
+    }
+
+    #[test]
+    fn public_hostnames_are_not_private() {
+        assert!(!host_is_private("syntaur.tail75e2be.ts.net"));
+        assert!(!host_is_private("syntaur.tail75e2be.ts.net:443"));
+        assert!(!host_is_private("example.com"));
+        assert!(!host_is_private("8.8.8.8"));
+    }
+
+    #[test]
+    fn localhost_is_private() {
+        assert!(host_is_private("localhost"));
+        assert!(host_is_private("LocalHost:3000"));
+    }
+
+    #[test]
+    fn public_outside_rfc1918() {
+        // 172.32 is outside 172.16-172.31
+        assert!(!host_is_private("172.32.0.1"));
+        // 11.x is not RFC1918
+        assert!(!host_is_private("11.0.0.1"));
+    }
+
+    #[test]
+    fn ipv6_loopback_and_link_local() {
+        assert!(host_is_private("[::1]:443"));
+        assert!(host_is_private("[fe80::1]"));
+        assert!(host_is_private("[fd00::1]:80"));
+        assert!(!host_is_private("[2606:4700:4700::1111]"));
+    }
+
+    #[test]
+    fn empty_and_garbage() {
+        assert!(!host_is_private(""));
+        assert!(!host_is_private("not-an-ip"));
+    }
+}
+
 /// Set a conservative set of security headers on every response.
 ///
 /// HTML responses also get their inline `<script>` tags rewritten with a
@@ -449,20 +544,36 @@ pub async fn security_headers(req: Request, next: Next) -> Response {
         "permissions-policy",
         "geolocation=(self), microphone=(self), camera=(self), payment=()",
     );
-    // HSTS (Phase 4.1 follow-up). Emitted unconditionally — the canonical
-    // production URL for Syntaur is the Tailscale-Serve-terminated
-    // https://<host>.<tailnet>.ts.net, and every browser that reaches us
-    // there sees real Let's Encrypt TLS. A user who happens to type the
-    // plain-HTTP LAN IP gets a 301 cost-free when their browser caches
-    // the HSTS entry from their first HTTPS visit. `includeSubDomains`
-    // preserves the property across any future syntaur-* subdomains on
-    // the tailnet. 1-year max-age is the standard preload threshold even
-    // though we don't submit to Chrome's preload list.
-    insert(
-        headers,
-        "strict-transport-security",
-        "max-age=31536000; includeSubDomains",
-    );
+    // HSTS — scoped to TLS-terminated requests ONLY, and never to private
+    // IPs. Emitting `strict-transport-security` on plain HTTP is an RFC
+    // 6797 foot-gun: some browsers (WebKit) cache it anyway, then upgrade
+    // future requests to HTTPS. If the gateway doesn't have a TLS listener
+    // on that host/port (our LAN case: plain HTTP on :18789, TLS only via
+    // the Tailscale Serve sidecar at syntaur.*.ts.net), the upgraded
+    // requests fail and the user is wedged for up to a year until the
+    // cached directive expires. LAN-IP HSTS is always a trap since those
+    // addresses can't have publicly-trusted TLS certs.
+    //
+    // Canonical public URL is Tailscale-Serve-terminated; the proxy sets
+    // `X-Forwarded-Proto: https` on inbound requests, which is our
+    // authoritative signal for "TLS was on the wire." Belt-and-suspenders:
+    // also refuse HSTS when the Host header resolves to a private address.
+    let forwarded_proto = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let is_tls_fronted = forwarded_proto.eq_ignore_ascii_case("https");
+    let host = headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if is_tls_fronted && !host_is_private(host) {
+        insert(
+            headers,
+            "strict-transport-security",
+            "max-age=31536000; includeSubDomains",
+        );
+    }
 
     // API responses must never be cached — they commonly contain tokens,
     // PII, or user-scoped data that would bleed across sessions otherwise.
