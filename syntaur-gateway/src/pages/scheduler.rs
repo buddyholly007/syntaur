@@ -238,10 +238,10 @@ fn theme_picker_modal() -> Markup {
                 p class="sch-border-hint" { "Dresses the calendar in a notebook-style binding. Matches the theme underneath." }
                 div class="sch-theme-grid" id="sch-border-grid" {}
 
-                // Panel transparency — single slider scales rails/cells/cards together.
+                // Two independent transparency sliders — side panels + calendar.
                 div style="padding: 10px 14px 4px; border-top: 1px solid var(--sch-border); margin-top: 6px;" {
                     label style="display: flex; align-items: center; gap: 10px; font-size: 13px;" {
-                        span { "Panel transparency" }
+                        span style="min-width: 150px" { "Side panels" }
                         input id="sch-pane-opacity-slider"
                               type="range" min="0" max="100" step="1" value="35"
                               style="flex: 1;"
@@ -249,7 +249,16 @@ fn theme_picker_modal() -> Markup {
                               onchange="schPaneOpacityCommit(this)";
                         span id="sch-pane-opacity-readout" style="min-width: 40px; text-align: right; color: var(--sch-ink-faint);" { "35%" }
                     }
-                    p class="sch-border-hint" style="margin: 4px 0 0 0; padding: 0;" { "Lower = more of the painted backdrop shows through your lists and grid." }
+                    label style="display: flex; align-items: center; gap: 10px; font-size: 13px; margin-top: 8px;" {
+                        span style="min-width: 150px" { "Calendar cells" }
+                        input id="sch-cal-opacity-slider"
+                              type="range" min="0" max="100" step="1" value="55"
+                              style="flex: 1;"
+                              oninput="schCalOpacityInput(this)"
+                              onchange="schCalOpacityCommit(this)";
+                        span id="sch-cal-opacity-readout" style="min-width: 40px; text-align: right; color: var(--sch-ink-faint);" { "55%" }
+                    }
+                    p class="sch-border-hint" style="margin: 4px 0 0 0; padding: 0;" { "Lower = more of the painted backdrop shows through. Panels and calendar are independent." }
                 }
 
                 // Adjust + Upload — two side-by-side actions.
@@ -1147,11 +1156,16 @@ body:not([data-sch-border]) .sch-main {
   --sch-bp-y: 50%;
   --sch-bp-w: 100%;
   --sch-bp-h: auto;
-  /* Pane transparency knob — 0 = fully see-through, 1 = fully opaque.
-   * JS writes this from scheduler prefs. Rails use it directly; cells
-   * and cards derive a slightly less transparent value so text stays
-   * legible even at low alpha. */
+  /* Two independent transparency knobs, both in [0,1]:
+   *   --sch-pane-alpha  — side panels (lists / habits / Thaddeus cards /
+   *                        rails). Default 0.35.
+   *   --sch-cal-alpha   — month-grid cells (and week-view day columns).
+   *                        Default 0.55 — slightly more opaque because
+   *                        event chips + date numbers need to read clearly
+   *                        even against the watercolor corners of the
+   *                        backdrop. User adjusts separately. */
   --sch-pane-alpha: 0.35;
+  --sch-cal-alpha: 0.55;
 }
 [data-sch-border="garden-backdrop"] .sch-shell,
 [data-sch-border="custom"]          .sch-shell {
@@ -1171,26 +1185,39 @@ body:not([data-sch-border]) .sch-main {
 [data-sch-border="garden-backdrop"] .sch-shell::before,
 [data-sch-border="custom"]          .sch-shell::before { content: none !important; }
 
-/* Layout zones scale from --sch-pane-alpha so a single slider controls
- * how transparent the panels feel. Cells get +0.20 on top of rails; cards
- * get +0.40 so chip text stays readable even when rails are nearly clear. */
+/* Side rails (panels) — controlled by --sch-pane-alpha. `.sch-main` is
+ * the CENTER column containing the month grid; keep it transparent so
+ * the grid's own cells render on the painted paper directly. Tinting
+ * `.sch-main` here would double-layer behind every cell, muddying the
+ * backdrop under the calendar. */
 [data-sch-border="garden-backdrop"] .sch-left,
-[data-sch-border="garden-backdrop"] .sch-main,
 [data-sch-border="garden-backdrop"] .sch-right,
 [data-sch-border="custom"]          .sch-left,
-[data-sch-border="custom"]          .sch-main,
 [data-sch-border="custom"]          .sch-right {
   background: rgba(248, 240, 215, var(--sch-pane-alpha, 0.35)) !important;
 }
-[data-sch-border="garden-backdrop"] .sch-cell,
-[data-sch-border="custom"]          .sch-cell {
-  background: rgba(253, 248, 232, calc(var(--sch-pane-alpha, 0.35) + 0.20)) !important;
+[data-sch-border="garden-backdrop"] .sch-main,
+[data-sch-border="custom"]          .sch-main { background: transparent !important; }
+
+/* Month-grid cells — controlled by --sch-cal-alpha (its own slider).
+ * Weekend variant keeps the darker tone but inherits the same alpha,
+ * so the backdrop shows through evenly regardless of day-of-week. */
+[data-sch-border="garden-backdrop"] .sch-month-cell,
+[data-sch-border="custom"]          .sch-month-cell {
+  background: rgba(253, 248, 232, var(--sch-cal-alpha, 0.55)) !important;
 }
-[data-sch-border="garden-backdrop"] .sch-card,
-[data-sch-border="garden-backdrop"] .sch-tp-card,
-[data-sch-border="custom"]          .sch-card,
-[data-sch-border="custom"]          .sch-tp-card {
-  background: rgba(253, 248, 232, calc(var(--sch-pane-alpha, 0.35) + 0.40)) !important;
+[data-sch-border="garden-backdrop"] .sch-month-cell.weekend,
+[data-sch-border="custom"]          .sch-month-cell.weekend {
+  background: rgba(238, 225, 195, var(--sch-cal-alpha, 0.55)) !important;
+}
+/* Week view — day columns use the same calendar alpha. */
+[data-sch-border="garden-backdrop"] .sch-week-day-col,
+[data-sch-border="custom"]          .sch-week-day-col {
+  background: rgba(253, 248, 232, var(--sch-cal-alpha, 0.55)) !important;
+}
+[data-sch-border="garden-backdrop"] .sch-week-day-col.weekend,
+[data-sch-border="custom"]          .sch-week-day-col.weekend {
+  background: rgba(238, 225, 195, var(--sch-cal-alpha, 0.55)) !important;
 }
 
 /* Adjust-backdrop edit mode — dim content, highlight the drag surface. */
@@ -1465,12 +1492,21 @@ const PAGE_JS: &str = r##"
     S.prefs.backdrop_scale_y = clamped_sy;
   }
 
-  // Pane transparency — single knob the rails/cells/cards all scale from.
+  // Two independent transparency knobs — one for side panels, one for
+  // the calendar grid cells. Users want separate control so they can
+  // make panels nearly invisible while keeping cell text readable, or
+  // vice-versa.
   function applyPaneOpacity(alpha) {
     const shell = document.querySelector('.sch-shell');
     const clamped = Math.max(0, Math.min(1, alpha ?? 0.35));
     if (shell) shell.style.setProperty('--sch-pane-alpha', clamped.toFixed(3));
     S.prefs.pane_opacity = clamped;
+  }
+  function applyCalendarOpacity(alpha) {
+    const shell = document.querySelector('.sch-shell');
+    const clamped = Math.max(0, Math.min(1, alpha ?? 0.55));
+    if (shell) shell.style.setProperty('--sch-cal-alpha', clamped.toFixed(3));
+    S.prefs.calendar_opacity = clamped;
   }
 
   // Custom backdrop URL — when the user has uploaded, the background-image
@@ -1770,6 +1806,7 @@ const PAGE_JS: &str = r##"
         prefs && prefs.backdrop_scale_y
       );
       applyPaneOpacity(prefs && prefs.pane_opacity);
+      applyCalendarOpacity(prefs && prefs.calendar_opacity);
       applyCustomBackdropUrl(prefs && prefs.custom_backdrop_file);
     } catch(e) { console.warn('[sch] prefs load:', e); applyBorder('garden-backdrop'); }
     if (window.innerWidth <= 900) S.view = 'day';
@@ -2607,10 +2644,15 @@ const PAGE_JS: &str = r##"
       </button>`;
     }).join('');
 
-    const slider = document.getElementById('sch-pane-opacity-slider');
-    if (slider) slider.value = Math.round((S.prefs.pane_opacity ?? 0.35) * 100);
-    const readout = document.getElementById('sch-pane-opacity-readout');
-    if (readout) readout.textContent = `${slider ? slider.value : 35}%`;
+    const paneSlider = document.getElementById('sch-pane-opacity-slider');
+    if (paneSlider) paneSlider.value = Math.round((S.prefs.pane_opacity ?? 0.35) * 100);
+    const paneReadout = document.getElementById('sch-pane-opacity-readout');
+    if (paneReadout) paneReadout.textContent = `${paneSlider ? paneSlider.value : 35}%`;
+
+    const calSlider = document.getElementById('sch-cal-opacity-slider');
+    if (calSlider) calSlider.value = Math.round((S.prefs.calendar_opacity ?? 0.55) * 100);
+    const calReadout = document.getElementById('sch-cal-opacity-readout');
+    if (calReadout) calReadout.textContent = `${calSlider ? calSlider.value : 55}%`;
 
     document.getElementById('sch-border-modal').hidden = false;
   };
@@ -2625,6 +2667,18 @@ const PAGE_JS: &str = r##"
     try {
       await api('/api/scheduler/prefs', { method: 'POST', body: JSON.stringify({ pane_opacity: a }) });
     } catch (e) { console.warn('[sch] save pane_opacity', e); }
+  };
+  window.schCalOpacityInput = function(el) {
+    const a = (+el.value) / 100;
+    applyCalendarOpacity(a);
+    const readout = document.getElementById('sch-cal-opacity-readout');
+    if (readout) readout.textContent = `${el.value}%`;
+  };
+  window.schCalOpacityCommit = async function(el) {
+    const a = (+el.value) / 100;
+    try {
+      await api('/api/scheduler/prefs', { method: 'POST', body: JSON.stringify({ calendar_opacity: a }) });
+    } catch (e) { console.warn('[sch] save calendar_opacity', e); }
   };
   window.schBackdropUpload = function() {
     const input = document.createElement('input');

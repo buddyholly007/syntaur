@@ -2086,6 +2086,16 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE scheduler_prefs ADD COLUMN custom_backdrop_file TEXT NOT NULL DEFAULT '';
     "#,
 
+    // Calendar cells get their own transparency knob, independent from
+    // the side-panel slider. Users want separate control: one slider for
+    // how much of the painted backdrop shows through their lists/cards
+    // rails, a second for how much shows through the month-grid cells.
+    // 0.55 default is what the previous coupled formula derived
+    // (pane_opacity 0.35 + 0.20 offset).
+    r#"
+    ALTER TABLE scheduler_prefs ADD COLUMN calendar_opacity REAL NOT NULL DEFAULT 0.55;
+    "#,
+
     // Audit log hash chain (threat-model item). Any attacker with SQL
     // access (container escape, backup leak) could previously redact or
     // forge audit rows silently. `prev_hash` + `row_hash` make the table

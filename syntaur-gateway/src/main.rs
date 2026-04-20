@@ -7392,20 +7392,26 @@ async fn handle_scheduler_prefs_get(
         let conn = rusqlite::Connection::open(&db).ok()?;
         conn.query_row(
             "SELECT theme, default_view, week_starts_on, show_weekends, work_hours_start, work_hours_end, border, \
-                    backdrop_x, backdrop_y, backdrop_scale \
+                    backdrop_x, backdrop_y, backdrop_scale, backdrop_scale_x, backdrop_scale_y, \
+                    pane_opacity, calendar_opacity, custom_backdrop_file \
              FROM scheduler_prefs WHERE user_id = ?",
             rusqlite::params![uid],
             |r| Ok(serde_json::json!({
-                "theme":            r.get::<_, String>(0)?,
-                "default_view":     r.get::<_, String>(1)?,
-                "week_starts_on":   r.get::<_, i64>(2)?,
-                "show_weekends":    r.get::<_, i64>(3)? != 0,
-                "work_hours_start": r.get::<_, String>(4)?,
-                "work_hours_end":   r.get::<_, String>(5)?,
-                "border":           r.get::<_, String>(6)?,
-                "backdrop_x":       r.get::<_, f64>(7)?,
-                "backdrop_y":       r.get::<_, f64>(8)?,
-                "backdrop_scale":   r.get::<_, f64>(9)?,
+                "theme":                r.get::<_, String>(0)?,
+                "default_view":         r.get::<_, String>(1)?,
+                "week_starts_on":       r.get::<_, i64>(2)?,
+                "show_weekends":        r.get::<_, i64>(3)? != 0,
+                "work_hours_start":     r.get::<_, String>(4)?,
+                "work_hours_end":       r.get::<_, String>(5)?,
+                "border":               r.get::<_, String>(6)?,
+                "backdrop_x":           r.get::<_, f64>(7)?,
+                "backdrop_y":           r.get::<_, f64>(8)?,
+                "backdrop_scale":       r.get::<_, f64>(9)?,
+                "backdrop_scale_x":     r.get::<_, f64>(10)?,
+                "backdrop_scale_y":     r.get::<_, f64>(11)?,
+                "pane_opacity":         r.get::<_, f64>(12)?,
+                "calendar_opacity":     r.get::<_, f64>(13)?,
+                "custom_backdrop_file": r.get::<_, String>(14)?,
             })),
         ).ok()
     }).await.ok().flatten();
@@ -7414,6 +7420,8 @@ async fn handle_scheduler_prefs_get(
         "show_weekends": true, "work_hours_start": "08:00", "work_hours_end": "18:00",
         "border": "notebook",
         "backdrop_x": 0.5, "backdrop_y": 0.5, "backdrop_scale": 1.0,
+        "backdrop_scale_x": 1.0, "backdrop_scale_y": 0.0,
+        "pane_opacity": 0.35, "calendar_opacity": 0.55, "custom_backdrop_file": "",
     }))))
 }
 
@@ -7471,6 +7479,26 @@ async fn handle_scheduler_prefs_put(
         }
         if let Some(v) = body.get("backdrop_scale").and_then(|v| v.as_f64()) {
             sets.push("backdrop_scale = ?"); params.push(Box::new(v.max(0.25).min(4.0)));
+        }
+        if let Some(v) = body.get("backdrop_scale_x").and_then(|v| v.as_f64()) {
+            sets.push("backdrop_scale_x = ?"); params.push(Box::new(v.max(0.25).min(4.0)));
+        }
+        if let Some(v) = body.get("backdrop_scale_y").and_then(|v| v.as_f64()) {
+            sets.push("backdrop_scale_y = ?"); params.push(Box::new(v.max(0.0).min(4.0)));
+        }
+        if let Some(v) = body.get("pane_opacity").and_then(|v| v.as_f64()) {
+            sets.push("pane_opacity = ?"); params.push(Box::new(v.max(0.0).min(1.0)));
+        }
+        if let Some(v) = body.get("calendar_opacity").and_then(|v| v.as_f64()) {
+            sets.push("calendar_opacity = ?"); params.push(Box::new(v.max(0.0).min(1.0)));
+        }
+        // custom_backdrop_file: only accept empty-string to clear. Any other
+        // value is ignored here — filename is set only by the upload handler
+        // which generates an unguessable random name server-side.
+        if let Some(v) = body.get("custom_backdrop_file").and_then(|v| v.as_str()) {
+            if v.is_empty() {
+                sets.push("custom_backdrop_file = ?"); params.push(Box::new(String::new()));
+            }
         }
         if sets.is_empty() {
             return Ok(());
