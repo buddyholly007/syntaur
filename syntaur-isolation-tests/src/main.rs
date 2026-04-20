@@ -353,11 +353,13 @@ async fn probe_tax_expenses(c: &Client, a: &TestUser, b: &TestUser) -> Result<()
 /// Journal moments — per-user daily view isolation.
 async fn probe_journal_moments(c: &Client, a: &TestUser, b: &TestUser) -> Result<()> {
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-    let (s, _) = c.request(
+    let (s, body) = c.request(
         reqwest::Method::POST, "/api/journal/moments", &a.token,
         Some(json!({ "token": a.token, "date": today, "text": "isolation-A moment secret", "source": "harness" })),
     ).await?;
     if s >= 400 { eprintln!("  [skip] journal_moments: POST returned {s}"); return Ok(()); }
+
+    // List-visibility: user B's listing must not contain user A's text.
     let (_, lb) = c.request(
         reqwest::Method::GET,
         &format!("/api/journal/moments?token={}&date={}", urlencoding::encode(&b.token), today),
@@ -366,6 +368,22 @@ async fn probe_journal_moments(c: &Client, a: &TestUser, b: &TestUser) -> Result
     for r in lb["moments"].as_array().cloned().unwrap_or_default() {
         if r["text"].as_str().unwrap_or("").contains("isolation-A moment secret") {
             return Err(anyhow!("user B's journal moments listing leaked user A's text"));
+        }
+    }
+
+    // Direct write-access: user B tries DELETE on user A's moment by id.
+    // A 4xx is required — 2xx means the moment was deleted by a non-owner.
+    let moment_id = body["id"].as_i64().or_else(|| body["moment_id"].as_i64());
+    if let Some(id) = moment_id {
+        let (sd, _) = c.request(
+            reqwest::Method::DELETE,
+            &format!("/api/journal/moments/{}", id),
+            &b.token, None,
+        ).await?;
+        if sd < 400 {
+            return Err(anyhow!(
+                "user B DELETEd user A's journal moment id {id} (got {sd})"
+            ));
         }
     }
     Ok(())
@@ -451,6 +469,8 @@ async fn probe_calendar(c: &Client, a: &TestUser, b: &TestUser) -> Result<()> {
     ).await?;
     if s >= 400 { eprintln!("  [skip] calendar: POST returned {s}"); return Ok(()); }
     let ev_id = body["id"].as_i64().or_else(|| body["event_id"].as_i64());
+
+    // List-visibility: user B's calendar must not surface user A's event.
     let (_, lb) = c.request(
         reqwest::Method::GET,
         &format!("/api/calendar?token={}&start=2026-04-01&end=2026-04-30", urlencoding::encode(&b.token)),
@@ -464,6 +484,32 @@ async fn probe_calendar(c: &Client, a: &TestUser, b: &TestUser) -> Result<()> {
             if r["id"].as_i64() == Some(id) {
                 return Err(anyhow!("user B's calendar listing contained user A's event id {id}"));
             }
+        }
+    }
+
+    // Direct write-access: user B tries PUT + DELETE on user A's event by id.
+    // Both must 4xx.
+    if let Some(id) = ev_id {
+        let (sp, _) = c.request(
+            reqwest::Method::PUT,
+            &format!("/api/calendar/{}", id),
+            &b.token,
+            Some(json!({ "token": b.token, "title": "user-B overwrite attempt" })),
+        ).await?;
+        if sp < 400 {
+            return Err(anyhow!(
+                "user B PUT user A's calendar event id {id} (got {sp})"
+            ));
+        }
+        let (sd, _) = c.request(
+            reqwest::Method::DELETE,
+            &format!("/api/calendar/{}", id),
+            &b.token, None,
+        ).await?;
+        if sd < 400 {
+            return Err(anyhow!(
+                "user B DELETEd user A's calendar event id {id} (got {sd})"
+            ));
         }
     }
     Ok(())
