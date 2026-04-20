@@ -326,14 +326,13 @@ fn generate_nonce() -> String {
 fn inject_script_nonce(html: &str, nonce: &str) -> String {
     let attr = format!(" nonce=\"{nonce}\"");
     let mut out = String::with_capacity(html.len() + attr.len() * 10);
-    let mut i = 0;
     let bytes = html.as_bytes();
+    let mut i = 0;
     while i < bytes.len() {
         // Find the next `<script` case-sensitively (HTML is case-insensitive
-        // but every maud-emitted script tag uses lowercase).
+        // but every maud-emitted script tag uses lowercase). ASCII match is
+        // safe at arbitrary byte offsets since '<' and 's' are single-byte.
         if i + 7 <= bytes.len() && &bytes[i..i + 7] == b"<script" {
-            // Does it already have a `nonce=`? If so, don't double up.
-            // Scan forward to `>` and look for `nonce=` inside.
             let start = i;
             let mut end = i + 7;
             while end < bytes.len() && bytes[end] != b'>' {
@@ -346,17 +345,61 @@ fn inject_script_nonce(html: &str, nonce: &str) -> String {
                 i = end;
                 continue;
             }
-            // Splice the nonce in right after `<script`.
             out.push_str("<script");
             out.push_str(&attr);
             out.push_str(&html[i + 7..end]);
             i = end;
         } else {
-            out.push(bytes[i] as char);
-            i += 1;
+            // Find the next `<script` (or end-of-string) and copy that whole
+            // slice verbatim. Byte-by-byte `out.push(bytes[i] as char)` was
+            // wrong: it treats each byte as a Latin-1 code point, so
+            // multi-byte UTF-8 sequences (em-dash —, ›, smart quotes, every
+            // emoji) got re-encoded as 2 bytes per input byte. The page
+            // showed mojibake like "Syntaur â Dashboard" wherever the HTML
+            // had a non-ASCII character. Copy by string slices instead:
+            // html is `&str` so the indices are guaranteed UTF-8 boundaries.
+            let search = &html[i..];
+            let next = search.find("<script").map(|off| i + off).unwrap_or(bytes.len());
+            out.push_str(&html[i..next]);
+            i = next;
         }
     }
     out
+}
+
+#[cfg(test)]
+mod nonce_tests {
+    use super::inject_script_nonce;
+
+    #[test]
+    fn preserves_utf8_em_dash() {
+        let html = "<title>Syntaur — Dashboard</title><script>x=1</script>";
+        let out = inject_script_nonce(html, "ABC");
+        assert!(out.contains("Syntaur — Dashboard"), "em-dash mangled: {out}");
+        assert!(out.contains("<script nonce=\"ABC\">"));
+    }
+
+    #[test]
+    fn preserves_emoji_and_smart_quotes() {
+        let html = "<p>“smart” quotes and 🎵 music</p><script>y=2</script>";
+        let out = inject_script_nonce(html, "XYZ");
+        assert!(out.contains("“smart” quotes and 🎵 music"), "smart quotes / emoji mangled: {out}");
+    }
+
+    #[test]
+    fn existing_nonce_untouched() {
+        let html = "<script nonce=\"ALREADY\">z=3</script>";
+        let out = inject_script_nonce(html, "NEW");
+        assert!(out.contains("nonce=\"ALREADY\""));
+        assert!(!out.contains("nonce=\"NEW\""));
+    }
+
+    #[test]
+    fn nonce_injected_once_per_script() {
+        let html = "<script>a</script><p>mid</p><script>b</script>";
+        let out = inject_script_nonce(html, "N");
+        assert_eq!(out.matches("nonce=\"N\"").count(), 2);
+    }
 }
 
 /// Return true if `host` is a loopback, RFC1918, link-local, or ULA IPv6
