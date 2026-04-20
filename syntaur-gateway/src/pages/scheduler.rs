@@ -237,9 +237,26 @@ fn theme_picker_modal() -> Markup {
                 }
                 p class="sch-border-hint" { "Dresses the calendar in a notebook-style binding. Matches the theme underneath." }
                 div class="sch-theme-grid" id="sch-border-grid" {}
-                div style="padding: 10px 14px 14px; display: flex; gap: 8px; align-items: center; border-top: 1px solid var(--sch-border); margin-top: 6px;" {
-                    span class="sch-border-hint" style="padding: 0; flex: 1;" { "Painted backdrop not lined up? Adjust its position and zoom, then save." }
-                    button class="sch-btn-primary" onclick="schEnterBackdropEdit()" { "Adjust backdrop" }
+
+                // Panel transparency — single slider scales rails/cells/cards together.
+                div style="padding: 10px 14px 4px; border-top: 1px solid var(--sch-border); margin-top: 6px;" {
+                    label style="display: flex; align-items: center; gap: 10px; font-size: 13px;" {
+                        span { "Panel transparency" }
+                        input id="sch-pane-opacity-slider"
+                              type="range" min="0" max="100" step="1" value="35"
+                              style="flex: 1;"
+                              oninput="schPaneOpacityInput(this)"
+                              onchange="schPaneOpacityCommit(this)";
+                        span id="sch-pane-opacity-readout" style="min-width: 40px; text-align: right; color: var(--sch-ink-faint);" { "35%" }
+                    }
+                    p class="sch-border-hint" style="margin: 4px 0 0 0; padding: 0;" { "Lower = more of the painted backdrop shows through your lists and grid." }
+                }
+
+                // Adjust + Upload — two side-by-side actions.
+                div style="padding: 10px 14px 14px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;" {
+                    button class="sch-btn-primary" onclick="schEnterBackdropEdit()" { "Adjust position" }
+                    button class="sch-btn-ghost" onclick="schBackdropUpload()" { "Upload your own…" }
+                    span class="sch-border-hint" style="padding: 0; flex: 1; text-align: right;" { "PNG · JPG · WebP · 5 MB max" }
                 }
             }
         }
@@ -1130,10 +1147,15 @@ body:not([data-sch-border]) .sch-main {
   --sch-bp-y: 50%;
   --sch-bp-w: 100%;
   --sch-bp-h: auto;
+  /* Pane transparency knob — 0 = fully see-through, 1 = fully opaque.
+   * JS writes this from scheduler prefs. Rails use it directly; cells
+   * and cards derive a slightly less transparent value so text stays
+   * legible even at low alpha. */
+  --sch-pane-alpha: 0.35;
 }
-[data-sch-border="garden-backdrop"] .sch-shell {
+[data-sch-border="garden-backdrop"] .sch-shell,
+[data-sch-border="custom"]          .sch-shell {
   background-color: #f4ead2;
-  background-image: url('/scheduler-frame/garden-backdrop');
   background-repeat: no-repeat;
   background-position: var(--sch-bp-x) var(--sch-bp-y);
   background-size: var(--sch-bp-w) var(--sch-bp-h);
@@ -1141,24 +1163,34 @@ body:not([data-sch-border]) .sch-main {
   border-radius: 4px;
   box-shadow: 0 2px 6px rgba(40,30,15,0.12), 0 14px 36px rgba(40,30,15,0.18);
 }
+[data-sch-border="garden-backdrop"] .sch-shell { background-image: url('/scheduler-frame/garden-backdrop'); }
+/* custom: JS sets --sch-custom-url after reading prefs.custom_backdrop_file */
+[data-sch-border="custom"] .sch-shell { background-image: var(--sch-custom-url, none); }
+
 /* Suppress the default spiral-notebook coil. */
-[data-sch-border="garden-backdrop"] .sch-shell::before { content: none !important; }
-/* Layout zones go see-through so the watercolor corners show behind the
- * panels. Event chips / cards / today-marker still get solid backgrounds
- * for legibility via their own rules. */
+[data-sch-border="garden-backdrop"] .sch-shell::before,
+[data-sch-border="custom"]          .sch-shell::before { content: none !important; }
+
+/* Layout zones scale from --sch-pane-alpha so a single slider controls
+ * how transparent the panels feel. Cells get +0.20 on top of rails; cards
+ * get +0.40 so chip text stays readable even when rails are nearly clear. */
 [data-sch-border="garden-backdrop"] .sch-left,
 [data-sch-border="garden-backdrop"] .sch-main,
-[data-sch-border="garden-backdrop"] .sch-right {
-  background: rgba(248, 240, 215, 0.35) !important;
+[data-sch-border="garden-backdrop"] .sch-right,
+[data-sch-border="custom"]          .sch-left,
+[data-sch-border="custom"]          .sch-main,
+[data-sch-border="custom"]          .sch-right {
+  background: rgba(248, 240, 215, var(--sch-pane-alpha, 0.35)) !important;
 }
-/* Month-grid cells and sidebar cards — lighter tint so watercolor peeks
- * through the grid, but text stays readable. */
-[data-sch-border="garden-backdrop"] .sch-cell {
-  background: rgba(253, 248, 232, 0.55) !important;
+[data-sch-border="garden-backdrop"] .sch-cell,
+[data-sch-border="custom"]          .sch-cell {
+  background: rgba(253, 248, 232, calc(var(--sch-pane-alpha, 0.35) + 0.20)) !important;
 }
 [data-sch-border="garden-backdrop"] .sch-card,
-[data-sch-border="garden-backdrop"] .sch-tp-card {
-  background: rgba(253, 248, 232, 0.75) !important;
+[data-sch-border="garden-backdrop"] .sch-tp-card,
+[data-sch-border="custom"]          .sch-card,
+[data-sch-border="custom"]          .sch-tp-card {
+  background: rgba(253, 248, 232, calc(var(--sch-pane-alpha, 0.35) + 0.40)) !important;
 }
 
 /* Adjust-backdrop edit mode — dim content, highlight the drag surface. */
@@ -1393,6 +1425,9 @@ const PAGE_JS: &str = r##"
     // Clean watercolor-corner backdrop — cream paper with botanical
     // accents at each corner, middle is open for content. The default.
     { key: 'garden-backdrop', name: 'Garden Backdrop', painted: true },
+    // Your own uploaded image. If none uploaded yet, the Upload button
+    // at the bottom of the picker gets you started.
+    { key: 'custom',          name: 'Your own',        painted: true, custom: true },
     { key: 'notebook',        name: 'Spiral notebook' },
     { key: 'disc',            name: 'Disc-bound' },
     { key: 'moleskine',       name: 'Moleskine' },
@@ -1428,6 +1463,26 @@ const PAGE_JS: &str = r##"
     S.prefs.backdrop_y = clamped_y;
     S.prefs.backdrop_scale_x = clamped_sx;
     S.prefs.backdrop_scale_y = clamped_sy;
+  }
+
+  // Pane transparency — single knob the rails/cells/cards all scale from.
+  function applyPaneOpacity(alpha) {
+    const shell = document.querySelector('.sch-shell');
+    const clamped = Math.max(0, Math.min(1, alpha ?? 0.35));
+    if (shell) shell.style.setProperty('--sch-pane-alpha', clamped.toFixed(3));
+    S.prefs.pane_opacity = clamped;
+  }
+
+  // Custom backdrop URL — when the user has uploaded, the background-image
+  // on `.sch-shell` needs a concrete `url('/scheduler-frame/custom-XXX.ext')`.
+  function applyCustomBackdropUrl(filename) {
+    const shell = document.querySelector('.sch-shell');
+    if (!shell) return;
+    if (filename && filename.startsWith('custom-')) {
+      shell.style.setProperty('--sch-custom-url', `url('/scheduler-frame/${filename}')`);
+    } else {
+      shell.style.removeProperty('--sch-custom-url');
+    }
   }
 
   // ── Adjust-backdrop mode ──────────────────────────────────────────
@@ -1714,6 +1769,8 @@ const PAGE_JS: &str = r##"
         prefs && prefs.backdrop_scale_x,
         prefs && prefs.backdrop_scale_y
       );
+      applyPaneOpacity(prefs && prefs.pane_opacity);
+      applyCustomBackdropUrl(prefs && prefs.custom_backdrop_file);
     } catch(e) { console.warn('[sch] prefs load:', e); applyBorder('garden-backdrop'); }
     if (window.innerWidth <= 900) S.view = 'day';
 
@@ -2530,18 +2587,76 @@ const PAGE_JS: &str = r##"
   // ── Border picker (Artful Agenda parity) ──────────────────────────
   window.schOpenBorders = function() {
     const grid = document.getElementById('sch-border-grid');
-    const current = S.prefs.border || 'garden-notebook';
-    grid.innerHTML = BORDERS.map(b => `
+    const current = S.prefs.border || 'garden-backdrop';
+    const customFile = S.prefs.custom_backdrop_file || '';
+    grid.innerHTML = BORDERS.map(b => {
+      let thumbHtml;
+      if (b.custom) {
+        thumbHtml = customFile
+          ? `<img class="sch-border-thumb" src="/scheduler-frame/${customFile}?t=${Date.now()}" alt="" loading="lazy">`
+          : `<div class="sch-preview-paper" style="display:flex;align-items:center;justify-content:center;color:var(--sch-ink-faint);font-size:12px;text-align:center;padding:6px">Upload your own below</div>`;
+      } else if (b.painted) {
+        thumbHtml = `<img class="sch-border-thumb" src="/scheduler-frame/${b.key}" alt="" loading="lazy">`;
+      } else {
+        thumbHtml = `<div class="sch-preview-paper"></div>`;
+      }
+      return `
       <button class="sch-border-tile${b.key === current ? ' active' : ''}" onclick="schPickBorder('${b.key}')" data-border="${b.key}">
-        <div class="sch-border-preview" data-preview="${b.key}">
-          ${b.painted
-            ? `<img class="sch-border-thumb" src="/scheduler-frame/${b.key}" alt="" loading="lazy">`
-            : `<div class="sch-preview-paper"></div>`}
-        </div>
+        <div class="sch-border-preview" data-preview="${b.key}">${thumbHtml}</div>
         <div class="sch-border-label">${escHtml(b.name)}</div>
-      </button>
-    `).join('');
+      </button>`;
+    }).join('');
+
+    const slider = document.getElementById('sch-pane-opacity-slider');
+    if (slider) slider.value = Math.round((S.prefs.pane_opacity ?? 0.35) * 100);
+    const readout = document.getElementById('sch-pane-opacity-readout');
+    if (readout) readout.textContent = `${slider ? slider.value : 35}%`;
+
     document.getElementById('sch-border-modal').hidden = false;
+  };
+  window.schPaneOpacityInput = function(el) {
+    const a = (+el.value) / 100;
+    applyPaneOpacity(a);
+    const readout = document.getElementById('sch-pane-opacity-readout');
+    if (readout) readout.textContent = `${el.value}%`;
+  };
+  window.schPaneOpacityCommit = async function(el) {
+    const a = (+el.value) / 100;
+    try {
+      await api('/api/scheduler/prefs', { method: 'POST', body: JSON.stringify({ pane_opacity: a }) });
+    } catch (e) { console.warn('[sch] save pane_opacity', e); }
+  };
+  window.schBackdropUpload = function() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/png,image/jpeg,image/webp';
+    input.onchange = async () => {
+      const file = input.files && input.files[0];
+      if (!file) return;
+      if (file.size > 5 * 1024 * 1024) {
+        (window.schAlert || alert)('Image too large (max 5MB).');
+        return;
+      }
+      try {
+        const resp = await fetch('/api/scheduler/backdrop', {
+          method: 'POST',
+          headers: { 'Content-Type': file.type || 'image/webp', 'Authorization': 'Bearer ' + token },
+          body: file,
+        });
+        const data = await resp.json();
+        if (!data.ok) {
+          (window.schAlert || alert)(data.error || 'Upload failed.');
+          return;
+        }
+        S.prefs.custom_backdrop_file = data.file;
+        applyCustomBackdropUrl(data.file);
+        applyBorder('custom');
+        schCloseBorders();
+      } catch (e) {
+        (window.schAlert || alert)('Upload failed: ' + e.message);
+      }
+    };
+    input.click();
   };
   window.schCloseBorders = function() { document.getElementById('sch-border-modal').hidden = true; };
   window.schPickBorder = async function(key) {

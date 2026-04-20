@@ -1196,23 +1196,140 @@ pub async fn handle_agent_avatar(
 pub async fn handle_scheduler_frame(
     axum::extract::Path(key): axum::extract::Path<String>,
 ) -> Result<(axum::http::HeaderMap, Vec<u8>), StatusCode> {
-    // Sanitize key: lowercase + hyphen only, short. Prevents path traversal.
-    if key.is_empty() || key.len() > 40 || !key.chars().all(|c| c.is_ascii_lowercase() || c == '-') {
+    // Sanitize key: lowercase + digits + hyphen + dot (for user-uploaded
+    // filenames like "custom-ab12cd34.webp"). Prevents path traversal.
+    if key.is_empty() || key.len() > 60 ||
+       !key.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.') {
         return Err(StatusCode::BAD_REQUEST);
     }
     let mut h = axum::http::HeaderMap::new();
     h.insert("content-type", "image/webp".parse().unwrap());
     h.insert("cache-control", "public, max-age=604800, immutable".parse().unwrap());
-    let bytes: &[u8] = match key.as_str() {
-        "garden-notebook" => include_bytes!("../static/scheduler-frames/garden-notebook.webp"),
-        "garden-backdrop" => include_bytes!("../static/scheduler-frames/garden-backdrop.webp"),
-        "heirloom"        => include_bytes!("../static/scheduler-frames/heirloom.webp"),
-        "woodland"        => include_bytes!("../static/scheduler-frames/woodland.webp"),
-        "cosmos"          => include_bytes!("../static/scheduler-frames/cosmos.webp"),
-        "field-journal"   => include_bytes!("../static/scheduler-frames/field-journal.webp"),
-        _ => return Err(StatusCode::NOT_FOUND),
+
+    // Built-in embedded frames first.
+    let embedded: Option<&[u8]> = match key.as_str() {
+        "garden-notebook" => Some(include_bytes!("../static/scheduler-frames/garden-notebook.webp")),
+        "garden-backdrop" => Some(include_bytes!("../static/scheduler-frames/garden-backdrop.webp")),
+        "heirloom"        => Some(include_bytes!("../static/scheduler-frames/heirloom.webp")),
+        "woodland"        => Some(include_bytes!("../static/scheduler-frames/woodland.webp")),
+        "cosmos"          => Some(include_bytes!("../static/scheduler-frames/cosmos.webp")),
+        "field-journal"   => Some(include_bytes!("../static/scheduler-frames/field-journal.webp")),
+        _ => None,
     };
-    Ok((h, bytes.to_vec()))
+    if let Some(bytes) = embedded {
+        return Ok((h, bytes.to_vec()));
+    }
+
+    // User-uploaded backdrops live at ~/.syntaur/backdrops/{filename}.
+    // Public read by design — same reasoning as agent avatars: ambient
+    // artwork, not sensitive data, and the random filename serves as
+    // the authorization (unguessable). Only accept `custom-` prefix.
+    if key.starts_with("custom-") && !key.contains("/") && !key.contains("..") {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
+        let path = format!("{}/.syntaur/backdrops/{}", home, key);
+        if let Ok(data) = std::fs::read(&path) {
+            let ct = if key.ends_with(".png") { "image/png" }
+                else if key.ends_with(".jpg") || key.ends_with(".jpeg") { "image/jpeg" }
+                else { "image/webp" };
+            h.insert("content-type", ct.parse().unwrap());
+            // User uploads get shorter cache so changes land quickly; still
+            // cacheable but busted by the unguessable filename on replace.
+            h.insert("cache-control", "public, max-age=60".parse().unwrap());
+            return Ok((h, data));
+        }
+    }
+    Err(StatusCode::NOT_FOUND)
+}
+
+/// POST /api/scheduler/backdrop — upload a custom backdrop image. Saves
+/// under ~/.syntaur/backdrops/custom-<random>.<ext>, stores the filename
+/// in scheduler_prefs.custom_backdrop_file, and cleans up the previous
+/// upload. Auth-gated (per-user). 5 MB max.
+pub async fn handle_scheduler_backdrop_upload(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<axum::Json<serde_json::Value>, (StatusCode, String)> {
+    let token = headers.get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await
+        .map_err(|s| (s, "Unauthorized".to_string()))?;
+    let user_id = principal.user_id();
+
+    if body.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "No image data".to_string()));
+    }
+    if body.len() > 5 * 1024 * 1024 {
+        return Err((StatusCode::BAD_REQUEST, "Image too large (max 5MB)".to_string()));
+    }
+
+    let content_type = headers.get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("image/webp");
+    let ext = if content_type.contains("png") { "png" }
+        else if content_type.contains("jpeg") || content_type.contains("jpg") { "jpg" }
+        else { "webp" };
+
+    // Unguessable suffix serves as the authorization: GET is public but
+    // the filename can't be enumerated. 96 bits of entropy is plenty.
+    use rand::{rngs::OsRng, RngCore};
+    let mut raw = [0u8; 12];
+    OsRng.fill_bytes(&mut raw);
+    let suffix: String = raw.iter().map(|b| format!("{:02x}", b)).collect();
+    let filename = format!("custom-{}.{}", suffix, ext);
+
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
+    let dir = format!("{}/.syntaur/backdrops", home);
+    let _ = std::fs::create_dir_all(&dir);
+    let path = format!("{}/{}", dir, filename);
+
+    // Look up the previous upload for this user so we can clean it up.
+    let db_path = state.db_path.clone();
+    let old_filename = tokio::task::spawn_blocking(move || -> Option<String> {
+        let conn = rusqlite::Connection::open(&db_path).ok()?;
+        conn.query_row(
+            "SELECT custom_backdrop_file FROM scheduler_prefs WHERE user_id = ?",
+            rusqlite::params![user_id],
+            |r| r.get::<_, String>(0),
+        ).ok()
+    }).await.ok().flatten();
+
+    std::fs::write(&path, &body).map_err(|e|
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Could not save: {}", e))
+    )?;
+
+    // Record new filename + flip the border to `custom` so the UI picks
+    // it up immediately on next load without a separate prefs update call.
+    let db_path2 = state.db_path.clone();
+    let fn_for_db = filename.clone();
+    let _ = tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
+        let conn = rusqlite::Connection::open(&db_path2)?;
+        let now = chrono::Utc::now().timestamp();
+        conn.execute(
+            "INSERT OR IGNORE INTO scheduler_prefs (user_id, updated_at) VALUES (?, ?)",
+            rusqlite::params![user_id, now],
+        )?;
+        conn.execute(
+            "UPDATE scheduler_prefs SET custom_backdrop_file = ?, border = 'custom', updated_at = ? WHERE user_id = ?",
+            rusqlite::params![fn_for_db, now, user_id],
+        )?;
+        Ok(())
+    }).await;
+
+    // Best-effort cleanup of previous upload. An orphaned file is
+    // acceptable worst-case — it only gets re-overwritten on next upload.
+    if let Some(old) = old_filename {
+        if !old.is_empty() && old != filename && old.starts_with("custom-") {
+            let _ = std::fs::remove_file(format!("{}/{}", dir, old));
+        }
+    }
+
+    Ok(axum::Json(serde_json::json!({
+        "ok": true,
+        "file": filename,
+    })))
 }
 
 /// POST /api/agent-avatar/{agent_id} — upload custom agent avatar (admin only)
