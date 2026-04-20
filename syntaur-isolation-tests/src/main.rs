@@ -409,6 +409,29 @@ async fn probe_knowledge_docs(c: &Client, a: &TestUser, b: &TestUser) -> Result<
             return Err(anyhow!("user B's knowledge docs contain user A's doc id {id}"));
         }
     }
+
+    // Direct write-access: user B tries to delete user A's doc via the
+    // body-param delete endpoint. Must 4xx (or return a success envelope
+    // reporting 0 rows deleted). The handler must refuse to look up
+    // a doc owned by another user_id.
+    if let Some(a_doc) = a_ids.first() {
+        let (sd, rb) = c.request(
+            reqwest::Method::POST,
+            "/api/knowledge/docs/delete",
+            &b.token,
+            Some(json!({ "token": b.token, "id": a_doc })),
+        ).await?;
+        if sd < 400 {
+            // Some handlers return 200 with `deleted: 0` for not-found. That's
+            // acceptable — the leaked signal is whether rows were deleted.
+            let deleted = rb["deleted"].as_i64().unwrap_or(0);
+            if deleted > 0 {
+                return Err(anyhow!(
+                    "user B deleted user A's knowledge doc id {a_doc} via /docs/delete"
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -430,6 +453,21 @@ async fn probe_music_folders(c: &Client, a: &TestUser, b: &TestUser) -> Result<(
     for id in &a_ids {
         if b_ids.contains(id) {
             return Err(anyhow!("user B's music folders contain user A's folder id {id}"));
+        }
+    }
+
+    // Direct write-access: user B tries DELETE on one of user A's folders.
+    // Must 4xx — remove_folder handler must check user_id on the row.
+    if let Some(a_fid) = a_ids.first() {
+        let (sd, _) = c.request(
+            reqwest::Method::DELETE,
+            &format!("/api/music/local/folders/{}", a_fid),
+            &b.token, None,
+        ).await?;
+        if sd < 400 {
+            return Err(anyhow!(
+                "user B DELETEd user A's music folder id {a_fid} (got {sd})"
+            ));
         }
     }
     Ok(())
@@ -517,11 +555,13 @@ async fn probe_calendar(c: &Client, a: &TestUser, b: &TestUser) -> Result<()> {
 
 /// Scheduler lists (shopping, to-do).
 async fn probe_scheduler_lists(c: &Client, a: &TestUser, b: &TestUser) -> Result<()> {
-    let (s, _) = c.request(
+    let (s, body) = c.request(
         reqwest::Method::POST, "/api/scheduler/lists", &a.token,
         Some(json!({ "token": a.token, "name": "isolation-A-grocery", "kind": "shopping" })),
     ).await?;
     if s >= 400 { eprintln!("  [skip] scheduler_lists: POST returned {s}"); return Ok(()); }
+
+    // List-visibility: user B must not see user A's list.
     let (_, lb) = c.request(
         reqwest::Method::GET,
         &format!("/api/scheduler/lists?token={}", urlencoding::encode(&b.token)),
@@ -530,6 +570,24 @@ async fn probe_scheduler_lists(c: &Client, a: &TestUser, b: &TestUser) -> Result
     for r in lb["lists"].as_array().cloned().unwrap_or_default() {
         if r["name"].as_str().unwrap_or("") == "isolation-A-grocery" {
             return Err(anyhow!("user B's scheduler lists include user A's list"));
+        }
+    }
+
+    // Direct write-access: user B tries to POST a new item into user A's
+    // list by id. Must 4xx — the handler must reject writes to lists
+    // owned by another user_id.
+    let list_id = body["id"].as_i64().or_else(|| body["list_id"].as_i64());
+    if let Some(id) = list_id {
+        let (sp, _) = c.request(
+            reqwest::Method::POST,
+            &format!("/api/scheduler/lists/{}/items", id),
+            &b.token,
+            Some(json!({ "token": b.token, "text": "user-B injected item" })),
+        ).await?;
+        if sp < 400 {
+            return Err(anyhow!(
+                "user B POSTed an item into user A's scheduler list id {id} (got {sp})"
+            ));
         }
     }
     Ok(())
