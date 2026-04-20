@@ -1,6 +1,6 @@
 [package]
 name = "syntaur-voice-pipeline"
-version = "0.1.0"
+version = "0.4.0"
 edition = "2021"
 description = "Pure-Rust voice pipeline for Peter Parker assistant. Replaces HA's assist_pipeline."
 

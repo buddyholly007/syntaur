@@ -32,19 +32,60 @@ env:
 
 jobs:
   build:
-    name: Build ${{ matrix.target }}
+    name: Build ${{ matrix.target }} / ${{ matrix.package }}
     strategy:
       fail-fast: false
       matrix:
         include:
+          # Linux x86_64 — gateway + viewer + isolation-tests
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-            artifact_name: syntaur-gateway-linux-x86_64
+            package: syntaur-gateway
             binary: syntaur-gateway
+            artifact_name: syntaur-gateway-linux-x86_64
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            package: syntaur-viewer
+            binary: syntaur-viewer
+            artifact_name: syntaur-viewer-linux-x86_64
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            package: syntaur-isolation-tests
+            binary: syntaur-isolation-tests
+            artifact_name: syntaur-isolation-tests-linux-x86_64
+          # macOS ARM (Apple Silicon)
           - os: macos-14
             target: aarch64-apple-darwin
-            artifact_name: syntaur-gateway-macos-arm64
+            package: syntaur-gateway
             binary: syntaur-gateway
+            artifact_name: syntaur-gateway-macos-arm64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            package: syntaur-viewer
+            binary: syntaur-viewer
+            artifact_name: syntaur-viewer-macos-arm64
+          # macOS Intel — macos-13 runners still have x86_64; macos-14+ are ARM-only
+          - os: macos-13
+            target: x86_64-apple-darwin
+            package: syntaur-gateway
+            binary: syntaur-gateway
+            artifact_name: syntaur-gateway-macos-x86_64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            package: syntaur-viewer
+            binary: syntaur-viewer
+            artifact_name: syntaur-viewer-macos-x86_64
+          # Windows x86_64 (MSVC ABI)
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            package: syntaur-gateway
+            binary: syntaur-gateway.exe
+            artifact_name: syntaur-gateway-windows-x86_64.exe
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            package: syntaur-viewer
+            binary: syntaur-viewer.exe
+            artifact_name: syntaur-viewer-windows-x86_64.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -57,15 +98,22 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          key: release-${{ matrix.target }}
+          key: release-${{ matrix.target }}-${{ matrix.package }}
+
+      - name: Install Linux GUI deps (syntaur-viewer only)
+        if: runner.os == 'Linux' && matrix.package == 'syntaur-viewer'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev
 
       - name: Build release
-        run: cargo build --release --target ${{ matrix.target }} -p syntaur-gateway
+        run: cargo build --release --target ${{ matrix.target }} -p ${{ matrix.package }}
 
-      - name: Rename binary
+      - name: Stage artifact
+        shell: bash
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/${{ matrix.binary }} dist/${{ matrix.artifact_name }}
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/${{ matrix.artifact_name }}"
 
       - name: Upload built binary
         uses: actions/upload-artifact@v4

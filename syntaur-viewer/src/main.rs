@@ -110,11 +110,229 @@ fn main() {
         .or_else(|| read_saved_url())
         .unwrap_or_else(|| DEFAULT_URL.to_string());
 
-    if let Err(e) = run_viewer(&url) {
+    // Tier 2 remote-access onboarding. A laptop user on the road hasn't
+    // joined the household tailnet yet — the target URL resolves (via
+    // MagicDNS or a public domain) but TCP connect fails because the
+    // device isn't a tailnet member. Instead of dropping her at a blank
+    // "server unreachable" screen, load a local onboarding HTML that
+    // explains Tailscale + polls reachability in the background, so the
+    // dashboard loads automatically as soon as the connection comes up.
+    //
+    // LAN-local URLs skip the probe — the operator intentionally chose
+    // local-only mode and Tailscale isn't the right guidance there.
+    let load_url = if is_local_gateway(&url)
+        || probe_reachable(&url, std::time::Duration::from_secs(3))
+    {
+        url.clone()
+    } else {
+        match write_onboarding_html(&url) {
+            Ok(path) => format!("file://{}", path.display()),
+            Err(e) => {
+                eprintln!("[syntaur-viewer] onboarding page write failed: {e}; falling back to direct load");
+                url.clone()
+            }
+        }
+    };
+
+    if let Err(e) = run_viewer(&load_url) {
         eprintln!("[syntaur-viewer] Failed: {}", e);
         std::process::exit(1);
     }
 }
+
+/// Loopback / RFC1918 / link-local hosts — operator picked LAN mode
+/// deliberately, no Tailscale onboarding relevant.
+fn is_local_gateway(url: &str) -> bool {
+    let stripped = url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    let host = stripped.split(':').next().unwrap_or("").split('/').next().unwrap_or("");
+    if host == "localhost" || host == "127.0.0.1" || host == "0.0.0.0" || host == "::1" {
+        return true;
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if ip.is_loopback() { return true; }
+        if let std::net::IpAddr::V4(v4) = ip {
+            let o = v4.octets();
+            return o[0] == 10
+                || (o[0] == 172 && (16..=31).contains(&o[1]))
+                || (o[0] == 192 && o[1] == 168)
+                || (o[0] == 169 && o[1] == 254);
+        }
+    }
+    false
+}
+
+/// TCP-connect reachability probe. Short timeout so we don't stall first
+/// launch on flaky networks; failure is treated as "show onboarding."
+fn probe_reachable(url: &str, timeout: std::time::Duration) -> bool {
+    let scheme_https = url.starts_with("https://");
+    let stripped = url.trim_start_matches("https://").trim_start_matches("http://");
+    let host_port = stripped.split('/').next().unwrap_or("");
+    let (host, port) = match host_port.rfind(':') {
+        Some(idx) if !host_port[..idx].contains(']') || idx > host_port.rfind(']').unwrap_or(0) => {
+            let (h, p) = host_port.split_at(idx);
+            let port = p[1..].parse::<u16>().ok();
+            match port {
+                Some(p) => (h.trim_matches(|c| c == '[' || c == ']').to_string(), p),
+                None => (host_port.to_string(), if scheme_https { 443 } else { 80 }),
+            }
+        }
+        _ => (host_port.to_string(), if scheme_https { 443 } else { 80 }),
+    };
+    if host.is_empty() { return false; }
+    use std::net::ToSocketAddrs;
+    let Ok(mut addrs) = (host.as_str(), port).to_socket_addrs() else {
+        return false;
+    };
+    let Some(addr) = addrs.next() else { return false; };
+    std::net::TcpStream::connect_timeout(&addr, timeout).is_ok()
+}
+
+/// Render the onboarding HTML to a temp file parameterized with the
+/// target URL. Self-contained — no remote assets — so it renders even if
+/// the laptop has no internet yet. Returns an absolute path; caller
+/// prepends `file://`.
+fn write_onboarding_html(target_url: &str) -> Result<std::path::PathBuf, String> {
+    let dir = std::env::temp_dir().join("syntaur-viewer");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let path = dir.join("connect.html");
+    let ts_download = if cfg!(target_os = "macos") {
+        "https://tailscale.com/download/mac"
+    } else if cfg!(target_os = "windows") {
+        "https://tailscale.com/download/windows"
+    } else {
+        "https://tailscale.com/download/linux"
+    };
+    let display_host = target_url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or(target_url);
+    let html = ONBOARDING_TEMPLATE
+        .replace("{{TARGET_URL}}", target_url)
+        .replace("{{DISPLAY_HOST}}", display_host)
+        .replace("{{TS_DOWNLOAD_URL}}", ts_download);
+    std::fs::write(&path, html.as_bytes())
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(path)
+}
+
+const ONBOARDING_TEMPLATE: &str = r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect to Home — Syntaur</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh;
+    display: flex; align-items: center; justify-content: center;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+    background: radial-gradient(ellipse at top, #1f2937, #0b1120 70%);
+    color: #e5e7eb;
+  }
+  .card {
+    max-width: 560px; width: 92%;
+    background: rgba(17,24,39,0.9);
+    border: 1px solid rgba(148,163,184,0.15);
+    border-radius: 18px;
+    padding: 40px 44px;
+    box-shadow: 0 24px 60px rgba(0,0,0,0.35);
+  }
+  h1 { margin: 0 0 8px; font-size: 26px; font-weight: 600; letter-spacing: -0.01em; }
+  .sub { margin: 0 0 28px; font-size: 14px; color: #94a3b8; line-height: 1.55; }
+  .host {
+    display: inline-block; font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 13px; padding: 4px 10px; border-radius: 6px;
+    background: rgba(56,189,248,0.08); color: #7dd3fc;
+    border: 1px solid rgba(56,189,248,0.18);
+  }
+  ol.steps { list-style: none; counter-reset: s; padding: 0; margin: 8px 0 28px; }
+  ol.steps li {
+    counter-increment: s; position: relative;
+    padding: 12px 0 12px 40px; font-size: 14px; color: #cbd5e1; line-height: 1.5;
+  }
+  ol.steps li::before {
+    content: counter(s); position: absolute; left: 0; top: 10px;
+    width: 26px; height: 26px; border-radius: 50%;
+    background: rgba(148,163,184,0.1); color: #94a3b8;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 600;
+  }
+  .btn {
+    display: inline-block; padding: 11px 20px; border-radius: 8px;
+    background: #0284c7; color: white; text-decoration: none;
+    font-weight: 500; font-size: 14px;
+    transition: background 120ms;
+  }
+  .btn:hover { background: #0ea5e9; }
+  .btn.ghost {
+    background: transparent; color: #94a3b8;
+    border: 1px solid rgba(148,163,184,0.25);
+  }
+  .btn.ghost:hover { background: rgba(148,163,184,0.06); color: #e5e7eb; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
+  .probe-state {
+    margin-top: 22px; padding: 10px 14px; border-radius: 8px;
+    font-size: 13px; color: #94a3b8;
+    background: rgba(148,163,184,0.06); border: 1px solid rgba(148,163,184,0.12);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .dot {
+    width: 8px; height: 8px; border-radius: 50%; background: #f59e0b;
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100%{opacity:0.45} 50%{opacity:1} }
+  .probe-state.ok .dot { background: #34d399; animation: none; }
+</style>
+</head>
+<body>
+  <main class="card">
+    <h1>Connect to Home</h1>
+    <p class="sub">Your Syntaur lives on your home network. To reach it from this laptop, this device needs to join your household's Tailscale — a private encrypted connection between your own devices. Free, one-time setup, takes about a minute.</p>
+
+    <ol class="steps">
+      <li>Install Tailscale from the official download page. When it asks you to sign in, use whichever account matches the invite your household admin sent you.</li>
+      <li>Once Tailscale is running in your menu bar / system tray, this window finishes loading automatically. You don't need to quit or restart.</li>
+    </ol>
+
+    <div class="row">
+      <a class="btn" href="{{TS_DOWNLOAD_URL}}" target="_blank" rel="noopener">Install Tailscale →</a>
+      <a class="btn ghost" href="{{TARGET_URL}}">Check again now</a>
+    </div>
+
+    <div class="probe-state" id="probe">
+      <span class="dot"></span>
+      <span id="probeMsg">Watching for a connection to <span class="host">{{DISPLAY_HOST}}</span>…</span>
+    </div>
+  </main>
+
+  <script>
+    const TARGET = "{{TARGET_URL}}";
+    const msg = document.getElementById('probeMsg');
+    const state = document.getElementById('probe');
+
+    async function probe() {
+      try {
+        await fetch(TARGET + "/health", { mode: "no-cors", cache: "no-store" });
+        state.classList.add('ok');
+        msg.innerHTML = "Connected. Loading your dashboard…";
+        setTimeout(() => { window.location.href = TARGET; }, 400);
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    probe();
+    setInterval(probe, 4000);
+  </script>
+</body>
+</html>
+"##;
 
 /// Read saved server URL from ~/.syntaur/server.json (connect mode)
 fn read_saved_url() -> Option<String> {

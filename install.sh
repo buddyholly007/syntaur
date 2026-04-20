@@ -16,7 +16,7 @@
 set -e
 
 BRAND="Syntaur"
-VERSION="0.1.0"
+VERSION="0.4.0"
 BINARY="syntaur"
 INSTALL_DIR="$HOME/.local/bin"
 MODE=""
@@ -515,6 +515,71 @@ LAUNCHER
 ICON
 
   echo "  Application shortcut installed (find 'Syntaur' in ~/Applications or Spotlight)"
+
+  # Desktop .webloc — double-click opens in default browser. Only
+  # created when SYNTAUR_URL is set (remote gateway case); for
+  # local-only installs the Applications bundle is enough.
+  if [ -n "${SYNTAUR_URL:-}" ] && [ -d "$HOME/Desktop" ]; then
+    cat > "$HOME/Desktop/Syntaur.webloc" << WEBLOC
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>URL</key>
+  <string>${SYNTAUR_URL}</string>
+</dict>
+</plist>
+WEBLOC
+    echo "  Desktop shortcut created (Syntaur.webloc)"
+  fi
+fi
+
+# ── Tailscale auto-setup (Tier 2 onboarding) ────────────────────────────────
+#
+# If the caller passed a Tailscale pre-auth key via SYNTAUR_TS_AUTHKEY
+# (the personalized-invite path mints one and bakes it into the install
+# command you send to a family member), bring Tailscale up to the
+# household tailnet so the viewer reaches the remote gateway the moment
+# it launches. Silently skipped when the key is absent — local-only
+# installs don't need it.
+#
+# Uses the official Tailscale installer. We never ship the daemon
+# ourselves. Users who already have Tailscale just get the `up` call.
+
+if [ -n "${SYNTAUR_TS_AUTHKEY:-}" ]; then
+  echo ""
+  echo "  Setting up Tailscale…"
+
+  if ! command -v tailscale >/dev/null 2>&1; then
+    if [ "$PLATFORM" = "macos" ]; then
+      # Mac installer is a signed .pkg — needs a user click-through.
+      echo "  Tailscale isn't installed yet. Opening the download page…"
+      open "https://tailscale.com/download/mac" 2>/dev/null || true
+      echo ""
+      echo "  When Tailscale finishes installing (icon appears in the menu bar),"
+      echo "  run this command to finish joining the household network:"
+      echo ""
+      echo "    /Applications/Tailscale.app/Contents/MacOS/Tailscale up \\"
+      echo "      --authkey=\"\$SYNTAUR_TS_AUTHKEY\" --accept-routes"
+    elif [ "$PLATFORM" = "linux" ]; then
+      echo "  Installing Tailscale…"
+      if command -v curl >/dev/null 2>&1; then
+        curl -fsSL https://tailscale.com/install.sh | sh
+      else
+        echo "  ! curl required for Tailscale install; please install curl and re-run."
+      fi
+    fi
+  fi
+
+  if command -v tailscale >/dev/null 2>&1; then
+    TS_UP="tailscale up --authkey=${SYNTAUR_TS_AUTHKEY} --accept-routes"
+    if [ "$PLATFORM" = "linux" ] && [ "$(id -u)" != "0" ]; then
+      sudo $TS_UP || echo "  ! tailscale up failed — retry with: sudo $TS_UP"
+    else
+      $TS_UP || echo "  ! tailscale up failed — you can retry with the command above."
+    fi
+    echo "  ✓ Tailscale connected to your household tailnet"
+  fi
 fi
 
 echo ""

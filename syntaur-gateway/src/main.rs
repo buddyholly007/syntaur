@@ -3203,6 +3203,104 @@ struct AdminMintTokenRequest {
     ttl_hours: Option<u64>,
 }
 
+// ── Personalized invite (Tier 2 Tailscale onboarding) ──────────────────
+//
+// Admin creates a new user + Syntaur session token + Tailscale pre-auth
+// key in one shot, then gets back a one-liner install command they can
+// send to a family member. The installer (install.sh / install.ps1)
+// reads SYNTAUR_URL + SYNTAUR_TS_AUTHKEY + SYNTAUR_SESSION_TOKEN from
+// the env the command sets, so the recipient's laptop auto-joins the
+// tailnet + auto-logs into Syntaur with zero manual credential entry.
+//
+// One-time-use: the Tailscale key is `reusable: false, expiry 7 days`,
+// and the Syntaur token has its own 30d TTL. An unredeemed invite
+// naturally expires.
+
+#[derive(serde::Deserialize)]
+struct AdminFamilyInviteRequest {
+    token: String,
+    /// Human-readable identifier for the new account.
+    name: String,
+    /// Optional public tailnet URL the installer will bake in.
+    #[serde(default)]
+    tailnet_url: Option<String>,
+}
+
+async fn handle_admin_family_invite(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AdminFamilyInviteRequest>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let principal = resolve_principal_scoped(&state, &req.token, "admin").await?;
+    require_admin(&principal)?;
+
+    let name = req.name.trim();
+    if name.is_empty() {
+        return Ok(Json(serde_json::json!({"ok": false, "error": "name required"})));
+    }
+
+    // Step 1: create the user.
+    let user = match state.users.create_user(name).await {
+        Ok(u) => u,
+        Err(e) => {
+            return Ok(Json(serde_json::json!({"ok": false, "error": format!("create user: {e}")})));
+        }
+    };
+
+    // Step 2: mint a 30-day session token for that user.
+    let session_token = match state.users.mint_token_with_expiry(user.id, "invite-session", Some(30 * 24)).await {
+        Ok(t) => t,
+        Err(e) => {
+            return Ok(Json(serde_json::json!({"ok": false, "error": format!("mint token: {e}")})));
+        }
+    };
+
+    // Step 3: mint a single-use Tailscale pre-auth key. Requires OAuth
+    // credentials already configured via the Phase 4.1 setup wizard.
+    let ts_key = match crate::tailscale::mint_invite_authkey(&state, name).await {
+        Ok(k) => k,
+        Err(e) => {
+            return Ok(Json(serde_json::json!({
+                "ok": false,
+                "error": format!("Tailscale key mint failed ({e}). Make sure you've completed /setup/tailscale first — the invite flow uses the same OAuth credentials.")
+            })));
+        }
+    };
+
+    crate::security::audit_log(
+        &state,
+        Some(principal.user_id()),
+        "admin.invite.create",
+        Some(&format!("user:{}", user.id)),
+        serde_json::json!({"name": name, "tailnet_url_set": req.tailnet_url.is_some()}),
+        None, None,
+    ).await;
+
+    let syntaur_url = req.tailnet_url.clone().unwrap_or_default();
+
+    // Build the install commands. These are what the admin copy-pastes
+    // into their messaging channel of choice.
+    let install_mac = format!(
+        "SYNTAUR_URL='{}' SYNTAUR_TS_AUTHKEY='{}' SYNTAUR_SESSION_TOKEN='{}' curl -fsSL https://github.com/buddyholly007/syntaur/releases/latest/download/install.sh | sh",
+        syntaur_url, ts_key, session_token
+    );
+    let install_windows = format!(
+        "$env:SYNTAUR_URL='{}'; $env:SYNTAUR_TS_AUTHKEY='{}'; $env:SYNTAUR_SESSION_TOKEN='{}'; irm https://github.com/buddyholly007/syntaur/releases/latest/download/install.ps1 | iex",
+        syntaur_url, ts_key, session_token
+    );
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "user_id": user.id,
+        "username": user.name,
+        "session_token": session_token,
+        "tailscale_authkey": ts_key,
+        "tailnet_url": syntaur_url,
+        "install_command_mac_linux": install_mac,
+        "install_command_windows": install_windows,
+        "note": "All three secrets are shown once — copy them somewhere before dismissing.",
+    })))
+}
+
 async fn handle_admin_mint_token(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(user_id): axum::extract::Path<i64>,
@@ -6193,6 +6291,7 @@ async fn main() {
         .route("/api/admin/users/{id}", axum::routing::put(handle_admin_update_user))
         .route("/api/admin/users/{id}", axum::routing::delete(handle_admin_delete_user))
         .route("/api/admin/users/{id}/tokens", post(handle_admin_mint_token))
+        .route("/api/admin/family-invite", post(handle_admin_family_invite))
         .route(
             "/api/admin/tokens/{token_id}",
             axum::routing::delete(handle_admin_revoke_token),

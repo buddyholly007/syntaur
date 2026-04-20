@@ -700,6 +700,74 @@ pub fn spawn_rotation_task(state: Arc<AppState>) {
     });
 }
 
+/// Mint a Tailscale pre-auth key for a single device (typical use:
+/// personalized per-invite installer credentials). Requires OAuth creds
+/// already stored in the vault. Unlike the auto-rotation key, these are
+/// single-use (`reusable: false`) and expire after 7 days so an
+/// unredeemed invite lapses on its own.
+///
+/// Returns the raw auth key (prefixed `tskey-auth-...`); caller is
+/// responsible for delivery (bake into installer command, email, etc.)
+/// and must audit-log the mint event with whatever context it has.
+pub async fn mint_invite_authkey(state: &Arc<AppState>, label: &str) -> Result<String, String> {
+    let (client_id, client_secret) = read_oauth_creds(state).await?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let token_resp = client
+        .post("https://api.tailscale.com/api/v2/oauth/token")
+        .form(&[
+            ("grant_type", "client_credentials"),
+            ("client_id", client_id.as_str()),
+            ("client_secret", client_secret.as_str()),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("token request: {e}"))?;
+    if !token_resp.status().is_success() {
+        return Err(format!("token endpoint: {}", token_resp.text().await.unwrap_or_default()));
+    }
+    let token_json: serde_json::Value = token_resp.json().await.map_err(|e| e.to_string())?;
+    let access_token = token_json["access_token"]
+        .as_str()
+        .ok_or_else(|| "no access_token".to_string())?
+        .to_string();
+
+    ensure_syntaur_tag_owner(&access_token).await?;
+
+    // Single-use, 7-day invite key. `reusable: false` means the key burns
+    // on first successful registration — safe to paste into a command
+    // the operator sends via an insecure channel.
+    let key_req = serde_json::json!({
+        "capabilities": {
+            "devices": {
+                "create": {
+                    "reusable": false,
+                    "ephemeral": false,
+                    "preauthorized": true,
+                    "tags": ["tag:syntaur"],
+                }
+            }
+        },
+        "expirySeconds": 60 * 60 * 24 * 7, // 7 days
+        "description": format!("syntaur invite {label}"),
+    });
+    let key_resp = client
+        .post("https://api.tailscale.com/api/v2/tailnet/-/keys")
+        .bearer_auth(&access_token)
+        .json(&key_req)
+        .send()
+        .await
+        .map_err(|e| format!("key mint: {e}"))?;
+    if !key_resp.status().is_success() {
+        return Err(format!("key endpoint: {}", key_resp.text().await.unwrap_or_default()));
+    }
+    let key_json: serde_json::Value = key_resp.json().await.map_err(|e| e.to_string())?;
+    let _ = state; // suppress unused warning
+    key_json["key"].as_str().map(|s| s.to_string()).ok_or_else(|| "no key in response".to_string())
+}
+
 async fn maybe_rotate(state: &Arc<AppState>) -> Result<(), String> {
     if !vault_has(state, OAUTH_VAULT_CLIENT_ID).await {
         return Ok(());

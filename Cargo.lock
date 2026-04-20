@@ -3787,7 +3787,7 @@ checksum = "c41e0c4fef86961ac6d6f8a82609f55f31b05e4fce149ac5710e439df7619ba4"
 
 [[package]]
 name = "mace"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -3927,7 +3927,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-protocol"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "log",
@@ -3959,7 +3959,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-server-search-rs"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5725,7 +5725,7 @@ dependencies = [
 
 [[package]]
 name = "rust-media-bridge"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6499,7 +6499,7 @@ dependencies = [
 
 [[package]]
 name = "syntaur-gateway"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -6565,7 +6565,7 @@ dependencies = [
 
 [[package]]
 name = "syntaur-isolation-tests"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6591,7 +6591,7 @@ dependencies = [
 
 [[package]]
 name = "syntaur-sdk"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6605,7 +6605,7 @@ dependencies = [
 
 [[package]]
 name = "syntaur-setup"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6616,7 +6616,7 @@ dependencies = [
 
 [[package]]
 name = "syntaur-viewer"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "gtk4",
  "serde",
@@ -6628,7 +6628,7 @@ dependencies = [
 
 [[package]]
 name = "syntaur-voice-pipeline"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "byteorder",
  "chrono",
