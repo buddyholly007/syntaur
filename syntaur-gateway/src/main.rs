@@ -6937,7 +6937,8 @@ async fn handle_scheduler_prefs_get(
     let row = tokio::task::spawn_blocking(move || -> Option<serde_json::Value> {
         let conn = rusqlite::Connection::open(&db).ok()?;
         conn.query_row(
-            "SELECT theme, default_view, week_starts_on, show_weekends, work_hours_start, work_hours_end, border \
+            "SELECT theme, default_view, week_starts_on, show_weekends, work_hours_start, work_hours_end, border, \
+                    backdrop_x, backdrop_y, backdrop_scale \
              FROM scheduler_prefs WHERE user_id = ?",
             rusqlite::params![uid],
             |r| Ok(serde_json::json!({
@@ -6948,6 +6949,9 @@ async fn handle_scheduler_prefs_get(
                 "work_hours_start": r.get::<_, String>(4)?,
                 "work_hours_end":   r.get::<_, String>(5)?,
                 "border":           r.get::<_, String>(6)?,
+                "backdrop_x":       r.get::<_, f64>(7)?,
+                "backdrop_y":       r.get::<_, f64>(8)?,
+                "backdrop_scale":   r.get::<_, f64>(9)?,
             })),
         ).ok()
     }).await.ok().flatten();
@@ -6955,6 +6959,7 @@ async fn handle_scheduler_prefs_get(
         "theme": "garden", "default_view": "month", "week_starts_on": 1,
         "show_weekends": true, "work_hours_start": "08:00", "work_hours_end": "18:00",
         "border": "notebook",
+        "backdrop_x": 0.5, "backdrop_y": 0.5, "backdrop_scale": 1.0,
     }))))
 }
 
@@ -7000,6 +7005,18 @@ async fn handle_scheduler_prefs_put(
         }
         if let Some(v) = body.get("border").and_then(|v| v.as_str()) {
             sets.push("border = ?"); params.push(Box::new(v.to_string()));
+        }
+        // Backdrop tuning: clamp to sensible ranges so bad client input
+        // can't move the image off-screen permanently (recoverable via
+        // reset button either way, but defense-in-depth).
+        if let Some(v) = body.get("backdrop_x").and_then(|v| v.as_f64()) {
+            sets.push("backdrop_x = ?"); params.push(Box::new(v.max(-1.0).min(2.0)));
+        }
+        if let Some(v) = body.get("backdrop_y").and_then(|v| v.as_f64()) {
+            sets.push("backdrop_y = ?"); params.push(Box::new(v.max(-1.0).min(2.0)));
+        }
+        if let Some(v) = body.get("backdrop_scale").and_then(|v| v.as_f64()) {
+            sets.push("backdrop_scale = ?"); params.push(Box::new(v.max(0.25).min(4.0)));
         }
         if sets.is_empty() {
             return Ok(());

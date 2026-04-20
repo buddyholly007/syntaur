@@ -2047,6 +2047,16 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX IF NOT EXISTS idx_audit_log_action_ts ON audit_log(action, ts DESC);
     CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts DESC);
     "#,
+
+    // Scheduler backdrop tuning. Users drag and scale the painted backdrop
+    // into place so watercolor corners line up behind their content. Values
+    // are fractions/multipliers (not pixel offsets) so they scale cleanly
+    // with viewport size. Defaults center the image and don't upscale.
+    r#"
+    ALTER TABLE scheduler_prefs ADD COLUMN backdrop_x     REAL NOT NULL DEFAULT 0.5;
+    ALTER TABLE scheduler_prefs ADD COLUMN backdrop_y     REAL NOT NULL DEFAULT 0.5;
+    ALTER TABLE scheduler_prefs ADD COLUMN backdrop_scale REAL NOT NULL DEFAULT 1.0;
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

@@ -237,6 +237,10 @@ fn theme_picker_modal() -> Markup {
                 }
                 p class="sch-border-hint" { "Dresses the calendar in a notebook-style binding. Matches the theme underneath." }
                 div class="sch-theme-grid" id="sch-border-grid" {}
+                div style="padding: 10px 14px 14px; display: flex; gap: 8px; align-items: center; border-top: 1px solid var(--sch-border); margin-top: 6px;" {
+                    span class="sch-border-hint" style="padding: 0; flex: 1;" { "Painted backdrop not lined up? Adjust its position and zoom, then save." }
+                    button class="sch-btn-primary" onclick="schEnterBackdropEdit()" { "Adjust backdrop" }
+                }
             }
         }
     }
@@ -1114,21 +1118,73 @@ body:not([data-sch-border]) .sch-main {
  * the shell is taller than the source), the middle is plain cream so
  * any stretching there is invisible.
  */
+/* CSS variables drive backdrop position + scale so users can drag + zoom
+ * the painting into place. Values are fractions: bp-x and bp-y in [0,1]
+ * are the classic CSS background-position percentages; bp-scale is a
+ * multiplier on width. Defaults center the image at 100% width. */
+:root {
+  --sch-bp-x: 50%;
+  --sch-bp-y: 50%;
+  --sch-bp-scale: 1;
+}
 [data-sch-border="garden-backdrop"] .sch-shell {
-  background:
-    url('/scheduler-frame/garden-backdrop') center / 100% 100% no-repeat,
-    #f4ead2;
+  background-color: #f4ead2;
+  background-image: url('/scheduler-frame/garden-backdrop');
+  background-repeat: no-repeat;
+  background-position: var(--sch-bp-x) var(--sch-bp-y);
+  background-size: calc(100% * var(--sch-bp-scale)) auto;
   padding: 24px;
   border-radius: 4px;
   box-shadow: 0 2px 6px rgba(40,30,15,0.12), 0 14px 36px rgba(40,30,15,0.18);
 }
 /* Suppress the default spiral-notebook coil. */
 [data-sch-border="garden-backdrop"] .sch-shell::before { content: none !important; }
-/* Layout zones see through to the painted paper — only event chips and
- * cards should have solid backgrounds to stay readable. */
+/* Layout zones go see-through so the watercolor corners show behind the
+ * panels. Event chips / cards / today-marker still get solid backgrounds
+ * for legibility via their own rules. */
 [data-sch-border="garden-backdrop"] .sch-left,
 [data-sch-border="garden-backdrop"] .sch-main,
-[data-sch-border="garden-backdrop"] .sch-right { background: transparent !important; }
+[data-sch-border="garden-backdrop"] .sch-right {
+  background: rgba(248, 240, 215, 0.35) !important;
+}
+/* Month-grid cells and sidebar cards — lighter tint so watercolor peeks
+ * through the grid, but text stays readable. */
+[data-sch-border="garden-backdrop"] .sch-cell {
+  background: rgba(253, 248, 232, 0.55) !important;
+}
+[data-sch-border="garden-backdrop"] .sch-card,
+[data-sch-border="garden-backdrop"] .sch-tp-card {
+  background: rgba(253, 248, 232, 0.75) !important;
+}
+
+/* Adjust-backdrop edit mode — dim content, highlight the drag surface. */
+.sch-shell.sch-editing-backdrop {
+  cursor: grab;
+}
+.sch-shell.sch-editing-backdrop:active { cursor: grabbing; }
+.sch-shell.sch-editing-backdrop .sch-left,
+.sch-shell.sch-editing-backdrop .sch-main,
+.sch-shell.sch-editing-backdrop .sch-right {
+  opacity: 0.25;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+.sch-backdrop-toolbar {
+  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+  background: rgba(17,24,39,0.95); color: #e5e7eb;
+  border-radius: 999px; padding: 10px 16px;
+  display: flex; gap: 10px; align-items: center;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+  z-index: 50; font-size: 13px;
+}
+.sch-backdrop-toolbar button {
+  background: transparent; color: inherit; border: 1px solid #374151;
+  border-radius: 999px; padding: 5px 12px; cursor: pointer; font: inherit;
+}
+.sch-backdrop-toolbar button:hover { border-color: #6b7280; color: #fff; }
+.sch-backdrop-toolbar .btn-save { background: #2563eb; border-color: #2563eb; color: #fff; }
+.sch-backdrop-toolbar .btn-save:hover { background: #1d4ed8; }
+.sch-backdrop-toolbar .hint { opacity: 0.7; font-size: 12px; margin-right: 6px; }
 
 /* ─── Preview tiles with per-style mini illustrations. */
 .sch-border-tile {
@@ -1348,6 +1404,158 @@ const PAGE_JS: &str = r##"
     S.prefs.border = key || 'garden-backdrop';
   }
 
+  // Backdrop position/scale — driven by CSS vars on the shell so the
+  // painting stays placed correctly as the window resizes. Values are
+  // fractions: x/y in [0,1] become CSS percentages; scale is a multiplier.
+  function applyBackdrop(x, y, scale) {
+    const shell = document.querySelector('.sch-shell');
+    if (!shell) return;
+    const clamped_x = Math.max(-1, Math.min(2, x ?? 0.5));
+    const clamped_y = Math.max(-1, Math.min(2, y ?? 0.5));
+    const clamped_s = Math.max(0.25, Math.min(4, scale ?? 1));
+    shell.style.setProperty('--sch-bp-x', (clamped_x * 100).toFixed(2) + '%');
+    shell.style.setProperty('--sch-bp-y', (clamped_y * 100).toFixed(2) + '%');
+    shell.style.setProperty('--sch-bp-scale', clamped_s.toFixed(3));
+    S.prefs.backdrop_x = clamped_x;
+    S.prefs.backdrop_y = clamped_y;
+    S.prefs.backdrop_scale = clamped_s;
+  }
+
+  // ── Adjust-backdrop mode ──────────────────────────────────────────
+  // Click the "Adjust" button in the frame picker to enter. Drag the
+  // backdrop, scroll to zoom. Toolbar at the bottom to Reset / Save / Cancel.
+  let schBackdropEditState = null;
+
+  window.schEnterBackdropEdit = function() {
+    const shell = document.querySelector('.sch-shell');
+    if (!shell) return;
+    if (schBackdropEditState) return; // already editing
+    if ((S.prefs.border || 'garden-backdrop') !== 'garden-backdrop') {
+      applyBorder('garden-backdrop');
+    }
+    schBackdropEditState = {
+      original: {
+        x: S.prefs.backdrop_x ?? 0.5,
+        y: S.prefs.backdrop_y ?? 0.5,
+        s: S.prefs.backdrop_scale ?? 1,
+      },
+      current: {
+        x: S.prefs.backdrop_x ?? 0.5,
+        y: S.prefs.backdrop_y ?? 0.5,
+        s: S.prefs.backdrop_scale ?? 1,
+      },
+      dragging: false,
+      startMouse: null,
+      startCurrent: null,
+    };
+    shell.classList.add('sch-editing-backdrop');
+    schCloseBorders();
+
+    // Drag: mousedown on shell, pointer move, mouseup. Translate mouse
+    // delta into fraction-of-shell delta and add to x/y.
+    const onDown = (e) => {
+      if (e.button !== 0) return;
+      schBackdropEditState.dragging = true;
+      schBackdropEditState.startMouse = { x: e.clientX, y: e.clientY };
+      schBackdropEditState.startCurrent = { ...schBackdropEditState.current };
+      e.preventDefault();
+    };
+    const onMove = (e) => {
+      if (!schBackdropEditState || !schBackdropEditState.dragging) return;
+      const rect = shell.getBoundingClientRect();
+      const dx = (e.clientX - schBackdropEditState.startMouse.x) / rect.width;
+      const dy = (e.clientY - schBackdropEditState.startMouse.y) / rect.height;
+      // Dragging the image right (positive dx) should pan the image right,
+      // which in CSS background-position is a HIGHER percentage on the
+      // left side. For `background-position: X% Y%`, increasing X moves
+      // the image's focal point further right, exposing the LEFT portion
+      // of the image. So we subtract dx to match user intuition.
+      schBackdropEditState.current.x = schBackdropEditState.startCurrent.x - dx;
+      schBackdropEditState.current.y = schBackdropEditState.startCurrent.y - dy;
+      applyBackdrop(
+        schBackdropEditState.current.x,
+        schBackdropEditState.current.y,
+        schBackdropEditState.current.s,
+      );
+    };
+    const onUp = () => {
+      if (schBackdropEditState) schBackdropEditState.dragging = false;
+    };
+    const onWheel = (e) => {
+      if (!schBackdropEditState) return;
+      e.preventDefault();
+      const delta = e.deltaY < 0 ? 1.05 : 1 / 1.05;
+      schBackdropEditState.current.s *= delta;
+      applyBackdrop(
+        schBackdropEditState.current.x,
+        schBackdropEditState.current.y,
+        schBackdropEditState.current.s,
+      );
+    };
+    schBackdropEditState.handlers = { onDown, onMove, onUp, onWheel };
+    shell.addEventListener('mousedown', onDown);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    shell.addEventListener('wheel', onWheel, { passive: false });
+
+    // Toolbar
+    const bar = document.createElement('div');
+    bar.className = 'sch-backdrop-toolbar';
+    bar.id = 'sch-backdrop-toolbar';
+    bar.innerHTML = `
+      <span class="hint">Drag to pan · scroll to zoom</span>
+      <button onclick="schBackdropReset()">Reset</button>
+      <button onclick="schBackdropCancel()">Cancel</button>
+      <button class="btn-save" onclick="schBackdropSave()">Save</button>
+    `;
+    document.body.appendChild(bar);
+  };
+
+  function schBackdropExit() {
+    if (!schBackdropEditState) return;
+    const shell = document.querySelector('.sch-shell');
+    if (shell) {
+      shell.classList.remove('sch-editing-backdrop');
+      const h = schBackdropEditState.handlers;
+      if (h) {
+        shell.removeEventListener('mousedown', h.onDown);
+        window.removeEventListener('mousemove', h.onMove);
+        window.removeEventListener('mouseup', h.onUp);
+        shell.removeEventListener('wheel', h.onWheel);
+      }
+    }
+    const bar = document.getElementById('sch-backdrop-toolbar');
+    if (bar) bar.remove();
+    schBackdropEditState = null;
+  }
+
+  window.schBackdropReset = function() {
+    if (!schBackdropEditState) return;
+    schBackdropEditState.current = { x: 0.5, y: 0.5, s: 1 };
+    applyBackdrop(0.5, 0.5, 1);
+  };
+  window.schBackdropCancel = function() {
+    if (!schBackdropEditState) return;
+    const o = schBackdropEditState.original;
+    applyBackdrop(o.x, o.y, o.s);
+    schBackdropExit();
+  };
+  window.schBackdropSave = async function() {
+    if (!schBackdropEditState) return;
+    const c = schBackdropEditState.current;
+    try {
+      await api('/api/scheduler/prefs', {
+        method: 'POST',
+        body: JSON.stringify({
+          backdrop_x: c.x,
+          backdrop_y: c.y,
+          backdrop_scale: c.s,
+        }),
+      });
+    } catch (e) { console.warn('[sch] save backdrop', e); }
+    schBackdropExit();
+  };
+
   // ── Modal UX: backdrop click dismisses, ESC closes top modal ──────
   // Every `.sch-modal` that wraps a `.sch-modal-box` picks this up: clicking
   // the dimmed area outside the box hides the modal. Native `prompt()` /
@@ -1453,6 +1661,14 @@ const PAGE_JS: &str = r##"
       else applyBorder('garden-backdrop');
       if (prefs && prefs.default_view && window.innerWidth > 900) { S.view = prefs.default_view; }
       S.prefs = Object.assign(S.prefs, prefs || {});
+      // Apply saved backdrop position + scale if present. Values live on
+      // the shell via CSS variables and are percentage/multiplier-based
+      // so the placement stays put when the viewport resizes.
+      applyBackdrop(
+        prefs && prefs.backdrop_x,
+        prefs && prefs.backdrop_y,
+        prefs && prefs.backdrop_scale
+      );
     } catch(e) { console.warn('[sch] prefs load:', e); applyBorder('garden-backdrop'); }
     if (window.innerWidth <= 900) S.view = 'day';
 
