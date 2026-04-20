@@ -2086,16 +2086,6 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE scheduler_prefs ADD COLUMN custom_backdrop_file TEXT NOT NULL DEFAULT '';
     "#,
 
-    // Calendar cells get their own transparency knob, independent from
-    // the side-panel slider. Users want separate control: one slider for
-    // how much of the painted backdrop shows through their lists/cards
-    // rails, a second for how much shows through the month-grid cells.
-    // 0.55 default is what the previous coupled formula derived
-    // (pane_opacity 0.35 + 0.20 offset).
-    r#"
-    ALTER TABLE scheduler_prefs ADD COLUMN calendar_opacity REAL NOT NULL DEFAULT 0.55;
-    "#,
-
     // Audit log hash chain (threat-model item). Any attacker with SQL
     // access (container escape, backup leak) could previously redact or
     // forge audit rows silently. `prev_hash` + `row_hash` make the table
@@ -2113,6 +2103,21 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE audit_log ADD COLUMN prev_hash TEXT;
     ALTER TABLE audit_log ADD COLUMN row_hash  TEXT;
+    "#,
+
+    // Calendar cells get their own transparency knob, independent from
+    // the side-panel slider. Two sliders total: one for lists/cards rails,
+    // one for month-grid cells. 0.55 default is what the previous
+    // coupled formula derived (pane_opacity 0.35 + 0.20 offset).
+    //
+    // MUST be appended at the end of MIGRATIONS, not inserted mid-array.
+    // The migration loop keys off array position; inserting above any
+    // already-applied migration shifts ALL later ones to new version
+    // numbers and triggers "duplicate column name" errors on re-run.
+    // Prod DB has schema_version 1..56 applied — new migrations must
+    // start at version 57.
+    r#"
+    ALTER TABLE scheduler_prefs ADD COLUMN calendar_opacity REAL NOT NULL DEFAULT 0.55;
     "#,
 ];
 

@@ -1220,6 +1220,33 @@ body:not([data-sch-border]) .sch-main {
   background: rgba(238, 225, 195, var(--sch-cal-alpha, 0.55)) !important;
 }
 
+/* Grid wrapper — the `<div class="sch-month-grid">` that houses every
+ * cell has `background: var(--sch-border)` by default (solid tan). The
+ * 1px `gap` between cells lets that show through as the grid lines.
+ * When the painted backdrop is active we want the cells transparent
+ * AND the inter-cell gaps to show the painted paper, not an opaque
+ * tan wrapper. Drop the wrapper background to transparent; the 1px
+ * `gap` now reveals the backdrop directly. Outer border stays visible
+ * but a touch softer. */
+[data-sch-border="garden-backdrop"] .sch-month-grid,
+[data-sch-border="custom"]          .sch-month-grid {
+  background: transparent !important;
+  border-color: rgba(120, 100, 70, 0.35) !important;
+}
+/* Thin inter-cell divider lines — paint them as faint overlays with a
+ * pseudo-layer since `gap` is transparent now. Use outline technique:
+ * give each cell a subtle right+bottom border that only activates on
+ * painted backdrops. */
+[data-sch-border="garden-backdrop"] .sch-month-cell,
+[data-sch-border="custom"]          .sch-month-cell {
+  box-shadow: inset -1px -1px 0 rgba(120, 100, 70, 0.25) !important;
+}
+/* Day-of-week header — `var(--sch-border)` bottom line — keep it faint. */
+[data-sch-border="garden-backdrop"] .sch-month-dow,
+[data-sch-border="custom"]          .sch-month-dow {
+  border-bottom-color: rgba(120, 100, 70, 0.35) !important;
+}
+
 /* Adjust-backdrop edit mode — dim content, highlight the drag surface. */
 .sch-shell.sch-editing-backdrop {
   cursor: grab;
