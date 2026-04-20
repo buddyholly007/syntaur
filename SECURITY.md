@@ -10,10 +10,10 @@ Only the current release line receives security fixes:
 
 | Version | Supported |
 | ------- | --------- |
-| 0.1.x   | ✅ fixes land here |
-| < 0.1   | ❌ unsupported |
+| 0.4.x   | ✅ fixes land here |
+| < 0.4   | ❌ unsupported |
 
-When we cut 0.2, 0.1 will move to a 60-day maintenance window before being dropped.
+When we cut 0.5, 0.4 will move to a 60-day maintenance window before being dropped.
 
 ## Reporting a vulnerability
 
@@ -105,13 +105,37 @@ For anyone running Syntaur in production:
 We track our own security posture honestly. At time of writing, the following
 are known and being worked on:
 
-- Some authenticated endpoints accept the session token in a URL query string
-  as well as the `Authorization` header. The query-string path is deprecated
-  and will be removed after a 30-day deprecation window.
-- Release artifacts are not yet signed; Sigstore provenance lands next release.
+- **Body-token handlers still exist.** A small set of handlers read the session
+  token from the JSON request body (`body["token"]`). Middleware lifts
+  `Authorization: Bearer` into the body for them so clients only ever send
+  Authorization, but the server-side handler code still reads the old position.
+  Every such lift logs a `DEPRECATED body-token lift` warning. **Scheduled
+  removal: v0.5.0** — the middleware + every handler move to a single
+  Authorization-header reader at that release.
+- **Legacy gateway.auth.token / gateway.auth.password path still functions**
+  as a fallback when the first user's password isn't set or drifted. Constant-
+  time comparison protects the hot path. Every fallback login logs a
+  `DEPRECATED legacy gateway-auth login succeeded` warning + writes an
+  `auth.login.legacy_deprecated` audit row. **Scheduled removal: v0.5.0** —
+  operators should set a password on user id=1 via `/settings/account/password`
+  and log in with that instead.
 - The `/v1/chat/completions` voice-relay endpoint requires an explicit
   `voice_secret` in config; unsetting it is allowed only when the gateway is
   bound to loopback.
+- Release installers are **not code-signed** on macOS or Windows. Gatekeeper
+  and SmartScreen will warn on first launch. Sigstore + cosign signatures and
+  SHA-256 checksums are published alongside every release artifact; verify
+  with `install.sh`'s `--skip-verify=0` path (default).
+
+**Removed in v0.4.0** (previously in this list):
+- ~~URL query-string token injection.~~ The middleware no longer lifts
+  `Authorization: Bearer` into the URL query. Every shipped client sends
+  tokens via header only, and no query-string token lives on disk (logs,
+  browser history, referrer).
+- ~~Release artifacts are not yet signed.~~ `release-sign.yml` signs every
+  shipped binary (gateway + viewer + isolation-tests) with Sigstore cosign
+  (keyless OIDC) and publishes SHA-256 checksums + SLSA v1 provenance
+  attestation.
 
 Keep us honest — tell us when this list is out of date.
 

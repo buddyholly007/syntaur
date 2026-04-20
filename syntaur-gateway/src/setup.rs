@@ -522,6 +522,30 @@ pub async fn handle_login(
 
     if admin_password_match || password_match || token_match {
         state.login_limiter.note_login_success(&identity);
+        // Deprecation signal — the legacy gateway.auth.token / gateway.auth.password
+        // fallback only fires when `admin_password_match` didn't match first, i.e.
+        // the operator is logging in with the config-file secret rather than
+        // their user password. This path is scheduled for removal in v0.5.0.
+        // Log every use so the operator sees it in the container log + audit.
+        if !admin_password_match && (password_match || token_match) {
+            log::warn!(
+                "[auth] DEPRECATED legacy gateway-auth login succeeded ({}). \
+                 This path will be removed in v0.5.0 — set a password for user id=1 \
+                 (via /settings/account/password) and log in with that instead.",
+                if token_match { "via gateway.auth.token" } else { "via gateway.auth.password" }
+            );
+            crate::security::audit_log(
+                &state,
+                Some(1),
+                "auth.login.legacy_deprecated",
+                None,
+                serde_json::json!({
+                    "variant": if token_match { "token" } else { "password" },
+                    "removal_version": "0.5.0",
+                }),
+                None, None,
+            ).await;
+        }
         // Mint a session token for the first user (admin)
         if let Ok(users) = state.users.list_users().await {
             if let Some(user) = users.first() {

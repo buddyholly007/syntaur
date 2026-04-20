@@ -37,21 +37,6 @@ use crate::AppState;
 
 // ── helper ──────────────────────────────────────────────────────────────────
 
-/// URL-encode a raw value for safe use in the query string. Only the
-/// reserved characters are percent-encoded.
-fn url_encode(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for b in input.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
-
 /// Extract the bearer token from the `Authorization` header. Returns None
 /// if the header is absent or doesn't carry a `Bearer ` prefix.
 fn extract_bearer(req: &Request) -> Option<String> {
@@ -61,13 +46,6 @@ fn extract_bearer(req: &Request) -> Option<String> {
         .and_then(|s| s.strip_prefix("Bearer "))
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-}
-
-/// Check whether the query string already carries a `token=` parameter.
-fn query_has_token(uri: &Uri) -> bool {
-    uri.query()
-        .map(|q| q.split('&').any(|pair| pair.starts_with("token=")))
-        .unwrap_or(false)
 }
 
 // ── 1. bootstrap_loopback_only ─────────────────────────────────────────────
@@ -204,40 +182,26 @@ pub async fn csrf_check(req: Request, next: Next) -> Result<Response, StatusCode
     }
 }
 
-// ── 3. lift_bearer_to_body_and_query ───────────────────────────────────────
+// ── 3. lift_bearer_to_body ─────────────────────────────────────────────────
 
-/// When a request carries `Authorization: Bearer <token>`, transparently
-/// copy that token into the URL query (as `token=…`) and, for JSON POSTs,
-/// into the body (as `"token": "..."`). Handler code reading
-/// `params.get("token")` / `body["token"]` then sees the header-provided
-/// value — without every handler needing to be refactored.
+/// When a JSON POST/PUT/PATCH request carries `Authorization: Bearer <token>`,
+/// transparently copy that token into the body as `"token": "..."` so handlers
+/// still reading `body["token"]` keep working. **Query-string injection was
+/// removed as of v0.4.0** — tokens in URLs leak into browser history, server
+/// access logs, and referrer headers on outbound links, and every shipped
+/// client was already migrated to header-only auth on the JSON surface.
 ///
-/// The net effect: clients stop sending tokens in URLs / bodies (where
-/// they leak into logs / history / screenshots); the server continues to
-/// read from the old positions for now. Phase 1.1 of the remediation plan.
+/// Body-token handlers are also scheduled for migration; this middleware
+/// will be removed entirely in **v0.5.0** once the handler refactor lands.
+/// Every lift logs a DEPRECATED warning tagged with the request path so the
+/// handler-migration progress is observable in the container log.
 pub async fn lift_bearer_to_body_and_query(req: Request, next: Next) -> Response {
     let Some(token) = extract_bearer(&req) else {
         return next.run(req).await;
     };
 
-    // Split once so we can mutate URI + body independently.
+    // Split once so we can mutate body.
     let (mut parts, body) = req.into_parts();
-
-    // Inject into URL query if no token= already present.
-    if !query_has_token(&parts.uri) {
-        let path = parts.uri.path().to_string();
-        let existing = parts.uri.query().unwrap_or("");
-        let encoded = url_encode(&token);
-        let new_query = if existing.is_empty() {
-            format!("token={}", encoded)
-        } else {
-            format!("{}&token={}", existing, encoded)
-        };
-        let new_uri: String = format!("{}?{}", path, new_query);
-        if let Ok(parsed) = new_uri.parse::<Uri>() {
-            parts.uri = parsed;
-        }
-    }
 
     // Decide whether to rewrite the body: only for JSON requests on
     // POST/PUT/PATCH, bounded at 16 MB.
@@ -270,6 +234,13 @@ pub async fn lift_bearer_to_body_and_query(req: Request, next: Next) -> Response
             match serde_json::from_slice::<serde_json::Value>(&bytes) {
                 Ok(serde_json::Value::Object(mut map)) => {
                     if !map.contains_key("token") {
+                        // DEPRECATED path — logged once per request so the
+                        // handler-migration progress is visible in the
+                        // container log. Target: zero of these by v0.5.0.
+                        log::warn!(
+                            "[security] DEPRECATED body-token lift: {} {} (handler should read Authorization header directly; removal v0.5.0)",
+                            parts.method, parts.uri.path()
+                        );
                         map.insert(
                             "token".to_string(),
                             serde_json::Value::String(token.clone()),
