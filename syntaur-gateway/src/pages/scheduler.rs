@@ -2902,7 +2902,7 @@ const PAGE_JS: &str = r##"
       try {
         const resp = await fetch('/api/scheduler/backdrop', {
           method: 'POST',
-          headers: { 'Content-Type': file.type || 'image/webp', 'Authorization': 'Bearer ' + token },
+          headers: { 'Content-Type': file.type || 'image/webp', 'Authorization': 'Bearer ' + TOKEN },
           body: file,
         });
         const data = await resp.json();
@@ -3462,7 +3462,7 @@ const PAGE_JS: &str = r##"
     if (!list) return;
     try {
       const resp = await fetch(`/api/conversations/${cid}`, {
-        headers: { 'Authorization': 'Bearer ' + token },
+        headers: { 'Authorization': 'Bearer ' + TOKEN },
       });
       if (!resp.ok) return;
       const data = await resp.json();
@@ -3514,7 +3514,7 @@ const PAGE_JS: &str = r##"
       try {
         const cr = await fetch('/api/conversations', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + TOKEN },
           body: JSON.stringify({ agent: 'thaddeus' }),
         });
         const cd = await cr.json();
@@ -3528,7 +3528,7 @@ const PAGE_JS: &str = r##"
     try {
       const resp = await fetch('/api/message', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + TOKEN },
         body: JSON.stringify({
           message: text,
           agent: 'thaddeus',
