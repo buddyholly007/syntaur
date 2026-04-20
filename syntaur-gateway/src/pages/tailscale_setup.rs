@@ -135,7 +135,25 @@ function renderStatus(s) {
   const url = s.tailnet_url
     ? '<a class="text-emerald-400 underline break-all" href="' + s.tailnet_url + '" target="_blank">' + s.tailnet_url + '</a>'
     : '<span class="text-gray-500">(URL appears once the sidecar finishes registering)</span>';
-  el.innerHTML = status + ' via ' + mode + '<br><span class="text-xs text-gray-500">Access at: </span>' + url;
+  let html = status + ' via ' + mode + '<br><span class="text-xs text-gray-500">Access at: </span>' + url;
+
+  // Phase 4.1 polish: if the sidecar reported a one-click-fix error, show
+  // the action URL as a prominent button the user can click to finish
+  // setup. Most commonly this is the Tailscale-Serve-not-enabled case.
+  if (s.last_error) {
+    html += '<div class="mt-3 p-3 rounded border border-amber-600/40 bg-amber-900/20">'
+         +   '<p class="text-sm text-amber-200 mb-2">' + s.last_error + '</p>';
+    if (s.action_url) {
+      html +=   '<a href="' + s.action_url + '" target="_blank" '
+             +    'class="inline-block px-3 py-1.5 rounded bg-amber-600 hover:bg-amber-500 text-white text-sm font-medium">'
+             +    'Finish setup in Tailscale →'
+             + '</a>'
+             + '<p class="text-xs text-amber-300/70 mt-2">Opens in a new tab. Come back here when done — we\'ll detect the change within seconds.</p>';
+    }
+    html += '</div>';
+  }
+
+  el.innerHTML = html;
   document.getElementById('ts-disconnect-wrap').classList.remove('hidden');
 }
 

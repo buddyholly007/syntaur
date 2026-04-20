@@ -92,7 +92,16 @@ pub struct StatusResponse {
     pub hostname: Option<String>,
     pub tailnet_url: Option<String>,
     pub auth_mode: &'static str,
+    /// Human-readable explanation of why the sidecar isn't serving yet.
+    /// Presence of `action_url` means this is a one-click-to-fix error.
     pub last_error: Option<String>,
+    /// If the error is a one-click remediation (e.g. Tailscale's per-node
+    /// "enable Serve" URL), the clickable URL the UI should render. `None`
+    /// means the error is informational only.
+    pub action_url: Option<String>,
+    /// Machine-readable error kind for the UI to branch on.
+    /// `"serve_not_enabled"` is the only one currently defined.
+    pub error_kind: Option<String>,
 }
 
 // ── Handlers ────────────────────────────────────────────────────────────
@@ -255,13 +264,39 @@ async fn current_status(state: &Arc<AppState>) -> StatusResponse {
         "none"
     };
 
+    // The sidecar writes /state/tailscale/sidecar-error.txt when it can't
+    // apply the serve config — most commonly because the tailnet owner
+    // hasn't enabled Tailscale Serve yet. The file is `kind\turl\n`.
+    // Surface the URL to the wizard UI so the user can click it directly
+    // rather than hunting through Tailscale's admin console.
+    let (last_error, action_url, error_kind) =
+        match tokio::fs::read_to_string("/state/tailscale/sidecar-error.txt").await {
+            Ok(s) => {
+                let line = s.trim();
+                let mut parts = line.splitn(2, '\t');
+                let kind = parts.next().unwrap_or("").to_string();
+                let action = parts.next().map(|s| s.to_string());
+                let msg = match kind.as_str() {
+                    "serve_not_enabled" | "serve-not-enabled" => Some(
+                        "Tailscale Serve isn't enabled on your tailnet yet. One click in your Tailscale admin console finishes the setup — we've pre-filled the exact URL.".to_string(),
+                    ),
+                    _ if !kind.is_empty() => Some(format!("Sidecar error: {kind}")),
+                    _ => None,
+                };
+                (msg, action, Some(kind).filter(|s| !s.is_empty()))
+            }
+            Err(_) => (None, None, None),
+        };
+
     StatusResponse {
         enabled,
         connected,
         hostname,
         tailnet_url: url,
         auth_mode,
-        last_error: None,
+        last_error,
+        action_url,
+        error_kind,
     }
 }
 
