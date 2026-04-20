@@ -8,9 +8,10 @@
 //! user exists yet (first-run). After setup completes, they require
 //! admin auth like other `/api/admin/*` endpoints.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
@@ -25,6 +26,47 @@ pub async fn require_setup_auth(state: &AppState, token: &str) -> Result<(), Sta
     let principal = crate::resolve_principal(state, token).await?;
     crate::require_admin(&principal)?;
     Ok(())
+}
+
+/// Handler-layer defense-in-depth for first-run bootstrap endpoints.
+///
+/// The outer `security::bootstrap_loopback_only` middleware already
+/// rejects non-loopback peers while the users table is empty — but the
+/// external-review guidance is that the setup handlers themselves must
+/// also enforce the first-run model rather than trusting middleware
+/// alone. This helper re-checks the peer IP at the handler layer and
+/// refuses with 403 + audit entry if anything non-loopback reaches the
+/// handler during first-run. Callers pass the `ConnectInfo<SocketAddr>`
+/// they've been given by axum.
+///
+/// Once the users table has at least one row, the check is a no-op —
+/// normal auth (require_setup_auth) takes over and admins can run
+/// setup from any address they're authenticated on.
+pub async fn require_first_run_loopback(
+    state: &Arc<AppState>,
+    peer: std::net::SocketAddr,
+) -> Result<(), StatusCode> {
+    if !is_first_run(state) {
+        return Ok(());
+    }
+    if peer.ip().is_loopback() {
+        return Ok(());
+    }
+    log::error!(
+        "[setup/first-run] handler-level defense-in-depth REJECTED non-loopback peer {peer} \
+         during first-run. Middleware should have caught this. Treat as a misconfiguration \
+         or a bypass attempt."
+    );
+    crate::security::audit_log(
+        state,
+        None,
+        "setup.first_run.non_loopback_rejected",
+        None,
+        serde_json::json!({ "peer": peer.to_string() }),
+        Some(peer.ip().to_string()),
+        None,
+    ).await;
+    Err(StatusCode::FORBIDDEN)
 }
 
 fn extract_token_from_headers(headers: &axum::http::HeaderMap) -> String {
@@ -735,9 +777,13 @@ pub async fn sync_gateway_password(state: &AppState, new_password: &str) -> Resu
 /// Writes config file + agent workspace from installer choices.
 pub async fn handle_setup_apply(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: axum::http::HeaderMap,
     Json(req): Json<SetupApplyRequest>,
 ) -> Result<Json<SetupApplyResponse>, StatusCode> {
+    // Defense in depth: even if middleware is misconfigured, handler
+    // refuses non-loopback peers during first-run.
+    require_first_run_loopback(&state, peer).await?;
     require_setup_auth(&state, &extract_token_from_headers(&headers)).await?;
     let data_dir = crate::resolve_data_dir();
 
@@ -837,6 +883,43 @@ pub async fn handle_setup_apply(
         }
         if !img.is_empty() {
             config["image_gen"] = serde_json::Value::Object(img);
+        }
+    }
+
+    // Create the admin user row. Pre-v0.5.0 the setup wizard only wrote
+    // `gateway.auth.password` and the login handler checked that config
+    // field directly. That legacy path is gone — handle_login now
+    // consults the argon2id-hashed password on the first user row. So
+    // we must land that row here, or the operator's first login after
+    // restart fails with "Invalid username or password."
+    //
+    // If user id=1 already exists (setup re-run, or bootstrap-admin CLI
+    // already ran), we try to reset their password to match what the
+    // wizard just accepted. That keeps the "change here, works
+    // everywhere" invariant.
+    let password_hash = match crate::auth::users::hash_password(&req.password) {
+        Ok(h) => h,
+        Err(e) => {
+            return Ok(Json(SetupApplyResponse {
+                success: false,
+                message: format!("Failed to hash admin password: {e}"),
+            }));
+        }
+    };
+    let admin_name = if req.user_name.trim().is_empty() { "admin".to_string() } else { req.user_name.clone() };
+    match state.users.get_user(1).await {
+        Ok(Some(_)) => {
+            if let Err(e) = state.users.set_password(1, &req.password).await {
+                log::warn!("[setup] reset admin password failed (continuing): {e}");
+            }
+        }
+        _ => {
+            if let Err(e) = state.users.create_user_full(&admin_name, "admin", Some(&password_hash)).await {
+                return Ok(Json(SetupApplyResponse {
+                    success: false,
+                    message: format!("Failed to create admin user: {e}"),
+                }));
+            }
         }
     }
 
