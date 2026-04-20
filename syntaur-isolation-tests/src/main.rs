@@ -513,10 +513,20 @@ async fn probe_research_sessions(c: &Client, a: &TestUser, b: &TestUser) -> Resu
 }
 
 /// Admin endpoints are admin-only; non-admin user must get 4xx on every
-/// /api/admin/* write.
+/// /api/admin/* write. Kept as one broad lockout probe so adding a new
+/// admin route anywhere in the gateway is one line here, not a new probe.
 async fn probe_admin_lockout(c: &Client, _a: &TestUser, b: &TestUser) -> Result<()> {
     let targets = [
-        ("POST", "/api/admin/users", json!({"token": b.token, "name": "shouldnt-work"})),
+        ("POST", "/api/admin/users",          json!({"token": b.token, "name": "shouldnt-work"})),
+        ("POST", "/api/admin/family-invite",  json!({"token": b.token, "name": "shouldnt-work"})),
+        ("POST", "/api/admin/invites",        json!({"token": b.token})),
+        ("POST", "/api/admin/hooks",          json!({"token": b.token, "name": "x", "event": "x", "command": "x"})),
+        ("POST", "/api/admin/skills",         json!({"token": b.token, "name": "x", "instructions": "x"})),
+        ("POST", "/api/admin/slash",          json!({"token": b.token, "name": "x", "body": "x"})),
+        ("POST", "/api/admin/oauth_config",   json!({"token": b.token, "provider": "x"})),
+        ("POST", "/api/admin/sharing",        json!({"token": b.token, "mode": "isolated"})),
+        ("POST", "/api/admin/sharing/grants", json!({"token": b.token})),
+        ("POST", "/api/admin/sharing/options",json!({"token": b.token})),
     ];
     for (method, path, body) in &targets {
         let m = reqwest::Method::from_bytes(method.as_bytes()).unwrap();
