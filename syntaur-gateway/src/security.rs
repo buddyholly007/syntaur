@@ -515,10 +515,23 @@ pub async fn security_headers(req: Request, next: Next) -> Response {
         }
     };
 
-    // CSP. Script policy switches between the nonce variant (HTML) and a
-    // plain `'self'` (JSON / streams / blobs — no inline script risk).
+    // CSP. Script policy:
+    //
+    //   - HTML responses: `'self' 'unsafe-inline'`. Dropped the nonce-only
+    //     variant that final-3 introduced because it silently killed every
+    //     inline `onclick="…"` event handler across the codebase (login
+    //     button, chat send, music controls, etc.) — CSP3 does not extend
+    //     nonces to inline event handlers, and when a nonce is present
+    //     the browser IGNORES `'unsafe-inline'`. So the strict variant
+    //     broke the login flow for every user.
+    //
+    //   - Non-HTML responses: plain `'self'`, no inline needed.
+    //
+    // The proper hardening path from here is migrating all inline
+    // `onclick=` attributes to `addEventListener` in nonced `<script>`
+    // blocks, then restoring the nonce-only CSP. Tracked as follow-up.
     let csp_script = match &nonce {
-        Some(n) => format!("script-src 'self' 'nonce-{n}'"),
+        Some(_) => "script-src 'self' 'unsafe-inline'".to_string(),
         None => "script-src 'self'".to_string(),
     };
     let csp = format!(
