@@ -6748,6 +6748,10 @@ async fn main() {
             get(smart_home::api::handle_diagnostics_summary),
         )
         .route(
+            "/api/smart-home/diagnostics/mqtt",
+            get(smart_home::api::handle_diagnostics_mqtt),
+        )
+        .route(
             "/api/smart-home/diagnostics/sweep",
             post(smart_home::api::handle_diagnostics_sweep),
         )

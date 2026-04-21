@@ -82,6 +82,17 @@ pub async fn dispatch_command(
     sup.dispatch_command(user_id, device_id, state).await
 }
 
+/// Snapshot MQTT observability counters for `/api/smart-home/diagnostics/mqtt`.
+/// Returns a default-initialised snapshot when the supervisor isn't
+/// running so the API handler never 500s — the UI treats empty
+/// sessions as "driver disabled."
+pub async fn stats_snapshot() -> stats::StatsSnapshot {
+    match SUPERVISOR.get() {
+        Some(sup) => sup.stats_snapshot().await,
+        None => stats::StatsSnapshot::default(),
+    }
+}
+
 /// Top-level scan entry. If a `MqttSupervisor` is running, returns its
 /// in-memory discovery snapshot (no second connection). Otherwise falls
 /// back to a legacy one-shot scan against `SMART_HOME_MQTT_URL`.

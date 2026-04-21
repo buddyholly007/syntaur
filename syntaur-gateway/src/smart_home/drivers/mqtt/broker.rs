@@ -649,7 +649,23 @@ mod tests {
                     (user_id, driver, external_id, name, kind, created_at)
                   VALUES
                     (1, 'mqtt', 'esphome:proxy-kids', 'Kids Bath BT Proxy', 'bluetooth_proxy', 0),
-                    (1, 'mqtt', 'esphome:proxy-master-bath', 'Master Bath BT Proxy', 'bluetooth_proxy', 0);",
+                    (1, 'mqtt', 'esphome:proxy-master-bath', 'Master Bath BT Proxy', 'bluetooth_proxy', 0),
+                    -- HA statestream entities. Selected to cover each
+                    -- dialect-emission path: SwitchBot Hub 3 built-ins
+                    -- (motion + illuminance + light_level — chatty when
+                    -- someone's in the kitchen), the BT-proxy pair's own
+                    -- sensors as seen through HA, Frigate per-camera
+                    -- counters, and the always-changing backup_manager
+                    -- sensor. Proves ha_statestream ingestion reaches
+                    -- the bus, not just the router.
+                    (1, 'mqtt', 'ha:binary_sensor.hub3_motion', 'Hub3 Motion', 'sensor_motion', 0),
+                    (1, 'mqtt', 'ha:sensor.hub3_illuminance', 'Hub3 Illuminance', 'sensor_illuminance', 0),
+                    (1, 'mqtt', 'ha:sensor.hub3_light_level', 'Hub3 Light Level', 'sensor_illuminance', 0),
+                    (1, 'mqtt', 'ha:sensor.master_bath_bt_proxy_wifi_rssi', 'MB Proxy WiFi RSSI (HA)', 'sensor_signal', 0),
+                    (1, 'mqtt', 'ha:sensor.kids_bath_bt_proxy_wifi_rssi', 'Kids Proxy WiFi RSSI (HA)', 'sensor_signal', 0),
+                    (1, 'mqtt', 'ha:sensor.backup_backup_manager_state', 'Backup Manager State', 'sensor', 0),
+                    (1, 'mqtt', 'ha:sensor.doorbell_person_count', 'Doorbell Person Count', 'sensor', 0),
+                    (1, 'mqtt', 'ha:sensor.doorbell_dog_count', 'Doorbell Dog Count', 'sensor', 0);",
             )
             .unwrap();
             let secret = serde_json::json!({ "url": url });
@@ -674,6 +690,7 @@ mod tests {
             let mut emitted_by_device: HashMap<i64, u64> = HashMap::new();
             let mut total_emits = 0u64;
 
+            let mut emits_by_source: HashMap<String, u64> = HashMap::new();
             while tokio::time::Instant::now() < deadline {
                 let remaining = deadline.saturating_duration_since(
                     tokio::time::Instant::now(),
@@ -683,8 +700,9 @@ mod tests {
                         device_id,
                         source,
                         ..
-                    })) if source == "esphome" => {
+                    })) => {
                         *emitted_by_device.entry(device_id).or_insert(0) += 1;
+                        *emits_by_source.entry(source).or_insert(0) += 1;
                         total_emits += 1;
                     }
                     Ok(Ok(_)) => continue,
@@ -715,6 +733,9 @@ mod tests {
             for (dev, n) in &emitted_by_device {
                 eprintln!("[state-cache-diff] device_id={} emits={}", dev, n);
             }
+            for (src, n) in &emits_by_source {
+                eprintln!("[state-cache-diff] source={:<16} emits={}", src, n);
+            }
 
             assert!(
                 stats.state_updates_received > 0,
@@ -724,9 +745,14 @@ mod tests {
                 stats.state_diffs_emitted <= stats.state_updates_received,
                 "diffs_emitted cannot exceed updates_received"
             );
+            // Bus emits = state diffs + availability transitions (those
+            // have their own counter). Both funnel to
+            // DeviceStateChanged so the subscriber sees the union.
+            let expected_emits =
+                stats.state_diffs_emitted + stats.availability_transitions_emitted;
             assert_eq!(
-                total_emits, stats.state_diffs_emitted,
-                "bus emits must match stats counter"
+                total_emits as u64, expected_emits,
+                "bus emits must match state+availability counter sum"
             );
             assert!(
                 !emitted_by_device.is_empty(),

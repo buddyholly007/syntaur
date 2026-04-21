@@ -844,6 +844,19 @@ pub async fn handle_diagnostics_summary(
     Ok(Json(json!(summary)))
 }
 
+/// GET /api/smart-home/diagnostics/mqtt — MQTT supervisor observability.
+/// Per-session counters (reconnects, messages in/out, per-dialect
+/// histogram) + aggregate StateCache stats (updates_received,
+/// diffs_emitted, availability transitions, bridge events). Returns an
+/// empty snapshot when the supervisor isn't installed — the caller
+/// UI should render "MQTT driver not enabled" rather than error.
+pub async fn handle_diagnostics_mqtt(
+    State(_state): State<std::sync::Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let snap = crate::smart_home::drivers::mqtt::stats_snapshot().await;
+    Json(json!(snap))
+}
+
 /// GET /api/smart-home/cameras/events — proxy Frigate's recent
 /// detections into the smart_home surface. Query params: ?camera=<name>
 /// &limit=<n>. All events across all cameras when `camera` omitted.
