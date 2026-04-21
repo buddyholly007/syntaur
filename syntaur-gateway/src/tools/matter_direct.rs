@@ -134,7 +134,6 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::num::NonZeroU8;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -553,12 +552,21 @@ impl SyntaurFabricFile {
 /// CASE/IM hold an Arc to this and drive `Matter::run` + an `Exchange`
 /// future under `select` (Stage 2b).
 struct MatterCore {
-    /// Loaded fabric metadata (kept around for reconstructing on restart
-    /// or for `list_nodes` to know which fabric_id devices belong to).
+    /// Loaded fabric metadata (hex fields validated at build time).
     fabric: SyntaurFabricFile,
-    /// Fabric index assigned by `Fabrics::add` on first insert (Stage 2b
-    /// will populate this from the real call; today it's a sentinel).
-    fab_idx: NonZeroU8,
+    /// Hex-decoded TLV root CA cert bytes. Cached to avoid re-decoding
+    /// per call; fed to `Fabrics::add` in the Stage 2b per-call path.
+    root_cert: Vec<u8>,
+    /// Hex-decoded TLV NOC bytes.
+    noc: Vec<u8>,
+    /// Hex-decoded TLV ICAC bytes. Empty `Vec` if the fabric had no
+    /// intermediate cert (most installs don't).
+    icac: Vec<u8>,
+    /// Raw 32-byte P-256 secret-key scalar, hex-decoded + length-checked.
+    secret_key_raw: Vec<u8>,
+    /// Raw 16-byte IPK (Identity Protection Key), hex-decoded + length-
+    /// checked. Fed as `Some(ipk.reference())` into `Fabrics::add`.
+    ipk_raw: Vec<u8>,
 }
 
 impl MatterCore {
@@ -567,21 +575,8 @@ impl MatterCore {
     async fn build(path: &PathBuf) -> Result<Self, DirectError> {
         let fabric = SyntaurFabricFile::load(path)?;
 
-        // Stage 2b: actual `Matter::new` + `state.fabrics.add(...)` call
-        // requires:
-        //   - hex-decoding root_cert / noc / icac / secret_key / ipk
-        //   - constructing CanonPkcSecretKey from raw bytes
-        //   - calling Matter::new(&dev_det, dev_comm, &dev_att, sys_epoch, 0)
-        //     with leak'd-at-startup BasicInfoConfig + DeviceAttestation
-        //     impls (controller-side fixtures, NOT the device-side
-        //     TEST_DEV_DET that ships with rs-matter)
-        //   - matter.initialize_transport_buffers()
-        //   - matter.with_state(|s| s.fabrics.add(crypto, secret_key,
-        //         &root_ca, &noc, &icac, Some(&ipk), vendor_id,
-        //         controller_node_id))
-        //
-        // Validate the fabric file fields up front so a typo in the JSON
-        // surfaces here rather than 200ms into the first device call.
+        // Non-empty guard — catches blank strings before hex::decode
+        // returns a silent zero-byte result.
         if fabric.root_cert_hex.is_empty()
             || fabric.noc_hex.is_empty()
             || fabric.secret_key_hex.is_empty()
@@ -592,33 +587,67 @@ impl MatterCore {
                 reason: "fabric file missing one of root_cert_hex / noc_hex / secret_key_hex / ipk_hex".into(),
             });
         }
-        // Validate the hex actually decodes (not the byte content — that's
-        // rs-matter's job — but the encoding).
-        for (name, hex_str) in [
-            ("root_cert_hex", &fabric.root_cert_hex),
-            ("noc_hex", &fabric.noc_hex),
-            ("secret_key_hex", &fabric.secret_key_hex),
-            ("ipk_hex", &fabric.ipk_hex),
-        ] {
-            hex::decode(hex_str).map_err(|e| DirectError::FabricParseError {
+
+        let decode = |name: &str, h: &str| -> Result<Vec<u8>, DirectError> {
+            hex::decode(h).map_err(|e| DirectError::FabricParseError {
                 path: path.display().to_string(),
                 reason: format!("{name} is not valid hex: {e}"),
-            })?;
-        }
-        if let Some(icac) = &fabric.icac_hex {
-            hex::decode(icac).map_err(|e| DirectError::FabricParseError {
+            })
+        };
+        let root_cert = decode("root_cert_hex", &fabric.root_cert_hex)?;
+        let noc = decode("noc_hex", &fabric.noc_hex)?;
+        let icac = match fabric.icac_hex.as_deref() {
+            Some(s) if !s.is_empty() => decode("icac_hex", s)?,
+            _ => Vec::new(),
+        };
+        let secret_key_raw = decode("secret_key_hex", &fabric.secret_key_hex)?;
+        let ipk_raw = decode("ipk_hex", &fabric.ipk_hex)?;
+
+        if secret_key_raw.len() != 32 {
+            return Err(DirectError::FabricParseError {
                 path: path.display().to_string(),
-                reason: format!("icac_hex is not valid hex: {e}"),
-            })?;
+                reason: format!(
+                    "secret_key decoded to {} bytes; expected 32 (P-256 scalar)",
+                    secret_key_raw.len()
+                ),
+            });
+        }
+        if ipk_raw.len() != 16 {
+            return Err(DirectError::FabricParseError {
+                path: path.display().to_string(),
+                reason: format!("ipk decoded to {} bytes; expected 16", ipk_raw.len()),
+            });
         }
 
-        // Sentinel fab_idx — replaced in Stage 2b by the real value
-        // returned from `Fabrics::add(...).fab_idx()`. Methods that
-        // consult `fab_idx` currently short-circuit on the Stage 2b
-        // ImFailed return in invoke_with_payload / read_*_attr.
-        let fab_idx = NonZeroU8::new(1).unwrap();
-
-        Ok(Self { fabric, fab_idx })
+        // Stage 2b runtime (still gated — see module docs): the per-call
+        // path constructs `Matter::new(&TEST_DEV_DET, TEST_DEV_COMM,
+        // &TEST_DEV_ATT, sys_epoch, 0)` + `initialize_transport_buffers`
+        // + `matter.with_state(|s| s.fabrics.add(crypto,
+        //     secret_key.reference(), &root_cert, &noc, &icac_or_empty,
+        //     Some(ipk.reference()), vendor_id, controller_node_id))`.
+        // It was deferred because:
+        //   1. `CanonPkcSecretKey` construction from a raw 32-byte scalar
+        //      requires API knowledge not yet confirmed at the pinned rev
+        //      (`rs-matter/src/crypto/canon.rs` has the type; the
+        //      canonical rs-matter `tests/case.rs` route uses
+        //      `crypto.generate_secret_key()` + `write_canon` on a fresh
+        //      keypair, not import from raw bytes — a different path).
+        //   2. Concurrent driver of `Matter::run` + per-call exchange
+        //      future requires `tokio::task::LocalSet` (because Matter
+        //      contains `RefCell`, unsafe across tokio multi-thread).
+        //      That scaffolding isn't here yet.
+        //
+        // Hex-decoded bytes are cached in the returned struct so the
+        // Stage 2b implementer can call `Fabrics::add` directly without
+        // re-parsing.
+        Ok(Self {
+            fabric,
+            root_cert,
+            noc,
+            icac,
+            secret_key_raw,
+            ipk_raw,
+        })
     }
 }
 
