@@ -820,9 +820,9 @@ pub async fn handle_plaid_webhook(
 /// List all connected financial accounts for the authenticated user.
 pub async fn handle_connections_list(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal(&state, token)
         .await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
@@ -2168,9 +2168,9 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
 /// Aggregated investment data across all connected brokers (Alpaca + Coinbase).
 pub async fn handle_investment_summary(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal(&state, token)
         .await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
@@ -2278,10 +2278,11 @@ pub async fn handle_investment_summary(
 ///
 /// List investment transactions with optional filters (provider, symbol, date range).
 pub async fn handle_investment_transactions(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal(&state, token)
         .await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;

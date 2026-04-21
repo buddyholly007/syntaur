@@ -496,9 +496,9 @@ pub struct TelegramPairRequest {
 
 pub async fn handle_sync_providers(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
@@ -744,9 +744,9 @@ pub async fn handle_sync_connect(
 pub async fn handle_sync_disconnect(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(provider): axum::extract::Path<String>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
@@ -1149,10 +1149,11 @@ async fn get_bot_username(token: &str, client: &reqwest::Client) -> Result<Strin
 
 /// Poll endpoint — UI checks if pairing was consumed. Returns {paired:true} when user has a link.
 pub async fn handle_telegram_pair_status(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let code = params.get("code").cloned().unwrap_or_default();
@@ -1335,10 +1336,10 @@ async fn health_check_tick(state: &Arc<AppState>) -> Result<(), String> {
 
 pub async fn handle_health_upload(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     if body.is_empty() { return Err(axum::http::StatusCode::BAD_REQUEST); }
@@ -1406,9 +1407,9 @@ pub async fn handle_health_upload(
 
 pub async fn handle_notebooklm_status(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _ = crate::resolve_principal(&state, token).await?;
 
     // Check common notebooklm-py storage_state.json locations
@@ -1452,9 +1453,9 @@ pub async fn handle_notebooklm_status(
 
 pub async fn handle_vault_status(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _ = crate::resolve_principal(&state, token).await?;
 
     let vault_path = "/home/sean/vault";
@@ -1520,9 +1521,9 @@ pub async fn handle_vault_status(
 
 pub async fn handle_ha_discover(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _ = crate::resolve_principal(&state, token).await?;
     let client = &state.client;
 
@@ -1694,9 +1695,9 @@ pub async fn handle_plex_pin_poll(
 
 pub async fn handle_airplay_discover(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _ = crate::resolve_principal(&state, token).await?;
 
     // Run mDNS discovery for 2 seconds. AirPlay services use:
@@ -1775,9 +1776,9 @@ pub async fn handle_airplay_discover(
 
 pub async fn handle_music_assistant_probe(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal(&state, token).await?;
     let uid = principal.user_id();
 
@@ -1952,9 +1953,9 @@ async fn get_cached_dev_token(client: &reqwest::Client) -> Result<String, String
 
 pub async fn handle_apple_music_dev_token(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _ = crate::resolve_principal(&state, token).await?;
     match get_cached_dev_token(&state.client).await {
         Ok(tok) => Ok(Json(serde_json::json!({ "developer_token": tok }))),
@@ -2061,9 +2062,9 @@ async fn load_apple_music_creds(state: &Arc<AppState>, uid: i64) -> Result<(Stri
 
 pub async fn handle_apple_music_playlists(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal(&state, token).await?;
     let (dev, mut_, _sf) = load_apple_music_creds(&state, principal.user_id()).await?;
     let resp = state.client.get("https://api.music.apple.com/v1/me/library/playlists?limit=100")
@@ -2079,10 +2080,11 @@ pub async fn handle_apple_music_playlists(
 }
 
 pub async fn handle_apple_music_search(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal(&state, token).await?;
     let q = params.get("q").cloned().unwrap_or_default();
     if q.is_empty() { return Err(axum::http::StatusCode::BAD_REQUEST); }
@@ -2105,9 +2107,9 @@ pub async fn handle_apple_music_search(
 // Returns the bookmarklet source code — used by the UI to build the "drag-to-bookmarks" link.
 pub async fn handle_apple_music_bookmarklet(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _ = crate::resolve_principal(&state, token).await?;
     // The capture page is served at /apple_music_capture.html same-origin.
     // Host comes from the Host header typically; the UI substitutes the actual origin.
@@ -2160,9 +2162,9 @@ pub async fn handle_apple_music_capture_page() -> axum::response::Html<&'static 
 
 pub async fn handle_ha_media_players(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal(&state, token).await?;
     let uid = principal.user_id();
 
@@ -2301,9 +2303,9 @@ pub async fn handle_oauth_config_save(
 
 pub async fn handle_oauth_config_list(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _ = crate::resolve_principal(&state, token).await?;
     let db = state.db_path.clone();
     let rows: Vec<serde_json::Value> = tokio::task::spawn_blocking(move || -> Vec<serde_json::Value> {
@@ -2352,9 +2354,9 @@ pub async fn handle_oauth_config_list(
 pub async fn handle_oauth_config_delete(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(identity_provider): axum::extract::Path<String>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _ = crate::resolve_principal(&state, token).await?;
     let db = state.db_path.clone();
     let ip = identity_provider.clone();

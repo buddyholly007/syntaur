@@ -92,10 +92,11 @@ pub struct NyotaAssistRequest {
 /// Returns the caller's connections. Credentials are never returned —
 /// only metadata the UI needs to render status pills.
 pub async fn handle_list(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Vec<SocialConnection>>, StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "social").await?;
     let uid = principal.user_id();
     let agent_filter = params.get("agent_id").cloned();
@@ -331,9 +332,9 @@ pub async fn handle_nyota_assist(
 /// and determine which Connect/Reconnect buttons are enabled.
 pub async fn handle_platforms(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _principal = crate::resolve_principal_scoped(&state, token, "social").await?;
     let descriptors = platforms::all_descriptors();
     Ok(Json(serde_json::json!({ "platforms": descriptors })))

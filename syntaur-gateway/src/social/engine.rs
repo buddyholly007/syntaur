@@ -110,10 +110,11 @@ pub struct RedraftRequest {
 // ── Draft CRUD handlers ─────────────────────────────────────────────────────
 
 pub async fn handle_drafts_list(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Vec<Draft>>, StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "social").await?;
     let uid = principal.user_id();
     let filter_status = params.get("status").cloned();
@@ -317,9 +318,9 @@ pub async fn handle_draft_reject(
 
 pub async fn handle_replies_list(
     State(state): State<Arc<AppState>>,
-    Query(params): Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<Vec<ReplyDraft>>, StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "social").await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
@@ -420,9 +421,9 @@ pub async fn handle_reply_reject(
 
 pub async fn handle_stats_list(
     State(state): State<Arc<AppState>>,
-    Query(params): Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "social").await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
@@ -446,9 +447,9 @@ pub async fn handle_stats_list(
 
 pub async fn handle_alerts_list(
     State(state): State<Arc<AppState>>,
-    Query(params): Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "social").await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();

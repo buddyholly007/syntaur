@@ -103,9 +103,9 @@ struct NowPlaying {
 
 pub async fn handle_music_now_playing(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "music").await?;
     let uid = principal.user_id();
 
@@ -337,9 +337,9 @@ pub async fn handle_music_control(
 
 pub async fn handle_music_speakers(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "music").await?;
     let uid = principal.user_id();
     let mut speakers: Vec<serde_json::Value> = Vec::new();
@@ -1350,9 +1350,9 @@ pub async fn handle_spotify_play(
 /// authenticated Syntaur session.
 pub async fn handle_spotify_token(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "music").await?;
     let tok = load_oauth_access_token(&state, principal.user_id(), "spotify").await;
     match tok {
@@ -1403,10 +1403,11 @@ pub async fn handle_music_pref_save(
 }
 
 pub async fn handle_music_prefs_list(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "music").await?;
     let sharing_mode = state.sharing_mode.read().await.clone();
     let scope = principal.scope_with_sharing(&sharing_mode);
@@ -1448,9 +1449,9 @@ pub async fn handle_music_prefs_list(
 pub async fn handle_music_pref_delete(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(pref_id): axum::extract::Path<i64>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "music").await?;
     let sharing_mode = state.sharing_mode.read().await.clone();
     let scope = principal.scope_with_sharing(&sharing_mode);
@@ -1560,9 +1561,9 @@ pub async fn handle_music_duck(
 
 pub async fn handle_music_duck_state(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _ = crate::resolve_principal_scoped(&state, token, "music").await?;
     let ds = get_duck_state().await;
     Ok(Json(serde_json::json!({
@@ -1642,9 +1643,9 @@ pub async fn handle_duck_volume_simple() -> Json<serde_json::Value> {
 /// installing the Syntaur Music Volume Shortcut.
 pub async fn handle_shortcut_setup_guide(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _ = crate::resolve_principal_scoped(&state, token, "music").await?;
     // The "host" from request would be ideal but we infer from config
     let host = std::env::var("SYNTAUR_PUBLIC_HOST").unwrap_or_else(|_| "your-syntaur-host".to_string());
@@ -1835,12 +1836,12 @@ pub async fn emit_local_event(ev: LocalEvent) {
 /// SSE stream of local playback events for /music tabs.
 pub async fn handle_local_events(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
     use axum::response::sse::{Event, KeepAlive, Sse};
     use axum::response::IntoResponse;
 
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     if crate::resolve_principal_scoped(&state, token, "music").await.is_err() {
         return (axum::http::StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
