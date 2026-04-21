@@ -1037,10 +1037,11 @@ struct BugReportRequest {
 }
 
 async fn handle_open_url(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     resolve_principal(&state, token).await?;
 
     let url = params.get("url").cloned().unwrap_or_default();
@@ -1111,10 +1112,11 @@ async fn handle_bug_report_submit(
 }
 
 async fn handle_bug_report_list(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _principal = resolve_principal(&state, token).await?;
 
     let db_path = state.db_path.clone();
@@ -1164,10 +1166,11 @@ struct TodoUpdateRequest { token: String, done: Option<bool> }
 struct TodoDeleteRequest { token: String }
 
 async fn handle_todo_list(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    axum::extract::Query(_params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let sharing_mode = state.sharing_mode.read().await.clone();
     let scope = principal.scope_with_sharing(&sharing_mode);
@@ -1381,10 +1384,11 @@ fn expand_recurrence(
 }
 
 async fn handle_calendar_list(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let sharing_mode = state.sharing_mode.read().await.clone();
     let scope = principal.scope_with_sharing(&sharing_mode);
@@ -1528,9 +1532,9 @@ async fn handle_calendar_update(
 async fn handle_calendar_delete(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(event_id): axum::extract::Path<i64>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let sharing_mode = state.sharing_mode.read().await.clone();
     let scope = principal.scope_with_sharing(&sharing_mode);
@@ -2189,11 +2193,12 @@ async fn handle_conv_create(
 }
 
 async fn handle_conv_get(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     // MACE scoped tokens may GET their own specialist conversation (for
     // interjection polling + banner topic). Full web-session tokens are
     // unscoped and pass via the same resolver.
@@ -2217,10 +2222,11 @@ async fn handle_conv_get(
 }
 
 async fn handle_conv_list(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let mgr = match &state.conversations {
         Some(m) => m,
@@ -2750,9 +2756,9 @@ async fn handle_research_start(
 async fn handle_research_get(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let store = match &state.research_store {
         Some(s) => s,
@@ -2769,10 +2775,10 @@ async fn handle_research_get(
 async fn handle_research_stream(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<axum::response::Response, axum::http::StatusCode> {
     use axum::response::IntoResponse;
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _principal = resolve_principal(&state, token).await?;
     // Look up the broadcast sender for this id
     let receiver = {
@@ -2812,11 +2818,12 @@ async fn handle_research_stream(
 }
 
 async fn handle_messages(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<Vec<serde_json::Value>>, axum::http::StatusCode> {
     // Require auth token
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _principal = resolve_principal(&state, token).await?;
 
     let home = std::env::var("HOME").unwrap_or_else(|_| "/home/sean".to_string());
@@ -2848,9 +2855,10 @@ async fn handle_messages(
 
 async fn handle_knowledge_stats(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _principal = resolve_principal(&state, token).await?;
     let indexer = match &state.indexer {
         Some(i) => i,
@@ -2871,10 +2879,11 @@ async fn handle_knowledge_stats(
 }
 
 async fn handle_knowledge_search(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _principal = resolve_principal(&state, token).await?;
     let indexer = match &state.indexer {
         Some(i) => i,
@@ -2905,9 +2914,10 @@ async fn handle_knowledge_search(
 
 async fn handle_knowledge_docs(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _principal = resolve_principal(&state, token).await?;
     let indexer = match &state.indexer {
         Some(i) => i,
@@ -3192,9 +3202,10 @@ async fn handle_knowledge_upload(
 
 async fn handle_research_recent(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _principal = resolve_principal(&state, token).await?;
     let store = match &state.research_store {
         Some(s) => s,
@@ -3255,9 +3266,9 @@ async fn handle_admin_create_user(
 
 async fn handle_admin_list_users(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal_scoped(&state, token, "admin").await?;
     require_admin(&principal)?;
     match state.users.list_users().await {
@@ -3457,14 +3468,15 @@ async fn handle_auth_refresh(
     headers: axum::http::HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let presented = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| body["token"].as_str().map(|s| s.to_string()))
-        .unwrap_or_default();
+    // Bearer header preferred; body["token"] fallback retained for the
+    // few clients that still POST the long-lived token in JSON. Once the
+    // gateway-wide audit shows zero body-token requests for two weeks
+    // the fallback can go.
+    let presented = {
+        let h = crate::security::bearer_from_headers(&headers);
+        if !h.is_empty() { h.to_string() }
+        else { body["token"].as_str().unwrap_or("").to_string() }
+    };
     if presented.is_empty() {
         return Err(axum::http::StatusCode::UNAUTHORIZED);
     }
@@ -3525,9 +3537,21 @@ async fn handle_auth_refresh(
 /// works, opening a different handler does not.
 async fn handle_auth_stream_token(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let long_token = body["token"].as_str().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    // Long-lived token: header preferred, body fallback for legacy clients.
+    let long_token_owned;
+    let long_token: &str = {
+        let h = crate::security::bearer_from_headers(&headers);
+        if !h.is_empty() { h }
+        else {
+            long_token_owned = body["token"].as_str()
+                .ok_or(axum::http::StatusCode::UNAUTHORIZED)?
+                .to_string();
+            long_token_owned.as_str()
+        }
+    };
     let url = body["url"].as_str().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
     let ttl_secs = body["ttl_secs"].as_u64().unwrap_or(60);
 
@@ -3596,10 +3620,11 @@ pub async fn resolve_principal_for_stream(
 /// sees all entries. Supports `limit` (default 100, max 500) and
 /// `since` (unix seconds) query params for pagination.
 async fn handle_audit_log_get(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let is_admin = principal.is_admin();
@@ -3663,9 +3688,9 @@ async fn handle_audit_log_get(
 /// `{ok: true, verified_rows: N}` on a clean chain.
 async fn handle_audit_log_verify(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal_scoped(&state, token, "admin").await?;
     require_admin(&principal)?;
 
@@ -3835,9 +3860,9 @@ async fn handle_admin_invite(
 
 async fn handle_admin_list_invites(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     require_admin(&principal)?;
     match state.users.list_invites().await {
@@ -3938,9 +3963,9 @@ async fn handle_admin_update_user(
 async fn handle_admin_delete_user(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(user_id): axum::extract::Path<i64>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal_scoped(&state, token, "admin").await?;
     require_admin(&principal)?;
     match state.users.delete_user(user_id).await {
@@ -3962,9 +3987,9 @@ async fn handle_admin_delete_user(
 
 async fn handle_me(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let user_id = principal.user_id();
     let user = state.users.get_user(user_id).await.ok().flatten();
@@ -4107,9 +4132,9 @@ async fn handle_me_mint_token(
 
 async fn handle_me_list_tokens(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let rows = state.users.list_tokens_for_user(principal.user_id()).await.unwrap_or_default();
     Ok(Json(serde_json::json!({ "tokens": rows })))
@@ -4151,9 +4176,9 @@ async fn handle_me_revoke_token(
 
 async fn handle_admin_get_sharing(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal_scoped(&state, token, "admin").await?;
     require_admin(&principal)?;
     let mode = state.sharing_mode.read().await.clone();
@@ -4192,9 +4217,9 @@ async fn handle_admin_set_sharing(
 
 async fn handle_me_agents(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let agents = state.users.list_user_agents(principal.user_id()).await.unwrap_or_default();
     Ok(Json(serde_json::json!({"agents": agents})))
@@ -4257,9 +4282,9 @@ async fn handle_update_user_agent(
 async fn handle_delete_user_agent(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(agent_id): axum::extract::Path<String>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     match state.users.delete_user_agent(principal.user_id(), &agent_id).await {
         Ok(()) => Ok(Json(serde_json::json!({"ok": true}))),
@@ -4271,9 +4296,9 @@ async fn handle_delete_user_agent(
 
 async fn handle_admin_sharing_options(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     require_admin(&principal)?;
     // Collect available resource types and their resource_ids
@@ -4297,10 +4322,11 @@ async fn handle_admin_sharing_options(
 }
 
 async fn handle_admin_sharing_grants_list(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     require_admin(&principal)?;
     let user_id: i64 = params.get("user_id").and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -4341,9 +4367,9 @@ async fn handle_admin_set_sharing_grants(
 async fn handle_admin_delete_sharing_grant(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(grant_id): axum::extract::Path<i64>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     require_admin(&principal)?;
     match state.users.delete_grant(grant_id).await {
@@ -4355,10 +4381,11 @@ async fn handle_admin_delete_sharing_grant(
 // ── Personality docs API ──────────────────────────────────────────────────
 
 async fn handle_personality_list(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let agent_id = params.get("agent_id").map(|s| s.as_str()).unwrap_or("main");
     match state.users.list_personality_docs(principal.user_id(), agent_id).await {
@@ -4411,9 +4438,9 @@ async fn handle_personality_update(
 async fn handle_personality_delete(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(doc_id): axum::extract::Path<i64>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     match state.users.delete_personality_doc(doc_id, principal.user_id()).await {
         Ok(()) => Ok(Json(serde_json::json!({"ok": true}))),
@@ -4425,9 +4452,9 @@ async fn handle_personality_delete(
 
 async fn handle_onboarding_status(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let complete = state.users.is_onboarding_complete(principal.user_id()).await;
     Ok(Json(serde_json::json!({"complete": complete})))
@@ -4435,9 +4462,9 @@ async fn handle_onboarding_status(
 
 async fn handle_onboarding_complete(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let _ = state.users.set_onboarding_complete(principal.user_id()).await;
     Ok(Json(serde_json::json!({"ok": true})))
@@ -4591,9 +4618,9 @@ async fn handle_admin_create_hook(
 
 async fn handle_admin_list_hooks(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     require_admin(&principal)?;
     match state.tool_hooks.list().await {
@@ -4676,10 +4703,11 @@ async fn handle_admin_create_skill(
 }
 
 async fn handle_admin_list_skills(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     require_admin(&principal)?;
     let agent_filter = params.get("agent").map(|s| s.as_str());
@@ -4876,9 +4904,9 @@ async fn handle_deny_plan(
 async fn handle_get_plan(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(plan_id): axum::extract::Path<i64>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     match state.plans.get(plan_id).await {
         Ok(Some((plan, steps))) => {
@@ -4895,9 +4923,9 @@ async fn handle_get_plan(
 
 async fn handle_list_plans(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     // Non-admin users see only their own plans; admin sees all.
     let filter = if principal.is_admin() {
@@ -4962,10 +4990,11 @@ async fn handle_admin_create_slash(
 }
 
 async fn handle_admin_list_slash(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     require_admin(&principal)?;
     let agent_filter = params.get("agent").map(|s| s.as_str());
@@ -7353,10 +7382,12 @@ fn open_browser(url: &str) -> std::io::Result<()> {
 
 /// POST /api/agents/dismiss_escalation
 async fn handle_api_dismiss_escalation(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let token = crate::security::bearer_from_headers(&headers);
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
     let conv_id = body["conversation_id"].as_str().unwrap_or("ephemeral");
     let module = body["module"].as_str().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
     let _principal = resolve_principal(&state, token).await?;
@@ -7395,10 +7426,12 @@ async fn resolve_agent_display_name(state: &AppState, uid: i64, agent_id: &str) 
 /// fires a single LLM chain call, returns JSON already in the response shape
 /// the clients expect.
 async fn llm_complete_inner(
+    headers: axum::http::HeaderMap,
     state: Arc<AppState>,
     body: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    let token = body["token"].as_str().ok_or("missing token".to_string())?;
+    let token = crate::security::bearer_from_headers(&headers);
+    if token.is_empty() { return Err("missing token".to_string()); }
     let principal = resolve_principal_scoped(&state, token, "mace")
         .await
         .map_err(|s| format!("auth failed: {}", s.as_u16()))?;
@@ -7480,9 +7513,10 @@ async fn llm_complete_inner(
 /// machine.
 async fn handle_api_llm_complete(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    match llm_complete_inner(state, body).await {
+    match llm_complete_inner(headers, state, body).await {
         Ok(v) => Ok(Json(v)),
         Err(_) => Err(axum::http::StatusCode::BAD_GATEWAY),
     }
@@ -7496,6 +7530,7 @@ async fn handle_api_llm_complete(
 /// 20-second Cerebras/Groq turn.
 async fn handle_api_llm_complete_stream(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> Result<axum::response::Response, axum::http::StatusCode> {
     use axum::response::IntoResponse;
@@ -7503,7 +7538,8 @@ async fn handle_api_llm_complete_stream(
     let state_c = state.clone();
     let stream = async_stream::stream! {
         let start = tokio::time::Instant::now();
-        let mut task = Box::pin(llm_complete_inner(state_c, body));
+        let headers_c = headers.clone();
+        let mut task = Box::pin(llm_complete_inner(headers_c, state_c, body));
         let mut ticker = tokio::time::interval(std::time::Duration::from_millis(500));
         ticker.tick().await; // skip the immediate first tick
         loop {
@@ -7548,9 +7584,9 @@ async fn handle_api_llm_complete_stream(
 
 async fn handle_scheduler_prefs_get(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
@@ -7596,10 +7632,11 @@ async fn handle_scheduler_prefs_get(
 // calls like `schPickTheme({theme:'garden'})` silently clobbered border,
 // work_hours, etc back to their defaults.
 async fn handle_scheduler_prefs_put(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
@@ -7682,9 +7719,9 @@ async fn handle_scheduler_prefs_put(
 
 async fn handle_scheduler_lists_get(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
@@ -7706,10 +7743,11 @@ async fn handle_scheduler_lists_get(
 }
 
 async fn handle_scheduler_lists_post(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let name = body["name"].as_str().unwrap_or("").trim().to_string();
@@ -7731,9 +7769,9 @@ async fn handle_scheduler_lists_post(
 
 async fn handle_scheduler_habits_get(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
@@ -7756,10 +7794,11 @@ async fn handle_scheduler_habits_get(
 }
 
 async fn handle_scheduler_habits_post(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let name = body["name"].as_str().unwrap_or("").trim().to_string();
@@ -7779,11 +7818,12 @@ async fn handle_scheduler_habits_post(
 }
 
 async fn handle_scheduler_habit_toggle(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Path(habit_id): axum::extract::Path<i64>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let date = body["date"].as_str().unwrap_or("").to_string();
@@ -7811,10 +7851,11 @@ async fn handle_scheduler_habit_toggle(
 }
 
 async fn handle_scheduler_approvals_get(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let status = params.get("status").map(|s| s.as_str()).unwrap_or("pending");
@@ -7849,11 +7890,12 @@ async fn handle_scheduler_approvals_get(
 }
 
 async fn handle_scheduler_approval_resolve(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<i64>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let approved = body["approved"].as_bool().unwrap_or(false);
@@ -7972,10 +8014,11 @@ async fn insert_approval(
 }
 
 async fn handle_scheduler_voice_create(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     // Accept either raw text (caller already transcribed) or a pointer
@@ -8004,10 +8047,11 @@ async fn handle_scheduler_voice_create(
 }
 
 async fn handle_scheduler_photo_create(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     // The client sends the image as base64 data URL under `image_data_url`
@@ -8047,10 +8091,11 @@ async fn handle_scheduler_photo_create(
 }
 
 async fn handle_scheduler_email_scan(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     // Gmail connector is wired against the same Google OAuth infrastructure
@@ -8062,10 +8107,11 @@ async fn handle_scheduler_email_scan(
 }
 
 async fn handle_scheduler_email_draft_reply(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let approval_id = body["approval_id"].as_i64().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
@@ -8116,10 +8162,11 @@ async fn handle_scheduler_email_draft_reply(
 }
 
 async fn handle_scheduler_email_send_reply(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let approval_id = body["approval_id"].as_i64().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
@@ -8146,9 +8193,9 @@ async fn handle_scheduler_email_send_reply(
 
 async fn handle_scheduler_stickers_get(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
@@ -8167,10 +8214,11 @@ async fn handle_scheduler_stickers_get(
 }
 
 async fn handle_scheduler_stickers_post(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let date = body["date"].as_str().unwrap_or("").to_string();
@@ -8192,9 +8240,9 @@ async fn handle_scheduler_stickers_post(
 async fn handle_scheduler_stickers_delete(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<i64>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
@@ -8210,9 +8258,9 @@ async fn handle_scheduler_stickers_delete(
 
 async fn handle_scheduler_m365_connect_url(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _principal = resolve_principal(&state, token).await?;
     match crate::tools::calendar::m365_auth_url(&state).await {
         Ok(url) => Ok(Json(serde_json::json!({ "url": url }))),
@@ -8234,9 +8282,9 @@ async fn handle_scheduler_m365_callback(
 
 async fn handle_scheduler_m365_calendars(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _p = resolve_principal(&state, token).await?;
     match crate::tools::calendar::m365_list_calendars(&state).await {
         Ok(list) => Ok(Json(serde_json::json!({ "calendars": list }))),
@@ -8245,10 +8293,11 @@ async fn handle_scheduler_m365_calendars(
 }
 
 async fn handle_scheduler_m365_subscriptions(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let subs = body["subscriptions"].as_array().cloned().unwrap_or_default();
@@ -8276,10 +8325,11 @@ async fn handle_scheduler_m365_subscriptions(
 }
 
 async fn handle_scheduler_m365_sync(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     match crate::tools::calendar::m365_sync_once(&state, uid).await {
@@ -8291,10 +8341,11 @@ async fn handle_scheduler_m365_sync(
 // ── T2 #9 — "Schedule my todos" ──────────────────────────────────────
 
 async fn handle_scheduler_schedule_todos(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     // Strategy: pull overdue/due-today todos, scan the next 7 days for free
@@ -8378,9 +8429,9 @@ async fn handle_scheduler_schedule_todos(
 
 async fn handle_scheduler_patterns_get(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
@@ -8421,11 +8472,12 @@ async fn handle_scheduler_patterns_get(
 }
 
 async fn handle_scheduler_pattern_dismiss(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<i64>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
@@ -8448,9 +8500,9 @@ async fn handle_scheduler_pattern_dismiss(
 async fn handle_scheduler_list_items_get(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(list_id): axum::extract::Path<i64>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
@@ -8474,11 +8526,12 @@ async fn handle_scheduler_list_items_get(
 }
 
 async fn handle_scheduler_list_items_post(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Path(list_id): axum::extract::Path<i64>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let text = body["text"].as_str().unwrap_or("").trim().to_string();
@@ -8507,9 +8560,9 @@ async fn handle_scheduler_list_items_post(
 async fn handle_scheduler_list_items_delete(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(item_id): axum::extract::Path<i64>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
@@ -8525,11 +8578,12 @@ async fn handle_scheduler_list_items_delete(
 }
 
 async fn handle_scheduler_list_items_toggle(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Path(item_id): axum::extract::Path<i64>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
@@ -8554,9 +8608,9 @@ async fn handle_scheduler_list_items_toggle(
 
 async fn handle_scheduler_meal_link_get(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
@@ -8575,10 +8629,11 @@ async fn handle_scheduler_meal_link_get(
 }
 
 async fn handle_scheduler_meal_link_post(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let meal_id = body["meal_list_id"].as_i64().unwrap_or(0);
@@ -8610,10 +8665,11 @@ async fn handle_scheduler_meal_link_post(
 }
 
 async fn handle_scheduler_meal_setup(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
@@ -8653,10 +8709,11 @@ async fn handle_scheduler_meal_setup(
 }
 
 async fn handle_scheduler_meal_add(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let meal = body["meal"].as_str().unwrap_or("").trim().to_string();
@@ -8748,9 +8805,9 @@ async fn handle_scheduler_meal_add(
 
 async fn handle_scheduler_school_feeds_get(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
@@ -8776,10 +8833,11 @@ async fn handle_scheduler_school_feeds_get(
 }
 
 async fn handle_scheduler_school_feeds_post(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let label = body["label"].as_str().unwrap_or("").trim().to_string();
@@ -8820,9 +8878,9 @@ async fn handle_scheduler_school_feeds_post(
 async fn handle_scheduler_school_feeds_delete(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<i64>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
@@ -8844,11 +8902,12 @@ async fn handle_scheduler_school_feeds_delete(
 }
 
 async fn handle_scheduler_school_feeds_sync(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<i64>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let imported = sync_one_school_feed(&state, uid, id).await.unwrap_or(0);
@@ -9182,9 +9241,9 @@ async fn cache_meeting_prep_card(state: &Arc<AppState>, uid: i64, event_id: i64,
 
 async fn handle_scheduler_meeting_prep_upcoming(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     // Upcoming events in the next 30 min — meetings only, so skip all-day.
@@ -9242,9 +9301,9 @@ async fn handle_scheduler_meeting_prep_upcoming(
 async fn handle_scheduler_meeting_prep_event(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(event_id): axum::extract::Path<i64>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
@@ -9697,13 +9756,11 @@ async fn handle_voice_transcribe(
 /// Body: `{ scope: "mace", ttl_secs: 86400, name?: "mace-session" }`
 /// Response: `{ token: "ocp_...", expires_at: <unix secs> }`
 async fn handle_api_mint_scoped_token(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"]
-        .as_str()
-        .or_else(|| body["authorization"].as_str())
-        .unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     // axum normally pulls the token from the Authorization header via the
     // extractor; this endpoint sticks with the body-style to match the rest
     // of the /api/* surface.
@@ -9743,11 +9800,13 @@ async fn handle_api_mint_scoped_token(
 /// without going through the full `/api/message` tool-loop path. Accepts
 /// `{role, content}` and an optional topic update.
 async fn handle_api_conversation_append(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Path(conv_id): axum::extract::Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let token = crate::security::bearer_from_headers(&headers);
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
     let _principal = resolve_principal_scoped(&state, token, "mace").await?;
     let role = body["role"].as_str().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
     let content = body["content"].as_str().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
@@ -9763,10 +9822,12 @@ async fn handle_api_conversation_append(
 
 /// POST /api/agents/handoff — carry context from main agent to a specialist.
 async fn handle_api_agent_handoff(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let token = crate::security::bearer_from_headers(&headers);
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
     let from_conv = body["from_conversation_id"].as_str().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
     let to_module = body["to_module"].as_str().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
     let context_count = body["context_messages"].as_u64().unwrap_or(6) as usize;
@@ -9820,10 +9881,12 @@ async fn handle_api_agent_handoff(
 
 /// POST /api/agents/reentry — summarize specialist session, carry back to main.
 async fn handle_api_agent_reentry(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let token = crate::security::bearer_from_headers(&headers);
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
     let specialist_conv = body["specialist_conversation_id"].as_str().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
     let main_conv = body["main_conversation_id"].as_str();
     let specialist_module = body["module"].as_str().unwrap_or("unknown");
@@ -9862,10 +9925,12 @@ async fn handle_api_agent_reentry(
 
 /// GET /api/voice/models — list the caller's voice models.
 async fn handle_api_voice_models_list(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    axum::extract::Query(_params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").cloned().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let token = crate::security::bearer_from_headers(&headers).to_string();
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
     let principal = resolve_principal(&state, &token).await?;
     let uid = principal.user_id();
 
@@ -9896,10 +9961,12 @@ async fn handle_api_voice_models_list(
 /// POST /api/voice/models — register a new voice model for the caller.
 /// Body: {"token", "wake_word", "satellite_id"?, "tts_sample_path"?}
 async fn handle_api_voice_models_create(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let token = crate::security::bearer_from_headers(&headers);
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
     let wake_word = body["wake_word"].as_str().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
     if wake_word.trim().is_empty() || wake_word.len() > 50 {
         return Err(axum::http::StatusCode::BAD_REQUEST);
@@ -9929,10 +9996,12 @@ async fn handle_api_voice_models_create(
 /// POST /api/voice/models/delete — remove a voice model by id.
 /// Body: {"token", "model_id"}
 async fn handle_api_voice_models_delete(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let token = crate::security::bearer_from_headers(&headers);
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
     let model_id = body["model_id"].as_i64().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
 
     let principal = resolve_principal(&state, token).await?;
@@ -9953,10 +10022,12 @@ async fn handle_api_voice_models_delete(
 
 /// GET /api/voice/settings — get house-level voice defaults.
 async fn handle_api_voice_settings_get(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    axum::extract::Query(_params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").cloned().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let token = crate::security::bearer_from_headers(&headers).to_string();
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
     let _principal = resolve_principal(&state, &token).await?;
 
     let db = state.db_path.clone();
@@ -9981,10 +10052,12 @@ async fn handle_api_voice_settings_get(
 /// PUT /api/voice/settings — update house-level voice defaults (admin only).
 /// Body: {"token", "key", "value"}
 async fn handle_api_voice_settings_set(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let token = crate::security::bearer_from_headers(&headers);
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
     let key = body["key"].as_str().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
     let value = body["value"].as_str().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
 
@@ -10016,10 +10089,12 @@ async fn handle_api_voice_settings_set(
 /// any todos or share any journal content — this is a read-only scan.
 /// Body: {"token", "conversation_id"}
 async fn handle_api_journal_extract_tasks(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let token = crate::security::bearer_from_headers(&headers);
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
     let conv_id = body["conversation_id"].as_str().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
 
     let principal = resolve_principal(&state, token).await?;
@@ -10060,10 +10135,12 @@ async fn handle_api_journal_extract_tasks(
 /// Only the task text travels — no journal context, no conversation reference.
 /// Body: {"token", "tasks": ["call the dentist", "order filters"]}
 async fn handle_api_journal_route_tasks(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let token = crate::security::bearer_from_headers(&headers);
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
     let tasks = body["tasks"].as_array().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
 
     let principal = resolve_principal(&state, token).await?;
@@ -10102,10 +10179,12 @@ async fn handle_api_journal_route_tasks(
 
 /// GET /api/memory/stats — per-agent memory statistics
 async fn handle_api_memory_stats(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    axum::extract::Query(_params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").cloned().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let token = crate::security::bearer_from_headers(&headers).to_string();
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
     let principal = resolve_principal(&state, &token).await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
@@ -10122,10 +10201,12 @@ async fn handle_api_memory_stats(
 
 /// POST /api/memory/export — export all memories to vault markdown files
 async fn handle_api_memory_export(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    axum::extract::Query(_params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").cloned().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let token = crate::security::bearer_from_headers(&headers).to_string();
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
     let principal = resolve_principal(&state, &token).await?;
     if principal.role() != "admin" { return Err(axum::http::StatusCode::FORBIDDEN); }
     let db = state.db_path.clone();
@@ -10143,10 +10224,12 @@ async fn handle_api_memory_export(
 
 /// POST /api/memory/prune — delete expired memories
 async fn handle_api_memory_prune(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    axum::extract::Query(_params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").cloned().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let token = crate::security::bearer_from_headers(&headers).to_string();
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
     let _principal = resolve_principal(&state, &token).await?;
     let db = state.db_path.clone();
     let pruned = tokio::task::spawn_blocking(move || {
@@ -10160,10 +10243,12 @@ async fn handle_api_memory_prune(
 /// GET /api/memory/all — full audit of all user's memories across agents.
 /// For the settings UI to render a browsable/searchable/deletable memory grid.
 async fn handle_api_memory_all(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    axum::extract::Query(_params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").cloned().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let token = crate::security::bearer_from_headers(&headers).to_string();
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
     let principal = resolve_principal(&state, &token).await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
@@ -10201,10 +10286,12 @@ async fn handle_api_memory_all(
 
 /// POST /api/memory/delete — delete a specific memory by id (user must own it).
 async fn handle_api_memory_delete(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let token = crate::security::bearer_from_headers(&headers);
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
     let memory_id = body["id"].as_i64().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
     let principal = resolve_principal(&state, token).await?;
     let uid = principal.user_id();
@@ -10224,11 +10311,13 @@ async fn handle_api_memory_delete(
 /// GET /api/tasks/{id} — poll a background task's status.
 /// Returns status + result when complete.
 async fn handle_api_task_poll(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    axum::extract::Query(_params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").cloned().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let token = crate::security::bearer_from_headers(&headers).to_string();
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
     let principal = resolve_principal(&state, &token).await?;
 
     match state.bg_tasks.get(&task_id, principal.user_id()).await {
@@ -10248,10 +10337,12 @@ async fn handle_api_task_poll(
 /// the caller's user_agents. Idempotent — safe to call repeatedly. Existing
 /// agents are not overwritten (INSERT OR IGNORE).
 async fn handle_api_agent_seed_defaults(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    axum::extract::Query(_params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").cloned().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let token = crate::security::bearer_from_headers(&headers).to_string();
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
     let principal = resolve_principal(&state, &token).await?;
     let uid = principal.user_id();
 
@@ -10274,10 +10365,12 @@ async fn handle_api_agent_seed_defaults(
 /// PUT /api/agents/rename — rename a user's agent display name.
 /// Body: {"token": "...", "agent_id": "main", "name": "MyAssistant"}
 async fn handle_api_agent_rename(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let token = crate::security::bearer_from_headers(&headers);
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
     let agent_id = body["agent_id"].as_str().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
     let new_name = body["name"].as_str().ok_or(axum::http::StatusCode::BAD_REQUEST)?;
     if new_name.trim().is_empty() || new_name.len() > 50 {
@@ -10311,10 +10404,12 @@ async fn handle_api_agent_rename(
 
 /// GET /api/agents/list — list the caller's agents with display names and roles.
 async fn handle_api_agent_list(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    axum::extract::Query(_params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").cloned().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let token = crate::security::bearer_from_headers(&headers).to_string();
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
     let principal = resolve_principal(&state, &token).await?;
     let uid = principal.user_id();
     let agents = state.users.list_user_agents(uid).await.unwrap_or_default();
@@ -10365,11 +10460,12 @@ fn slugify_agent_id(name: &str) -> String {
 /// Body: {token, display_name, description?, system_prompt?, is_main_thread?,
 ///        base_agent?, avatar_color?, agent_id?}
 async fn handle_api_agent_create(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let token = body["token"].as_str()
-        .ok_or((axum::http::StatusCode::UNAUTHORIZED, "missing token".into()))?;
+    let token = crate::security::bearer_from_headers(&headers);
+    if token.is_empty() { return Err((axum::http::StatusCode::UNAUTHORIZED, "missing token".into())); }
     let display_name = body["display_name"].as_str().unwrap_or("").trim().to_string();
     if display_name.is_empty() || display_name.len() > 60 {
         return Err((axum::http::StatusCode::BAD_REQUEST, "display_name required (1-60 chars)".into()));
@@ -10504,11 +10600,13 @@ async fn handle_api_agent_import(
 
 /// DELETE /api/agents/:agent_id — archive (remove) a user-owned agent.
 async fn handle_api_agent_delete(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Path(agent_id): axum::extract::Path<String>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    axum::extract::Query(_params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").cloned().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let token = crate::security::bearer_from_headers(&headers).to_string();
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
     let principal = resolve_principal(&state, &token).await?;
     let uid = principal.user_id();
     state.users.delete_user_agent(uid, &agent_id).await
@@ -10518,10 +10616,12 @@ async fn handle_api_agent_delete(
 
 /// GET /api/settings/preferences — return all per-user prefs as a {key: value} map.
 async fn handle_api_settings_prefs_get(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    axum::extract::Query(_params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").cloned().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let token = crate::security::bearer_from_headers(&headers).to_string();
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
     let principal = resolve_principal(&state, &token).await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
@@ -10542,10 +10642,12 @@ async fn handle_api_settings_prefs_get(
 
 /// PUT /api/settings/preferences — body: {token, key, value}. Upserts one pref.
 async fn handle_api_settings_prefs_put(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = body["token"].as_str().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let token = crate::security::bearer_from_headers(&headers);
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
     let key = body["key"].as_str().ok_or(axum::http::StatusCode::BAD_REQUEST)?.to_string();
     if key.is_empty() || key.len() > 100 { return Err(axum::http::StatusCode::BAD_REQUEST); }
     let value = body["value"].as_str().map(|s| s.to_string());
@@ -10568,10 +10670,12 @@ async fn handle_api_settings_prefs_put(
 /// GET /api/settings/export — aggregate the caller's non-secret config into
 /// a portable JSON blob for backup / migration / sharing.
 async fn handle_api_settings_export(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    axum::extract::Query(_params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").cloned().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let token = crate::security::bearer_from_headers(&headers).to_string();
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
     let principal = resolve_principal(&state, &token).await?;
     let uid = principal.user_id();
 
@@ -10624,11 +10728,12 @@ async fn handle_api_settings_export(
 /// to purge all memory — there's no "keep some" option. If this feels
 /// wrong for a given workflow, add a `scope` field to the request body.
 async fn handle_api_settings_wipe_memories(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let token = body["token"].as_str()
-        .ok_or((axum::http::StatusCode::UNAUTHORIZED, "missing token".into()))?;
+    let token = crate::security::bearer_from_headers(&headers);
+    if token.is_empty() { return Err((axum::http::StatusCode::UNAUTHORIZED, "missing token".into())); }
     let confirm = body["confirm"].as_str().unwrap_or("");
     if confirm != "wipe all memories" {
         return Err((axum::http::StatusCode::BAD_REQUEST,
@@ -10664,11 +10769,12 @@ async fn handle_api_settings_wipe_memories(
 /// server-wide config (LLM providers, gateway port) or other users' data.
 /// Body: {token, confirm: "factory reset"}.
 async fn handle_api_settings_factory_reset(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let token = body["token"].as_str()
-        .ok_or((axum::http::StatusCode::UNAUTHORIZED, "missing token".into()))?;
+    let token = crate::security::bearer_from_headers(&headers);
+    if token.is_empty() { return Err((axum::http::StatusCode::UNAUTHORIZED, "missing token".into())); }
     let confirm = body["confirm"].as_str().unwrap_or("");
     if confirm != "factory reset" {
         return Err((axum::http::StatusCode::BAD_REQUEST,
@@ -10733,10 +10839,12 @@ async fn handle_api_settings_factory_reset(
 /// shown on the Settings → Integrations pages. Used to drive the status
 /// pills (connected / partially configured / not configured / error).
 async fn handle_api_settings_integration_status(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    axum::extract::Query(_params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let token = params.get("token").cloned().ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let token = crate::security::bearer_from_headers(&headers).to_string();
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
     let _principal = resolve_principal(&state, &token).await?;
 
     // Telegram — configured if either the gateway config has a token OR
