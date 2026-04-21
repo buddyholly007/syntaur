@@ -527,4 +527,191 @@ mod tests {
             );
         });
     }
+
+    /// Full-stack roundtrip — the plan's Phase G-2 path, proving a real
+    /// device flip lands on the module-wide event bus:
+    ///
+    /// 1. Temp DB with users + smart_home_credentials + smart_home_devices
+    /// 2. Seed a Tasmota device row (driver=mqtt, external_id=tasmota_topic:test_plug)
+    /// 3. Ephemeral EmbeddedBroker, credential pointing at it
+    /// 4. MqttSupervisor::spawn(db_path) — starts one MqttSession
+    /// 5. External rumqttc publisher sends `stat/test_plug/POWER ON`
+    /// 6. Subscriber on events::bus() receives DeviceStateChanged within 5s,
+    ///    source="tasmota", device_id matching the seeded row
+    ///
+    /// Caveats:
+    ///   - events::bus() is a process-global OnceLock; other tests may
+    ///     pollute it. We subscribe then drain anything already queued
+    ///     before the publish, then match by device_id + source.
+    ///   - Supervisor runs as a detached tokio task; test keeps the
+    ///     runtime alive long enough for its connect → subscribe →
+    ///     poll → StateCache.apply_state chain to complete.
+    #[test]
+    fn full_stack_session_emits_device_state_changed() {
+        use crate::crypto;
+        use crate::smart_home::credentials;
+        use crate::smart_home::drivers::mqtt::MqttSupervisor;
+        use crate::smart_home::events::{self, SmartHomeEvent};
+        use rumqttc::{AsyncClient, MqttOptions, QoS};
+        use std::time::Duration;
+        use tempfile::TempDir;
+        use tokio::time::timeout;
+
+        // Broker first — we need its ephemeral port for the credential URL.
+        let mut broker_opt = None;
+        let mut bind = None;
+        for _ in 0..3 {
+            let addr = claim_ephemeral_port();
+            if let Some(b) = EmbeddedBroker::spawn(addr) {
+                broker_opt = Some(b);
+                bind = Some(addr);
+                break;
+            }
+        }
+        let _broker = broker_opt.expect("embedded broker spawn (after retries)");
+        let addr = bind.unwrap();
+
+        let tmp = TempDir::new().expect("tempdir");
+        let data_dir = tmp.path().to_path_buf();
+        let key = crypto::load_or_create_key(&data_dir).expect("master key");
+        let db_path = data_dir.join("index.db");
+
+        // Minimal schema — only the tables the supervisor + state cache touch.
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE users (id INTEGER PRIMARY KEY);
+                 INSERT INTO users (id) VALUES (1);
+                 CREATE TABLE smart_home_devices (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    room_id INTEGER,
+                    driver TEXT NOT NULL,
+                    external_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    capabilities_json TEXT NOT NULL DEFAULT '{}',
+                    state_json TEXT NOT NULL DEFAULT '{}',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    last_seen_at INTEGER,
+                    created_at INTEGER NOT NULL,
+                    UNIQUE(user_id, driver, external_id)
+                 );
+                 CREATE TABLE smart_home_credentials (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    provider TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    secret_encrypted TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at INTEGER NOT NULL
+                 );
+                 INSERT INTO smart_home_devices
+                    (user_id, driver, external_id, name, kind, created_at)
+                  VALUES
+                    (1, 'mqtt', 'tasmota_topic:test_plug', 'Test Plug', 'switch', 0);",
+            )
+            .unwrap();
+
+            let secret = serde_json::json!({
+                "url": format!("mqtt://{}", addr)
+            });
+            credentials::upsert(&conn, &key, 1, "mqtt", "default", &secret, None)
+                .expect("upsert credential");
+        }
+
+        let device_id: i64 = {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.query_row(
+                "SELECT id FROM smart_home_devices WHERE external_id = 'tasmota_topic:test_plug'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            // Broker accept-loop readiness.
+            for _ in 0..40 {
+                if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(50))
+                    .is_ok()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+
+            // Subscribe to the bus BEFORE the supervisor starts so we
+            // don't race the first DeviceStateChanged emission.
+            let mut rx = events::bus().subscribe();
+
+            // Start the supervisor. Gives us a session connected to
+            // the embedded broker, subscribed to every v1 dialect topic.
+            let _sup = MqttSupervisor::spawn(db_path).await;
+
+            // Give the session a beat to connect + subscribe. Two polls
+            // at 250ms each is usually enough on a quiet VM.
+            tokio::time::sleep(Duration::from_millis(600)).await;
+
+            // External publisher — not the supervisor — sends the
+            // Tasmota POWER frame. Simulates the real wire exchange.
+            let mut pub_opts =
+                MqttOptions::new("ext-pub", addr.ip().to_string(), addr.port());
+            pub_opts.set_keep_alive(Duration::from_secs(5));
+            let (pub_client, mut pub_loop) = AsyncClient::new(pub_opts, 32);
+            tokio::spawn(async move {
+                for _ in 0..60 {
+                    let _ = timeout(Duration::from_millis(200), pub_loop.poll()).await;
+                }
+            });
+            pub_client
+                .publish(
+                    "stat/test_plug/POWER",
+                    QoS::AtLeastOnce,
+                    false,
+                    b"ON".to_vec(),
+                )
+                .await
+                .expect("publish POWER");
+
+            // Wait for DeviceStateChanged on the bus. Ignore noise
+            // emitted by other tests sharing the global bus.
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            let mut matched = false;
+            while tokio::time::Instant::now() < deadline {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                match timeout(remaining, rx.recv()).await {
+                    Ok(Ok(SmartHomeEvent::DeviceStateChanged {
+                        user_id,
+                        device_id: id,
+                        source,
+                        state,
+                    })) => {
+                        if user_id == 1 && id == device_id && source == "tasmota" {
+                            // Verify the merged state carries our frame.
+                            assert_eq!(
+                                state["relays"]["POWER"], "ON",
+                                "state: {}",
+                                state
+                            );
+                            matched = true;
+                            break;
+                        }
+                    }
+                    Ok(Ok(_other)) => continue,
+                    Ok(Err(_lag_or_closed)) => continue,
+                    Err(_timeout) => break,
+                }
+            }
+            assert!(
+                matched,
+                "did not observe DeviceStateChanged for device_id={} within 5s",
+                device_id
+            );
+        });
+    }
 }
