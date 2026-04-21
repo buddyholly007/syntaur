@@ -323,6 +323,75 @@ impl MqttSupervisor {
             let _ = tx.send(());
         }
     }
+
+    /// Publish an arbitrary retained frame to every active session.
+    /// Used by the HA Discovery publisher (Phase F) which needs to
+    /// reach whatever broker the user's session is connected to —
+    /// embedded 1884 or their upstream Mosquitto. Returns the number
+    /// of sessions the publish was enqueued on.
+    pub async fn publish_retained(
+        &self,
+        topic: impl Into<String>,
+        payload: impl Into<Vec<u8>>,
+    ) -> usize {
+        let topic = topic.into();
+        let payload = payload.into();
+        let enc = super::command::EncodedCommand {
+            topic,
+            payload,
+            qos: rumqttc::QoS::AtLeastOnce,
+            retain: true,
+        };
+        let handles = self.handles.read().await;
+        let mut count = 0usize;
+        for h in handles.iter() {
+            if h.cmd_tx
+                .send(SessionCommand::Publish(enc.clone()))
+                .await
+                .is_ok()
+            {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Snapshot of the device rows the publisher should emit HA
+    /// Discovery configs for. Run off a spawn_blocking path so the
+    /// caller (an async init task) doesn't block on SQLite.
+    pub async fn list_commissioned_devices(
+        &self,
+    ) -> Result<Vec<(i64, i64, String, String, String, String)>, String> {
+        let db = self.db_path.clone();
+        tokio::task::spawn_blocking(move || -> Result<_, String> {
+            let conn = Connection::open(&db).map_err(|e| e.to_string())?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, user_id, name, kind, driver, external_id
+                       FROM smart_home_devices",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                        r.get::<_, String>(5)?,
+                    ))
+                })
+                .map_err(|e| e.to_string())?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r.map_err(|e| e.to_string())?);
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| format!("join: {e}"))?
+    }
 }
 
 fn data_dir_for(db_path: &Path) -> PathBuf {

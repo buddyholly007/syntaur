@@ -39,6 +39,7 @@ pub mod broker;
 pub mod client;
 pub mod command;
 pub mod dialects;
+pub mod publisher;
 pub mod state;
 pub mod supervisor;
 

@@ -83,8 +83,18 @@ pub async fn init(db_path: std::path::PathBuf) -> Result<(), String> {
     // `smart_home_credentials` row (provider='mqtt'), plus a legacy
     // `SMART_HOME_MQTT_URL` fallback. Never fails `init`: bad/missing
     // credentials log a warning and no sessions spawn.
-    let mqtt_supervisor = drivers::mqtt::MqttSupervisor::spawn(db_path).await;
-    drivers::mqtt::install_supervisor(mqtt_supervisor);
+    let mqtt_supervisor = drivers::mqtt::MqttSupervisor::spawn(db_path.clone()).await;
+    drivers::mqtt::install_supervisor(mqtt_supervisor.clone());
+
+    // Phase F-1 Home Assistant MQTT-Discovery publisher — retained
+    // config frames so HA/openHAB auto-surface every Syntaur device,
+    // plus state republish on every DeviceStateChanged. Detached task
+    // with a ~2s warm-up so the supervisor's sessions have a chance
+    // to connect before the first config publish lands.
+    let _ha_discovery = std::sync::Arc::new(
+        drivers::mqtt::publisher::HADiscoveryPublisher::new(mqtt_supervisor, db_path),
+    )
+    .spawn();
 
     log::info!(
         "[smart_home] module initialized — event bus + automation + diagnostics + energy + mqtt engines spawned"
