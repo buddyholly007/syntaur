@@ -69,11 +69,18 @@ pub async fn init(db_path: std::path::PathBuf) -> Result<(), String> {
         std::sync::Arc::new(diagnostics::DiagnosticsEngine::new(db_path.clone()));
     let _diag_handle = diag_engine.spawn();
 
-    let energy_engine = std::sync::Arc::new(energy::EnergyEngine::new(db_path));
+    let energy_engine = std::sync::Arc::new(energy::EnergyEngine::new(db_path.clone()));
     let _energy_handle = energy_engine.spawn();
 
+    // Phase C MQTT supervisor — one long-running rumqttc session per
+    // `smart_home_credentials` row (provider='mqtt'), plus a legacy
+    // `SMART_HOME_MQTT_URL` fallback. Never fails `init`: bad/missing
+    // credentials log a warning and no sessions spawn.
+    let mqtt_supervisor = drivers::mqtt::MqttSupervisor::spawn(db_path).await;
+    drivers::mqtt::install_supervisor(mqtt_supervisor);
+
     log::info!(
-        "[smart_home] module initialized — event bus + automation + diagnostics + energy engines spawned"
+        "[smart_home] module initialized — event bus + automation + diagnostics + energy + mqtt engines spawned"
     );
     Ok(())
 }

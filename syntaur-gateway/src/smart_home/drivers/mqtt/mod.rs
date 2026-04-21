@@ -2,44 +2,80 @@
 //! (from Phase D) control, via a user-supplied broker or Syntaur's own
 //! in-process `rumqttd` (Phase E, embedded-by-default per plan §8 Q1).
 //!
-//! v1 scan behavior: connect, subscribe to the topic set every
-//! registered dialect asks for, parse retained frames through
-//! [`dialects::DialectRouter`] into [`ScanCandidate`]s for a short
-//! window, disconnect. If the broker is unreachable or no config is
-//! present, return empty (graceful degrade — Matter / Wi-Fi / etc.
-//! scans must not be poisoned by a flaky broker).
+//! Runtime path (Phase C): the [`MqttSupervisor`] hooks off
+//! `smart_home::init`, reads every `smart_home_credentials` row with
+//! `provider='mqtt'`, and spawns one long-running [`MqttSession`] per
+//! row. Dialect parses produce [`dialects::DialectMessage`] variants
+//! that land in the [`StateCache`] hash-diff layer and fire
+//! `SmartHomeEvent::DeviceStateChanged` on the module-wide bus.
+//!
+//! Scan path: when the supervisor is running, `scan()` returns the
+//! in-memory discovery snapshot the long-running session has already
+//! populated — no second broker connection. If no supervisor is set
+//! (tests, minimal deployments), `scan()` falls back to the legacy
+//! one-shot `SMART_HOME_MQTT_URL` env-var path.
 //!
 //! Supported dialects (see `dialects/` for each):
-//!   - `ha`           — Home Assistant MQTT discovery
-//!   - `tasmota`      — Tasmota discovery (extends to STATE/SENSOR in Phase B4)
+//!   - `tasmota`      — discovery + STATE/SENSOR/POWER/LWT runtime
 //!   - `shelly_gen1`  — `shellies/<id>/announce`
+//!   - `shelly_gen2`  — `shellyplus<id>/online` + RPC (Phase D commands)
 //!   - `esphome`      — `esphome/discover/<host>`
+//!   - `zigbee2mqtt`  — `bridge/devices` inventory (per-device runtime in Phase B follow-on)
+//!   - `openmqttgateway` — BLE/RF/IR bridge output
+//!   - `ha_discovery` — Home Assistant MQTT discovery (fallback)
 //!
-//! Phase B additions (coming):
-//!   - `shelly_gen2`       — RPC-over-MQTT for Plus/Pro/Gen3 devices
-//!   - `zigbee2mqtt`       — bridge/devices inventory + per-device state
-//!   - `openmqttgateway`   — BLE/RF/IR bridge output
-//!
-//! Configuration in v1: `SMART_HOME_MQTT_URL=mqtt://[user:pass@]host[:port]`.
-//! Phase A's `smart_home_credentials` table supersedes this —
-//! the supervisor (Phase C) reads encrypted rows from there and the
-//! env var stays as a last-resort dev-mode fallback.
+//! Configuration: `smart_home_credentials` (provider='mqtt') is the
+//! canonical source. `SMART_HOME_MQTT_URL` is honored as a deprecated
+//! fallback and logged at warn level.
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS};
 
 use crate::smart_home::scan::ScanCandidate;
 
+pub mod client;
 pub mod dialects;
+pub mod state;
+pub mod supervisor;
 
 use dialects::{DialectMessage, DialectRouter};
+pub use supervisor::MqttSupervisor;
 
 const DEFAULT_SCAN_SECONDS: u64 = 5;
+/// Widened from rumqttc's 32 default so retained-message catch-up on
+/// reconnect doesn't back up the event loop. See
+/// [`client::EVENT_LOOP_CAPACITY`] — same rationale for the one-shot
+/// scan path, where bridge/devices arrays + HA Discovery retention can
+/// exceed 32 in a single cycle.
+const SCAN_EVENT_LOOP_CAPACITY: usize = 1024;
 
-/// Top-level scan entry. Returns empty if no broker is configured or
-/// the connection fails.
+/// Global supervisor handle, set by `smart_home::init` → `MqttSupervisor::spawn`.
+/// `scan()` prefers this when present.
+static SUPERVISOR: OnceLock<std::sync::Arc<MqttSupervisor>> = OnceLock::new();
+
+/// Install the supervisor handle. Called once from `smart_home::init`.
+/// Subsequent calls are no-ops.
+pub fn install_supervisor(sup: std::sync::Arc<MqttSupervisor>) {
+    let _ = SUPERVISOR.set(sup);
+}
+
+/// Top-level scan entry. If a `MqttSupervisor` is running, returns its
+/// in-memory discovery snapshot (no second connection). Otherwise falls
+/// back to a legacy one-shot scan against `SMART_HOME_MQTT_URL`.
 pub async fn scan() -> Vec<ScanCandidate> {
+    if let Some(sup) = SUPERVISOR.get() {
+        let snap = sup.scan_snapshot().await;
+        if !snap.is_empty() {
+            return snap;
+        }
+        // Empty snapshot usually means the subscriber hasn't received
+        // retained discovery yet (cold boot). Fall through to the
+        // one-shot scan — it's a fixed 5s stall but gives the user
+        // something when they press "Scan" before the subscriber has
+        // warmed up.
+    }
     let Some(opts) = mqtt_options_from_env() else {
         log::debug!("[smart_home::mqtt] SMART_HOME_MQTT_URL not set, skipping scan");
         return Vec::new();
@@ -51,7 +87,7 @@ pub async fn scan() -> Vec<ScanCandidate> {
 /// can exercise a specific broker without going through env.
 pub async fn scan_with_options(opts: MqttOptions, window: Duration) -> Vec<ScanCandidate> {
     let router = DialectRouter::v1();
-    let (client, mut event_loop) = AsyncClient::new(opts, 32);
+    let (client, mut event_loop) = AsyncClient::new(opts, SCAN_EVENT_LOOP_CAPACITY);
 
     for topic in router.subscribe_topics() {
         if let Err(e) = client.subscribe(topic, QoS::AtMostOnce).await {
