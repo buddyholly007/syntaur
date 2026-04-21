@@ -25,6 +25,7 @@ use std::sync::Arc;
 use rusqlite::{params, Connection};
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 
+use super::bridge::{Bridge, BridgeConfig};
 use super::client::{MqttSession, SessionCommand, SessionConfig};
 use super::command::{commands_from_state_patch, MqttCommand};
 use super::dialects::DialectRouter;
@@ -153,6 +154,26 @@ impl MqttSupervisor {
                 });
             }
             let counters = self.stats.session(cfg.user_id, &cfg.label).await;
+
+            // Optional upstream bridge: if the credential carries a
+            // `bridge_to` URL, one-way mirror HA Discovery + Syntaur
+            // state topics from this session's broker to the user's
+            // upstream broker. See drivers/mqtt/bridge.rs.
+            if let Some(upstream_url) = cfg.bridge_to.clone() {
+                let (bridge_shutdown_tx, bridge_shutdown_rx) = oneshot::channel::<()>();
+                {
+                    let mut guard = self.shutdowns.lock().await;
+                    guard.push(bridge_shutdown_tx);
+                }
+                let bridge_cfg = BridgeConfig {
+                    label: format!("bridge-{}-{}", cfg.user_id, cfg.label),
+                    downstream_url: cfg.url.clone(),
+                    upstream_url,
+                };
+                let bridge = Bridge::new(bridge_cfg, bridge_shutdown_rx);
+                tokio::spawn(bridge.run());
+            }
+
             let session = MqttSession::new(
                 cfg,
                 self.router.clone(),

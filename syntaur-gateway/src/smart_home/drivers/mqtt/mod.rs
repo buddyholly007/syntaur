@@ -35,6 +35,7 @@ use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS};
 
 use crate::smart_home::scan::ScanCandidate;
 
+pub mod bridge;
 pub mod broker;
 pub mod client;
 pub mod command;

@@ -68,6 +68,10 @@ pub struct SessionConfig {
     pub label: String,
     /// TLS root CA for self-signed brokers. Plaintext PEM.
     pub ca_pem: Option<String>,
+    /// Optional upstream broker to mirror Syntaur-relevant topics to.
+    /// When present the supervisor spawns a `Bridge` alongside the
+    /// session — one-way downstream → upstream for v1.
+    pub bridge_to: Option<String>,
 }
 
 impl SessionConfig {
@@ -82,12 +86,18 @@ impl SessionConfig {
             .get("ca_pem")
             .and_then(|v| v.as_str())
             .map(str::to_string);
+        let bridge_to = secret
+            .get("bridge_to")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         Some(Self {
             user_id,
             url,
             client_id,
             label: label.to_string(),
             ca_pem,
+            bridge_to,
         })
     }
 }
@@ -433,6 +443,7 @@ mod tests {
             client_id: "x".into(),
             label: "x".into(),
             ca_pem: None,
+            bridge_to: None,
         };
         // We can't read the port back from MqttOptions easily in 0.25,
         // but a successful build means host parsing succeeded.
