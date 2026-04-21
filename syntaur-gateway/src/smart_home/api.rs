@@ -294,14 +294,58 @@ pub async fn handle_control(
 
     match device.driver.as_str() {
         "matter" => control_matter(&device, &body.state).await,
+        "mqtt" => control_mqtt(&device, &body.state).await,
         other => Err((
             StatusCode::NOT_IMPLEMENTED,
             Json(json!({
                 "error": format!("driver '{}' not wired yet", other),
-                "hint": "Non-Matter driver control lands per the plan calendar (Zigbee week 5, BLE week 7, MQTT week 8, cameras week 9, cloud adapters week 11, Z-Wave week 13)."
+                "hint": "Non-Matter/MQTT driver control lands per the plan calendar (Zigbee week 5, BLE week 7, cameras week 9, cloud adapters week 11, Z-Wave week 13)."
             })),
         )),
     }
+}
+
+async fn control_mqtt(
+    device: &devices::Device,
+    desired: &serde_json::Value,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let dispatched = crate::smart_home::drivers::mqtt::dispatch_command(
+        device.user_id,
+        device.id,
+        desired,
+    )
+    .await
+    .map_err(|e| {
+        // No installed supervisor / driver mismatch → 501 so the UI can
+        // hint at setup. Everything else → 500 as a real dispatch fault.
+        if e.contains("not installed") {
+            (
+                StatusCode::NOT_IMPLEMENTED,
+                Json(json!({
+                    "error": "mqtt supervisor not running",
+                    "hint": "Add an MQTT broker in settings → smart_home_credentials (provider='mqtt')."
+                })),
+            )
+        } else {
+            err_500(format!("mqtt control: {e}"))
+        }
+    })?;
+
+    // Optimistic state echo — automation + dashboard update without
+    // waiting for the broker's own retained state publish to come back.
+    crate::smart_home::events::publish(
+        crate::smart_home::events::SmartHomeEvent::DeviceStateChanged {
+            user_id: device.user_id,
+            device_id: device.id,
+            state: desired.clone(),
+            source: "mqtt".to_string(),
+        },
+    );
+    Ok(Json(json!({
+        "ok": true,
+        "driver": "mqtt",
+        "dispatched": dispatched
+    })))
 }
 
 async fn control_matter(

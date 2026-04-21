@@ -601,8 +601,38 @@ impl AutomationEngine {
         .map_err(|e| format!("join: {e}"))??;
 
         match driver.as_str() {
+            "mqtt" => {
+                // Route through the running MqttSupervisor. When no
+                // supervisor is installed (tests, disabled smart_home)
+                // degrade to the historical log-only stub instead of
+                // failing the automation — a missing driver shouldn't
+                // kill the whole rule's run.
+                match crate::smart_home::drivers::mqtt::dispatch_command(
+                    user_id, device_id, &state,
+                )
+                .await
+                {
+                    Ok(n) => {
+                        log::info!(
+                            "[smart_home::automation] SetDevice(mqtt) device_id={} dispatched={} publishes",
+                            device_id, n
+                        );
+                        // Optimistic echo so listeners update before
+                        // the broker's own state publish comes back.
+                        crate::smart_home::events::publish(
+                            crate::smart_home::events::SmartHomeEvent::DeviceStateChanged {
+                                user_id,
+                                device_id,
+                                state: state.clone(),
+                                source: "mqtt".into(),
+                            },
+                        );
+                        Ok(())
+                    }
+                    Err(e) => Err(format!("mqtt dispatch: {e}")),
+                }
+            }
             // Per-driver arms land with each driver's control path:
-            //   "mqtt"   => Phase D of the MQTT plan
             //   "matter" => v1.1 Matter Controller cutover
             //   "zwave"  => Track D real-device bring-up
             //   "wifi_lan" / "ble" / "camera" / "cloud_*" — as they wire.
