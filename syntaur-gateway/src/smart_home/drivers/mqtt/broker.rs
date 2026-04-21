@@ -761,6 +761,321 @@ mod tests {
         });
     }
 
+    /// Chaos test — opt-in reconnect validation. Runs when
+    /// `SYNTAUR_CHAOS=1` is set (so default `cargo test` stays
+    /// hermetic and doesn't spend ~15s per run).
+    ///
+    /// Shape: session → TCP proxy → broker. We control the proxy's
+    /// lifecycle so we can simulate broker outage without touching
+    /// rumqttd (which has no graceful shutdown API in 0.20).
+    ///
+    ///   1. Spawn broker on ephemeral port B.
+    ///   2. Spawn proxy on ephemeral port P that forwards to B.
+    ///   3. Seed DB + credentials pointing session at P.
+    ///   4. Start supervisor. Wait for the session's first successful
+    ///      connect (counter `connected_since > 0`).
+    ///   5. Kill the proxy (drops every live connection + refuses new).
+    ///   6. Wait for the session to notice — reconnects_total
+    ///      increments while proxy is down.
+    ///   7. Restart the proxy on the same port.
+    ///   8. Wait up to 10s for the session to reconnect (connected_since
+    ///      refreshes to a newer timestamp).
+    ///   9. Publish a fresh frame through a separate client. Assert
+    ///      the session's `messages_in_total` increments after reconnect
+    ///      — proves subscriptions were re-issued.
+    #[test]
+    fn chaos_session_reconnects_after_proxy_kill() {
+        use crate::crypto;
+        use crate::smart_home::credentials;
+        use crate::smart_home::drivers::mqtt::MqttSupervisor;
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+        use tempfile::TempDir;
+        use tokio::io::copy_bidirectional;
+        use tokio::net::{TcpListener, TcpStream};
+        use tokio::sync::oneshot;
+
+        if std::env::var("SYNTAUR_CHAOS").ok().as_deref() != Some("1") {
+            eprintln!("SYNTAUR_CHAOS not set — skipping chaos test");
+            return;
+        }
+
+        // Broker + proxy ports separately. Retry on TOCTOU.
+        let mut broker_opt = None;
+        let mut broker_addr = None;
+        for _ in 0..3 {
+            let addr = claim_ephemeral_port();
+            if let Some(b) = EmbeddedBroker::spawn(addr) {
+                broker_opt = Some(b);
+                broker_addr = Some(addr);
+                break;
+            }
+        }
+        let _broker = broker_opt.expect("broker spawn");
+        let broker_addr = broker_addr.unwrap();
+
+        // Run the proxy + supervisor + chaos dance on a tokio runtime.
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(2)
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            // Bring broker up first.
+            for _ in 0..40 {
+                if std::net::TcpStream::connect_timeout(
+                    &broker_addr,
+                    Duration::from_millis(50),
+                )
+                .is_ok()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+
+            let proxy_addr = claim_ephemeral_port();
+            let (proxy_shutdown_tx_a, proxy_shutdown_rx_a) = oneshot::channel::<()>();
+            let proxy_a = tokio::spawn(run_proxy(
+                proxy_addr,
+                broker_addr,
+                proxy_shutdown_rx_a,
+            ));
+            tokio::time::sleep(Duration::from_millis(200)).await;
+
+            // Temp DB + credentials pointing at PROXY (not broker).
+            let tmp = TempDir::new().unwrap();
+            let data_dir = tmp.path().to_path_buf();
+            let key = crypto::load_or_create_key(&data_dir).unwrap();
+            let db_path = data_dir.join("index.db");
+            {
+                let conn = rusqlite::Connection::open(&db_path).unwrap();
+                conn.execute_batch(
+                    "CREATE TABLE users (id INTEGER PRIMARY KEY);
+                     INSERT INTO users (id) VALUES (1);
+                     CREATE TABLE smart_home_devices (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER NOT NULL, room_id INTEGER,
+                        driver TEXT NOT NULL, external_id TEXT NOT NULL,
+                        name TEXT NOT NULL, kind TEXT NOT NULL,
+                        capabilities_json TEXT NOT NULL DEFAULT '{}',
+                        state_json TEXT NOT NULL DEFAULT '{}',
+                        metadata_json TEXT NOT NULL DEFAULT '{}',
+                        last_seen_at INTEGER,
+                        created_at INTEGER NOT NULL,
+                        UNIQUE(user_id, driver, external_id)
+                     );
+                     CREATE TABLE smart_home_credentials (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER NOT NULL, provider TEXT NOT NULL,
+                        label TEXT NOT NULL, secret_encrypted TEXT NOT NULL,
+                        metadata_json TEXT NOT NULL DEFAULT '{}',
+                        created_at INTEGER NOT NULL
+                     );",
+                )
+                .unwrap();
+                let secret = serde_json::json!({
+                    "url": format!("mqtt://{}", proxy_addr)
+                });
+                credentials::upsert(&conn, &key, 1, "mqtt", "chaos", &secret, None)
+                    .unwrap();
+            }
+
+            let sup = MqttSupervisor::spawn(db_path).await;
+            // Wait for the first successful connect.
+            let mut first_connected_at: i64 = 0;
+            for _ in 0..60 {
+                let snap = sup.stats_snapshot().await;
+                if let Some(s) = snap.sessions.first() {
+                    if let Some(ts) = s.connected_since {
+                        first_connected_at = ts;
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            assert!(
+                first_connected_at > 0,
+                "session never established initial connection"
+            );
+            eprintln!("[chaos] session up, connected_since={}", first_connected_at);
+
+            // Kill the proxy. Session should notice broker-gone and
+            // enter the reconnect loop.
+            let _ = proxy_shutdown_tx_a.send(());
+            let _ = proxy_a.await;
+            eprintln!("[chaos] proxy down");
+
+            // rumqttc keepalive is 30s (hardcoded in mqtt_options_from_cfg).
+            // When the proxy drops the TCP connection, the session won't
+            // notice until the next keepalive ping times out — so give
+            // the poll loop up to 45s to catch up. Chaos tests run long
+            // by design.
+            let mut reconnects_after_kill: u64 = 0;
+            for _ in 0..90 {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let snap = sup.stats_snapshot().await;
+                if let Some(s) = snap.sessions.first() {
+                    if s.reconnects_total > 0 {
+                        reconnects_after_kill = s.reconnects_total;
+                        break;
+                    }
+                }
+            }
+            assert!(
+                reconnects_after_kill > 0,
+                "reconnects_total never incremented while proxy was down"
+            );
+            eprintln!(
+                "[chaos] reconnects_total={} while proxy down",
+                reconnects_after_kill
+            );
+
+            // Restart proxy.
+            let (proxy_shutdown_tx_b, proxy_shutdown_rx_b) = oneshot::channel::<()>();
+            let proxy_b = tokio::spawn(run_proxy(
+                proxy_addr,
+                broker_addr,
+                proxy_shutdown_rx_b,
+            ));
+            tokio::time::sleep(Duration::from_millis(500)).await;
+
+            // Poll for session to successfully reconnect — connected_since
+            // refreshes to a timestamp AFTER first_connected_at.
+            let mut reconnected_at: i64 = 0;
+            for _ in 0..40 {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let snap = sup.stats_snapshot().await;
+                if let Some(s) = snap.sessions.first() {
+                    if let Some(ts) = s.connected_since {
+                        if ts > first_connected_at {
+                            reconnected_at = ts;
+                            break;
+                        }
+                    }
+                }
+            }
+            assert!(
+                reconnected_at > first_connected_at,
+                "session did not re-establish connected_since after proxy restarted"
+            );
+            eprintln!(
+                "[chaos] session reconnected, connected_since={} (delta={}s)",
+                reconnected_at,
+                reconnected_at - first_connected_at
+            );
+
+            // Publish a frame through a SEPARATE client directly to the
+            // broker (bypassing the proxy to avoid a second restart window
+            // timing issue). The session's subscribe should receive it if
+            // subscriptions were re-issued on reconnect.
+            let msgs_before = sup
+                .stats_snapshot()
+                .await
+                .sessions
+                .first()
+                .map(|s| s.messages_in_total)
+                .unwrap_or(0);
+            use rumqttc::{AsyncClient, MqttOptions, QoS};
+            let mut opts = MqttOptions::new(
+                "chaos-pub",
+                broker_addr.ip().to_string(),
+                broker_addr.port(),
+            );
+            opts.set_keep_alive(Duration::from_secs(5));
+            let (pub_client, mut pub_loop) = AsyncClient::new(opts, 16);
+            tokio::spawn(async move {
+                for _ in 0..20 {
+                    let _ = tokio::time::timeout(
+                        Duration::from_millis(200),
+                        pub_loop.poll(),
+                    )
+                    .await;
+                }
+            });
+            // Use a Tasmota-style topic the session already subscribed to.
+            pub_client
+                .publish(
+                    "stat/chaos-plug/POWER",
+                    QoS::AtLeastOnce,
+                    false,
+                    b"ON".to_vec(),
+                )
+                .await
+                .unwrap();
+            for _ in 0..20 {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let n = sup
+                    .stats_snapshot()
+                    .await
+                    .sessions
+                    .first()
+                    .map(|s| s.messages_in_total)
+                    .unwrap_or(0);
+                if n > msgs_before {
+                    eprintln!(
+                        "[chaos] post-reconnect messages_in_total went {}→{}",
+                        msgs_before, n
+                    );
+                    let _ = proxy_shutdown_tx_b.send(());
+                    let _ = proxy_b.await;
+                    return;
+                }
+            }
+            let _ = proxy_shutdown_tx_b.send(());
+            let _ = proxy_b.await;
+            panic!(
+                "session never received a new publish after reconnect (messages_in_total stuck at {})",
+                msgs_before
+            );
+        });
+
+        // Keep an atomic op to avoid dead-code lint if the rest is elided.
+        let _ = std::sync::atomic::AtomicU64::new(0).load(Ordering::Relaxed);
+    }
+
+    /// Simple tokio TCP proxy — accepts on `listen`, splices to
+    /// `upstream`. Shuts down when `shutdown` fires. All connection-
+    /// handler tasks get `abort()`ed so in-flight TCP connections
+    /// drop immediately (without that, detached splice tasks keep
+    /// running forever and the "chaos" never actually strikes).
+    async fn run_proxy(
+        listen: std::net::SocketAddr,
+        upstream: std::net::SocketAddr,
+        mut shutdown: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        use tokio::io::copy_bidirectional;
+        use tokio::net::{TcpListener, TcpStream};
+        use tokio::task::JoinSet;
+
+        let listener = match TcpListener::bind(listen).await {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("[chaos-proxy] bind {} failed: {}", listen, e);
+                return;
+            }
+        };
+        let mut conns: JoinSet<()> = JoinSet::new();
+        loop {
+            tokio::select! {
+                _ = &mut shutdown => break,
+                acc = listener.accept() => {
+                    let Ok((mut inbound, _)) = acc else { break };
+                    conns.spawn(async move {
+                        let Ok(mut outbound) = TcpStream::connect(upstream).await
+                            else { return };
+                        let _ = copy_bidirectional(&mut inbound, &mut outbound).await;
+                    });
+                }
+            }
+        }
+        // On shutdown: abort every connection task synchronously. This
+        // closes their TcpStreams, which is what the session sees as
+        // "broker died."
+        conns.abort_all();
+        while conns.join_next().await.is_some() {}
+    }
+
     /// Live wire-level per-user token auth: spawn a broker with a
     /// small allowlist, prove (a) valid user + valid password connects,
     /// (b) valid user + wrong password rejected, (c) user not in the
