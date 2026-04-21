@@ -246,6 +246,7 @@ impl AutomationEngine {
                         if let crate::smart_home::events::SmartHomeEvent::DeviceStateChanged {
                             user_id,
                             device_id,
+                            ..
                         } = event
                         {
                             if let Err(e) =

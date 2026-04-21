@@ -363,6 +363,8 @@ async fn control_matter(
         crate::smart_home::events::SmartHomeEvent::DeviceStateChanged {
             user_id: device.user_id,
             device_id: device.id,
+            state: desired.clone(),
+            source: "matter".to_string(),
         },
     );
     Ok(Json(json!({ "ok": true, "node_id": node_id })))
@@ -451,6 +453,8 @@ pub async fn handle_refresh_state(
         crate::smart_home::events::SmartHomeEvent::DeviceStateChanged {
             user_id,
             device_id: id,
+            state: fresh_state.clone(),
+            source: device.driver.clone(),
         },
     );
     Ok(Json(json!({ "device": updated })))

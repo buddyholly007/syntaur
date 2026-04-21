@@ -57,13 +57,22 @@ pub enum SmartHomeEvent {
         scene_id: i64,
         failed: usize,
     },
-    /// Device state changed (driver publishes when a control succeeds
-    /// or a subscription delivered fresh state). Not fully wired in
-    /// v1 since most drivers poll rather than subscribe; published
-    /// opportunistically when a control call succeeds.
+    /// Device state changed. Published when a control call succeeds,
+    /// a driver subscription delivers fresh state, or a periodic poll
+    /// finds new values. `state` carries the new state_json for
+    /// dashboards that want to render without a DB round-trip; `source`
+    /// identifies the driver ("mqtt", "matter", "matter-direct",
+    /// "wifi_lan", "zwave", etc.) so subscribers can filter.
+    ///
+    /// Shape was locked 2026-04-21 via the MQTT/Matter parallel-session
+    /// handoff (see vault/daily/2026-04-21.md and plan §6 at
+    /// ~/.claude/plans/i-want-you-to-fluttering-forest.md). Adding
+    /// fields is a breaking change — coordinate via claude-coord.
     DeviceStateChanged {
         user_id: i64,
         device_id: i64,
+        state: serde_json::Value,
+        source: String,
     },
 }
 
