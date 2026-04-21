@@ -32,6 +32,7 @@ use crate::smart_home::scan::ScanCandidate;
 pub mod esphome;
 pub mod frigate;
 pub mod ha_discovery;
+pub mod ha_statestream;
 pub mod openmqttgateway;
 pub mod shelly_gen1;
 pub mod shelly_gen2;
@@ -139,6 +140,7 @@ impl DialectRouter {
             Box::new(zigbee2mqtt::Zigbee2Mqtt),
             Box::new(openmqttgateway::OpenMqttGateway),
             Box::new(frigate::Frigate),
+            Box::new(ha_statestream::HaStatestream),
             Box::new(ha_discovery::HaDiscovery),
         ];
         Self { dialects }
