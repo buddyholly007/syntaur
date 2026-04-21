@@ -59,12 +59,13 @@ enum Subcommand {
     /// dump as JSON `{"node_id": "addr:port"}`. Workaround for rs-matter
     /// #370 (operational mDNS). Redirect to a file + feed to
     /// MatterDirectClient::put_address or persist for later sessions.
-    PopulateFromBridge { bridge_url: Option<String> },
+    PopulateFromBridge { bridge_url: Option<String>, save_to: Option<String> },
 }
 
 fn parse_args(argv: &[String]) -> Result<CliArgs, String> {
     let mut fabric_override = None;
     let mut bridge_url_override: Option<String> = None;
+    let mut save_to_override: Option<String> = None;
     let mut json = false;
     let mut positional: Vec<&str> = Vec::new();
     let mut i = 0;
@@ -83,6 +84,14 @@ fn parse_args(argv: &[String]) -> Result<CliArgs, String> {
                 bridge_url_override = Some(
                     argv.get(i)
                         .ok_or_else(|| "--bridge-url needs a value".to_string())?
+                        .clone(),
+                );
+            }
+            "--save" => {
+                i += 1;
+                save_to_override = Some(
+                    argv.get(i)
+                        .ok_or_else(|| "--save needs a file path".to_string())?
                         .clone(),
                 );
             }
@@ -113,6 +122,7 @@ fn parse_args(argv: &[String]) -> Result<CliArgs, String> {
         ["validate-fabric", path] => Subcommand::ValidateFabric(path.to_string()),
         ["populate-from-bridge"] => Subcommand::PopulateFromBridge {
             bridge_url: bridge_url_override.clone(),
+            save_to: save_to_override.clone(),
         },
         [] => return Err(usage()),
         _ => return Err(format!("unknown subcommand: {}\n\n{}", positional.join(" "), usage())),
@@ -139,8 +149,11 @@ fn usage() -> String {
        read-on-off <node_id>      OnOff cluster attribute 0\n\
        import-pms <pms-dir>       dump SyntaurFabricFile from python-matter-server storage\n\
        validate-fabric <path>     load + summarize a SyntaurFabricFile\n\
-       populate-from-bridge       query python-matter-server, dump node_id -> addr JSON\n\n\
+       populate-from-bridge       query python-matter-server, dump node_id -> addr JSON\n\
        --bridge-url WS_URL        override ws://127.0.0.1:5580/ws for populate-from-bridge\n\
+       --save PATH                persist addresses to PATH (atomic). Loaded by\n\
+                                  MatterDirectClient::new if SYNTAUR_MATTER_ADDRESSES_FILE\n\
+                                  is set to the same path.\n\n\
      fabric file resolution: --fabric flag, then SYNTAUR_MATTER_FABRIC_FILE env"
         .into()
 }
@@ -171,8 +184,8 @@ pub async fn run(raw_args: &[String]) -> ! {
         Subcommand::ReadOnOff(id) => read_on_off_cmd(&client, id, args.json).await,
         Subcommand::ImportPms(path) => import_pms_cmd(&path, args.json),
         Subcommand::ValidateFabric(path) => validate_fabric_cmd(&path, args.json),
-        Subcommand::PopulateFromBridge { bridge_url } => {
-            populate_from_bridge_cmd(bridge_url.as_deref(), args.json).await
+        Subcommand::PopulateFromBridge { bridge_url, save_to } => {
+            populate_from_bridge_cmd(bridge_url.as_deref(), save_to.as_deref(), args.json).await
         }
     };
 
@@ -459,9 +472,12 @@ fn hex_decode(s: &str, field: &str, path: &str) -> Result<Vec<u8>, DirectError> 
 /// reached but no nodes or none resolvable — actionable signal).
 async fn populate_from_bridge_cmd(
     bridge_url: Option<&str>,
+    save_to: Option<&str>,
     json_output: bool,
 ) -> Result<(), DirectError> {
-    use crate::tools::matter_bridge_address::{fetch_node_addresses, BridgeError};
+    use crate::tools::matter_bridge_address::{
+        fetch_node_addresses, save_addresses_to_file, BridgeError,
+    };
 
     let addrs = fetch_node_addresses(bridge_url)
         .await
@@ -469,6 +485,16 @@ async fn populate_from_bridge_cmd(
 
     if addrs.is_empty() {
         return Err(DirectError::OperationalMdnsMissing { node_id: 0 });
+    }
+
+    if let Some(path_str) = save_to {
+        let path = std::path::Path::new(path_str);
+        save_addresses_to_file(path, &addrs).map_err(|e| {
+            DirectError::Matter(format!("save {}: {}", path_str, e))
+        })?;
+        if !json_output {
+            eprintln!("saved {} address(es) to {}", addrs.len(), path_str);
+        }
     }
 
     if json_output {

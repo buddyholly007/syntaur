@@ -215,9 +215,37 @@ pub struct MatterDirectClient {
 
 impl MatterDirectClient {
     pub fn new() -> Self {
+        // Load persisted addresses on construction. These come from
+        // \`matter-direct populate-from-bridge --save PATH\` (workaround
+        // for rs-matter operational mDNS gap #370). Missing file is not
+        // an error: cache stays empty and per-method calls return
+        // \`DirectError::OperationalMdnsMissing\` per requested node_id.
+        let mut initial_cache = HashMap::new();
+        if let Ok(addr_path) = std::env::var("SYNTAUR_MATTER_ADDRESSES_FILE") {
+            let path = std::path::Path::new(&addr_path);
+            match crate::tools::matter_bridge_address::load_addresses_from_file(path) {
+                Ok(loaded) => {
+                    if !loaded.is_empty() {
+                        log::info!(
+                            "[matter_direct] loaded {} address(es) from {}",
+                            loaded.len(),
+                            addr_path
+                        );
+                    }
+                    initial_cache = loaded;
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[matter_direct] SYNTAUR_MATTER_ADDRESSES_FILE={} did not load cleanly: {}. Continuing with empty cache.",
+                        addr_path,
+                        e
+                    );
+                }
+            }
+        }
         Self {
             fabric_file: std::env::var("SYNTAUR_MATTER_FABRIC_FILE").ok().map(Into::into),
-            address_cache: Arc::new(RwLock::new(HashMap::new())),
+            address_cache: Arc::new(RwLock::new(initial_cache)),
             core: Arc::new(RwLock::new(None)),
         }
     }

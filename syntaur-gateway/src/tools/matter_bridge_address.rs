@@ -243,6 +243,57 @@ pub async fn fetch_node_addresses(
     Ok(out)
 }
 
+/// Persist an address map to JSON on disk. The file is keyed by
+/// stringified node_id (for JSON compatibility) and values are
+/// `"addr:port"` strings that parse via `SocketAddr::from_str`.
+///
+/// Used by the CLI's `populate-from-bridge --save PATH` flow + the
+/// complementary `load_from_file` used at `MatterDirectClient::new`.
+/// Atomic write: writes to a sibling `.tmp` then renames, so a crash
+/// mid-write can't leave a torn file.
+pub fn save_addresses_to_file(
+    path: &std::path::Path,
+    addrs: &HashMap<u64, SocketAddr>,
+) -> std::io::Result<()> {
+    let map: std::collections::BTreeMap<String, String> = addrs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let json = serde_json::to_vec_pretty(&map)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("serialize: {e}")))?;
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, &json)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Load an address map that was previously written by
+/// `save_addresses_to_file`. Returns Ok(empty) if the file doesn't
+/// exist — missing is not an error, we just have no addresses yet.
+/// Any JSON/parse failures surface as `io::Error` with a descriptive
+/// message.
+pub fn load_addresses_from_file(
+    path: &std::path::Path,
+) -> std::io::Result<HashMap<u64, SocketAddr>> {
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let bytes = std::fs::read(path)?;
+    let map: std::collections::BTreeMap<String, String> = serde_json::from_slice(&bytes)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("parse: {e}")))?;
+    let mut out = HashMap::new();
+    for (k, v) in map {
+        let node_id: u64 = k.parse().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, format!("bad node_id {k}: {e}"))
+        })?;
+        let sa: SocketAddr = v.parse().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, format!("bad addr {v}: {e}"))
+        })?;
+        out.insert(node_id, sa);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
