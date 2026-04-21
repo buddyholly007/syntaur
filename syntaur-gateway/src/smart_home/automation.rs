@@ -517,30 +517,7 @@ impl AutomationEngine {
                 Ok(())
             }
             Action::SetDevice { device_id, state } => {
-                // v1 shortcut: drive the existing Matter bridge directly
-                // when the device is Matter-backed; otherwise log a
-                // "not-yet-wired" note. Week 11+ reconciliation work
-                // unifies this with the non-Matter drivers.
-                let db = self.db_path.clone();
-                let device_id = *device_id;
-                let state = state.clone();
-                tokio::task::spawn_blocking(move || -> Result<(), String> {
-                    let conn = Connection::open(&db).map_err(|e| e.to_string())?;
-                    let (driver, external_id): (String, String) = conn
-                        .query_row(
-                            "SELECT driver, external_id FROM smart_home_devices WHERE user_id = ? AND id = ?",
-                            rusqlite::params![user_id, device_id],
-                            |row| Ok((row.get(0)?, row.get(1)?)),
-                        )
-                        .map_err(|e| e.to_string())?;
-                    log::info!(
-                        "[smart_home::automation] SetDevice dispatch device_id={} driver={} external_id={} state={}",
-                        device_id, driver, external_id, state
-                    );
-                    Ok(())
-                })
-                .await
-                .map_err(|e| format!("join: {e}"))?
+                self.dispatch_set_device(user_id, *device_id, state.clone()).await
             }
             Action::Scene { scene_id } => {
                 // Load the scene's action list and fire each in sequence.
@@ -587,6 +564,52 @@ impl AutomationEngine {
                         }
                     }
                 }
+                Ok(())
+            }
+        }
+    }
+
+    /// Driver-keyed dispatch for `Action::SetDevice`. Resolves the
+    /// target device's `driver` column in SQLite, then delegates to the
+    /// matching driver's control surface. v1 the real dispatch is a
+    /// log-only stub for every driver — per-driver arms land as those
+    /// drivers grow a control path (MQTT in Phase D of the plan at
+    /// `~/.claude/plans/i-want-you-to-fluttering-forest.md`; Matter when
+    /// the v1.1 Controller takes over from the bridge). The table-shaped
+    /// match keeps each session's driver commit to a single additive arm,
+    /// avoiding clobber on the same code block.
+    async fn dispatch_set_device(
+        &self,
+        user_id: i64,
+        device_id: i64,
+        state: serde_json::Value,
+    ) -> Result<(), String> {
+        let db = self.db_path.clone();
+        let (driver, external_id): (String, String) = tokio::task::spawn_blocking(
+            move || -> Result<(String, String), String> {
+                let conn = Connection::open(&db).map_err(|e| e.to_string())?;
+                conn.query_row(
+                    "SELECT driver, external_id FROM smart_home_devices WHERE user_id = ? AND id = ?",
+                    rusqlite::params![user_id, device_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|e| e.to_string())
+            },
+        )
+        .await
+        .map_err(|e| format!("join: {e}"))??;
+
+        match driver.as_str() {
+            // Per-driver arms land with each driver's control path:
+            //   "mqtt"   => Phase D of the MQTT plan
+            //   "matter" => v1.1 Matter Controller cutover
+            //   "zwave"  => Track D real-device bring-up
+            //   "wifi_lan" / "ble" / "camera" / "cloud_*" — as they wire.
+            _ => {
+                log::info!(
+                    "[smart_home::automation] SetDevice dispatch (no-op) device_id={} driver={} external_id={} state={}",
+                    device_id, driver, external_id, state
+                );
                 Ok(())
             }
         }
