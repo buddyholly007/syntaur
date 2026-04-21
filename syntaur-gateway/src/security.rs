@@ -1,6 +1,6 @@
 //! Security middleware — phases 1 + 3 of the 2026-04-19 remediation plan.
 //!
-//! Four middleware layers, applied from outermost to innermost in `main.rs`:
+//! Three middleware layers, applied from outermost to innermost in `main.rs`:
 //!
 //!   1. `bootstrap_loopback_only` — when the users table is empty, reject any
 //!      request to `/setup`, `/api/auth/register`, `/api/auth/login` unless it
@@ -10,15 +10,15 @@
 //!      require that the `Origin` (or falling back to `Referer`) header
 //!      matches the gateway's host. Blocks cross-origin forged submits.
 //!
-//!   3. `lift_bearer_to_body_and_query` — read `Authorization: Bearer <token>`
-//!      and inject the token into the URL query string AND (when the request
-//!      carries JSON) the body. Handlers continue to read `params.get("token")`
-//!      or `body["token"]` as before — but the value now comes from the header,
-//!      not from attacker-accessible URL/body sources.
-//!
-//!   4. `security_headers` — set CSP / X-Content-Type-Options /
+//!   3. `security_headers` — set CSP / X-Content-Type-Options /
 //!      Referrer-Policy / X-Frame-Options / Permissions-Policy on every
 //!      response and `Cache-Control: no-store` on /api/*.
+//!
+//! Until v0.4.3 a fourth layer, `lift_bearer_to_body_and_query`, copied
+//! `Authorization: Bearer` into request body / URL so legacy handlers
+//! reading `body["token"]` / `params.get("token")` kept working. Every
+//! such handler was migrated to call `bearer_from_headers(&headers)`
+//! directly; the layer was removed in v0.4.3.
 //!
 //! The layers are intentionally independent so any one can be disabled
 //! during incident response without rewriting the others.
@@ -35,27 +35,15 @@ use std::sync::Arc;
 
 use crate::AppState;
 
-// ── helper ──────────────────────────────────────────────────────────────────
-
-/// Extract the bearer token from the `Authorization` header. Returns None
-/// if the header is absent or doesn't carry a `Bearer ` prefix.
-fn extract_bearer(req: &Request) -> Option<String> {
-    req.headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
 /// Read the bearer token from `Authorization: Bearer <token>` and return
 /// it as a borrowed slice (or empty string if absent / malformed). The
 /// `&HeaderMap` form lets handlers take `headers: HeaderMap` as an axum
 /// extractor and call this without an allocation per request.
 ///
-/// This is the migration target for the legacy `body["token"]` and
-/// `params.get("token")` reads — see `lift_bearer_to_body_and_query`
-/// for the deprecated middleware those handlers used to depend on.
+/// This was the migration target for the legacy `body["token"]` and
+/// `params.get("token")` reads. The deprecated middleware that
+/// populated those positions (`lift_bearer_to_body_and_query`) was
+/// removed in v0.4.3 once every handler was migrated.
 pub fn bearer_from_headers(headers: &axum::http::HeaderMap) -> &str {
     headers
         .get("authorization")
@@ -199,99 +187,8 @@ pub async fn csrf_check(req: Request, next: Next) -> Result<Response, StatusCode
     }
 }
 
-// ── 3. lift_bearer_to_body ─────────────────────────────────────────────────
 
-/// When a JSON POST/PUT/PATCH request carries `Authorization: Bearer <token>`,
-/// transparently copy that token into the body as `"token": "..."` so handlers
-/// still reading `body["token"]` keep working. **Query-string injection was
-/// removed as of v0.4.0** — tokens in URLs leak into browser history, server
-/// access logs, and referrer headers on outbound links, and every shipped
-/// client was already migrated to header-only auth on the JSON surface.
-///
-/// Body-token handlers are also scheduled for migration; this middleware
-/// will be removed entirely in **v0.5.0** once the handler refactor lands.
-/// Every lift logs a DEPRECATED warning tagged with the request path so the
-/// handler-migration progress is observable in the container log.
-pub async fn lift_bearer_to_body_and_query(req: Request, next: Next) -> Response {
-    let Some(token) = extract_bearer(&req) else {
-        return next.run(req).await;
-    };
-
-    // Split once so we can mutate body.
-    let (mut parts, body) = req.into_parts();
-
-    // Decide whether to rewrite the body: only for JSON requests on
-    // POST/PUT/PATCH, bounded at 16 MB.
-    let is_json = parts
-        .headers
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_ascii_lowercase().contains("application/json"))
-        .unwrap_or(false);
-    let mutating = matches!(parts.method, Method::POST | Method::PUT | Method::PATCH);
-
-    let rebuilt_body: Body = if is_json && mutating {
-        // Buffer + parse + re-serialize the JSON body.
-        let limit = 16 * 1024 * 1024;
-        let bytes: Bytes = match axum::body::to_bytes(body, limit).await {
-            Ok(b) => b,
-            Err(e) => {
-                log::warn!("[security] body-read failed during bearer lift: {e}");
-                return Response::builder()
-                    .status(StatusCode::PAYLOAD_TOO_LARGE)
-                    .body(Body::empty())
-                    .unwrap_or_else(|_| Response::new(Body::empty()));
-            }
-        };
-
-        // Empty body: skip injection, preserve empty.
-        if bytes.is_empty() {
-            Body::from(bytes)
-        } else {
-            match serde_json::from_slice::<serde_json::Value>(&bytes) {
-                Ok(serde_json::Value::Object(mut map)) => {
-                    if !map.contains_key("token") {
-                        // DEPRECATED path — logged once per request so the
-                        // handler-migration progress is visible in the
-                        // container log. Target: zero of these by v0.5.0.
-                        log::warn!(
-                            "[security] DEPRECATED body-token lift: {} {} (handler should read Authorization header directly; removal v0.5.0)",
-                            parts.method, parts.uri.path()
-                        );
-                        map.insert(
-                            "token".to_string(),
-                            serde_json::Value::String(token.clone()),
-                        );
-                    }
-                    match serde_json::to_vec(&serde_json::Value::Object(map)) {
-                        Ok(v) => {
-                            // Content-Length header needs updating too.
-                            let new_len = v.len();
-                            parts
-                                .headers
-                                .insert(
-                                    axum::http::header::CONTENT_LENGTH,
-                                    HeaderValue::from_str(&new_len.to_string())
-                                        .unwrap_or_else(|_| HeaderValue::from_static("0")),
-                                );
-                            Body::from(v)
-                        }
-                        Err(_) => Body::from(bytes),
-                    }
-                }
-                // Not a JSON object (array / scalar / invalid): leave as-is.
-                Ok(_) | Err(_) => Body::from(bytes),
-            }
-        }
-    } else {
-        body
-    };
-
-    let new_req = Request::from_parts(parts, rebuilt_body);
-    next.run(new_req).await
-}
-
-// ── 4. security_headers ─────────────────────────────────────────────────────
+// ── 3. security_headers ─────────────────────────────────────────────────────
 
 /// Generate a fresh CSP nonce. 16 bytes of urandom, base64-encoded → ~22
 /// chars. Unique per response, cryptographically unguessable. An attacker

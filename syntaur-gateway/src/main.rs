@@ -6910,7 +6910,6 @@ async fn main() {
         // ensures bootstrap check runs first, then CSRF, then the bearer
         // hoist, and headers are set after the handler responds.
         .layer(axum::middleware::from_fn(security::security_headers))
-        .layer(axum::middleware::from_fn(security::lift_bearer_to_body_and_query))
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),
             security::api_rate_limit,

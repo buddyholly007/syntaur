@@ -64,28 +64,16 @@ jobs:
             package: syntaur-viewer
             binary: syntaur-viewer
             artifact_name: syntaur-viewer-macos-arm64
-          # macOS Intel — macos-13 runners still have x86_64; macos-14+ are
-          # ARM-only. GitHub-hosted macos-13 runner availability is erratic
-          # (hour+ queue times during peak), so these targets are marked
-          # continue-on-error and the sign-and-release job does NOT hard-block
-          # on them (see `if: always()` + success-count gate below). If a
-          # run publishes without Intel binaries the release still ships
-          # with arm64 Mac artifacts; Intel users fall back to Rosetta,
-          # which runs both gateway and viewer correctly. A follow-up
-          # workflow_dispatch once runners free up re-adds the Intel Mac
-          # artifacts to the same tag.
-          - os: macos-13
-            target: x86_64-apple-darwin
-            package: syntaur-gateway
-            binary: syntaur-gateway
-            artifact_name: syntaur-gateway-macos-x86_64
-            tolerate_queue_shortage: true
-          - os: macos-13
-            target: x86_64-apple-darwin
-            package: syntaur-viewer
-            binary: syntaur-viewer
-            artifact_name: syntaur-viewer-macos-x86_64
-            tolerate_queue_shortage: true
+          # macOS Intel — macos-13 runner queue is erratic (multi-hour
+          # waits regularly stalled v0.4.0/v0.4.1/v0.4.2 release runs).
+          # `continue-on-error` doesn't help while a job is stuck in
+          # `queued` because GitHub waits for matrix entries to reach a
+          # terminal state before evaluating the downstream
+          # `sign-and-release` gate. So Intel Mac is OFF the tag-push
+          # matrix entirely as of v0.4.3 — Intel users use Rosetta on
+          # the arm64 binary (verified to run both gateway and viewer
+          # correctly). Build Intel Mac artifacts on demand via the
+          # workflow_dispatch path (`build-intel-mac` job below).
           # Windows x86_64 (MSVC ABI)
           - os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -99,7 +87,6 @@ jobs:
             artifact_name: syntaur-viewer-windows-x86_64.exe
     runs-on: ${{ matrix.os }}
     # Intel Mac targets don't block the release; all other platforms do.
-    continue-on-error: ${{ matrix.tolerate_queue_shortage == true }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -181,13 +168,44 @@ jobs:
           path: dist/${{ matrix.artifact_name }}
           retention-days: 7
 
+  # Opt-in Intel Mac builder. Only runs on workflow_dispatch — never
+  # blocks tag-push releases. Run manually after a tag publishes if the
+  # Intel Mac runner queue clears and you want to attach Intel binaries
+  # to the existing release. Uploads to the same tag's release page.
+  build-intel-mac:
+    name: Build Intel Mac (workflow_dispatch only)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-13
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - syntaur-gateway
+          - syntaur-viewer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-intel-mac-${{ matrix.package }}
+      - name: Build release
+        run: cargo build --release --target x86_64-apple-darwin -p ${{ matrix.package }}
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/x86_64-apple-darwin/release/${{ matrix.package }}
+          tag_name: ${{ github.ref_name }}
+          fail_on_unmatched_files: true
+
   sign-and-release:
     name: Sign + publish release
     needs: build
-    # Run even if some matrix entries were marked continue-on-error — the
-    # Intel Mac targets are allowed to lag runner availability. Refuse to
-    # run if the non-tolerant targets actually failed (Linux, Windows,
-    # Mac arm64 are load-bearing).
+    # Linux, Windows, and Mac arm64 are all required. Intel Mac is
+    # built only via workflow_dispatch (see build-intel-mac above) and
+    # is not part of `needs: build`, so the queue cannot stall this gate.
     if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
     steps:

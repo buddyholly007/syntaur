@@ -13,6 +13,12 @@ Only the current release line receives security fixes:
 | 0.4.x   | ✅ fixes land here |
 | < 0.4   | ❌ unsupported |
 
+**v0.4.3 highlight:** `lift_bearer_to_body_and_query` middleware removed.
+Every handler now calls `security::bearer_from_headers(&headers)` directly;
+the request body and URL are no longer load-bearing for the session token
+on JSON endpoints. (SSE/WS/media long-lived `?token=` migration to
+stream-tokens is still in progress — see Known gaps below.)
+
 When we cut 0.5, 0.4 will move to a 60-day maintenance window before being dropped.
 
 ## Reporting a vulnerability
@@ -105,13 +111,6 @@ For anyone running Syntaur in production:
 We track our own security posture honestly. At time of writing, the following
 are known and being worked on:
 
-- **Body-token handlers still exist.** A small set of handlers read the session
-  token from the JSON request body (`body["token"]`). Middleware lifts
-  `Authorization: Bearer` into the body for them so clients only ever send
-  Authorization, but the server-side handler code still reads the old position.
-  Every such lift logs a `DEPRECATED body-token lift` warning. **Scheduled
-  removal: v0.5.0** — the middleware + every handler move to a single
-  Authorization-header reader at that release.
 - **Long-lived tokens in SSE / WebSocket / media-element URLs.** Browser
   streaming APIs can't attach an `Authorization: Bearer` header, so those
   endpoints currently accept `?token=<long-lived>` in the URL. That's the
@@ -137,6 +136,17 @@ are known and being worked on:
   deleted. Every login now hits a real user row. Fresh installs bootstrap
   through `/setup/register` and the syntaur.json config file no longer
   carries a usable admin credential.
+
+**Removed in v0.4.3** (previously in this list):
+- ~~Body-token handlers + `lift_bearer_to_body_and_query` middleware.~~
+  Every JSON POST/PUT/PATCH handler that used to read `body["token"]` or
+  `params.get("token")` now reads the bearer directly from the
+  `Authorization` header via `security::bearer_from_headers`. The
+  middleware that copied header→body is deleted. Three handlers
+  (`handle_auth_refresh`, `handle_auth_stream_token`, the legacy
+  `?token=` fallback in `resolve_principal_for_stream`) keep a
+  body/query reader as a transition fallback for older clients;
+  each prefers the header and the legacy paths emit deprecation warnings.
 
 **Removed in v0.4.0** (previously in this list):
 - ~~URL query-string token injection.~~ The middleware no longer lifts

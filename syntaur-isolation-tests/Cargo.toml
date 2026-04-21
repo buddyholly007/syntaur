@@ -1,6 +1,6 @@
 [package]
 name = "syntaur-isolation-tests"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2021"
 description = "Integration tests — prove user B cannot reach user A's data across every mutating endpoint."
 
