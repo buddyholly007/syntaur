@@ -53,6 +53,7 @@ mailparse = "0.15"      # RFC 5322 .eml email parsing
 fastembed = "4"
 
 shell-words = "1"
+thiserror = { workspace = true }
 subtle = "2"
 argon2 = "0.5"
 tower-http = { version = "0.6", features = ["limit", "cors"] }
@@ -70,3 +71,10 @@ rustls-pemfile = "2"
 rustls = { version = "0.23", features = ["ring"] }
 webpki-roots = "1"
 url = "2.5.8"
+
+# rs-matter — pure-Rust Matter Controller (upstream). Pinned to main HEAD
+# 2026-04-20. The bridge in tools/matter.rs (python-matter-server WS) is
+# the production path; tools/matter_direct.rs is a skeleton wrapper using
+# upstream primitives (CASE init, IM Client, mDNS query, NOC gen) for the
+# eventual cutover. See vault: projects/syntaur_smart_home_module.md.
+rs-matter = { git = "https://github.com/project-chip/rs-matter", rev = "993a0763e450183acb5181073223ab48e44b8c2e", default-features = false, features = ["os", "rustcrypto", "log"] }
