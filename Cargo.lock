@@ -6447,7 +6447,7 @@ dependencies = [
 
 [[package]]
 name = "syntaur-gateway"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -6513,7 +6513,7 @@ dependencies = [
 
 [[package]]
 name = "syntaur-isolation-tests"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6564,7 +6564,7 @@ dependencies = [
 
 [[package]]
 name = "syntaur-viewer"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "gtk4",
  "serde",
