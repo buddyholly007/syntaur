@@ -74,6 +74,21 @@ pub enum SmartHomeEvent {
         state: serde_json::Value,
         source: String,
     },
+    /// Device was deleted from `smart_home_devices`. Subscribers clean
+    /// up anything they cached for the device — the HA Discovery
+    /// publisher uses this to purge its retained config topic so the
+    /// device stops appearing in Home Assistant.
+    ///
+    /// `kind` carries the pre-delete `smart_home_devices.kind` so
+    /// subscribers that key off component mapping (HA publisher) don't
+    /// need a DB round trip. Emitted by the DELETE handler AFTER the
+    /// row is removed — the SQL transaction commits first, then the
+    /// bus publish happens.
+    DeviceRemoved {
+        user_id: i64,
+        device_id: i64,
+        kind: String,
+    },
 }
 
 #[derive(Clone)]

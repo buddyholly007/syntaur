@@ -6720,6 +6720,10 @@ async fn main() {
         )
         .route("/api/smart-home/devices", get(smart_home::api::handle_list_devices))
         .route(
+            "/api/smart-home/devices/{id}",
+            axum::routing::delete(smart_home::api::handle_delete_device),
+        )
+        .route(
             "/api/smart-home/devices/{id}/room",
             post(smart_home::api::handle_assign_device_room),
         )

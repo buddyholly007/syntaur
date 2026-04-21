@@ -71,6 +71,31 @@ pub fn state_topic(user_id: i64, device_id: i64) -> String {
     format!("syntaur/u/{}/device/{}/state", user_id, device_id)
 }
 
+/// Per-device command topic — HA publishes here to drive the device.
+pub fn command_topic(user_id: i64, device_id: i64) -> String {
+    format!("syntaur/u/{}/device/{}/cmd", user_id, device_id)
+}
+
+/// Subscription pattern the command round-trip task watches.
+pub const COMMAND_WILDCARD: &str = "syntaur/u/+/device/+/cmd";
+
+/// Parse a command topic into (user_id, device_id). Returns `None`
+/// for anything that doesn't match the `syntaur/u/<u>/device/<d>/cmd`
+/// shape — defensive because rumqttc happily delivers whatever the
+/// broker routes.
+pub fn parse_command_topic(topic: &str) -> Option<(i64, i64)> {
+    let parts: Vec<&str> = topic.split('/').collect();
+    if parts.len() != 6 {
+        return None;
+    }
+    if parts[0] != "syntaur" || parts[1] != "u" || parts[3] != "device" || parts[5] != "cmd" {
+        return None;
+    }
+    let user_id: i64 = parts[2].parse().ok()?;
+    let device_id: i64 = parts[4].parse().ok()?;
+    Some((user_id, device_id))
+}
+
 /// Build the HA Discovery config payload for one commissioned device.
 /// JSON shape is deliberately minimal — HA fills in sensible defaults
 /// for fields like `availability_topic` and `payload_on` / `payload_off`.
@@ -86,6 +111,7 @@ pub fn build_discovery_config(
         "name": name,
         "unique_id": unique_id,
         "state_topic": state_topic(user_id, device_id),
+        "command_topic": command_topic(user_id, device_id),
         "device": {
             "identifiers": [unique_id],
             "manufacturer": "Syntaur",
@@ -128,14 +154,124 @@ impl HADiscoveryPublisher {
     ///      walk and continue — not a correctness bug, just wasted work.
     ///   2. Walk every commissioned device, publish retained HA
     ///      Discovery config.
-    ///   3. Subscribe to the event bus; on DeviceStateChanged emit a
-    ///      retained frame on the matching state_topic.
+    ///   3. Spawn the command round-trip task (subscribe to
+    ///      `syntaur/u/+/device/+/cmd`, translate payload → state
+    ///      patch → `MqttSupervisor::dispatch_command`).
+    ///   4. Subscribe to the event bus; on DeviceStateChanged emit a
+    ///      retained frame on the matching state_topic; on DeviceRemoved
+    ///      publish an empty retained payload on the discovery topic so
+    ///      HA drops the entity.
     pub fn spawn(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             self.publish_all_device_configs().await;
+            let cmd_task = tokio::spawn(Self::run_command_loop(self.supervisor.clone()));
             self.run_state_loop().await;
+            cmd_task.abort();
         })
+    }
+
+    /// Subscribe to `syntaur/u/+/device/+/cmd` on whichever broker
+    /// the local Syntaur install presents. When HA (or anything else)
+    /// publishes a state patch there, the payload is interpreted as
+    /// the same JSON shape the REST `/api/smart-home/control` takes
+    /// (`{"on": true}`, `{"brightness": 180}`, etc.) and dispatched
+    /// through the MQTT supervisor's driver path.
+    ///
+    /// Broker selection:
+    ///   - `SMART_HOME_HA_CMD_BROKER` env — explicit URL, e.g.
+    ///     `mqtt://127.0.0.1:1884`.
+    ///   - Otherwise default to `mqtt://127.0.0.1:1884` (the embedded
+    ///     broker's default bind). When the user has disabled the
+    ///     embedded broker without providing the env var, the
+    ///     subscriber logs + retries every 30s so late-started brokers
+    ///     still get picked up.
+    ///
+    /// Keep this single-task (one rumqttc client, shared event loop).
+    /// Upstream-broker bridging is Phase F-2 Piece A.
+    async fn run_command_loop(supervisor: Arc<MqttSupervisor>) {
+        use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS};
+        use std::time::Duration;
+
+        let url = std::env::var("SMART_HOME_HA_CMD_BROKER")
+            .unwrap_or_else(|_| "mqtt://127.0.0.1:1884".into());
+
+        loop {
+            let (host, port, user, pass) = match parse_broker_url(&url) {
+                Some(x) => x,
+                None => {
+                    log::warn!(
+                        "[smart_home::ha_discovery] SMART_HOME_HA_CMD_BROKER unparsable: {} — command loop off",
+                        url
+                    );
+                    return;
+                }
+            };
+
+            let mut opts = MqttOptions::new("syntaur-ha-cmd-sub", host, port);
+            opts.set_keep_alive(Duration::from_secs(30));
+            if let (Some(u), Some(p)) = (user.as_ref(), pass.as_ref()) {
+                opts.set_credentials(u, p);
+            }
+            let (client, mut event_loop) = AsyncClient::new(opts, 128);
+            if let Err(e) = client.subscribe(COMMAND_WILDCARD, QoS::AtLeastOnce).await {
+                log::warn!(
+                    "[smart_home::ha_discovery] cmd subscribe failed: {} — retrying in 30s",
+                    e
+                );
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                continue;
+            }
+            log::info!(
+                "[smart_home::ha_discovery] cmd loop subscribed {}",
+                COMMAND_WILDCARD
+            );
+
+            loop {
+                match event_loop.poll().await {
+                    Ok(Event::Incoming(Incoming::Publish(p))) => {
+                        let Some((user_id, device_id)) = parse_command_topic(&p.topic) else {
+                            continue;
+                        };
+                        let state: serde_json::Value = match serde_json::from_slice(&p.payload) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                log::warn!(
+                                    "[smart_home::ha_discovery] cmd payload not JSON on {}: {}",
+                                    p.topic,
+                                    e
+                                );
+                                continue;
+                            }
+                        };
+                        match supervisor
+                            .dispatch_command(user_id, device_id, &state)
+                            .await
+                        {
+                            Ok(n) => log::debug!(
+                                "[smart_home::ha_discovery] cmd dispatched {} publishes for device {}",
+                                n,
+                                device_id
+                            ),
+                            Err(e) => log::warn!(
+                                "[smart_home::ha_discovery] cmd dispatch device {}: {}",
+                                device_id,
+                                e
+                            ),
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        log::warn!(
+                            "[smart_home::ha_discovery] cmd event loop error: {} — reconnecting in 5s",
+                            e
+                        );
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     async fn publish_all_device_configs(&self) {
@@ -199,6 +335,16 @@ impl HADiscoveryPublisher {
                     };
                     let _ = self.supervisor.publish_retained(topic, bytes).await;
                 }
+                Ok(SmartHomeEvent::DeviceRemoved {
+                    device_id, kind, ..
+                }) => {
+                    // Clear the retained HA Discovery config so HA
+                    // drops the entity. Publishing an empty payload on
+                    // a retained topic is HA's canonical purge signal.
+                    let component = kind_to_ha_component(&kind);
+                    let topic = discovery_topic(component, device_id);
+                    let _ = self.supervisor.publish_retained(topic, Vec::new()).await;
+                }
                 Ok(_other) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     log::warn!(
@@ -222,6 +368,22 @@ impl HADiscoveryPublisher {
     fn db_path(&self) -> &PathBuf {
         &self.db_path
     }
+}
+
+/// Minimal URL parser for `mqtt://[user:pass@]host[:port]`. We use
+/// `url::Url` elsewhere in this crate; here we want to accept "host"
+/// without scheme too, so a lightweight split is friendlier.
+fn parse_broker_url(s: &str) -> Option<(String, u16, Option<String>, Option<String>)> {
+    let parsed = url::Url::parse(s).ok()?;
+    let host = parsed.host_str()?.to_string();
+    let port = parsed.port().unwrap_or(1884);
+    let user = if parsed.username().is_empty() {
+        None
+    } else {
+        Some(parsed.username().to_string())
+    };
+    let pass = parsed.password().map(|s| s.to_string());
+    Some((host, port, user, pass))
 }
 
 #[cfg(test)]
@@ -286,5 +448,50 @@ mod tests {
     fn discovery_config_binary_sensor_has_value_template() {
         let v = build_discovery_config("binary_sensor", 9, 1, "Front Door", "matter");
         assert!(v["value_template"].is_string());
+    }
+
+    #[test]
+    fn discovery_config_carries_command_topic() {
+        let v = build_discovery_config("switch", 42, 1, "Kitchen Plug", "mqtt");
+        assert_eq!(v["command_topic"], "syntaur/u/1/device/42/cmd");
+    }
+
+    #[test]
+    fn command_topic_shape() {
+        assert_eq!(command_topic(3, 99), "syntaur/u/3/device/99/cmd");
+    }
+
+    #[test]
+    fn parse_command_topic_happy_path() {
+        assert_eq!(
+            parse_command_topic("syntaur/u/1/device/7/cmd"),
+            Some((1, 7))
+        );
+    }
+
+    #[test]
+    fn parse_command_topic_rejects_wrong_shapes() {
+        assert!(parse_command_topic("syntaur/u/1/device/7").is_none());
+        assert!(parse_command_topic("syntaur/u/a/device/7/cmd").is_none());
+        assert!(parse_command_topic("syntaur/u/1/device/b/cmd").is_none());
+        assert!(parse_command_topic("homeassistant/switch/x/config").is_none());
+        assert!(parse_command_topic("syntaur/u/1/device/7/cmd/extra").is_none());
+    }
+
+    #[test]
+    fn parse_broker_url_happy_path() {
+        let (h, p, u, pw) = parse_broker_url("mqtt://127.0.0.1:1884").unwrap();
+        assert_eq!(h, "127.0.0.1");
+        assert_eq!(p, 1884);
+        assert!(u.is_none());
+        assert!(pw.is_none());
+    }
+
+    #[test]
+    fn parse_broker_url_with_credentials() {
+        let (_h, _p, u, pw) =
+            parse_broker_url("mqtt://foo:bar@broker.lan:1883").unwrap();
+        assert_eq!(u.as_deref(), Some("foo"));
+        assert_eq!(pw.as_deref(), Some("bar"));
     }
 }

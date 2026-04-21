@@ -173,6 +173,61 @@ pub async fn handle_assign_device_room(
     Ok(Json(json!({ "updated": n })))
 }
 
+/// DELETE /api/smart-home/devices/{id} — remove a device. Publishes a
+/// `SmartHomeEvent::DeviceRemoved` on success so the HA Discovery
+/// publisher can purge the retained config topic. Idempotent — deleting
+/// a missing device returns 404 without an event.
+pub async fn handle_delete_device(
+    State(state): State<std::sync::Arc<AppState>>,
+    Path(device_id): Path<i64>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let user_id = current_user_id(&state);
+    let db = state.db_path.clone();
+
+    // Read the device first so we can carry `kind` in the event
+    // without forcing subscribers to do a second DB read after the
+    // row is gone.
+    let device = {
+        let db = db.clone();
+        tokio::task::spawn_blocking(move || -> rusqlite::Result<Option<devices::Device>> {
+            let conn = rusqlite::Connection::open(&db)?;
+            devices::get(&conn, user_id, device_id)
+        })
+        .await
+        .map_err(|e| err_500(format!("join error: {e}")))?
+        .map_err(|e| err_500(format!("db error: {e}")))?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "device not found" })),
+            )
+        })?
+    };
+
+    let deleted = tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
+        let conn = rusqlite::Connection::open(&db)?;
+        conn.execute(
+            "DELETE FROM smart_home_devices WHERE user_id = ? AND id = ?",
+            rusqlite::params![user_id, device_id],
+        )
+    })
+    .await
+    .map_err(|e| err_500(format!("join error: {e}")))?
+    .map_err(|e| err_500(format!("db error: {e}")))?;
+
+    if deleted > 0 {
+        crate::smart_home::events::publish(
+            crate::smart_home::events::SmartHomeEvent::DeviceRemoved {
+                user_id,
+                device_id,
+                kind: device.kind.clone(),
+            },
+        );
+    }
+
+    Ok(Json(json!({ "deleted": deleted })))
+}
+
 // ── scan ────────────────────────────────────────────────────────────────
 
 pub async fn handle_scan(
