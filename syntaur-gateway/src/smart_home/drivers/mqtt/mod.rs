@@ -36,6 +36,7 @@ use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS};
 use crate::smart_home::scan::ScanCandidate;
 
 pub mod client;
+pub mod command;
 pub mod dialects;
 pub mod state;
 pub mod supervisor;
@@ -59,6 +60,22 @@ static SUPERVISOR: OnceLock<std::sync::Arc<MqttSupervisor>> = OnceLock::new();
 /// Subsequent calls are no-ops.
 pub fn install_supervisor(sup: std::sync::Arc<MqttSupervisor>) {
     let _ = SUPERVISOR.set(sup);
+}
+
+/// Dispatch a state-patch control call through the installed MQTT
+/// supervisor. `Err(..)` when no supervisor is installed; the
+/// automation engine + `/api/smart-home/control` callers interpret
+/// that as "mqtt not wired yet." Returns the number of command
+/// publishes enqueued on success.
+pub async fn dispatch_command(
+    user_id: i64,
+    device_id: i64,
+    state: &serde_json::Value,
+) -> Result<usize, String> {
+    let Some(sup) = SUPERVISOR.get() else {
+        return Err("mqtt supervisor not installed".into());
+    };
+    sup.dispatch_command(user_id, device_id, state).await
 }
 
 /// Top-level scan entry. If a `MqttSupervisor` is running, returns its

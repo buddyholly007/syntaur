@@ -18,6 +18,7 @@
 use serde_json::Value;
 
 use super::{Dialect, DialectMessage};
+use crate::smart_home::drivers::mqtt::command::{EncodedCommand, MqttCommand};
 use crate::smart_home::scan::ScanCandidate;
 
 pub struct Zigbee2Mqtt;
@@ -45,6 +46,35 @@ impl Dialect for Zigbee2Mqtt {
             return None;
         }
         Some(DialectMessage::Discoveries(candidates))
+    }
+
+    fn encode_command(
+        &self,
+        external_id: &str,
+        cmd: &MqttCommand,
+    ) -> Option<EncodedCommand> {
+        // Z2M keys devices by ieee address; Z2M accepts that or a user-
+        // set friendly_name on the same topic path. Using ieee is safe
+        // regardless of rename.
+        let ieee = external_id.strip_prefix("z2m:")?;
+        let body = match cmd {
+            MqttCommand::SetOn(on) => {
+                serde_json::json!({ "state": if *on { "ON" } else { "OFF" } })
+            }
+            MqttCommand::SetBrightness(b) => serde_json::json!({ "brightness": *b }),
+            MqttCommand::SetColorTempMireds(m) => serde_json::json!({ "color_temp": *m }),
+            MqttCommand::SetColorRgb(r, g, b) => serde_json::json!({
+                "color": { "r": *r, "g": *g, "b": *b }
+            }),
+            MqttCommand::SetTargetTemp(t) => {
+                serde_json::json!({ "current_heating_setpoint": *t })
+            }
+            MqttCommand::SetHvacMode(m) => serde_json::json!({ "system_mode": m }),
+            MqttCommand::SetCoverPosition(p) => serde_json::json!({ "position": *p }),
+            MqttCommand::Raw(v) => v.clone(),
+        };
+        let payload = serde_json::to_vec(&body).ok()?;
+        Some(EncodedCommand::new(format!("zigbee2mqtt/{}/set", ieee), payload))
     }
 }
 
@@ -268,5 +298,34 @@ mod tests {
         let d = Zigbee2Mqtt;
         let msg = d.parse("zigbee2mqtt/bridge/devices", b"[]");
         assert!(msg.is_none());
+    }
+
+    #[test]
+    fn encode_set_on_targets_ieee_set_topic() {
+        let d = Zigbee2Mqtt;
+        let e = d
+            .encode_command("z2m:0x00158d0001abcdef", &MqttCommand::SetOn(true))
+            .expect("some");
+        assert_eq!(e.topic, "zigbee2mqtt/0x00158d0001abcdef/set");
+        let v: Value = serde_json::from_slice(&e.payload).unwrap();
+        assert_eq!(v["state"], "ON");
+    }
+
+    #[test]
+    fn encode_brightness_uses_native_scale() {
+        let d = Zigbee2Mqtt;
+        let e = d
+            .encode_command("z2m:0xAA", &MqttCommand::SetBrightness(200))
+            .unwrap();
+        let v: Value = serde_json::from_slice(&e.payload).unwrap();
+        assert_eq!(v["brightness"], 200);
+    }
+
+    #[test]
+    fn encode_ignores_foreign_external_id() {
+        let d = Zigbee2Mqtt;
+        assert!(d
+            .encode_command("tasmota_topic:plug", &MqttCommand::SetOn(true))
+            .is_none());
     }
 }

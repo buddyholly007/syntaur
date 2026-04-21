@@ -23,13 +23,24 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rusqlite::{params, Connection};
-use tokio::sync::{oneshot, Mutex, RwLock};
+use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 
-use super::client::{MqttSession, SessionConfig};
+use super::client::{MqttSession, SessionCommand, SessionConfig};
+use super::command::{commands_from_state_patch, MqttCommand};
 use super::dialects::DialectRouter;
 use super::state::StateCache;
 use crate::crypto;
 use crate::smart_home::scan::ScanCandidate;
+
+/// One dispatch handle per running session. The supervisor uses these
+/// to route command publishes to the right broker without holding a
+/// reference to the (reconnect-recreated) AsyncClient.
+#[derive(Clone)]
+struct SessionHandle {
+    user_id: i64,
+    label: String,
+    cmd_tx: mpsc::Sender<SessionCommand>,
+}
 
 pub struct MqttSupervisor {
     db_path: PathBuf,
@@ -37,6 +48,7 @@ pub struct MqttSupervisor {
     state_cache: Arc<StateCache>,
     discovery: Arc<RwLock<HashMap<String, ScanCandidate>>>,
     shutdowns: Arc<Mutex<Vec<oneshot::Sender<()>>>>,
+    handles: Arc<RwLock<Vec<SessionHandle>>>,
 }
 
 impl MqttSupervisor {
@@ -48,6 +60,7 @@ impl MqttSupervisor {
             state_cache,
             discovery: Arc::new(RwLock::new(HashMap::new())),
             shutdowns: Arc::new(Mutex::new(Vec::new())),
+            handles: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -117,19 +130,108 @@ impl MqttSupervisor {
 
         for cfg in configs {
             let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+            let (cmd_tx, cmd_rx) = mpsc::channel::<SessionCommand>(32);
             {
                 let mut guard = self.shutdowns.lock().await;
                 guard.push(shutdown_tx);
+            }
+            {
+                let mut handles = self.handles.write().await;
+                handles.push(SessionHandle {
+                    user_id: cfg.user_id,
+                    label: cfg.label.clone(),
+                    cmd_tx,
+                });
             }
             let session = MqttSession::new(
                 cfg,
                 self.router.clone(),
                 self.state_cache.clone(),
                 discovery_tx.clone(),
+                cmd_rx,
                 shutdown_rx,
             );
             tokio::spawn(session.run());
         }
+    }
+
+    /// Look up device `(driver, external_id)` in SQLite, translate the
+    /// state patch through `commands_from_state_patch`, route each
+    /// encoded command to the user's session(s). Returns the number of
+    /// commands enqueued for publish.
+    ///
+    /// Errors:
+    ///   - device row missing           → Err("device <id> not found")
+    ///   - driver column isn't "mqtt"    → Err("device driver is <x>, not mqtt")
+    ///   - state patch emits no commands → Ok(0) (caller handles)
+    ///   - no session matches user_id    → Err("no mqtt session for user <id>")
+    pub async fn dispatch_command(
+        &self,
+        user_id: i64,
+        device_id: i64,
+        state: &serde_json::Value,
+    ) -> Result<usize, String> {
+        let db = self.db_path.clone();
+        let row = tokio::task::spawn_blocking(
+            move || -> Result<(String, String), String> {
+                let conn = Connection::open(&db).map_err(|e| e.to_string())?;
+                conn.query_row(
+                    "SELECT driver, external_id
+                       FROM smart_home_devices
+                      WHERE user_id = ? AND id = ?",
+                    params![user_id, device_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .map_err(|e| format!("device {} not found: {}", device_id, e))
+            },
+        )
+        .await
+        .map_err(|e| format!("join: {e}"))??;
+        let (driver, external_id) = row;
+
+        if driver != "mqtt" {
+            return Err(format!("device driver is {}, not mqtt", driver));
+        }
+
+        let cmds: Vec<MqttCommand> = commands_from_state_patch(state);
+        if cmds.is_empty() {
+            return Ok(0);
+        }
+
+        let handles = self.handles.read().await;
+        let targets: Vec<&SessionHandle> =
+            handles.iter().filter(|h| h.user_id == user_id).collect();
+        if targets.is_empty() {
+            return Err(format!("no mqtt session for user {}", user_id));
+        }
+
+        let mut dispatched = 0usize;
+        for cmd in &cmds {
+            let Some(enc) = self.router.encode_command(&external_id, cmd) else {
+                log::info!(
+                    "[smart_home::mqtt] no dialect accepted external_id={} cmd={:?}",
+                    external_id,
+                    cmd
+                );
+                continue;
+            };
+            for h in &targets {
+                if let Err(e) = h
+                    .cmd_tx
+                    .send(SessionCommand::Publish(enc.clone()))
+                    .await
+                {
+                    log::warn!(
+                        "[smart_home::mqtt] session {} dispatch channel closed: {}",
+                        h.label,
+                        e
+                    );
+                    continue;
+                }
+                dispatched += 1;
+            }
+        }
+        Ok(dispatched)
     }
 
     fn load_session_configs(&self) -> Result<Vec<SessionConfig>, String> {

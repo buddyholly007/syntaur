@@ -27,12 +27,21 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS};
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
+use super::command::EncodedCommand;
 use super::dialects::{DialectMessage, DialectRouter};
 use super::state::{EmittedChange, StateCache};
 use crate::smart_home::events::{self, SmartHomeEvent};
 use crate::smart_home::scan::ScanCandidate;
+
+/// Channel message to drive a publish from outside the session loop.
+/// Used by `MqttSupervisor::dispatch_command` so the dispatch layer
+/// doesn't need a reference to the (reconnect-recreated) AsyncClient.
+#[derive(Debug)]
+pub enum SessionCommand {
+    Publish(EncodedCommand),
+}
 
 /// Widened from rumqttc's 32 default. A busy Z2M `bridge/devices`
 /// inventory (500+ devices) plus retained HA-Discovery catch-up on
@@ -45,6 +54,9 @@ const BACKOFF_SCHEDULE_SECS: &[u64] = &[1, 2, 4, 8, 30];
 
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
+    /// Syntaur user that owns this broker binding. Routes command
+    /// dispatch (Phase D) to the right session.
+    pub user_id: i64,
     /// `mqtt://user:pass@host:1883` or `mqtts://...`. Parsed by
     /// `url::Url` and spread into rumqttc options.
     pub url: String,
@@ -70,6 +82,7 @@ impl SessionConfig {
             .and_then(|v| v.as_str())
             .map(str::to_string);
         Some(Self {
+            user_id,
             url,
             client_id,
             label: label.to_string(),
@@ -83,6 +96,7 @@ pub struct MqttSession {
     router: Arc<DialectRouter>,
     state_cache: Arc<StateCache>,
     discovery_tx: tokio::sync::mpsc::UnboundedSender<ScanCandidate>,
+    cmd_rx: Option<mpsc::Receiver<SessionCommand>>,
     shutdown_rx: Option<oneshot::Receiver<()>>,
 }
 
@@ -92,6 +106,7 @@ impl MqttSession {
         router: Arc<DialectRouter>,
         state_cache: Arc<StateCache>,
         discovery_tx: tokio::sync::mpsc::UnboundedSender<ScanCandidate>,
+        cmd_rx: mpsc::Receiver<SessionCommand>,
         shutdown_rx: oneshot::Receiver<()>,
     ) -> Self {
         Self {
@@ -99,6 +114,7 @@ impl MqttSession {
             router,
             state_cache,
             discovery_tx,
+            cmd_rx: Some(cmd_rx),
             shutdown_rx: Some(shutdown_rx),
         }
     }
@@ -108,6 +124,10 @@ impl MqttSession {
     pub async fn run(mut self) {
         let mut shutdown = self
             .shutdown_rx
+            .take()
+            .expect("MqttSession::run called twice");
+        let mut cmd_rx = self
+            .cmd_rx
             .take()
             .expect("MqttSession::run called twice");
         let mut attempt: usize = 0;
@@ -126,7 +146,7 @@ impl MqttSession {
                     );
                     return;
                 }
-                outcome = self.one_connection_cycle() => {
+                outcome = self.one_connection_cycle(&mut cmd_rx) => {
                     match outcome {
                         Ok(()) => {
                             // Graceful disconnect — reset backoff.
@@ -157,7 +177,10 @@ impl MqttSession {
         }
     }
 
-    async fn one_connection_cycle(&self) -> Result<(), String> {
+    async fn one_connection_cycle(
+        &self,
+        cmd_rx: &mut mpsc::Receiver<SessionCommand>,
+    ) -> Result<(), String> {
         let opts = mqtt_options_from_cfg(&self.cfg)?;
         let (client, mut event_loop) = AsyncClient::new(opts, EVENT_LOOP_CAPACITY);
         for topic in self.router.subscribe_topics() {
@@ -172,13 +195,37 @@ impl MqttSession {
         }
 
         loop {
-            let event = event_loop
-                .poll()
-                .await
-                .map_err(|e| format!("poll: {e}"))?;
-            if let Event::Incoming(Incoming::Publish(publish)) = event {
-                if let Some(msg) = self.router.parse(&publish.topic, &publish.payload) {
-                    self.handle_message(msg).await;
+            tokio::select! {
+                event_res = event_loop.poll() => {
+                    let event = event_res.map_err(|e| format!("poll: {e}"))?;
+                    if let Event::Incoming(Incoming::Publish(publish)) = event {
+                        if let Some(msg) = self.router.parse(&publish.topic, &publish.payload) {
+                            self.handle_message(msg).await;
+                        }
+                    }
+                }
+                cmd = cmd_rx.recv() => {
+                    match cmd {
+                        Some(SessionCommand::Publish(enc)) => {
+                            if let Err(e) = client
+                                .publish(enc.topic.clone(), enc.qos, enc.retain, enc.payload)
+                                .await
+                            {
+                                log::warn!(
+                                    "[smart_home::mqtt] session {} publish {} failed: {}",
+                                    self.cfg.label,
+                                    enc.topic,
+                                    e
+                                );
+                            }
+                        }
+                        None => {
+                            // Supervisor dropped the sender — fall out
+                            // of the connection cycle so shutdown is
+                            // observed on the outer select.
+                            return Ok(());
+                        }
+                    }
                 }
             }
         }
@@ -365,6 +412,7 @@ mod tests {
     #[test]
     fn mqtt_options_defaults_port_by_scheme() {
         let cfg = SessionConfig {
+            user_id: 1,
             url: "mqtts://broker.lan".into(),
             client_id: "x".into(),
             label: "x".into(),

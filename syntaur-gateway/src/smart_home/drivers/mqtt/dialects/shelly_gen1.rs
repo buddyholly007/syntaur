@@ -20,6 +20,7 @@
 use serde_json::Value;
 
 use super::{Dialect, DialectMessage};
+use crate::smart_home::drivers::mqtt::command::{EncodedCommand, MqttCommand};
 use crate::smart_home::scan::ScanCandidate;
 
 pub struct ShellyGen1;
@@ -39,6 +40,38 @@ impl Dialect for ShellyGen1 {
         }
         let payload_s = std::str::from_utf8(payload).ok()?;
         parse_announce(topic, payload_s).map(DialectMessage::Discovery)
+    }
+
+    fn encode_command(
+        &self,
+        external_id: &str,
+        cmd: &MqttCommand,
+    ) -> Option<EncodedCommand> {
+        // Shelly Gen1 has a flat topic space. v1 wires the single-relay
+        // path (`relay/0`); multi-relay devices can use `Raw` until we
+        // add a channel parameter to the command vocabulary.
+        let id = external_id.strip_prefix("shelly:")?;
+        match cmd {
+            MqttCommand::SetOn(on) => Some(EncodedCommand::new(
+                format!("shellies/{}/relay/0/command", id),
+                if *on { b"on".to_vec() } else { b"off".to_vec() },
+            )),
+            MqttCommand::SetCoverPosition(pct) => Some(EncodedCommand::new(
+                format!("shellies/{}/roller/0/command/pos", id),
+                pct.to_string().into_bytes(),
+            )),
+            MqttCommand::Raw(v) => {
+                let payload = match v {
+                    Value::String(s) => s.clone().into_bytes(),
+                    other => other.to_string().into_bytes(),
+                };
+                Some(EncodedCommand::new(
+                    format!("shellies/{}/command", id),
+                    payload,
+                ))
+            }
+            _ => None,
+        }
     }
 }
 
@@ -84,5 +117,15 @@ mod tests {
     fn dialect_returns_none_for_non_shelly_topic() {
         let d = ShellyGen1;
         assert!(d.parse("homeassistant/light/x/config", b"{}").is_none());
+    }
+
+    #[test]
+    fn encode_set_on_maps_to_relay_zero_command() {
+        let d = ShellyGen1;
+        let e = d
+            .encode_command("shelly:shellyplug-s-aabbcc", &MqttCommand::SetOn(false))
+            .expect("some");
+        assert_eq!(e.topic, "shellies/shellyplug-s-aabbcc/relay/0/command");
+        assert_eq!(&e.payload, b"off");
     }
 }

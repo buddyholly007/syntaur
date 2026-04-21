@@ -26,6 +26,7 @@
 
 use serde_json::Value;
 
+use super::command::{EncodedCommand, MqttCommand};
 use crate::smart_home::scan::ScanCandidate;
 
 pub mod esphome;
@@ -92,6 +93,28 @@ pub trait Dialect: Send + Sync {
     /// outside their schema; the router tries each dialect in
     /// registration order and takes the first `Some`.
     fn parse(&self, topic: &str, payload: &[u8]) -> Option<DialectMessage>;
+
+    /// Encode an `MqttCommand` for one of this dialect's devices.
+    ///
+    /// `external_id` is the canonical `smart_home_devices.external_id`
+    /// value (already includes the dialect-specific prefix — see each
+    /// dialect's `parse` for the format). Returning `None` signals
+    /// "this command is not applicable to this device" (wrong dialect,
+    /// unsupported vocabulary for this device class, etc.) — the
+    /// router tries the next dialect.
+    ///
+    /// Default implementation returns `None` so discovery-only
+    /// dialects (ESPHome, OpenMQTTGateway, HA Discovery) don't need
+    /// to implement anything. Phase D wires Tasmota, Z2M,
+    /// Shelly Gen1, and Shelly Gen2 — see each dialect for the wire
+    /// format.
+    fn encode_command(
+        &self,
+        _external_id: &str,
+        _cmd: &MqttCommand,
+    ) -> Option<EncodedCommand> {
+        None
+    }
 }
 
 /// Ordered collection of dialects.
@@ -133,6 +156,23 @@ impl DialectRouter {
         for d in &self.dialects {
             if let Some(m) = d.parse(topic, payload) {
                 return Some(m);
+            }
+        }
+        None
+    }
+
+    /// Encode one command — first dialect that claims the device wins.
+    /// Dispatch layer hands back `None` if no dialect matches (the
+    /// device's `external_id` prefix isn't recognized, or the dialect
+    /// doesn't support the requested command).
+    pub fn encode_command(
+        &self,
+        external_id: &str,
+        cmd: &MqttCommand,
+    ) -> Option<EncodedCommand> {
+        for d in &self.dialects {
+            if let Some(e) = d.encode_command(external_id, cmd) {
+                return Some(e);
             }
         }
         None

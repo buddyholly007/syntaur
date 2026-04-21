@@ -23,6 +23,7 @@
 //! Device catalog: https://shelly-api-docs.shelly.cloud/gen2/Devices/
 
 use super::{Dialect, DialectMessage};
+use crate::smart_home::drivers::mqtt::command::{EncodedCommand, MqttCommand};
 use crate::smart_home::scan::ScanCandidate;
 
 pub struct ShellyGen2;
@@ -57,6 +58,88 @@ impl Dialect for ShellyGen2 {
         }
         parse_online(topic).map(DialectMessage::Discovery)
     }
+
+    fn encode_command(
+        &self,
+        external_id: &str,
+        cmd: &MqttCommand,
+    ) -> Option<EncodedCommand> {
+        // `external_id` shape: `shelly_gen2:shellyplus1pm-aabbccddeeff`
+        let device_id = external_id.strip_prefix("shelly_gen2:")?;
+        // Shelly Gen2 JSON-RPC: publish to `<device_id>/rpc` with
+        //   {"id": <u32>, "src": "syntaur", "method": "...", "params": {...}}
+        // `id` is opaque to the device — it echoes back on the response
+        // topic. Using a timestamp-derived value keeps in-flight calls
+        // distinguishable without pulling in a UUID dep.
+        let rpc_id = rpc_id();
+        let (method, params): (&'static str, serde_json::Value) = match cmd {
+            MqttCommand::SetOn(on) => (
+                "Switch.Set",
+                serde_json::json!({ "id": 0, "on": *on }),
+            ),
+            MqttCommand::SetBrightness(b) => {
+                // Light.Set brightness is 0..=100.
+                let pct = ((*b as u16 * 100) / 255).min(100);
+                (
+                    "Light.Set",
+                    serde_json::json!({ "id": 0, "brightness": pct }),
+                )
+            }
+            MqttCommand::SetColorTempMireds(m) => {
+                let kelvin = if *m > 0 { 1_000_000 / *m as u32 } else { 0 };
+                (
+                    "Light.Set",
+                    serde_json::json!({ "id": 0, "ct": kelvin }),
+                )
+            }
+            MqttCommand::SetColorRgb(r, g, b) => (
+                "Light.Set",
+                serde_json::json!({
+                    "id": 0,
+                    "rgb": [*r, *g, *b]
+                }),
+            ),
+            MqttCommand::SetCoverPosition(p) => (
+                "Cover.GoToPosition",
+                serde_json::json!({ "id": 0, "pos": *p }),
+            ),
+            MqttCommand::SetTargetTemp(t) => (
+                "Thermostat.SetConfig",
+                serde_json::json!({
+                    "id": 0,
+                    "config": { "target_C": *t }
+                }),
+            ),
+            MqttCommand::Raw(v) => {
+                // Raw is expected to be a full RPC object; pass through.
+                return Some(EncodedCommand::new(
+                    format!("{}/rpc", device_id),
+                    serde_json::to_vec(v).ok()?,
+                ));
+            }
+            _ => return None,
+        };
+        let body = serde_json::json!({
+            "id": rpc_id,
+            "src": "syntaur",
+            "method": method,
+            "params": params,
+        });
+        Some(EncodedCommand::new(
+            format!("{}/rpc", device_id),
+            serde_json::to_vec(&body).ok()?,
+        ))
+    }
+}
+
+/// Monotonic-ish 32-bit RPC id derived from the wall clock. Good enough
+/// to distinguish our concurrent RPC calls; collisions don't matter
+/// because we don't process responses (Phase G metric).
+fn rpc_id() -> u32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| (d.as_millis() & 0xFFFF_FFFF) as u32)
+        .unwrap_or(0)
 }
 
 /// Build a `ScanCandidate` from a `shellyplus<id>/online` topic.
@@ -201,5 +284,58 @@ mod tests {
     fn parse_online_malformed_device_id_returns_none() {
         // No hyphen separator → can't split model from MAC.
         assert!(parse_online("shellyplus_no_hyphen/online").is_none());
+    }
+
+    #[test]
+    fn encode_set_on_is_rpc_switch_set() {
+        let d = ShellyGen2;
+        let e = d
+            .encode_command(
+                "shelly_gen2:shellyplus1pm-aabbccddeeff",
+                &MqttCommand::SetOn(true),
+            )
+            .expect("some");
+        assert_eq!(e.topic, "shellyplus1pm-aabbccddeeff/rpc");
+        let v: serde_json::Value = serde_json::from_slice(&e.payload).unwrap();
+        assert_eq!(v["src"], "syntaur");
+        assert_eq!(v["method"], "Switch.Set");
+        assert_eq!(v["params"]["on"], true);
+    }
+
+    #[test]
+    fn encode_brightness_uses_light_set_percent() {
+        let d = ShellyGen2;
+        let e = d
+            .encode_command(
+                "shelly_gen2:shellypluslightpr-abc",
+                &MqttCommand::SetBrightness(128),
+            )
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&e.payload).unwrap();
+        assert_eq!(v["method"], "Light.Set");
+        let b = v["params"]["brightness"].as_u64().unwrap();
+        assert!((45..=55).contains(&b), "got {}", b);
+    }
+
+    #[test]
+    fn encode_cover_position_is_cover_goto() {
+        let d = ShellyGen2;
+        let e = d
+            .encode_command(
+                "shelly_gen2:shellypluscover-x",
+                &MqttCommand::SetCoverPosition(42),
+            )
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&e.payload).unwrap();
+        assert_eq!(v["method"], "Cover.GoToPosition");
+        assert_eq!(v["params"]["pos"], 42);
+    }
+
+    #[test]
+    fn encode_ignores_non_gen2_external_id() {
+        let d = ShellyGen2;
+        assert!(d
+            .encode_command("shelly:legacy-id", &MqttCommand::SetOn(true))
+            .is_none());
     }
 }

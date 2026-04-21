@@ -27,6 +27,7 @@
 use serde_json::Value;
 
 use super::{DeviceStateUpdate, Dialect, DialectMessage};
+use crate::smart_home::drivers::mqtt::command::{EncodedCommand, MqttCommand};
 use crate::smart_home::scan::ScanCandidate;
 
 pub struct Tasmota;
@@ -69,6 +70,53 @@ impl Dialect for Tasmota {
             }
         }
         None
+    }
+
+    fn encode_command(
+        &self,
+        external_id: &str,
+        cmd: &MqttCommand,
+    ) -> Option<EncodedCommand> {
+        // Tasmota runtime devices are keyed `tasmota_topic:<topic>`.
+        // Discovery rows (`tasmota:<mac>`) lack the MQTT topic we need
+        // and are skipped — Phase D reconciliation will alias them.
+        let topic = external_id.strip_prefix("tasmota_topic:")?;
+        match cmd {
+            MqttCommand::SetOn(on) => Some(EncodedCommand::new(
+                format!("cmnd/{}/POWER", topic),
+                if *on { b"ON".to_vec() } else { b"OFF".to_vec() },
+            )),
+            MqttCommand::SetBrightness(level) => {
+                // Tasmota Dimmer accepts 0..=100. Scale from 0..=255.
+                let pct = ((*level as u16 * 100) / 255).min(100) as u8;
+                Some(EncodedCommand::new(
+                    format!("cmnd/{}/Dimmer", topic),
+                    pct.to_string().into_bytes(),
+                ))
+            }
+            MqttCommand::SetColorTempMireds(mireds) => {
+                // Tasmota CT is 153 (cold) to 500 (warm) mireds natively —
+                // the wire value is the same as our unit.
+                Some(EncodedCommand::new(
+                    format!("cmnd/{}/CT", topic),
+                    mireds.to_string().into_bytes(),
+                ))
+            }
+            MqttCommand::SetColorRgb(r, g, b) => Some(EncodedCommand::new(
+                format!("cmnd/{}/Color", topic),
+                format!("{:02X}{:02X}{:02X}", r, g, b).into_bytes(),
+            )),
+            MqttCommand::Raw(v) => {
+                // Raw escape hatch: {"topic":"...","payload":"..."} or a
+                // bare string → publish as-is under cmnd/<topic>/Backlog.
+                let payload = match v {
+                    serde_json::Value::String(s) => s.clone().into_bytes(),
+                    other => other.to_string().into_bytes(),
+                };
+                Some(EncodedCommand::new(format!("cmnd/{}/Backlog", topic), payload))
+            }
+            _ => None,
+        }
     }
 }
 
@@ -270,5 +318,37 @@ mod tests {
     fn parse_lwt_rejects_unknown_payload() {
         let d = Tasmota;
         assert!(d.parse("tele/plug/LWT", b"maybe").is_none());
+    }
+
+    #[test]
+    fn encode_set_on_produces_cmnd_power() {
+        let d = Tasmota;
+        let e = d
+            .encode_command("tasmota_topic:kitchen_plug", &MqttCommand::SetOn(true))
+            .expect("some");
+        assert_eq!(e.topic, "cmnd/kitchen_plug/POWER");
+        assert_eq!(&e.payload, b"ON");
+        assert!(!e.retain);
+    }
+
+    #[test]
+    fn encode_brightness_scales_to_percent() {
+        let d = Tasmota;
+        let e = d
+            .encode_command("tasmota_topic:lamp", &MqttCommand::SetBrightness(128))
+            .expect("some");
+        assert_eq!(e.topic, "cmnd/lamp/Dimmer");
+        // 128 / 255 ≈ 50%
+        let s = std::str::from_utf8(&e.payload).unwrap();
+        let pct: u32 = s.parse().unwrap();
+        assert!((45..=55).contains(&pct), "got {}", pct);
+    }
+
+    #[test]
+    fn encode_ignores_non_tasmota_external_id() {
+        let d = Tasmota;
+        assert!(d
+            .encode_command("z2m:0x00158d", &MqttCommand::SetOn(true))
+            .is_none());
     }
 }
