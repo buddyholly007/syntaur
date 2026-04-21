@@ -72,6 +72,13 @@ pub async fn init(db_path: std::path::PathBuf) -> Result<(), String> {
     let energy_engine = std::sync::Arc::new(energy::EnergyEngine::new(db_path.clone()));
     let _energy_handle = energy_engine.spawn();
 
+    // Phase E MQTT embedded broker — `rumqttd` on 127.0.0.1:1884 by
+    // default. Honors `SMART_HOME_EMBEDDED_BROKER=off` to disable or
+    // `=<host:port>` to rebind. Bind conflicts (Mosquitto already on
+    // the port, permission denied, etc.) soft-fail into the supervisor
+    // running bridge-only against an upstream broker.
+    let _embedded_broker = drivers::mqtt::broker::EmbeddedBroker::from_env_or_default();
+
     // Phase C MQTT supervisor — one long-running rumqttc session per
     // `smart_home_credentials` row (provider='mqtt'), plus a legacy
     // `SMART_HOME_MQTT_URL` fallback. Never fails `init`: bad/missing

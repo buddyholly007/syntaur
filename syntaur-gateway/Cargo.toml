@@ -68,10 +68,13 @@ tokio-util = { version = "0.7", features = ["io"] }
 ed25519-dalek = "2"
 
 # Smart Home and Network module — MQTT driver (week 8). rumqttc is the
-# pure-Rust async MQTT client we use for both discovery-topic scanning
-# and (later) device control. No broker runs in-process for v1; user
-# points us at their Mosquitto / HA broker via config.
+# pure-Rust async MQTT client; rumqttd is the pure-Rust embeddable
+# broker we supervise in-process on 127.0.0.1:1884 (Phase E of the
+# subsystem plan at ~/.claude/plans/i-want-you-to-fluttering-forest.md).
+# rumqttd is pinned exact (=0.20.0) because the embeddable API is
+# pre-1.0 and changed between 0.19 and 0.20.
 rumqttc = { version = "0.25", default-features = false, features = ["use-rustls"] }
+rumqttd = "=0.20.0"
 hex = "0.4"
 rustls-pemfile = "2"
 rustls = { version = "0.23", features = ["ring"] }
