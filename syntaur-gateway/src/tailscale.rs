@@ -110,9 +110,9 @@ pub struct StatusResponse {
 /// Connect card to render the current state.
 pub async fn handle_status(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<StatusResponse>, StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _principal = crate::resolve_principal_scoped(&state, token, "admin").await?;
     Ok(Json(current_status(&state).await))
 }
@@ -221,9 +221,9 @@ pub async fn handle_connect_oauth(
 /// dir. Next sidecar poll discovers an empty key file and stays logged out.
 pub async fn handle_disconnect(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _principal = crate::resolve_principal_scoped(&state, token, "admin").await?;
 
     let _ = tokio::fs::write(AUTHKEY_FILE, b"").await;

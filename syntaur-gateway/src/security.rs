@@ -48,6 +48,23 @@ fn extract_bearer(req: &Request) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Read the bearer token from `Authorization: Bearer <token>` and return
+/// it as a borrowed slice (or empty string if absent / malformed). The
+/// `&HeaderMap` form lets handlers take `headers: HeaderMap` as an axum
+/// extractor and call this without an allocation per request.
+///
+/// This is the migration target for the legacy `body["token"]` and
+/// `params.get("token")` reads — see `lift_bearer_to_body_and_query`
+/// for the deprecated middleware those handlers used to depend on.
+pub fn bearer_from_headers(headers: &axum::http::HeaderMap) -> &str {
+    headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(str::trim)
+        .unwrap_or("")
+}
+
 // ── 1. bootstrap_loopback_only ─────────────────────────────────────────────
 
 /// When the `users` table is empty, bootstrap surfaces are reachable only
