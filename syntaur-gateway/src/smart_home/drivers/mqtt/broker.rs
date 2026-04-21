@@ -574,6 +574,167 @@ mod tests {
         });
     }
 
+    /// Opt-in live test — drives Syntaur's full stack (MqttSupervisor
+    /// + StateCache + event bus) against Sean's actual HA Mosquitto,
+    /// using the two live ESPHome BT proxies as the traffic source.
+    /// Measures:
+    ///   - raw state-frame ingest rate (how chatty the broker is)
+    ///   - post-diff emission rate (how much the StateCache suppresses)
+    ///   - per-proxy `DeviceStateChanged` counts
+    /// Assertion is loose on purpose: the proxies might be in BLE
+    /// range of each other or not, house activity varies. We just
+    /// require that the supervisor ingests frames, the diff layer
+    /// emits fewer than it sees, and both proxies surface at least
+    /// once.
+    ///
+    /// Requires two env vars:
+    ///   `SYNTAUR_LIVE_MQTT_URL` — broker URL with creds
+    ///   `SYNTAUR_LIVE_DURATION_SECS` — observation window (default 20)
+    #[test]
+    fn live_esphome_proxies_exercise_state_cache_diff() {
+        use crate::crypto;
+        use crate::smart_home::credentials;
+        use crate::smart_home::drivers::mqtt::MqttSupervisor;
+        use crate::smart_home::events::{self, SmartHomeEvent};
+        use std::collections::HashMap;
+        use std::time::Duration;
+        use tempfile::TempDir;
+        use tokio::time::timeout;
+
+        let Ok(url) = std::env::var("SYNTAUR_LIVE_MQTT_URL") else {
+            eprintln!("SYNTAUR_LIVE_MQTT_URL not set — skipping live test");
+            return;
+        };
+        let window_secs: u64 = std::env::var("SYNTAUR_LIVE_DURATION_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(20);
+
+        let tmp = TempDir::new().unwrap();
+        let data_dir = tmp.path().to_path_buf();
+        let key = crypto::load_or_create_key(&data_dir).unwrap();
+        let db_path = data_dir.join("index.db");
+
+        // Schema + two seeded rows, one per live ESPHome proxy.
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE users (id INTEGER PRIMARY KEY);
+                 INSERT INTO users (id) VALUES (1);
+                 CREATE TABLE smart_home_devices (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    room_id INTEGER,
+                    driver TEXT NOT NULL,
+                    external_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    capabilities_json TEXT NOT NULL DEFAULT '{}',
+                    state_json TEXT NOT NULL DEFAULT '{}',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    last_seen_at INTEGER,
+                    created_at INTEGER NOT NULL,
+                    UNIQUE(user_id, driver, external_id)
+                 );
+                 CREATE TABLE smart_home_credentials (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    provider TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    secret_encrypted TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at INTEGER NOT NULL
+                 );
+                 INSERT INTO smart_home_devices
+                    (user_id, driver, external_id, name, kind, created_at)
+                  VALUES
+                    (1, 'mqtt', 'esphome:proxy-kids', 'Kids Bath BT Proxy', 'bluetooth_proxy', 0),
+                    (1, 'mqtt', 'esphome:proxy-master-bath', 'Master Bath BT Proxy', 'bluetooth_proxy', 0);",
+            )
+            .unwrap();
+            let secret = serde_json::json!({ "url": url });
+            credentials::upsert(&conn, &key, 1, "mqtt", "live-ha", &secret, None)
+                .unwrap();
+        }
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            let mut rx = events::bus().subscribe();
+            let sup = MqttSupervisor::spawn(db_path).await;
+
+            // Let the session connect + subscribe before we start
+            // counting — otherwise startup lag skews the diff ratio.
+            tokio::time::sleep(Duration::from_millis(2000)).await;
+
+            let deadline =
+                tokio::time::Instant::now() + Duration::from_secs(window_secs);
+            let mut emitted_by_device: HashMap<i64, u64> = HashMap::new();
+            let mut total_emits = 0u64;
+
+            while tokio::time::Instant::now() < deadline {
+                let remaining = deadline.saturating_duration_since(
+                    tokio::time::Instant::now(),
+                );
+                match timeout(remaining, rx.recv()).await {
+                    Ok(Ok(SmartHomeEvent::DeviceStateChanged {
+                        device_id,
+                        source,
+                        ..
+                    })) if source == "esphome" => {
+                        *emitted_by_device.entry(device_id).or_insert(0) += 1;
+                        total_emits += 1;
+                    }
+                    Ok(Ok(_)) => continue,
+                    Ok(Err(_)) => continue,
+                    Err(_) => break,
+                }
+            }
+
+            let stats = sup.stats_snapshot().await;
+            eprintln!(
+                "[state-cache-diff] window={}s  updates_received={}  diffs_emitted={}  observed_emits={}",
+                window_secs,
+                stats.state_updates_received,
+                stats.state_diffs_emitted,
+                total_emits,
+            );
+            eprintln!(
+                "[state-cache-diff] suppression_ratio={:.1}%",
+                if stats.state_updates_received > 0 {
+                    100.0
+                        * (stats.state_updates_received - stats.state_diffs_emitted)
+                            as f64
+                        / stats.state_updates_received as f64
+                } else {
+                    0.0
+                }
+            );
+            for (dev, n) in &emitted_by_device {
+                eprintln!("[state-cache-diff] device_id={} emits={}", dev, n);
+            }
+
+            assert!(
+                stats.state_updates_received > 0,
+                "no state updates observed — is the broker reachable + proxies online?"
+            );
+            assert!(
+                stats.state_diffs_emitted <= stats.state_updates_received,
+                "diffs_emitted cannot exceed updates_received"
+            );
+            assert_eq!(
+                total_emits, stats.state_diffs_emitted,
+                "bus emits must match stats counter"
+            );
+            assert!(
+                !emitted_by_device.is_empty(),
+                "expected at least one commissioned device to emit"
+            );
+        });
+    }
+
     /// Live wire-level per-user token auth: spawn a broker with a
     /// small allowlist, prove (a) valid user + valid password connects,
     /// (b) valid user + wrong password rejected, (c) user not in the

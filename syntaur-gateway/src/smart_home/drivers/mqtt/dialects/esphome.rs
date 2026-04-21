@@ -12,7 +12,7 @@
 
 use serde_json::Value;
 
-use super::{Dialect, DialectMessage};
+use super::{DeviceStateUpdate, Dialect, DialectMessage};
 use crate::smart_home::scan::ScanCandidate;
 
 pub struct EspHome;
@@ -23,15 +23,85 @@ impl Dialect for EspHome {
     }
 
     fn subscribe_topics(&self) -> &'static [&'static str] {
-        &["esphome/discover/+"]
+        &[
+            "esphome/discover/+",
+            // Per-entity state — ESPHome publishes every entity update
+            // here. Shape: `esphome/<device>/<component>/<slug>/state`.
+            // Subscribing broadly lets the supervisor's StateCache diff
+            // layer ingest heap/rssi/temperature/etc. live.
+            "esphome/+/sensor/+/state",
+            "esphome/+/binary_sensor/+/state",
+            "esphome/+/switch/+/state",
+            "esphome/+/text_sensor/+/state",
+            "esphome/+/number/+/state",
+            // Birth / will for server-level availability.
+            "esphome/+/status",
+        ]
     }
 
     fn parse(&self, topic: &str, payload: &[u8]) -> Option<DialectMessage> {
-        if !topic.starts_with("esphome/discover/") {
-            return None;
+        if topic.starts_with("esphome/discover/") {
+            let payload_s = std::str::from_utf8(payload).ok()?;
+            return parse_discover(topic, payload_s).map(DialectMessage::Discovery);
         }
-        let payload_s = std::str::from_utf8(payload).ok()?;
-        parse_discover(topic, payload_s).map(DialectMessage::Discovery)
+        // esphome/<device>/status — birth/will
+        if let Some(rest) = topic.strip_prefix("esphome/") {
+            if let Some(device) = rest.strip_suffix("/status") {
+                let s = std::str::from_utf8(payload).ok()?.trim();
+                let online = match s {
+                    "online" | "ON" | "on" | "true" | "1" => true,
+                    "offline" | "OFF" | "off" | "false" | "0" => false,
+                    _ => return None,
+                };
+                return Some(DialectMessage::Availability {
+                    external_id: format!("esphome:{}", device),
+                    online,
+                });
+            }
+        }
+        // esphome/<device>/<component>/<slug>/state
+        let parts: Vec<&str> = topic.split('/').collect();
+        if parts.len() == 5 && parts[0] == "esphome" && parts[4] == "state" {
+            let device = parts[1];
+            let component = parts[2];
+            let slug = parts[3];
+            let s = std::str::from_utf8(payload).ok()?.trim();
+            let value = parse_state_payload(component, s);
+            return Some(DialectMessage::State(DeviceStateUpdate {
+                external_id: format!("esphome:{}", device),
+                state: serde_json::json!({ slug: value }),
+                source: "esphome".into(),
+            }));
+        }
+        None
+    }
+}
+
+/// Interpret an ESPHome state payload into a JSON value. Booleans
+/// come through as `ON`/`OFF`; numerics as decimal strings; text
+/// sensors as raw UTF-8.
+fn parse_state_payload(component: &str, s: &str) -> Value {
+    match component {
+        "binary_sensor" | "switch" => match s {
+            "ON" | "on" | "true" | "1" => Value::Bool(true),
+            "OFF" | "off" | "false" | "0" => Value::Bool(false),
+            _ => Value::String(s.into()),
+        },
+        "sensor" | "number" => {
+            // Integer first, then float, then string. Same choice as
+            // the frigate/tasmota dialects so downstream comparisons
+            // against int literals line up.
+            if let Ok(n) = s.parse::<i64>() {
+                return Value::Number(n.into());
+            }
+            if let Ok(n) = s.parse::<f64>() {
+                if let Some(num) = serde_json::Number::from_f64(n) {
+                    return Value::Number(num);
+                }
+            }
+            Value::String(s.into())
+        }
+        _ => Value::String(s.into()),
     }
 }
 
@@ -193,6 +263,91 @@ mod tests {
             infer_kind_from_names("random_sensor", Some("Random")),
             None
         );
+    }
+
+    #[test]
+    fn parses_sensor_state_as_numeric() {
+        let d = EspHome;
+        let m = d
+            .parse("esphome/proxy-kids/sensor/heap_free/state", b"159424")
+            .expect("some");
+        match m {
+            DialectMessage::State(u) => {
+                assert_eq!(u.external_id, "esphome:proxy-kids");
+                assert_eq!(u.source, "esphome");
+                assert_eq!(u.state["heap_free"], 159424);
+            }
+            _ => panic!("expected State"),
+        }
+    }
+
+    #[test]
+    fn parses_sensor_state_as_float_when_decimal() {
+        let d = EspHome;
+        let m = d
+            .parse("esphome/proxy-kids/sensor/internal_temperature/state", b"47.6")
+            .expect("some");
+        match m {
+            DialectMessage::State(u) => {
+                let v = u.state["internal_temperature"].as_f64().unwrap();
+                assert!((v - 47.6).abs() < 1e-6);
+            }
+            _ => panic!("expected State"),
+        }
+    }
+
+    #[test]
+    fn parses_binary_sensor_state_as_bool() {
+        let d = EspHome;
+        let m = d
+            .parse("esphome/proxy-kids/binary_sensor/status/state", b"ON")
+            .expect("some");
+        match m {
+            DialectMessage::State(u) => assert_eq!(u.state["status"], true),
+            _ => panic!("expected State"),
+        }
+    }
+
+    #[test]
+    fn parses_text_sensor_state_as_string() {
+        let d = EspHome;
+        let m = d
+            .parse(
+                "esphome/proxy-kids/text_sensor/ip_address/state",
+                b"192.168.20.229",
+            )
+            .expect("some");
+        match m {
+            DialectMessage::State(u) => assert_eq!(u.state["ip_address"], "192.168.20.229"),
+            _ => panic!("expected State"),
+        }
+    }
+
+    #[test]
+    fn parses_status_as_availability() {
+        let d = EspHome;
+        let on = d.parse("esphome/proxy-kids/status", b"online").expect("some");
+        let off = d
+            .parse("esphome/proxy-kids/status", b"offline")
+            .expect("some");
+        match on {
+            DialectMessage::Availability { external_id, online } => {
+                assert_eq!(external_id, "esphome:proxy-kids");
+                assert!(online);
+            }
+            _ => panic!("expected Availability"),
+        }
+        match off {
+            DialectMessage::Availability { online, .. } => assert!(!online),
+            _ => panic!("expected Availability"),
+        }
+    }
+
+    #[test]
+    fn ignores_unknown_topic_shape() {
+        let d = EspHome;
+        assert!(d.parse("esphome/proxy-kids/whatever", b"x").is_none());
+        assert!(d.parse("not/esphome/a/b/state", b"x").is_none());
     }
 
     /// Opt-in live test — runs when SYNTAUR_LIVE_MQTT_URL points at a
