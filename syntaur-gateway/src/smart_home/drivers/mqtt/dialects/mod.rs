@@ -29,6 +29,7 @@ use crate::smart_home::scan::ScanCandidate;
 pub mod esphome;
 pub mod ha_discovery;
 pub mod shelly_gen1;
+pub mod shelly_gen2;
 pub mod tasmota;
 pub mod zigbee2mqtt;
 
@@ -86,6 +87,7 @@ impl DialectRouter {
         let dialects: Vec<Box<dyn Dialect>> = vec![
             Box::new(tasmota::Tasmota),
             Box::new(shelly_gen1::ShellyGen1),
+            Box::new(shelly_gen2::ShellyGen2),
             Box::new(esphome::EspHome),
             Box::new(zigbee2mqtt::Zigbee2Mqtt),
             Box::new(ha_discovery::HaDiscovery),
@@ -127,6 +129,7 @@ mod tests {
         assert!(topics.iter().any(|t| t.starts_with("shellies/")));
         assert!(topics.iter().any(|t| t.starts_with("esphome/")));
         assert!(topics.iter().any(|t| t.starts_with("zigbee2mqtt/")));
+        assert!(topics.iter().any(|t| t.starts_with("shellyplus")));
     }
 
     #[test]
