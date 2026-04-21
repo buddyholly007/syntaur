@@ -1,26 +1,35 @@
-//! Upstream MQTT bridge — one-direction mirror from the gateway's
-//! primary broker (usually the embedded `rumqttd` on :1884) into the
+//! Upstream MQTT bridge — bidirectional mirror between the gateway's
+//! primary broker (usually the embedded `rumqttd` on :1884) and the
 //! user's existing broker (Mosquitto / HA-OS / etc.).
 //!
 //! The goal: a household running HA at `mosquitto.lan` sees every
 //! Syntaur-native device without configuring HA against our embedded
-//! broker directly. HA Discovery configs + per-device state publishes
-//! land on their existing broker verbatim.
+//! broker directly, AND can control Syntaur devices from their HA
+//! instance by publishing to the familiar `syntaur/u/<user>/device/<id>/cmd`
+//! topic. The bridge relays both directions:
 //!
-//! Phase F-2 Piece A ships one-direction mirroring only. Control from
-//! the upstream side back to the device (HA → Mosquitto → Syntaur)
-//! still works either via HA connecting directly to :1884 (the
-//! embedded broker) or through the user's own Mosquitto bridge config
-//! pointing at :1884. Bidirectional relay with loop prevention is a
-//! Phase F-3 follow-on.
+//! ```text
+//!   downstream (embedded)                    upstream (user's Mosquitto)
+//!   └── SH_DOWN_FILTERS  ──────────────────→ republish verbatim
+//!         (HA Discovery configs, state)
 //!
-//! Topic filter: we mirror exactly the topics Syntaur writes:
-//!   - `homeassistant/+/+/config` and `homeassistant/+/+/+/config`
-//!     (HA Discovery configs emitted by `HADiscoveryPublisher`)
-//!   - `syntaur/u/+/device/+/state` (per-device state republish)
-//! Every other topic on the downstream broker is ignored, so the
-//! bridge doesn't leak internal Syntaur traffic the user didn't ask
-//! for.
+//!   downstream (embedded) ←────────────────── SH_UP_FILTERS
+//!                                             (Syntaur command topics)
+//! ```
+//!
+//! Loop prevention: the two direction filters are **disjoint by
+//! construction**. Nothing we forward downstream→upstream overlaps
+//! with what we forward upstream→downstream:
+//!   - Downstream→upstream carries `homeassistant/*/config` (HA
+//!     Discovery writes from `HADiscoveryPublisher`) + Syntaur's
+//!     own `syntaur/u/+/device/+/state` state feeds.
+//!   - Upstream→downstream carries `syntaur/u/+/device/+/cmd` — the
+//!     HA command topic HA publishes to drive devices.
+//! Because the topic namespaces don't overlap, a mirrored message
+//! can't re-enter the bridge from the opposite side. No MQTT-5
+//! user-property tag needed; no topic-prefix dance. If a user later
+//! wants a wider bidirectional mirror (not the case for our HA-control
+//! use case), that's when the tagging mitigation lands.
 //!
 //! Triggered by the credential's secret blob carrying
 //!   `"bridge_to": "mqtt://[user:pass@]host[:port]"`
@@ -31,15 +40,26 @@ use std::time::Duration;
 use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS};
 use tokio::sync::oneshot;
 
-/// Topics Syntaur publishes that the bridge mirrors upstream. Keeping
-/// this narrow stops the bridge from flooding the user's upstream
-/// with `zigbee2mqtt/bridge/devices` retained inventories etc. that
-/// are already available on their source of truth.
-const MIRROR_FILTERS: &[&str] = &[
+/// Topics Syntaur publishes that the bridge mirrors downstream →
+/// upstream. Keeping this narrow stops the bridge from flooding the
+/// user's upstream with `zigbee2mqtt/bridge/devices` retained
+/// inventories etc. that are already available on their source of
+/// truth.
+const SH_DOWN_FILTERS: &[&str] = &[
     "homeassistant/+/+/config",
     "homeassistant/+/+/+/config",
     "syntaur/u/+/device/+/state",
 ];
+
+/// Topics the bridge mirrors upstream → downstream. Scoped to HA's
+/// command topic pattern so a user's HA instance running against
+/// their upstream broker can drive Syntaur devices. Keeping this
+/// narrower than SH_DOWN_FILTERS guarantees no overlap → no loops.
+const SH_UP_FILTERS: &[&str] = &["syntaur/u/+/device/+/cmd"];
+
+// Preserve the old public name for callers/tests that imported it.
+#[allow(dead_code)]
+pub const MIRROR_FILTERS: &[&str] = SH_DOWN_FILTERS;
 
 /// Configuration for one bridge.
 #[derive(Debug, Clone)]
@@ -103,15 +123,36 @@ impl Bridge {
     }
 
     async fn one_cycle(&self) -> Result<(), String> {
-        let down = build_client(&self.cfg.downstream_url, "syntaur-bridge-sub")?;
-        let (down_client, mut down_loop) = down;
-        let up = build_client(&self.cfg.upstream_url, "syntaur-bridge-pub")?;
-        let (up_client, mut up_loop) = up;
+        // Four clients, one pair per direction. Each pair has a
+        // "reader" subscribed on the source broker and a "writer" that
+        // publishes to the destination broker. Neither pair overlaps
+        // the other's topic filters so there's no self-echo risk.
+        let (down_read_client, mut down_read_loop) =
+            build_client(&self.cfg.downstream_url, "syntaur-bridge-down-read")?;
+        let (up_write_client, mut up_write_loop) =
+            build_client(&self.cfg.upstream_url, "syntaur-bridge-up-write")?;
+        let (up_read_client, mut up_read_loop) =
+            build_client(&self.cfg.upstream_url, "syntaur-bridge-up-read")?;
+        let (down_write_client, mut down_write_loop) =
+            build_client(&self.cfg.downstream_url, "syntaur-bridge-down-write")?;
 
-        for filter in MIRROR_FILTERS {
-            if let Err(e) = down_client.subscribe(*filter, QoS::AtLeastOnce).await {
+        for filter in SH_DOWN_FILTERS {
+            if let Err(e) = down_read_client
+                .subscribe(*filter, QoS::AtLeastOnce)
+                .await
+            {
                 log::warn!(
-                    "[smart_home::mqtt::bridge] {} subscribe {} failed: {}",
+                    "[smart_home::mqtt::bridge] {} down sub {} failed: {}",
+                    self.cfg.label,
+                    filter,
+                    e
+                );
+            }
+        }
+        for filter in SH_UP_FILTERS {
+            if let Err(e) = up_read_client.subscribe(*filter, QoS::AtLeastOnce).await {
+                log::warn!(
+                    "[smart_home::mqtt::bridge] {} up sub {} failed: {}",
                     self.cfg.label,
                     filter,
                     e
@@ -119,60 +160,107 @@ impl Bridge {
             }
         }
         log::info!(
-            "[smart_home::mqtt::bridge] {} mirroring {} → {}",
+            "[smart_home::mqtt::bridge] {} mirroring {} ⇄ {}",
             self.cfg.label,
             redact(&self.cfg.downstream_url),
             redact(&self.cfg.upstream_url)
         );
 
-        // Service the upstream event loop passively — we don't
-        // subscribe upstream (one-way relay), but rumqttc still needs
-        // its event loop polled to flush publishes.
-        let up_poll = tokio::spawn(async move {
+        // Keep the write-only clients' event loops serviced so their
+        // publish queues drain (rumqttc requires polling even when
+        // nothing is subscribed).
+        let up_write_poll = tokio::spawn(async move {
             loop {
-                match up_loop.poll().await {
-                    Ok(_) => {}
-                    Err(e) => {
-                        log::warn!(
-                            "[smart_home::mqtt::bridge] upstream event loop error: {}",
-                            e
-                        );
-                        break;
-                    }
+                if up_write_loop.poll().await.is_err() {
+                    break;
+                }
+            }
+        });
+        let down_write_poll = tokio::spawn(async move {
+            loop {
+                if down_write_loop.poll().await.is_err() {
+                    break;
                 }
             }
         });
 
-        let outcome = async move {
+        // Downstream → upstream task.
+        let down_up_label = self.cfg.label.clone();
+        let down_up = tokio::spawn(async move {
             loop {
-                let ev = down_loop
-                    .poll()
-                    .await
-                    .map_err(|e| format!("downstream poll: {e}"))?;
+                let ev = match down_read_loop.poll().await {
+                    Ok(e) => e,
+                    Err(e) => {
+                        return Err::<(), String>(format!("down poll: {e}"));
+                    }
+                };
                 if let Event::Incoming(Incoming::Publish(p)) = ev {
-                    // Defensive: rumqttc can deliver frames outside
-                    // our subscribed filters if the broker's own
-                    // bridge config cross-publishes. Re-check.
-                    if !topic_matches_any(&p.topic, MIRROR_FILTERS) {
+                    if !topic_matches_any(&p.topic, SH_DOWN_FILTERS) {
                         continue;
                     }
-                    if let Err(e) = up_client
-                        .publish(p.topic.clone(), QoS::AtLeastOnce, p.retain, p.payload)
+                    if let Err(e) = up_write_client
+                        .publish(
+                            p.topic.clone(),
+                            QoS::AtLeastOnce,
+                            p.retain,
+                            p.payload,
+                        )
                         .await
                     {
                         log::warn!(
-                            "[smart_home::mqtt::bridge] {} upstream publish {} failed: {}",
-                            self.cfg.label,
+                            "[smart_home::mqtt::bridge] {} down→up publish {} failed: {}",
+                            down_up_label,
                             p.topic,
                             e
                         );
                     }
                 }
             }
-        }
-        .await;
+        });
 
-        up_poll.abort();
+        // Upstream → downstream task.
+        let up_down_label = self.cfg.label.clone();
+        let up_down = tokio::spawn(async move {
+            loop {
+                let ev = match up_read_loop.poll().await {
+                    Ok(e) => e,
+                    Err(e) => {
+                        return Err::<(), String>(format!("up poll: {e}"));
+                    }
+                };
+                if let Event::Incoming(Incoming::Publish(p)) = ev {
+                    if !topic_matches_any(&p.topic, SH_UP_FILTERS) {
+                        continue;
+                    }
+                    if let Err(e) = down_write_client
+                        .publish(
+                            p.topic.clone(),
+                            QoS::AtLeastOnce,
+                            p.retain,
+                            p.payload,
+                        )
+                        .await
+                    {
+                        log::warn!(
+                            "[smart_home::mqtt::bridge] {} up→down publish {} failed: {}",
+                            up_down_label,
+                            p.topic,
+                            e
+                        );
+                    }
+                }
+            }
+        });
+
+        // If either mirror task exits we tear the whole cycle down —
+        // reconnect policy lives in the outer loop.
+        let outcome: Result<(), String> = tokio::select! {
+            r = down_up => r.unwrap_or_else(|e| Err(format!("down→up join: {e}"))),
+            r = up_down => r.unwrap_or_else(|e| Err(format!("up→down join: {e}"))),
+        };
+
+        up_write_poll.abort();
+        down_write_poll.abort();
         outcome
     }
 }
@@ -314,6 +402,44 @@ mod tests {
             "syntaur/u/1/device/7/cmd",
             filters
         ));
+    }
+
+    #[test]
+    fn up_filters_cover_command_topic() {
+        assert!(topic_matches_any(
+            "syntaur/u/1/device/7/cmd",
+            SH_UP_FILTERS
+        ));
+    }
+
+    #[test]
+    fn down_and_up_filters_are_disjoint() {
+        // The bridge's no-loop guarantee hinges on these being
+        // disjoint. A mirror-eligible frame on one side must NEVER
+        // match the opposite-side filter. If someone adds a shared
+        // topic, this test fails loud.
+        let down_cases = &[
+            "homeassistant/switch/syntaur/7/config",
+            "homeassistant/light/7/config",
+            "syntaur/u/1/device/7/state",
+        ];
+        for t in down_cases {
+            assert!(topic_matches_any(t, SH_DOWN_FILTERS));
+            assert!(
+                !topic_matches_any(t, SH_UP_FILTERS),
+                "DOWN filter topic {} also matches UP filter — loop risk",
+                t
+            );
+        }
+        let up_cases = &["syntaur/u/1/device/7/cmd"];
+        for t in up_cases {
+            assert!(topic_matches_any(t, SH_UP_FILTERS));
+            assert!(
+                !topic_matches_any(t, SH_DOWN_FILTERS),
+                "UP filter topic {} also matches DOWN filter — loop risk",
+                t
+            );
+        }
     }
 
     #[test]
