@@ -77,6 +77,10 @@ pub enum AuthPolicy {
     Open,
     /// Single shared secret; any username accepted if password matches.
     Password(String),
+    /// Explicit allowlist of `(username, password)` pairs. Auth
+    /// accepts iff the username exists in the allowlist AND the
+    /// supplied password matches (constant-time compare).
+    PerUserTokens(Vec<(String, String)>),
 }
 
 impl AuthPolicy {
@@ -90,6 +94,15 @@ impl AuthPolicy {
         }
     }
 
+    /// Supported shapes:
+    ///   ""                       → Open
+    ///   "open" / "off"           → Open
+    ///   "password:<pw>"          → Password
+    ///   "tokens:u1=p1,u2=p2"     → PerUserTokens
+    /// Malformed tokens or empty passwords inside a `tokens:` spec are
+    /// dropped individually (logged); the remaining entries stand. An
+    /// all-dropped `tokens:` spec degrades to Open with a warning so
+    /// operators see the misconfiguration in logs.
     pub fn parse(raw: &str) -> Self {
         let trimmed = raw.trim();
         if trimmed.is_empty()
@@ -107,6 +120,29 @@ impl AuthPolicy {
                 return Self::Open;
             }
             return Self::Password(pw.to_string());
+        }
+        if let Some(list) = trimmed.strip_prefix("tokens:") {
+            let mut tokens = Vec::new();
+            for pair in list.split(',').filter(|s| !s.trim().is_empty()) {
+                match pair.split_once('=') {
+                    Some((u, p)) if !u.trim().is_empty() && !p.is_empty() => {
+                        tokens.push((u.trim().to_string(), p.to_string()));
+                    }
+                    _ => log::warn!(
+                        "[smart_home::mqtt] {} token entry '{}' malformed — dropped",
+                        AUTH_ENV_VAR,
+                        pair
+                    ),
+                }
+            }
+            if tokens.is_empty() {
+                log::warn!(
+                    "[smart_home::mqtt] {} tokens: list had no valid entries — degrading to open",
+                    AUTH_ENV_VAR
+                );
+                return Self::Open;
+            }
+            return Self::PerUserTokens(tokens);
         }
         log::warn!(
             "[smart_home::mqtt] unrecognized {} value '{}' — degrading to open",
@@ -200,6 +236,7 @@ impl EmbeddedBroker {
         let auth_label = match &auth {
             AuthPolicy::Open => "open".to_string(),
             AuthPolicy::Password(_) => "password".to_string(),
+            AuthPolicy::PerUserTokens(list) => format!("tokens({})", list.len()),
         };
         let config = build_config(bind, auth);
         let handle = std::thread::Builder::new()
@@ -255,6 +292,24 @@ fn build_config(bind: SocketAddr, auth: AuthPolicy) -> Config {
                       pass: rumqttd::AuthPass| {
                     let expected = expected.clone();
                     async move { ct_eq(pass.as_bytes(), expected.as_bytes()) }
+                },
+            );
+        }
+        AuthPolicy::PerUserTokens(list) => {
+            // Allowlist lookup with constant-time pw compare. Capturing
+            // the Vec by value keeps the handler self-contained; rumqttd
+            // invokes it per-CONNECT, so the linear scan cost is fine
+            // for a household-scale token list (typically < 10 users).
+            settings.set_auth_handler(
+                move |_client_id: rumqttd::ClientId,
+                      user: rumqttd::AuthUser,
+                      pass: rumqttd::AuthPass| {
+                    let list = list.clone();
+                    async move {
+                        list.iter().any(|(u, p)| {
+                            u == &user && ct_eq(pass.as_bytes(), p.as_bytes())
+                        })
+                    }
                 },
             );
         }
@@ -346,6 +401,51 @@ mod tests {
     fn auth_policy_unknown_scheme_degrades_to_open() {
         assert_eq!(AuthPolicy::parse("bearer:x"), AuthPolicy::Open);
         assert_eq!(AuthPolicy::parse("garbage"), AuthPolicy::Open);
+    }
+
+    #[test]
+    fn auth_policy_parses_tokens_list() {
+        match AuthPolicy::parse("tokens:u1=p1,u2=p2") {
+            AuthPolicy::PerUserTokens(v) => {
+                assert_eq!(v.len(), 2);
+                assert_eq!(v[0], ("u1".into(), "p1".into()));
+                assert_eq!(v[1], ("u2".into(), "p2".into()));
+            }
+            other => panic!("expected PerUserTokens, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn auth_policy_tokens_drops_malformed_entries() {
+        match AuthPolicy::parse("tokens:valid=pw,=empty_user,novalue,another=good") {
+            AuthPolicy::PerUserTokens(v) => {
+                assert_eq!(v.len(), 2, "got {:?}", v);
+                let users: Vec<&str> = v.iter().map(|(u, _)| u.as_str()).collect();
+                assert!(users.contains(&"valid"));
+                assert!(users.contains(&"another"));
+            }
+            other => panic!("expected PerUserTokens, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn auth_policy_all_malformed_tokens_degrades_to_open() {
+        assert_eq!(AuthPolicy::parse("tokens:=a,nouser"), AuthPolicy::Open);
+        assert_eq!(AuthPolicy::parse("tokens:"), AuthPolicy::Open);
+    }
+
+    #[test]
+    fn build_config_with_per_user_tokens_installs_auth_handler() {
+        let cfg = build_config(
+            "127.0.0.1:18832".parse().unwrap(),
+            AuthPolicy::PerUserTokens(vec![
+                ("alice".into(), "pw1".into()),
+                ("bob".into(), "pw2".into()),
+            ]),
+        );
+        let v4 = cfg.v4.as_ref().unwrap();
+        let s = v4.values().next().unwrap();
+        assert!(s.connections.external_auth.is_some());
     }
 
     #[test]
@@ -471,6 +571,149 @@ mod tests {
                 .unwrap();
             let saw = poll_task.await.unwrap();
             assert!(saw, "good-password client didn't receive its own publish");
+        });
+    }
+
+    /// Live wire-level per-user token auth: spawn a broker with a
+    /// small allowlist, prove (a) valid user + valid password connects,
+    /// (b) valid user + wrong password rejected, (c) user not in the
+    /// allowlist rejected.
+    #[test]
+    fn per_user_tokens_enforces_allowlist() {
+        use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS};
+        use std::time::Duration;
+        use tokio::time::timeout;
+
+        let mut broker_opt = None;
+        let mut bind = None;
+        for _ in 0..3 {
+            let addr = claim_ephemeral_port();
+            if let Some(b) = EmbeddedBroker::spawn_with(
+                addr,
+                AuthPolicy::PerUserTokens(vec![
+                    ("alice".into(), "alpha-pw".into()),
+                    ("bob".into(), "bravo-pw".into()),
+                ]),
+            ) {
+                broker_opt = Some(b);
+                bind = Some(addr);
+                break;
+            }
+        }
+        let _broker = broker_opt.expect("broker spawn");
+        let addr = bind.unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            for _ in 0..40 {
+                if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(50))
+                    .is_ok()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+
+            // (a) Valid user + valid password: handshake + subscribe +
+            // publish round trip succeeds. No explicit pub-sub here —
+            // the Phase E-2 password test already covers that shape;
+            // we just prove the ConnAck is success-coded by waiting
+            // ~1s without an error.
+            let mut alice_opts =
+                MqttOptions::new("tokens-alice", addr.ip().to_string(), addr.port());
+            alice_opts.set_keep_alive(Duration::from_secs(5));
+            alice_opts.set_credentials("alice", "alpha-pw");
+            let (_alice_client, mut alice_loop) = AsyncClient::new(alice_opts, 16);
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            let mut alice_ok = false;
+            while tokio::time::Instant::now() < deadline {
+                match timeout(Duration::from_millis(300), alice_loop.poll()).await {
+                    Ok(Ok(Event::Incoming(Incoming::ConnAck(ack))))
+                        if matches!(ack.code, rumqttc::ConnectReturnCode::Success) =>
+                    {
+                        alice_ok = true;
+                        break;
+                    }
+                    Ok(Err(e)) => panic!("alice should have succeeded, got err: {e}"),
+                    _ => continue,
+                }
+            }
+            assert!(alice_ok, "alice w/ correct password failed to connect");
+
+            // (b) Valid user + wrong password: rejected.
+            let mut bad_opts =
+                MqttOptions::new("tokens-alice-badpw", addr.ip().to_string(), addr.port());
+            bad_opts.set_keep_alive(Duration::from_secs(5));
+            bad_opts.set_credentials("alice", "wrong");
+            let (_bad_client, mut bad_loop) = AsyncClient::new(bad_opts, 16);
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+            let mut bad_rejected = false;
+            while tokio::time::Instant::now() < deadline {
+                match timeout(Duration::from_millis(300), bad_loop.poll()).await {
+                    Ok(Err(_e)) => {
+                        bad_rejected = true;
+                        break;
+                    }
+                    Ok(Ok(Event::Incoming(Incoming::ConnAck(ack))))
+                        if matches!(
+                            ack.code,
+                            rumqttc::ConnectReturnCode::BadUserNamePassword
+                                | rumqttc::ConnectReturnCode::NotAuthorized
+                        ) =>
+                    {
+                        bad_rejected = true;
+                        break;
+                    }
+                    Ok(Ok(Event::Incoming(Incoming::ConnAck(ack))))
+                        if matches!(ack.code, rumqttc::ConnectReturnCode::Success) =>
+                    {
+                        panic!("bad password was accepted!")
+                    }
+                    _ => continue,
+                }
+            }
+            assert!(bad_rejected, "alice w/ wrong password wasn't rejected");
+
+            // (c) User not in allowlist: rejected.
+            let mut stranger_opts = MqttOptions::new(
+                "tokens-stranger",
+                addr.ip().to_string(),
+                addr.port(),
+            );
+            stranger_opts.set_keep_alive(Duration::from_secs(5));
+            stranger_opts.set_credentials("carol", "whatever");
+            let (_stranger_client, mut stranger_loop) =
+                AsyncClient::new(stranger_opts, 16);
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+            let mut stranger_rejected = false;
+            while tokio::time::Instant::now() < deadline {
+                match timeout(Duration::from_millis(300), stranger_loop.poll()).await {
+                    Ok(Err(_)) => {
+                        stranger_rejected = true;
+                        break;
+                    }
+                    Ok(Ok(Event::Incoming(Incoming::ConnAck(ack))))
+                        if matches!(
+                            ack.code,
+                            rumqttc::ConnectReturnCode::BadUserNamePassword
+                                | rumqttc::ConnectReturnCode::NotAuthorized
+                        ) =>
+                    {
+                        stranger_rejected = true;
+                        break;
+                    }
+                    Ok(Ok(Event::Incoming(Incoming::ConnAck(ack))))
+                        if matches!(ack.code, rumqttc::ConnectReturnCode::Success) =>
+                    {
+                        panic!("stranger user was accepted!")
+                    }
+                    _ => continue,
+                }
+            }
+            assert!(stranger_rejected, "carol (not in list) wasn't rejected");
         });
     }
 
