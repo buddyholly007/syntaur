@@ -194,7 +194,7 @@ jobs:
       - name: Build release
         run: cargo build --release --target x86_64-apple-darwin -p ${{ matrix.package }}
       - name: Upload to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: target/x86_64-apple-darwin/release/${{ matrix.package }}
           tag_name: ${{ github.ref_name }}
@@ -283,7 +283,7 @@ jobs:
           subject-path: 'dist/syntaur-*'
 
       - name: Upload release assets
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/syntaur-*
