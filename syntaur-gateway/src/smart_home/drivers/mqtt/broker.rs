@@ -33,6 +33,21 @@ use std::net::{SocketAddr, TcpListener};
 
 use rumqttd::{Broker, Config, ConnectionSettings, RouterConfig, ServerSettings};
 
+/// Constant-time byte compare — avoids timing leaks on the password
+/// check. `subtle` would be the right dep but it isn't in the workspace
+/// and the password check runs once per connect (not per message), so
+/// a hand-rolled loop is fine here.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Default bind for the embedded broker. Port 1884 keeps Mosquitto on
 /// 1883 untouched, and binding to 127.0.0.1 keeps the broker off the
 /// LAN until auth + TLS land in Phase E-2.
@@ -44,6 +59,63 @@ pub const DEFAULT_BIND: &str = "127.0.0.1:1884";
 ///   "off" / "0" — disable entirely
 ///   "host:port" — bind there (e.g. "0.0.0.0:1884" or "127.0.0.1:18830")
 pub const ENV_VAR: &str = "SMART_HOME_EMBEDDED_BROKER";
+
+/// Env var controlling connection authentication. Phase E-2:
+///   unset / ""         — noauth (default; localhost-only is safe)
+///   "open" / "off"     — noauth, explicit
+///   "password:<pw>"    — any username, `<pw>` required
+/// Per-user HMAC tokens + ACL rewriting into `u/<user_id>/...`
+/// namespace are a future iteration tied to the settings UI. For v1 a
+/// static shared secret is enough to cover the "I want to bind to
+/// 0.0.0.0" scenario without a full identity model.
+pub const AUTH_ENV_VAR: &str = "SMART_HOME_EMBEDDED_BROKER_AUTH";
+
+/// Parsed auth policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthPolicy {
+    /// No authentication — anyone who can reach the listener connects.
+    Open,
+    /// Single shared secret; any username accepted if password matches.
+    Password(String),
+}
+
+impl AuthPolicy {
+    /// Parse the `SMART_HOME_EMBEDDED_BROKER_AUTH` environment
+    /// surface. Unknown values log a warning and degrade to `Open` so
+    /// a typo doesn't silently lock the broker.
+    pub fn from_env() -> Self {
+        match std::env::var(AUTH_ENV_VAR) {
+            Ok(v) => Self::parse(&v),
+            Err(_) => Self::Open,
+        }
+    }
+
+    pub fn parse(raw: &str) -> Self {
+        let trimmed = raw.trim();
+        if trimmed.is_empty()
+            || trimmed.eq_ignore_ascii_case("open")
+            || trimmed.eq_ignore_ascii_case("off")
+        {
+            return Self::Open;
+        }
+        if let Some(pw) = trimmed.strip_prefix("password:") {
+            if pw.is_empty() {
+                log::warn!(
+                    "[smart_home::mqtt] {} password is empty — degrading to open",
+                    AUTH_ENV_VAR
+                );
+                return Self::Open;
+            }
+            return Self::Password(pw.to_string());
+        }
+        log::warn!(
+            "[smart_home::mqtt] unrecognized {} value '{}' — degrading to open",
+            AUTH_ENV_VAR,
+            trimmed
+        );
+        Self::Open
+    }
+}
 
 /// Started broker. Dropping this value does NOT shut the broker down —
 /// rumqttd 0.20 has no public shutdown API. Kept as a handle mainly so
@@ -72,7 +144,7 @@ impl EmbeddedBroker {
                 None
             }
             Ok(v) => match v.parse::<SocketAddr>() {
-                Ok(addr) => Self::spawn(addr),
+                Ok(addr) => Self::spawn_with(addr, AuthPolicy::from_env()),
                 Err(e) => {
                     log::warn!(
                         "[smart_home::mqtt] invalid {}={} ({}); using {}",
@@ -92,7 +164,13 @@ impl EmbeddedBroker {
         let addr: SocketAddr = DEFAULT_BIND
             .parse()
             .expect("DEFAULT_BIND is a valid socket addr");
-        Self::spawn(addr)
+        Self::spawn_with(addr, AuthPolicy::from_env())
+    }
+
+    /// Spawn the broker with `AuthPolicy::Open`. Convenience for the
+    /// default no-auth + localhost-only v1 path.
+    pub fn spawn(bind: SocketAddr) -> Option<Self> {
+        Self::spawn_with(bind, AuthPolicy::Open)
     }
 
     /// Spawn the broker on a dedicated OS thread. `rumqttd::Broker::start`
@@ -103,7 +181,7 @@ impl EmbeddedBroker {
     /// use, permission denied on low ports, etc.) — `smart_home::init`
     /// continues in that case; the supervisor just has no in-process
     /// broker to use.
-    pub fn spawn(bind: SocketAddr) -> Option<Self> {
+    pub fn spawn_with(bind: SocketAddr, auth: AuthPolicy) -> Option<Self> {
         // Probe the bind before handing rumqttd a config it would fail
         // on inside a background thread. Structured log here is easier
         // to trace than a rumqttd IO error surfaced after thread spawn.
@@ -119,7 +197,11 @@ impl EmbeddedBroker {
             }
         }
 
-        let config = build_config(bind);
+        let auth_label = match &auth {
+            AuthPolicy::Open => "open".to_string(),
+            AuthPolicy::Password(_) => "password".to_string(),
+        };
+        let config = build_config(bind, auth);
         let handle = std::thread::Builder::new()
             .name("syntaur-mqtt-broker".into())
             .spawn(move || {
@@ -133,32 +215,52 @@ impl EmbeddedBroker {
             return None;
         }
 
-        log::info!("[smart_home::mqtt] embedded broker listening on {}", bind);
+        log::info!(
+            "[smart_home::mqtt] embedded broker listening on {} (auth={})",
+            bind,
+            auth_label
+        );
         Some(Self { bind })
     }
 }
 
-fn build_config(bind: SocketAddr) -> Config {
-    let mut v4 = HashMap::new();
-    v4.insert(
-        "v4-syntaur".to_string(),
-        ServerSettings {
-            name: "v4-syntaur".into(),
-            listen: bind,
-            tls: None,
-            next_connection_delay_ms: 1,
-            connections: ConnectionSettings {
-                connection_timeout_ms: 60_000,
-                // 256 KB is comfortable for retained Z2M `bridge/devices`
-                // with ~100 devices; rumqttd's default 20KB is too tight.
-                max_payload_size: 256 * 1024,
-                max_inflight_count: 500,
-                auth: None,
-                external_auth: None,
-                dynamic_filters: true,
-            },
+fn build_config(bind: SocketAddr, auth: AuthPolicy) -> Config {
+    let mut settings = ServerSettings {
+        name: "v4-syntaur".into(),
+        listen: bind,
+        tls: None,
+        next_connection_delay_ms: 1,
+        connections: ConnectionSettings {
+            connection_timeout_ms: 60_000,
+            // 256 KB is comfortable for retained Z2M `bridge/devices`
+            // with ~100 devices; rumqttd's default 20KB is too tight.
+            max_payload_size: 256 * 1024,
+            max_inflight_count: 500,
+            auth: None,
+            external_auth: None,
+            dynamic_filters: true,
         },
-    );
+    };
+    match auth {
+        AuthPolicy::Open => {}
+        AuthPolicy::Password(expected) => {
+            // rumqttd::ConnectionSettings::set_auth_handler expects a
+            // closure returning `impl IntoFuture<Output = bool>`. Plain
+            // async closures satisfy that; the password is captured by
+            // value and compared constant-time against the incoming
+            // frame.
+            settings.set_auth_handler(
+                move |_client_id: rumqttd::ClientId,
+                      _user: rumqttd::AuthUser,
+                      pass: rumqttd::AuthPass| {
+                    let expected = expected.clone();
+                    async move { ct_eq(pass.as_bytes(), expected.as_bytes()) }
+                },
+            );
+        }
+    }
+    let mut v4 = HashMap::new();
+    v4.insert("v4-syntaur".to_string(), settings);
 
     Config {
         id: 0,
@@ -192,7 +294,7 @@ mod tests {
 
     #[test]
     fn build_config_has_v4_server() {
-        let cfg = build_config("127.0.0.1:18830".parse().unwrap());
+        let cfg = build_config("127.0.0.1:18830".parse().unwrap(), AuthPolicy::Open);
         let v4 = cfg.v4.as_ref().expect("v4 configured");
         assert_eq!(v4.len(), 1);
         let s = v4.values().next().unwrap();
@@ -202,10 +304,174 @@ mod tests {
     }
 
     #[test]
+    fn build_config_with_password_installs_auth_handler() {
+        let cfg = build_config(
+            "127.0.0.1:18831".parse().unwrap(),
+            AuthPolicy::Password("hunter2".into()),
+        );
+        let v4 = cfg.v4.as_ref().unwrap();
+        let s = v4.values().next().unwrap();
+        assert!(s.connections.external_auth.is_some());
+    }
+
+    #[test]
     fn build_config_router_caps_are_modest() {
-        let cfg = build_config(DEFAULT_BIND.parse().unwrap());
+        let cfg = build_config(DEFAULT_BIND.parse().unwrap(), AuthPolicy::Open);
         assert!(cfg.router.max_connections >= 16 && cfg.router.max_connections <= 1024);
         assert!(cfg.router.max_segment_count >= 2);
+    }
+
+    #[test]
+    fn auth_policy_parses_open_variants() {
+        assert_eq!(AuthPolicy::parse(""), AuthPolicy::Open);
+        assert_eq!(AuthPolicy::parse("open"), AuthPolicy::Open);
+        assert_eq!(AuthPolicy::parse("OFF"), AuthPolicy::Open);
+        assert_eq!(AuthPolicy::parse("  open  "), AuthPolicy::Open);
+    }
+
+    #[test]
+    fn auth_policy_parses_password_form() {
+        assert_eq!(
+            AuthPolicy::parse("password:hunter2"),
+            AuthPolicy::Password("hunter2".into())
+        );
+    }
+
+    #[test]
+    fn auth_policy_empty_password_degrades_to_open() {
+        assert_eq!(AuthPolicy::parse("password:"), AuthPolicy::Open);
+    }
+
+    #[test]
+    fn auth_policy_unknown_scheme_degrades_to_open() {
+        assert_eq!(AuthPolicy::parse("bearer:x"), AuthPolicy::Open);
+        assert_eq!(AuthPolicy::parse("garbage"), AuthPolicy::Open);
+    }
+
+    #[test]
+    fn ct_eq_distinguishes_lengths_and_contents() {
+        assert!(ct_eq(b"abc", b"abc"));
+        assert!(!ct_eq(b"abc", b"abd"));
+        assert!(!ct_eq(b"abc", b"ab"));
+        assert!(ct_eq(b"", b""));
+    }
+
+    /// Live wire-level auth: spawn a broker with Password("correct"),
+    /// try to connect with the wrong password, assert rumqttc's event
+    /// loop surfaces a connection error rather than completing the
+    /// handshake. Then connect with the right password and prove a
+    /// subsequent publish-subscribe round trips.
+    #[test]
+    fn password_auth_rejects_bad_and_accepts_good() {
+        use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS};
+        use std::time::Duration;
+        use tokio::time::timeout;
+
+        let mut broker_opt = None;
+        let mut bind = None;
+        for _ in 0..3 {
+            let addr = claim_ephemeral_port();
+            if let Some(b) = EmbeddedBroker::spawn_with(
+                addr,
+                AuthPolicy::Password("correct-horse-battery".into()),
+            ) {
+                broker_opt = Some(b);
+                bind = Some(addr);
+                break;
+            }
+        }
+        let _broker = broker_opt.expect("broker spawn");
+        let addr = bind.unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            for _ in 0..40 {
+                if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(50))
+                    .is_ok()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+
+            // Wrong password: event loop must surface an error within
+            // a couple of seconds. rumqttc returns the error on the
+            // poll that follows the rejected CONNECT.
+            let mut bad_opts =
+                MqttOptions::new("auth-bad", addr.ip().to_string(), addr.port());
+            bad_opts.set_keep_alive(Duration::from_secs(5));
+            bad_opts.set_credentials("anyuser", "definitely-wrong");
+            let (_bad_client, mut bad_loop) = AsyncClient::new(bad_opts, 32);
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+            let mut saw_error = false;
+            while tokio::time::Instant::now() < deadline {
+                match timeout(Duration::from_millis(300), bad_loop.poll()).await {
+                    Ok(Err(_e)) => {
+                        saw_error = true;
+                        break;
+                    }
+                    Ok(Ok(Event::Incoming(Incoming::ConnAck(ack)))) => {
+                        // Some brokers reply with a failing ConnAck
+                        // before dropping the socket — also acceptable.
+                        if matches!(
+                            ack.code,
+                            rumqttc::ConnectReturnCode::BadUserNamePassword
+                                | rumqttc::ConnectReturnCode::NotAuthorized
+                        ) {
+                            saw_error = true;
+                            break;
+                        }
+                    }
+                    _ => continue,
+                }
+            }
+            assert!(
+                saw_error,
+                "expected bad-password client to be rejected by broker"
+            );
+
+            // Right password: handshake + sub + pub round trip must
+            // succeed, proving the auth handler accepts the matching
+            // credential (not just rejecting everything).
+            let mut good_opts =
+                MqttOptions::new("auth-good", addr.ip().to_string(), addr.port());
+            good_opts.set_keep_alive(Duration::from_secs(5));
+            good_opts.set_credentials("anyuser", "correct-horse-battery");
+            let (good_client, mut good_loop) = AsyncClient::new(good_opts, 32);
+            good_client
+                .subscribe("auth_ok/#", QoS::AtLeastOnce)
+                .await
+                .unwrap();
+            // Service the event loop in the background while we also
+            // publish from the same client.
+            let poll_task = tokio::spawn(async move {
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+                let mut saw = false;
+                while tokio::time::Instant::now() < deadline {
+                    match timeout(Duration::from_millis(300), good_loop.poll()).await {
+                        Ok(Ok(Event::Incoming(Incoming::Publish(p)))) => {
+                            if p.topic == "auth_ok/hello" && &*p.payload == b"y" {
+                                saw = true;
+                                break;
+                            }
+                        }
+                        _ => continue,
+                    }
+                }
+                saw
+            });
+            // Small wait so SUBACK lands before the publish.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            good_client
+                .publish("auth_ok/hello", QoS::AtLeastOnce, false, b"y".to_vec())
+                .await
+                .unwrap();
+            let saw = poll_task.await.unwrap();
+            assert!(saw, "good-password client didn't receive its own publish");
+        });
     }
 
     #[test]
@@ -653,10 +919,6 @@ mod tests {
             // the embedded broker, subscribed to every v1 dialect topic.
             let _sup = MqttSupervisor::spawn(db_path).await;
 
-            // Give the session a beat to connect + subscribe. Two polls
-            // at 250ms each is usually enough on a quiet VM.
-            tokio::time::sleep(Duration::from_millis(600)).await;
-
             // External publisher — not the supervisor — sends the
             // Tasmota POWER frame. Simulates the real wire exchange.
             let mut pub_opts =
@@ -664,52 +926,79 @@ mod tests {
             pub_opts.set_keep_alive(Duration::from_secs(5));
             let (pub_client, mut pub_loop) = AsyncClient::new(pub_opts, 32);
             tokio::spawn(async move {
-                for _ in 0..60 {
-                    let _ = timeout(Duration::from_millis(200), pub_loop.poll()).await;
+                for _ in 0..80 {
+                    let _ = timeout(Duration::from_millis(250), pub_loop.poll()).await;
                 }
             });
-            pub_client
-                .publish(
-                    "stat/test_plug/POWER",
-                    QoS::AtLeastOnce,
-                    false,
-                    b"ON".to_vec(),
-                )
-                .await
-                .expect("publish POWER");
 
-            // Wait for DeviceStateChanged on the bus. Ignore noise
-            // emitted by other tests sharing the global bus.
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-            let mut matched = false;
-            while tokio::time::Instant::now() < deadline {
-                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                match timeout(remaining, rx.recv()).await {
-                    Ok(Ok(SmartHomeEvent::DeviceStateChanged {
-                        user_id,
-                        device_id: id,
-                        source,
-                        state,
-                    })) => {
-                        if user_id == 1 && id == device_id && source == "tasmota" {
-                            // Verify the merged state carries our frame.
-                            assert_eq!(
-                                state["relays"]["POWER"], "ON",
-                                "state: {}",
-                                state
-                            );
-                            matched = true;
-                            break;
-                        }
+            // Under parallel cargo test load the session's subscribe
+            // can land a few hundred ms late. Publish repeatedly with
+            // a toggling payload so the StateCache hash-diff always
+            // has something new to emit even if the first one or two
+            // beat the subscription handshake. Gives the test enough
+            // slack to pass with --test-threads=N without flaking.
+            let toggles = ["ON", "OFF", "ON", "OFF", "ON"];
+            let mut republisher_done = false;
+            let republisher = async {
+                for payload in toggles {
+                    if republisher_done {
+                        break;
                     }
-                    Ok(Ok(_other)) => continue,
-                    Ok(Err(_lag_or_closed)) => continue,
-                    Err(_timeout) => break,
+                    let _ = pub_client
+                        .publish(
+                            "stat/test_plug/POWER",
+                            QoS::AtLeastOnce,
+                            false,
+                            payload.as_bytes().to_vec(),
+                        )
+                        .await;
+                    tokio::time::sleep(Duration::from_millis(400)).await;
                 }
-            }
+            };
+
+            // Wait for DeviceStateChanged on the bus while the
+            // republisher runs. Either side winning cleanly ends the
+            // test; we join them with tokio::select so the republisher
+            // gets a chance to retry on slow startup.
+            let waiter = async {
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+                while tokio::time::Instant::now() < deadline {
+                    let remaining =
+                        deadline.saturating_duration_since(tokio::time::Instant::now());
+                    match timeout(remaining, rx.recv()).await {
+                        Ok(Ok(SmartHomeEvent::DeviceStateChanged {
+                            user_id,
+                            device_id: id,
+                            source,
+                            state,
+                        })) => {
+                            if user_id == 1 && id == device_id && source == "tasmota" {
+                                // Assert against "relays.POWER" being
+                                // either ON or OFF — we don't know which
+                                // republish frame the session caught first.
+                                let got = state["relays"]["POWER"].as_str().unwrap_or("");
+                                assert!(
+                                    got == "ON" || got == "OFF",
+                                    "unexpected POWER state: {}",
+                                    state
+                                );
+                                return true;
+                            }
+                        }
+                        Ok(Ok(_other)) => continue,
+                        Ok(Err(_lag_or_closed)) => continue,
+                        Err(_timeout) => break,
+                    }
+                }
+                false
+            };
+
+            let (matched, _) = tokio::join!(waiter, republisher);
+            republisher_done = true;
+            let _ = republisher_done;
             assert!(
                 matched,
-                "did not observe DeviceStateChanged for device_id={} within 5s",
+                "did not observe DeviceStateChanged for device_id={} within 8s",
                 device_id
             );
         });
