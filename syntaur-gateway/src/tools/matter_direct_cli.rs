@@ -45,6 +45,15 @@ enum Subcommand {
     Off(u64),
     Level(u64, u8),
     ReadOnOff(u64),
+    /// import-pms <pms-storage-dir>
+    /// Read python-matter-server storage, dump a SyntaurFabricFile JSON
+    /// to stdout. Does NOT talk to the network — pure file parsing.
+    ImportPms(String),
+    /// validate-fabric <syntaur-fabric-file-path>
+    /// Load a SyntaurFabricFile from disk and print a summary of the
+    /// cert + key lengths. No network — catches format errors before
+    /// you try to use the fabric for real ops.
+    ValidateFabric(String),
 }
 
 fn parse_args(argv: &[String]) -> Result<CliArgs, String> {
@@ -85,6 +94,8 @@ fn parse_args(argv: &[String]) -> Result<CliArgs, String> {
             Subcommand::Level(n, l)
         }
         ["read-on-off", id] => Subcommand::ReadOnOff(parse_node_id(id)?),
+        ["import-pms", path] => Subcommand::ImportPms(path.to_string()),
+        ["validate-fabric", path] => Subcommand::ValidateFabric(path.to_string()),
         [] => return Err(usage()),
         _ => return Err(format!("unknown subcommand: {}\n\n{}", positional.join(" "), usage())),
     };
@@ -107,7 +118,9 @@ fn usage() -> String {
        on   <node_id>             OnOff cluster, command 0x01\n\
        off  <node_id>             OnOff cluster, command 0x00\n\
        level <node_id> <0..=254>  LevelControl MoveToLevel\n\
-       read-on-off <node_id>      OnOff cluster attribute 0\n\n\
+       read-on-off <node_id>      OnOff cluster attribute 0\n\
+       import-pms <pms-dir>       dump SyntaurFabricFile from python-matter-server storage\n\
+       validate-fabric <path>     load + summarize a SyntaurFabricFile\n\n\
      fabric file resolution: --fabric flag, then SYNTAUR_MATTER_FABRIC_FILE env"
         .into()
 }
@@ -136,6 +149,8 @@ pub async fn run(raw_args: &[String]) -> ! {
         Subcommand::Off(id) => set_on_off_cmd(&client, id, false, args.json).await,
         Subcommand::Level(id, lvl) => set_level_cmd(&client, id, lvl, args.json).await,
         Subcommand::ReadOnOff(id) => read_on_off_cmd(&client, id, args.json).await,
+        Subcommand::ImportPms(path) => import_pms_cmd(&path, args.json),
+        Subcommand::ValidateFabric(path) => validate_fabric_cmd(&path, args.json),
     };
 
     match result {
@@ -238,6 +253,180 @@ async fn read_on_off_cmd(
         println!("node {node_id}: {}", if on { "on" } else { "off" });
     }
     Ok(())
+}
+
+
+/// `import-pms <pms-storage-dir>` — parse python-matter-server's
+/// `chip.json` + compressed-fabric-id.json, dump a SyntaurFabricFile.
+/// Lossy: we drop fabric_label, commissioned_devices, compressed_fabric_id
+/// because SyntaurFabricFile is the minimum rs-matter needs to build a
+/// FabricMgr. Run with `--output /path/out.json` or redirect stdout.
+fn import_pms_cmd(pms_dir: &str, json_output: bool) -> Result<(), DirectError> {
+    use crate::tools::matter_fabric_import::{import_from_storage_dir, ImportError};
+
+    let pms_path = std::path::Path::new(pms_dir);
+    let imported = import_from_storage_dir(pms_path).map_err(|e: ImportError| {
+        DirectError::FabricParseError {
+            path: pms_dir.to_string(),
+            reason: format!("python-matter-server import: {e}"),
+        }
+    })?;
+
+    // Controller signing key is stored as a full serialized P-256 keypair
+    // in python-matter-server; the trailing 32 bytes are the raw scalar.
+    // If the blob isn't a standard 97-byte keypair, caller has to fix up.
+    let secret_key = if imported.noc_signing_key_serialized.len() >= 32 {
+        let n = imported.noc_signing_key_serialized.len();
+        &imported.noc_signing_key_serialized[n - 32..]
+    } else {
+        return Err(DirectError::FabricParseError {
+            path: pms_dir.to_string(),
+            reason: format!(
+                "noc_signing_key too short: {} bytes (expected >= 32)",
+                imported.noc_signing_key_serialized.len()
+            ),
+        });
+    };
+
+    // Required TLV certs — error if absent, can't build a fabric without them.
+    let root_tlv = imported.root_ca_cert.tlv.as_ref().ok_or_else(|| {
+        DirectError::FabricParseError {
+            path: pms_dir.to_string(),
+            reason: "root_ca_cert.tlv missing from python-matter-server storage".into(),
+        }
+    })?;
+    let icac_tlv = match imported.icac.as_ref() {
+        Some(cb) => cb.tlv.as_ref().map(|v| hex_encode(v)),
+        None => None,
+    };
+    let syntaur_file = serde_json::json!({
+        "fabric_id": imported.fabric_id,
+        "vendor_id": imported.vendor_id,
+        "controller_node_id": imported.node_id,
+        "root_cert_hex": hex_encode(root_tlv),
+        "noc_hex": hex_encode(&imported.noc),
+        "icac_hex": icac_tlv,
+        "secret_key_hex": hex_encode(secret_key),
+        "ipk_hex": hex_encode(&imported.ipk),
+    });
+
+    if json_output {
+        println!("{}", syntaur_file);
+    } else {
+        println!("{}", serde_json::to_string_pretty(&syntaur_file).unwrap());
+    }
+    Ok(())
+}
+
+/// `validate-fabric <path>` — load SyntaurFabricFile, print summary.
+/// Does NOT establish any sessions. Catches hex decode + structural
+/// errors before they blow up in Stage 2b CASE/IM paths.
+fn validate_fabric_cmd(path: &str, json_output: bool) -> Result<(), DirectError> {
+    #[derive(serde::Deserialize)]
+    struct FabricFile {
+        fabric_id: u64,
+        vendor_id: u16,
+        controller_node_id: u64,
+        root_cert_hex: String,
+        noc_hex: String,
+        icac_hex: Option<String>,
+        secret_key_hex: String,
+        ipk_hex: String,
+    }
+
+    let bytes = std::fs::read(path).map_err(|e| DirectError::FabricParseError {
+        path: path.to_string(),
+        reason: format!("read: {e}"),
+    })?;
+    let ff: FabricFile = serde_json::from_slice(&bytes).map_err(|e| {
+        DirectError::FabricParseError {
+            path: path.to_string(),
+            reason: format!("parse: {e}"),
+        }
+    })?;
+
+    // Decode every hex field, surface exact location on failure.
+    let root = hex_decode(&ff.root_cert_hex, "root_cert_hex", path)?;
+    let noc = hex_decode(&ff.noc_hex, "noc_hex", path)?;
+    let icac = match ff.icac_hex.as_deref() {
+        Some(s) => Some(hex_decode(s, "icac_hex", path)?),
+        None => None,
+    };
+    let key = hex_decode(&ff.secret_key_hex, "secret_key_hex", path)?;
+    let ipk = hex_decode(&ff.ipk_hex, "ipk_hex", path)?;
+
+    if key.len() != 32 {
+        return Err(DirectError::FabricParseError {
+            path: path.to_string(),
+            reason: format!(
+                "secret_key_hex decoded to {} bytes; expected 32 for P-256 scalar",
+                key.len()
+            ),
+        });
+    }
+    if ipk.len() != 16 {
+        return Err(DirectError::FabricParseError {
+            path: path.to_string(),
+            reason: format!("ipk_hex decoded to {} bytes; expected 16", ipk.len()),
+        });
+    }
+
+    if json_output {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": true,
+                "fabric_id": ff.fabric_id,
+                "vendor_id": ff.vendor_id,
+                "controller_node_id": ff.controller_node_id,
+                "root_cert_bytes": root.len(),
+                "noc_bytes": noc.len(),
+                "icac_bytes": icac.as_ref().map(|v| v.len()),
+                "secret_key_bytes": key.len(),
+                "ipk_bytes": ipk.len(),
+            })
+        );
+    } else {
+        println!("Fabric file: {}", path);
+        println!("  fabric_id           = {}", ff.fabric_id);
+        println!("  vendor_id           = {:#06x}", ff.vendor_id);
+        println!("  controller_node_id  = {} ({:#x})", ff.controller_node_id, ff.controller_node_id);
+        println!("  root_cert           = {} bytes (TLV)", root.len());
+        println!("  noc                 = {} bytes (TLV)", noc.len());
+        println!("  icac                = {}", icac.as_ref().map(|v| format!("{} bytes", v.len())).unwrap_or_else(|| "(none)".into()));
+        println!("  secret_key          = {} bytes (P-256 scalar)", key.len());
+        println!("  ipk                 = {} bytes", ipk.len());
+        println!("OK");
+    }
+    Ok(())
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
+fn hex_decode(s: &str, field: &str, path: &str) -> Result<Vec<u8>, DirectError> {
+    if s.len() % 2 != 0 {
+        return Err(DirectError::FabricParseError {
+            path: path.to_string(),
+            reason: format!("{field}: odd-length hex ({})", s.len()),
+        });
+    }
+    let mut out = Vec::with_capacity(s.len() / 2);
+    for i in (0..s.len()).step_by(2) {
+        let byte = u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| {
+            DirectError::FabricParseError {
+                path: path.to_string(),
+                reason: format!("{field}: invalid hex at byte {}", i / 2),
+            }
+        })?;
+        out.push(byte);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
