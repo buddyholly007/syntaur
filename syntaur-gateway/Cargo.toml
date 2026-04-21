@@ -66,6 +66,12 @@ lofty = "0.22"
 tokio-util = { version = "0.7", features = ["io"] }
 
 ed25519-dalek = "2"
+
+# Smart Home and Network module — MQTT driver (week 8). rumqttc is the
+# pure-Rust async MQTT client we use for both discovery-topic scanning
+# and (later) device control. No broker runs in-process for v1; user
+# points us at their Mosquitto / HA broker via config.
+rumqttc = { version = "0.25", default-features = false, features = ["use-rustls"] }
 hex = "0.4"
 rustls-pemfile = "2"
 rustls = { version = "0.23", features = ["ring"] }
@@ -78,3 +84,9 @@ url = "2.5.8"
 # upstream primitives (CASE init, IM Client, mDNS query, NOC gen) for the
 # eventual cutover. See vault: projects/syntaur_smart_home_module.md.
 rs-matter = { git = "https://github.com/project-chip/rs-matter", rev = "993a0763e450183acb5181073223ab48e44b8c2e", default-features = false, features = ["os", "rustcrypto", "log"] }
+
+[dev-dependencies]
+# Used by #[cfg(test)] modules (crypto, schema migrations, etc.).
+# Was previously referenced without being declared — `cargo test` failed
+# to resolve the import until this section existed.
+tempfile = "3"

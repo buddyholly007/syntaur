@@ -22,11 +22,9 @@ pub mod home_assistant;
 // Smart Home and Network module — agent-facing tool surface. Scaffolded
 // in Track A week 1 (stub execute() returns "driver not wired yet"); real
 // control/query/automation plumbing lands across weeks 3-10.
-    // --- SMART_HOME_DISABLED START --- // SMART_HOME_DISABLED: files referenced by 66e7f36 are stashed under 'parallel-session-WIP-do-not-commit' in openclaw-workspace, not pushed. Re-enable when smart_home/ + pages/smart_home.rs + matter.rs public surface land.
-// pub mod smart_home_control;
-// pub mod smart_home_query;
-// pub mod smart_home_automation;
-    // --- SMART_HOME_DISABLED END ---
+pub mod smart_home_control;
+pub mod smart_home_query;
+pub mod smart_home_automation;
 // Phase 0 voice skill router: embedding-based intent → tool dispatch.
 pub mod router;
 pub mod find_tool;
@@ -483,11 +481,9 @@ impl ToolRegistry {
         reg!(voice_journal::ListRecordingsTool);
 
         // Smart Home and Network (scaffold — real drivers land weeks 3-10).
-    // --- SMART_HOME_DISABLED START --- // SMART_HOME_DISABLED: files referenced by 66e7f36 are stashed under 'parallel-session-WIP-do-not-commit' in openclaw-workspace, not pushed. Re-enable when smart_home/ + pages/smart_home.rs + matter.rs public surface land.
-        // reg!(smart_home_control::SmartHomeControlTool);
-        // reg!(smart_home_query::SmartHomeQueryTool);
-        // reg!(smart_home_automation::SmartHomeAutomationTool);
-    // --- SMART_HOME_DISABLED END ---
+        reg!(smart_home_control::SmartHomeControlTool);
+        reg!(smart_home_query::SmartHomeQueryTool);
+        reg!(smart_home_automation::SmartHomeAutomationTool);
 
         // OpenAPI tools registered via add_openapi_tools() after construction
 

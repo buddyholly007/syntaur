@@ -36,9 +36,7 @@ mod calendar_reminder;
 mod sync;
 mod music;
 mod music_local;
-    // --- SMART_HOME_DISABLED START --- // SMART_HOME_DISABLED: files referenced by 66e7f36 are stashed under 'parallel-session-WIP-do-not-commit' in openclaw-workspace, not pushed. Re-enable when smart_home/ + pages/smart_home.rs + matter.rs public surface land.
-// mod smart_home;
-    // --- SMART_HOME_DISABLED END ---
+mod smart_home;
 mod fs_browser;
 pub mod crypto;
 pub mod terminal;
@@ -6407,15 +6405,13 @@ async fn main() {
         }
     }
 
-    // --- SMART_HOME_DISABLED START --- // SMART_HOME_DISABLED: files referenced by 66e7f36 are stashed under 'parallel-session-WIP-do-not-commit' in openclaw-workspace, not pushed. Re-enable when smart_home/ + pages/smart_home.rs + matter.rs public surface land.
     // Smart Home and Network — module init hook. Launches the automation
     // engine supervisor as a detached tokio task; additional background
     // workers (diagnostics sweeper, energy roll-up scheduler) hang off
     // this call as they land.
-    // if let Err(e) = smart_home::init(state.db_path.clone()).await {
-        // warn!("[smart_home] init failed: {}", e);
-    // }
-    // --- SMART_HOME_DISABLED END ---
+    if let Err(e) = smart_home::init(state.db_path.clone()).await {
+        warn!("[smart_home] init failed: {}", e);
+    }
 
     // HTTP server
     let port = config.gateway.port;
@@ -6711,77 +6707,75 @@ async fn main() {
         .route("/scheduler", get(pages::scheduler::render))
         // Smart Home and Network module (Track A week 1 scaffold —
         // see plans/we-need-to-work-floofy-haven.md). UI route + the
-    // --- SMART_HOME_DISABLED START --- // SMART_HOME_DISABLED: files referenced by 66e7f36 are stashed under 'parallel-session-WIP-do-not-commit' in openclaw-workspace, not pushed. Re-enable when smart_home/ + pages/smart_home.rs + matter.rs public surface land.
         // /api/smart-home/* CRUD + scan/control/automation surface.
-        // .route("/smart-home", get(pages::smart_home::render))
-        // .route(
-            // "/api/smart-home/rooms",
-            // get(smart_home::api::handle_list_rooms).post(smart_home::api::handle_create_room),
-        // )
-        // .route(
-            // "/api/smart-home/rooms/{id}",
-            // axum::routing::delete(smart_home::api::handle_delete_room)
-                // .patch(smart_home::api::handle_patch_room),
-        // )
-        // .route("/api/smart-home/devices", get(smart_home::api::handle_list_devices))
-        // .route(
-            // "/api/smart-home/devices/{id}/room",
-            // post(smart_home::api::handle_assign_device_room),
-        // )
-        // .route("/api/smart-home/scan", post(smart_home::api::handle_scan))
-        // .route("/api/smart-home/scan/confirm", post(smart_home::api::handle_scan_confirm))
-        // .route("/api/smart-home/control", post(smart_home::api::handle_control))
-        // .route(
-            // "/api/smart-home/devices/{id}/refresh-state",
-            // post(smart_home::api::handle_refresh_state),
-        // )
-        // .route(
-            // "/api/smart-home/automations",
-            // get(smart_home::api::handle_list_automations)
-                // .post(smart_home::api::handle_create_automation),
-        // )
-        // .route(
-            // "/api/smart-home/automation/compile",
-            // post(smart_home::api::handle_compile_automation),
-        // )
-        // .route(
-            // "/api/smart-home/diagnostics/summary",
-            // get(smart_home::api::handle_diagnostics_summary),
-        // )
-        // .route(
-            // "/api/smart-home/diagnostics/sweep",
-            // post(smart_home::api::handle_diagnostics_sweep),
-        // )
-        // .route(
-            // "/api/smart-home/energy/summary",
-            // get(smart_home::api::handle_energy_summary),
-        // )
-        // .route(
-            // "/api/smart-home/energy/ingest",
-            // post(smart_home::api::handle_energy_ingest),
-        // )
-        // .route(
-            // "/api/smart-home/scenes",
-            // get(smart_home::api::handle_list_scenes)
-                // .post(smart_home::api::handle_create_scene),
-        // )
-        // .route(
-            // "/api/smart-home/scenes/{id}",
-            // axum::routing::delete(smart_home::api::handle_delete_scene),
-        // )
-        // .route(
-            // "/api/smart-home/scenes/{id}/activate",
-            // post(smart_home::api::handle_activate_scene),
-        // )
-        // .route(
-            // "/api/smart-home/cameras/events",
-            // get(smart_home::api::handle_camera_events),
-        // )
-        // .route(
-            // "/api/smart-home/events/stream",
-            // get(smart_home::api::handle_events_stream),
-        // )
-    // --- SMART_HOME_DISABLED END ---
+        .route("/smart-home", get(pages::smart_home::render))
+        .route(
+            "/api/smart-home/rooms",
+            get(smart_home::api::handle_list_rooms).post(smart_home::api::handle_create_room),
+        )
+        .route(
+            "/api/smart-home/rooms/{id}",
+            axum::routing::delete(smart_home::api::handle_delete_room)
+                .patch(smart_home::api::handle_patch_room),
+        )
+        .route("/api/smart-home/devices", get(smart_home::api::handle_list_devices))
+        .route(
+            "/api/smart-home/devices/{id}/room",
+            post(smart_home::api::handle_assign_device_room),
+        )
+        .route("/api/smart-home/scan", post(smart_home::api::handle_scan))
+        .route("/api/smart-home/scan/confirm", post(smart_home::api::handle_scan_confirm))
+        .route("/api/smart-home/control", post(smart_home::api::handle_control))
+        .route(
+            "/api/smart-home/devices/{id}/refresh-state",
+            post(smart_home::api::handle_refresh_state),
+        )
+        .route(
+            "/api/smart-home/automations",
+            get(smart_home::api::handle_list_automations)
+                .post(smart_home::api::handle_create_automation),
+        )
+        .route(
+            "/api/smart-home/automation/compile",
+            post(smart_home::api::handle_compile_automation),
+        )
+        .route(
+            "/api/smart-home/diagnostics/summary",
+            get(smart_home::api::handle_diagnostics_summary),
+        )
+        .route(
+            "/api/smart-home/diagnostics/sweep",
+            post(smart_home::api::handle_diagnostics_sweep),
+        )
+        .route(
+            "/api/smart-home/energy/summary",
+            get(smart_home::api::handle_energy_summary),
+        )
+        .route(
+            "/api/smart-home/energy/ingest",
+            post(smart_home::api::handle_energy_ingest),
+        )
+        .route(
+            "/api/smart-home/scenes",
+            get(smart_home::api::handle_list_scenes)
+                .post(smart_home::api::handle_create_scene),
+        )
+        .route(
+            "/api/smart-home/scenes/{id}",
+            axum::routing::delete(smart_home::api::handle_delete_scene),
+        )
+        .route(
+            "/api/smart-home/scenes/{id}/activate",
+            post(smart_home::api::handle_activate_scene),
+        )
+        .route(
+            "/api/smart-home/cameras/events",
+            get(smart_home::api::handle_camera_events),
+        )
+        .route(
+            "/api/smart-home/events/stream",
+            get(smart_home::api::handle_events_stream),
+        )
         .route("/chat", get(pages::chat::render))
         .route("/history", get(pages::history::render))
         .route("/knowledge", get(pages::knowledge::render))

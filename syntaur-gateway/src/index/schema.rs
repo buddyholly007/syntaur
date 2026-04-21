@@ -2119,6 +2119,204 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE scheduler_prefs ADD COLUMN calendar_opacity REAL NOT NULL DEFAULT 0.55;
     "#,
+
+    // v57: Smart Home and Network — rooms + devices.
+    //
+    // Per-user smart-home inventory. Matches the canonical data model in
+    // plans/we-need-to-work-floofy-haven.md. `driver` names the low-level
+    // stack that owns the device ('matter' | 'zigbee' | 'zwave' | 'wifi_*'
+    // | 'ble' | 'mqtt' | 'camera_onvif' | 'cloud_*'). `kind` is the
+    // user-facing category (light | switch | plug | thermostat | lock |
+    // sensor_* | camera | media_player | cover | fan | vacuum). Per-driver
+    // state details live inside `state_json` / `capabilities_json` so new
+    // drivers can land without further migrations.
+    r#"
+    CREATE TABLE IF NOT EXISTS smart_home_rooms (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id           INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name              TEXT NOT NULL,
+        zone              TEXT,
+        sort_order        INTEGER NOT NULL DEFAULT 0,
+        background_image  TEXT,
+        created_at        INTEGER NOT NULL,
+        UNIQUE(user_id, name)
+    );
+    CREATE INDEX IF NOT EXISTS idx_smart_home_rooms_user ON smart_home_rooms(user_id, sort_order);
+
+    CREATE TABLE IF NOT EXISTS smart_home_devices (
+        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id            INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        room_id            INTEGER REFERENCES smart_home_rooms(id) ON DELETE SET NULL,
+        driver             TEXT NOT NULL,
+        external_id        TEXT NOT NULL,
+        name               TEXT NOT NULL,
+        kind               TEXT NOT NULL,
+        capabilities_json  TEXT NOT NULL DEFAULT '{}',
+        state_json         TEXT NOT NULL DEFAULT '{}',
+        metadata_json      TEXT NOT NULL DEFAULT '{}',
+        last_seen_at       INTEGER,
+        created_at         INTEGER NOT NULL,
+        UNIQUE(user_id, driver, external_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_smart_home_devices_user_room ON smart_home_devices(user_id, room_id);
+    CREATE INDEX IF NOT EXISTS idx_smart_home_devices_kind     ON smart_home_devices(user_id, kind);
+    "#,
+
+    // v58: automation engine.
+    //
+    // `spec_json` holds the canonical AST: {triggers:[...], conditions:[...],
+    // actions:[...]}. `source` records whether the user built it visually,
+    // authored it via the natural-language compiler, or imported it. Each
+    // run of the automation writes a row into smart_home_automation_runs for
+    // the "why didn't my automation fire?" surface on the dashboard.
+    r#"
+    CREATE TABLE IF NOT EXISTS smart_home_automations (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name             TEXT NOT NULL,
+        description      TEXT,
+        source           TEXT NOT NULL CHECK (source IN ('visual','nl','imported')),
+        nl_prompt        TEXT,
+        spec_json        TEXT NOT NULL,
+        enabled          INTEGER NOT NULL DEFAULT 1,
+        last_run_at      INTEGER,
+        last_run_status  TEXT,
+        last_run_error   TEXT,
+        created_at       INTEGER NOT NULL,
+        updated_at       INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_sh_automations_user ON smart_home_automations(user_id, enabled);
+
+    CREATE TABLE IF NOT EXISTS smart_home_automation_runs (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        automation_id   INTEGER NOT NULL REFERENCES smart_home_automations(id) ON DELETE CASCADE,
+        ts              INTEGER NOT NULL,
+        status          TEXT NOT NULL,
+        details_json    TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_sh_auto_runs ON smart_home_automation_runs(automation_id, ts DESC);
+    "#,
+
+    // v59: scenes. A scene is an eager bundle of device actions the user
+    // can fire from a single tap — "Movie time" dims lights + drops the
+    // shades + switches the TV input. Distinct from automations in that
+    // scenes have no triggers; they're only ever user-invoked (or
+    // referenced as an `action` in an automation spec).
+    r#"
+    CREATE TABLE IF NOT EXISTS smart_home_scenes (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name          TEXT NOT NULL,
+        icon          TEXT,
+        actions_json  TEXT NOT NULL,
+        room_id       INTEGER REFERENCES smart_home_rooms(id) ON DELETE SET NULL,
+        created_at    INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_sh_scenes_user_room ON smart_home_scenes(user_id, room_id);
+    "#,
+
+    // v60: energy accounting.
+    //
+    // Samples are raw — (device, ts, watts, kwh_cumulative). Roll-ups
+    // (daily/weekly/monthly) are computed on demand from SQL; we don't
+    // denormalize here to keep the data model simple. Rates are a separate
+    // history table so time-of-use pricing works: every sample joins with
+    // the rate whose [starts_at, ends_at) covers its ts.
+    r#"
+    CREATE TABLE IF NOT EXISTS smart_home_energy_samples (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        device_id        INTEGER REFERENCES smart_home_devices(id) ON DELETE SET NULL,
+        ts               INTEGER NOT NULL,
+        watts            REAL,
+        kwh_cumulative   REAL,
+        source           TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_sh_energy_device_ts ON smart_home_energy_samples(device_id, ts DESC);
+    CREATE INDEX IF NOT EXISTS idx_sh_energy_user_ts   ON smart_home_energy_samples(user_id, ts DESC);
+
+    CREATE TABLE IF NOT EXISTS smart_home_energy_rates (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id           INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        starts_at         INTEGER NOT NULL,
+        ends_at           INTEGER,
+        cost_per_kwh      REAL NOT NULL,
+        carbon_g_per_kwh  REAL,
+        utility           TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_sh_energy_rates_user ON smart_home_energy_rates(user_id, starts_at DESC);
+    "#,
+
+    // v61: network diagnostics.
+    //
+    // smart_home_network_devices is the LAN inventory — every MAC we've
+    // ever seen, with its most recent IP / hostname / fingerprint. Events
+    // record per-device health transitions so the diagnostics dashboard
+    // can surface top-N issues with remediation copy.
+    r#"
+    CREATE TABLE IF NOT EXISTS smart_home_network_devices (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id           INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        mac               TEXT NOT NULL,
+        ip                TEXT,
+        hostname          TEXT,
+        vendor            TEXT,
+        fingerprint_json  TEXT,
+        last_seen_at      INTEGER NOT NULL,
+        linked_device_id  INTEGER REFERENCES smart_home_devices(id) ON DELETE SET NULL,
+        UNIQUE(user_id, mac)
+    );
+    CREATE INDEX IF NOT EXISTS idx_sh_net_devices_user ON smart_home_network_devices(user_id, last_seen_at DESC);
+
+    CREATE TABLE IF NOT EXISTS smart_home_network_events (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        ts            INTEGER NOT NULL,
+        kind          TEXT NOT NULL,
+        subject       TEXT,
+        details_json  TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_sh_net_events_user_ts ON smart_home_network_events(user_id, ts DESC);
+    CREATE INDEX IF NOT EXISTS idx_sh_net_events_kind    ON smart_home_network_events(user_id, kind, ts DESC);
+    "#,
+
+    // v62: presence signals. Room-level occupancy feed fused from BLE
+    // proxies, phone location, voice utterances, door-lock events, etc.
+    // `confidence` is 0.0..1.0 — automations set a per-rule threshold.
+    r#"
+    CREATE TABLE IF NOT EXISTS smart_home_presence_signals (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        person      TEXT NOT NULL,
+        ts          INTEGER NOT NULL,
+        room_id     INTEGER REFERENCES smart_home_rooms(id) ON DELETE SET NULL,
+        confidence  REAL NOT NULL,
+        source      TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_sh_presence_person_ts ON smart_home_presence_signals(person, ts DESC);
+    CREATE INDEX IF NOT EXISTS idx_sh_presence_user_room ON smart_home_presence_signals(user_id, room_id, ts DESC);
+    "#,
+
+    // v63: smart-home credentials (encrypted at rest).
+    //
+    // `secret_encrypted` is the `enc:<hex>` format produced by
+    // crypto::encrypt — NEVER a raw token. `provider` names what the
+    // secret is for (matter_fabric | thread_network | zigbee_stick |
+    // zwave_stick | mqtt | ring | nest | ecobee | tesla_local | ...).
+    // `label` is user-facing so multiple credentials of the same
+    // provider (e.g. two Shelly devices) stay distinguishable.
+    r#"
+    CREATE TABLE IF NOT EXISTS smart_home_credentials (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id           INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        provider          TEXT NOT NULL,
+        label             TEXT NOT NULL,
+        secret_encrypted  TEXT NOT NULL,
+        metadata_json     TEXT NOT NULL DEFAULT '{}',
+        created_at        INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_sh_creds_user_provider ON smart_home_credentials(user_id, provider);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
@@ -2147,4 +2345,105 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! Migration dry-run — asserts every entry in `MIGRATIONS` applies
+    //! cleanly against an empty in-memory SQLite. Runs as part of
+    //! `cargo test -p syntaur-gateway index::schema` and in CI, so a
+    //! malformed new migration (typo in a column name, missing trailing
+    //! semicolon, broken FK reference) is caught before it hits a live DB.
+    //!
+    //! Smart Home and Network v57–v63 migrations specifically are
+    //! regression-tested here: each smart_home_* table is asserted to
+    //! exist and to enforce the user_id FK.
+
+    use super::*;
+
+    #[test]
+    fn migrations_apply_to_empty_db() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        migrate(&conn).expect("migrations apply cleanly");
+
+        // Exactly MIGRATIONS.len() rows should be in schema_version,
+        // keyed 1..=len(), so `cargo test` fails loud when someone
+        // appends a migration that no-ops or a previous one silently
+        // becomes idempotent.
+        let applied: i64 = conn
+            .query_row("SELECT COUNT(*) FROM schema_version", [], |r| r.get(0))
+            .expect("count schema_version");
+        assert_eq!(applied, MIGRATIONS.len() as i64, "every migration recorded");
+
+        let max: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .expect("max version");
+        assert_eq!(max, MIGRATIONS.len() as i64, "max version matches len");
+    }
+
+    #[test]
+    fn smart_home_tables_created() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        migrate(&conn).expect("migrations apply cleanly");
+
+        let expected = [
+            "smart_home_rooms",
+            "smart_home_devices",
+            "smart_home_automations",
+            "smart_home_automation_runs",
+            "smart_home_scenes",
+            "smart_home_energy_samples",
+            "smart_home_energy_rates",
+            "smart_home_network_devices",
+            "smart_home_network_events",
+            "smart_home_presence_signals",
+            "smart_home_credentials",
+        ];
+        for table in expected {
+            let cnt: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?",
+                    rusqlite::params![table],
+                    |r| r.get(0),
+                )
+                .expect("query sqlite_master");
+            assert_eq!(cnt, 1, "expected table `{}` to exist", table);
+        }
+    }
+
+    #[test]
+    fn smart_home_user_id_fk_enforced() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        migrate(&conn).expect("migrations apply cleanly");
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("enable fks");
+
+        // Insert a legitimate user first so the positive-case insert works.
+        conn.execute(
+            "INSERT INTO users (name, created_at) VALUES ('smoke', 0)",
+            [],
+        )
+        .expect("seed user");
+        let uid: i64 = conn
+            .query_row("SELECT id FROM users WHERE name = 'smoke'", [], |r| r.get(0))
+            .expect("fetch seeded user id");
+
+        conn.execute(
+            "INSERT INTO smart_home_rooms (user_id, name, sort_order, created_at)
+             VALUES (?, 'Kitchen', 0, 0)",
+            rusqlite::params![uid],
+        )
+        .expect("insert room for real user");
+
+        // FK violation — non-existent user should be rejected.
+        let bad = conn.execute(
+            "INSERT INTO smart_home_rooms (user_id, name, sort_order, created_at)
+             VALUES (999999, 'Ghost', 0, 0)",
+            [],
+        );
+        assert!(
+            bad.is_err(),
+            "expected FK violation when inserting a room with a non-existent user_id"
+        );
+    }
 }

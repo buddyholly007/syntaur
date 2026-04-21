@@ -216,6 +216,173 @@ async fn matter_command(
     Ok(resp.get("result").cloned().unwrap_or(Value::Null))
 }
 
+// ── Public surface for smart_home module (v1 legacy-bridge wrapper) ─────
+//
+// The new Smart Home and Network module (`crate::smart_home`) wraps this
+// file as a driver until the v1.1 pure-Rust Matter Controller lands.
+// These helpers expose just enough to list commissioned nodes + look up
+// their friendly labels + rooms without duplicating the WebSocket
+// plumbing below.
+
+/// List every commissioned Matter node via the python-matter-server
+/// bridge at `MATTER_WS_URL`. Returns the raw node JSON array so the
+/// caller can inspect `node_id`, `available`, `attributes`, etc.
+///
+/// Returns `Err(_)` on WS connection failure — callers that want to
+/// silently degrade (e.g. the smart_home scan pipeline) should map to
+/// an empty Vec.
+pub async fn list_nodes() -> Result<Vec<Value>, String> {
+    let nodes = matter_command(&reqwest::Client::new(), "get_nodes", json!({})).await?;
+    Ok(nodes.as_array().cloned().unwrap_or_default())
+}
+
+/// Turn a Matter node on or off (OnOff cluster, endpoint 1).
+pub async fn set_onoff(node_id: u64, on: bool) -> Result<(), String> {
+    let cmd = if on { "on" } else { "off" };
+    matter_command(
+        &reqwest::Client::new(),
+        "device_command",
+        json!({
+            "node_id": node_id,
+            "endpoint_id": 1,
+            "cluster_id": CLUSTER_ON_OFF,
+            "command_name": cmd,
+            "payload": {}
+        }),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Set a dimmable node's brightness. `level_fraction` ∈ [0.0, 1.0]; the
+/// bridge speaks Matter LevelControl in 0..=254.
+pub async fn set_level(node_id: u64, level_fraction: f64) -> Result<(), String> {
+    let lvl = (level_fraction.clamp(0.0, 1.0) * 254.0).round() as u16;
+    let lvl = lvl.min(254);
+    matter_command(
+        &reqwest::Client::new(),
+        "device_command",
+        json!({
+            "node_id": node_id,
+            "endpoint_id": 1,
+            "cluster_id": CLUSTER_LEVEL_CONTROL,
+            "command_name": "MoveToLevelWithOnOff",
+            "payload": {"level": lvl, "transitionTime": 0}
+        }),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Set a tunable-white bulb's color temperature in Kelvin. The
+/// ColorControl cluster speaks mireds (1e6 / kelvin).
+pub async fn set_color_temp_kelvin(node_id: u64, kelvin: u32) -> Result<(), String> {
+    let mireds = (1_000_000u32 / kelvin.max(1)) as u16;
+    matter_command(
+        &reqwest::Client::new(),
+        "device_command",
+        json!({
+            "node_id": node_id,
+            "endpoint_id": 1,
+            "cluster_id": CLUSTER_COLOR_CONTROL,
+            "command_name": "MoveToColorTemperature",
+            "payload": {"colorTemperature": mireds, "transitionTime": 0}
+        }),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Pull live cluster attributes for one node from the bridge and project
+/// them into the typed smart_home state JSON shape (on / level / locked /
+/// temperature / humidity / motion / contact / battery). Unknown fields
+/// are omitted rather than filled with defaults.
+pub async fn get_node_state(node_id: u64) -> Result<Value, String> {
+    let nodes = list_nodes().await?;
+    let node = nodes
+        .iter()
+        .find(|n| n.get("node_id").and_then(|v| v.as_u64()) == Some(node_id))
+        .ok_or_else(|| format!("node {} not known to bridge", node_id))?;
+
+    let attrs = node
+        .get("attributes")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut out = serde_json::Map::new();
+
+    // OnOff cluster (0x0006) → on: bool
+    if let Some(v) = attrs.get("1/6/0").and_then(|v| v.as_bool()) {
+        out.insert("on".into(), Value::from(v));
+    }
+    // LevelControl cluster (0x0008) → level: f64 in [0,1]
+    if let Some(v) = attrs.get("1/8/0").and_then(|v| v.as_u64()) {
+        out.insert("level".into(), Value::from(v as f64 / 254.0));
+    }
+    // DoorLock cluster (0x0101 = 257) → locked: bool. Matter LockState
+    // enum: 0 = not-fully-locked, 1 = locked, 2 = unlocked.
+    if let Some(v) = attrs.get("1/257/0").and_then(|v| v.as_u64()) {
+        out.insert("locked".into(), Value::from(v == 1));
+    }
+    // TemperatureMeasurement (0x0402 = 1026) — value is centi-degrees C.
+    if let Some(v) = attrs.get("1/1026/0").and_then(|v| v.as_i64()) {
+        out.insert("temperature".into(), Value::from(v as f64 / 100.0));
+    }
+    // RelativeHumidityMeasurement (0x0405 = 1029) — percent × 100.
+    if let Some(v) = attrs.get("1/1029/0").and_then(|v| v.as_u64()) {
+        out.insert("humidity".into(), Value::from(v as f64 / 100.0));
+    }
+    // OccupancySensing (0x0406 = 1030) → motion: bit 0 of the bitmap.
+    if let Some(v) = attrs.get("1/1030/0").and_then(|v| v.as_u64()) {
+        out.insert("motion".into(), Value::from((v & 0x01) != 0));
+    }
+    // PowerSource battery percent (0x002F = 47).
+    if let Some(v) = attrs.get("0/47/12").and_then(|v| v.as_u64()) {
+        out.insert("battery".into(), Value::from(v as f64 / 2.0));
+    }
+    // Always include availability so stale tiles show up.
+    if let Some(v) = node.get("available").and_then(|v| v.as_bool()) {
+        out.insert("available".into(), Value::from(v));
+    }
+    Ok(Value::Object(out))
+}
+
+/// Best-effort lookup of a friendly (device-label, room-area-id,
+/// room-friendly-name) for a node_id against the `matter_rooms.json`
+/// config. All three fall back to None if the mapping file is missing
+/// or the node isn't listed.
+pub fn lookup_node_metadata(node_id: u64) -> (Option<String>, Option<String>, Option<String>) {
+    let Some(mapping) = load_room_mapping() else {
+        return (None, None, None);
+    };
+    let nid_str = node_id.to_string();
+    for (area_id, entry) in &mapping {
+        let devices = entry.get("devices").and_then(|v| v.as_object());
+        let in_room = devices
+            .and_then(|d| d.get(&nid_str).and_then(|v| v.as_str()))
+            .map(str::to_string);
+        let node_ids_match = entry
+            .get("node_ids")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().any(|v| v.as_u64() == Some(node_id)))
+            .unwrap_or(false);
+        let bulb_ids_match = entry
+            .get("bulb_ids")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().any(|v| v.as_u64() == Some(node_id)))
+            .unwrap_or(false);
+        if in_room.is_some() || node_ids_match || bulb_ids_match {
+            let friendly = entry
+                .get("friendly_name")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            return (in_room, Some(area_id.clone()), friendly);
+        }
+    }
+    (None, None, None)
+}
+
 pub struct MatterTool;
 
 #[async_trait]

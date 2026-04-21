@@ -1,0 +1,17 @@
+[package]
+name = "syntaur-zwave"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Pure-Rust Z-Wave Serial API client for the Syntaur Smart Home and Network module. Forked from the abandoned rzw (2018) and brought back up against the Z-Wave Serial API spec. No sidecars — see feedback/pure_rust_no_sidecars."
+
+[dependencies]
+tokio = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+bytes = "1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+tokio-test = "0.4"
