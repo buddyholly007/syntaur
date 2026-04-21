@@ -649,6 +649,86 @@ impl MatterCore {
             ipk_raw,
         })
     }
+
+    /// Stage 2b dispatcher (skeleton). Every per-call rs-matter operation
+    /// should route through this — keeps the `Matter::new` + `fabrics.add`
+    /// + UDP-socket + `Matter::run` + `select(transport, op_future)`
+    /// boilerplate in ONE place instead of duplicated across the 3 stubs.
+    ///
+    /// Current state: returns a Stage-2b gap error that names the op.
+    /// The implementer fills in the body using the rs-matter pattern from
+    /// `rs-matter/tests/case.rs` (993a0763) — see vault:
+    /// projects/claude_coord_broker.md for spec, projects/syntaur_smart_home_module.md
+    /// for the wider Matter pipeline context.
+    ///
+    /// Expected signature when wired:
+    ///
+    /// ```text
+    /// async fn with_matter_op<F, R>(
+    ///     &self,
+    ///     node_id: u64,
+    ///     addr: SocketAddr,
+    ///     op_label: &'static str,
+    ///     op: F,
+    /// ) -> Result<R, DirectError>
+    /// where
+    ///     F: for<'e> FnOnce(&'e mut Exchange<'_>) -> Pin<Box<dyn Future<Output = Result<R, rs_matter::Error>> + 'e>>
+    ///         + Send + 'static,
+    ///     R: Send + 'static,
+    /// ```
+    ///
+    /// Implementation sketch (see tests/case.rs for canonical pattern):
+    ///
+    /// 1. `tokio::task::spawn_blocking(move || futures_lite::future::block_on(async { ... }))`
+    /// 2. Inside block_on:
+    ///    - `let crypto = /* rs_matter::crypto::rustcrypto::RustCryptoCrypto::default() */;`
+    ///    - `let matter = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, sys_epoch, 0);`
+    ///    - `matter.initialize_transport_buffers()?;`
+    ///    - `let secret_key = /* CanonPkcSecretKey from &self.secret_key_raw */;`
+    ///    - `let ipk_arr: [u8; 16] = self.ipk_raw[..].try_into()?;`
+    ///    - `let fab_idx = matter.with_state(|s| s.fabrics.add(&crypto, secret_key.reference(),`
+    ///      `  &self.root_cert, &self.noc, &self.icac, Some(ipk_arr.reference()),`
+    ///      `  self.fabric.vendor_id, self.fabric.controller_node_id))?.fab_idx();`
+    ///    - `let socket = async_io::Async::<UdpSocket>::bind(([0,0,0,0], 0))?;`
+    ///    - `let transport = pin!(matter.run(&crypto, &socket, &socket, NoNetwork));`
+    ///    - `let op_fut = pin!(async {`
+    ///      `    let mut ex = Exchange::initiate_unsecured(&matter, &crypto, Address::Udp(addr)).await?;`
+    ///      `    CaseInitiator::initiate(&mut ex, &crypto, fab_idx, node_id).await?;`
+    ///      `    op(&mut ex).await`
+    ///      `});`
+    ///    - `let timeout = pin!(Timer::after(Duration::from_secs(30)));`
+    ///    - Match `select!(transport, op_fut, timeout)` to handle each outcome
+    ///      (op_fut success → return R; timeout → DirectError::Timeout;
+    ///       transport exits first → DirectError::Matter(...))
+    ///
+    /// Open API questions to resolve by reading rs-matter source (all in
+    /// `rs-matter/src/` at rev 993a0763):
+    ///   - `crypto/canon.rs::CanonPkcSecretKey` — is there a `from_raw(&[u8; 32])`
+    ///     constructor, or must we go through `RustCryptoCrypto::import_secret_key`?
+    ///   - `fabric_table.rs::Fabrics::add` — exact arg types. Tests call with
+    ///     `.reference()` accessors on CanonPkcSecretKey + Ipk wrappers.
+    ///   - `dm/devices/test.rs` — is it always in scope with default features,
+    ///     or gated by `#[cfg(test)]`? (Tests use it from integration tests
+    ///     that compile the crate with test config, which may not match our
+    ///     binary compile.)
+    ///   - `crypto/rustcrypto/mod.rs` — name of the concrete Crypto impl
+    ///     for the `rustcrypto` feature we enabled.
+    ///
+    /// Time estimate: 2-4 hours focused work with rs-matter source open +
+    /// iterative `cargo build` cycles. Should produce ~150 lines of new
+    /// code in this module.
+    #[allow(dead_code)]
+    fn with_matter_op_stage_2b_placeholder(&self, node_id: u64, op_label: &str) -> DirectError {
+        DirectError::ImFailed {
+            node_id,
+            reason: format!(
+                "stage 2b runtime: {op_label} not wired. Fabric ready                  (root={}B noc={}B icac={}B key=32 ipk=16); rs-matter                  API pointers in with_matter_op_stage_2b_placeholder                  doc comment + rs-matter/tests/case.rs @993a0763 is the                  template. Est. 2-4h dedicated session.",
+                self.root_cert.len(),
+                self.noc.len(),
+                self.icac.len(),
+            ),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------
