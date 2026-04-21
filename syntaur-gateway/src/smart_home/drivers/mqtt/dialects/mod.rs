@@ -30,6 +30,7 @@ use super::command::{EncodedCommand, MqttCommand};
 use crate::smart_home::scan::ScanCandidate;
 
 pub mod esphome;
+pub mod frigate;
 pub mod ha_discovery;
 pub mod openmqttgateway;
 pub mod shelly_gen1;
@@ -137,6 +138,7 @@ impl DialectRouter {
             Box::new(esphome::EspHome),
             Box::new(zigbee2mqtt::Zigbee2Mqtt),
             Box::new(openmqttgateway::OpenMqttGateway),
+            Box::new(frigate::Frigate),
             Box::new(ha_discovery::HaDiscovery),
         ];
         Self { dialects }
@@ -195,6 +197,7 @@ mod tests {
         assert!(topics.iter().any(|t| t.starts_with("zigbee2mqtt/")));
         assert!(topics.iter().any(|t| t.starts_with("shellyplus")));
         assert!(topics.iter().any(|t| t.starts_with("home/+/BTtoMQTT/")));
+        assert!(topics.iter().any(|t| t.starts_with("frigate/")));
     }
 
     #[test]
