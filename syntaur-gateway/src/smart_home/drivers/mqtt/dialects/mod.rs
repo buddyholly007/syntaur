@@ -28,6 +28,7 @@ use crate::smart_home::scan::ScanCandidate;
 
 pub mod esphome;
 pub mod ha_discovery;
+pub mod openmqttgateway;
 pub mod shelly_gen1;
 pub mod shelly_gen2;
 pub mod tasmota;
@@ -90,6 +91,7 @@ impl DialectRouter {
             Box::new(shelly_gen2::ShellyGen2),
             Box::new(esphome::EspHome),
             Box::new(zigbee2mqtt::Zigbee2Mqtt),
+            Box::new(openmqttgateway::OpenMqttGateway),
             Box::new(ha_discovery::HaDiscovery),
         ];
         Self { dialects }
@@ -130,6 +132,7 @@ mod tests {
         assert!(topics.iter().any(|t| t.starts_with("esphome/")));
         assert!(topics.iter().any(|t| t.starts_with("zigbee2mqtt/")));
         assert!(topics.iter().any(|t| t.starts_with("shellyplus")));
+        assert!(topics.iter().any(|t| t.starts_with("home/+/BTtoMQTT/")));
     }
 
     #[test]
