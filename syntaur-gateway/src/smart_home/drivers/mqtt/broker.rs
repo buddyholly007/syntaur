@@ -691,7 +691,51 @@ mod tests {
             let mut total_emits = 0u64;
 
             let mut emits_by_source: HashMap<String, u64> = HashMap::new();
+            // Long-soak logging: when the window is big enough to be
+            // an overnight-style run (>10 min), print a stats tick every
+            // 5 minutes so the log tells a continuous story instead of
+            // just "here's the final number." Tick also pulls VmRSS from
+            // /proc/self/status so we can spot memory growth over time.
+            let soak_mode = window_secs > 600;
+            let mut next_tick = tokio::time::Instant::now()
+                + std::time::Duration::from_secs(if soak_mode { 300 } else { u64::MAX });
             while tokio::time::Instant::now() < deadline {
+                if soak_mode && tokio::time::Instant::now() >= next_tick {
+                    let snap = sup.stats_snapshot().await;
+                    let rss_kb = std::fs::read_to_string("/proc/self/status")
+                        .ok()
+                        .and_then(|s| {
+                            s.lines()
+                                .find(|l| l.starts_with("VmRSS:"))
+                                .and_then(|l| {
+                                    l.split_whitespace().nth(1).and_then(|v| v.parse::<u64>().ok())
+                                })
+                        })
+                        .unwrap_or(0);
+                    let elapsed = window_secs
+                        .saturating_sub(
+                            deadline
+                                .saturating_duration_since(tokio::time::Instant::now())
+                                .as_secs(),
+                        );
+                    let reconnects = snap
+                        .sessions
+                        .first()
+                        .map(|s| s.reconnects_total)
+                        .unwrap_or(0);
+                    eprintln!(
+                        "[soak-tick] t={:>6}s  updates_rx={:>7}  diffs={:>7}  availability={:>4}  emits_bus={:>7}  reconnects={}  rss={}MB",
+                        elapsed,
+                        snap.state_updates_received,
+                        snap.state_diffs_emitted,
+                        snap.availability_transitions_emitted,
+                        total_emits,
+                        reconnects,
+                        rss_kb / 1024,
+                    );
+                    next_tick = tokio::time::Instant::now()
+                        + std::time::Duration::from_secs(300);
+                }
                 let remaining = deadline.saturating_duration_since(
                     tokio::time::Instant::now(),
                 );
