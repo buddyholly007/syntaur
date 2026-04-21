@@ -226,4 +226,305 @@ mod tests {
         assert!(out.is_none(), "expected soft-fail on EADDRINUSE");
         drop(listener);
     }
+
+    /// Claim an ephemeral port by binding + dropping a probe listener.
+    /// There's a tiny TOCTOU window before the broker takes the same
+    /// port; single-process test suites rarely collide, and if one
+    /// does, `EmbeddedBroker::spawn` cleanly returns `None` so we
+    /// retry. Used by the round-trip test below.
+    fn claim_ephemeral_port() -> SocketAddr {
+        let l = TcpListener::bind("127.0.0.1:0").expect("probe listener");
+        let a = l.local_addr().unwrap();
+        drop(l);
+        a
+    }
+
+    /// Full publish/subscribe round trip through the embedded broker,
+    /// using rumqttc (the same client the `MqttSession` uses in prod)
+    /// to prove the broker accepts connections, delivers messages, and
+    /// preserves retained state across a fresh subscription.
+    ///
+    /// The test body is multi-async and uses a bespoke tokio runtime
+    /// because `spawn_returns_none_on_address_in_use` and the rest of
+    /// the broker tests are plain `#[test]`s; importing `#[tokio::test]`
+    /// just for one case would blow up build time on every broker
+    /// change.
+    #[test]
+    fn round_trip_pub_sub_and_retained() {
+        use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS};
+        use std::time::Duration;
+        use tokio::time::timeout;
+
+        // Try up to 3 ephemeral ports in case the TOCTOU window bites.
+        let mut broker_opt = None;
+        let mut bind = None;
+        for _ in 0..3 {
+            let addr = claim_ephemeral_port();
+            if let Some(b) = EmbeddedBroker::spawn(addr) {
+                broker_opt = Some(b);
+                bind = Some(addr);
+                break;
+            }
+        }
+        let broker = broker_opt.expect("embedded broker spawn (after retries)");
+        let addr = bind.unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            // Wait for the broker's accept loop to be ready. `spawn_blocking`
+            // returns before rumqttd's OS thread is listening, so we do a
+            // short bounded connect-retry instead of a bare sleep.
+            for _ in 0..40 {
+                if std::net::TcpStream::connect_timeout(
+                    &addr,
+                    Duration::from_millis(50),
+                )
+                .is_ok()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+
+            let mut sub_opts =
+                MqttOptions::new("test-sub", addr.ip().to_string(), addr.port());
+            sub_opts.set_keep_alive(Duration::from_secs(5));
+            let (sub_client, mut sub_loop) = AsyncClient::new(sub_opts, 32);
+            sub_client
+                .subscribe("round_trip/#", QoS::AtLeastOnce)
+                .await
+                .expect("subscribe");
+
+            // Drain the initial SubAck etc. so the poll loop is past
+            // handshake before the publisher joins.
+            for _ in 0..4 {
+                let _ = timeout(Duration::from_millis(500), sub_loop.poll()).await;
+            }
+
+            let mut pub_opts =
+                MqttOptions::new("test-pub", addr.ip().to_string(), addr.port());
+            pub_opts.set_keep_alive(Duration::from_secs(5));
+            let (pub_client, mut pub_loop) = AsyncClient::new(pub_opts, 32);
+            // Service the publisher's event loop in the background — without
+            // it `publish` queues but nothing flushes.
+            tokio::spawn(async move {
+                for _ in 0..50 {
+                    let _ = timeout(Duration::from_millis(200), pub_loop.poll()).await;
+                }
+            });
+
+            pub_client
+                .publish(
+                    "round_trip/hello",
+                    QoS::AtLeastOnce,
+                    true, // retained — verify the broker honors it
+                    b"world".to_vec(),
+                )
+                .await
+                .expect("publish");
+
+            // Poll until we see the publish arrive. 5s cap — broker is
+            // local, this runs well under 100ms on healthy hardware.
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            let mut saw = false;
+            while tokio::time::Instant::now() < deadline && !saw {
+                match timeout(Duration::from_millis(200), sub_loop.poll()).await {
+                    Ok(Ok(Event::Incoming(Incoming::Publish(p)))) => {
+                        if p.topic == "round_trip/hello" && &*p.payload == b"world" {
+                            saw = true;
+                        }
+                    }
+                    _ => continue,
+                }
+            }
+            assert!(saw, "subscriber did not receive retained publish within 5s");
+
+            // Fresh subscriber after the retained publish lands: it
+            // should get the message without the publisher re-sending.
+            let mut late_opts =
+                MqttOptions::new("test-late", addr.ip().to_string(), addr.port());
+            late_opts.set_keep_alive(Duration::from_secs(5));
+            let (late_client, mut late_loop) = AsyncClient::new(late_opts, 32);
+            late_client
+                .subscribe("round_trip/#", QoS::AtLeastOnce)
+                .await
+                .unwrap();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            let mut saw_retained = false;
+            while tokio::time::Instant::now() < deadline && !saw_retained {
+                match timeout(Duration::from_millis(200), late_loop.poll()).await {
+                    Ok(Ok(Event::Incoming(Incoming::Publish(p)))) => {
+                        if p.topic == "round_trip/hello" && p.retain {
+                            saw_retained = true;
+                        }
+                    }
+                    _ => continue,
+                }
+            }
+            assert!(
+                saw_retained,
+                "late subscriber did not receive retained publish"
+            );
+        });
+
+        // Broker handle is kept alive so we can log its bind on failure.
+        drop(broker);
+    }
+
+    /// End-to-end: publish a Z2M `bridge/devices` array through the
+    /// embedded broker, hand every received frame to `DialectRouter`,
+    /// assert the Zigbee2Mqtt dialect surfaces the inventory as
+    /// `DialectMessage::Discoveries` with the right device count.
+    ///
+    /// This is the smallest "real" driver path validation — proves the
+    /// wire → router handoff works against a running broker without
+    /// standing up the full `MqttSession` + DB chain.
+    #[test]
+    fn z2m_bridge_devices_parse_via_broker() {
+        use crate::smart_home::drivers::mqtt::dialects::{DialectMessage, DialectRouter};
+        use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS};
+        use std::time::Duration;
+        use tokio::time::timeout;
+
+        let mut broker_opt = None;
+        let mut bind = None;
+        for _ in 0..3 {
+            let addr = claim_ephemeral_port();
+            if let Some(b) = EmbeddedBroker::spawn(addr) {
+                broker_opt = Some(b);
+                bind = Some(addr);
+                break;
+            }
+        }
+        let _broker = broker_opt.expect("embedded broker spawn (after retries)");
+        let addr = bind.unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            for _ in 0..40 {
+                if std::net::TcpStream::connect_timeout(
+                    &addr,
+                    Duration::from_millis(50),
+                )
+                .is_ok()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+
+            let router = DialectRouter::v1();
+
+            // Subscriber first — then publish retained inventory.
+            let mut sub_opts =
+                MqttOptions::new("z2m-sub", addr.ip().to_string(), addr.port());
+            sub_opts.set_keep_alive(Duration::from_secs(5));
+            let (sub_client, mut sub_loop) = AsyncClient::new(sub_opts, 128);
+            for topic in router.subscribe_topics() {
+                sub_client.subscribe(topic, QoS::AtMostOnce).await.ok();
+            }
+            for _ in 0..4 {
+                let _ = timeout(Duration::from_millis(300), sub_loop.poll()).await;
+            }
+
+            let mut pub_opts =
+                MqttOptions::new("z2m-pub", addr.ip().to_string(), addr.port());
+            pub_opts.set_keep_alive(Duration::from_secs(5));
+            let (pub_client, mut pub_loop) = AsyncClient::new(pub_opts, 32);
+            tokio::spawn(async move {
+                for _ in 0..50 {
+                    let _ = timeout(Duration::from_millis(200), pub_loop.poll()).await;
+                }
+            });
+
+            // A minimally-valid Z2M inventory: one coordinator (skipped),
+            // one end-device light (surfaces), one end-device sensor
+            // (surfaces).
+            let payload = serde_json::json!([
+                {
+                    "ieee_address": "0x1111",
+                    "type": "Coordinator",
+                    "friendly_name": "Coordinator"
+                },
+                {
+                    "ieee_address": "0x0001",
+                    "type": "EndDevice",
+                    "friendly_name": "living_room_light",
+                    "manufacturer": "IKEA",
+                    "definition": {
+                        "exposes": [
+                            {
+                                "type": "light",
+                                "features": [
+                                    {"name": "state", "property": "state"},
+                                    {"name": "brightness", "property": "brightness"}
+                                ]
+                            }
+                        ]
+                    }
+                },
+                {
+                    "ieee_address": "0x0002",
+                    "type": "EndDevice",
+                    "friendly_name": "kitchen_motion",
+                    "manufacturer": "Aqara",
+                    "definition": {
+                        "exposes": [
+                            {"name": "occupancy", "property": "occupancy"}
+                        ]
+                    }
+                }
+            ])
+            .to_string();
+            pub_client
+                .publish(
+                    "zigbee2mqtt/bridge/devices",
+                    QoS::AtLeastOnce,
+                    true,
+                    payload.into_bytes(),
+                )
+                .await
+                .expect("publish");
+
+            // Pull frames until we see the Z2M inventory or time out.
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            let mut got_inventory: Vec<_> = Vec::new();
+            while tokio::time::Instant::now() < deadline && got_inventory.is_empty() {
+                match timeout(Duration::from_millis(300), sub_loop.poll()).await {
+                    Ok(Ok(Event::Incoming(Incoming::Publish(p)))) => {
+                        if let Some(msg) = router.parse(&p.topic, &p.payload) {
+                            if let DialectMessage::Discoveries(list) = msg {
+                                got_inventory = list;
+                            }
+                        }
+                    }
+                    _ => continue,
+                }
+            }
+
+            assert_eq!(
+                got_inventory.len(),
+                2,
+                "expected 2 candidates (coordinator skipped), got {}: {:?}",
+                got_inventory.len(),
+                got_inventory
+                    .iter()
+                    .map(|c| &c.external_id)
+                    .collect::<Vec<_>>()
+            );
+            let kinds: Vec<&str> = got_inventory.iter().map(|c| c.kind.as_str()).collect();
+            assert!(kinds.contains(&"light"), "expected a light, got {:?}", kinds);
+            assert!(
+                kinds.contains(&"sensor_motion"),
+                "expected sensor_motion, got {:?}",
+                kinds
+            );
+        });
+    }
 }
