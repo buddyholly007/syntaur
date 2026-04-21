@@ -30,10 +30,16 @@ pub mod esphome;
 pub mod ha_discovery;
 pub mod shelly_gen1;
 pub mod tasmota;
+pub mod zigbee2mqtt;
 
 /// A dialect-specific message extracted from one MQTT frame.
 ///
-/// v1 only populates `Discovery`. Phase C adds:
+/// v1 populates two variants:
+///   - `Discovery` — one candidate per frame (HA, Tasmota, Shelly, ESPHome).
+///   - `Discoveries` — many candidates per frame (Z2M `bridge/devices`
+///     publishes the whole inventory as one JSON array).
+///
+/// Phase C adds:
 ///   - `State(DeviceStateUpdate)` — driver subscription delivered fresh values
 ///   - `Availability { external_id, online }` — LWT / presence signals
 ///   - `BridgeEvent(Value)` — dialect-level control plane (z2m join/leave, etc.)
@@ -43,6 +49,7 @@ pub mod tasmota;
 #[non_exhaustive]
 pub enum DialectMessage {
     Discovery(ScanCandidate),
+    Discoveries(Vec<ScanCandidate>),
 }
 
 /// Parser surface for one smart-home MQTT dialect.
@@ -80,6 +87,7 @@ impl DialectRouter {
             Box::new(tasmota::Tasmota),
             Box::new(shelly_gen1::ShellyGen1),
             Box::new(esphome::EspHome),
+            Box::new(zigbee2mqtt::Zigbee2Mqtt),
             Box::new(ha_discovery::HaDiscovery),
         ];
         Self { dialects }
@@ -118,6 +126,7 @@ mod tests {
         assert!(topics.iter().any(|t| t.starts_with("tasmota/")));
         assert!(topics.iter().any(|t| t.starts_with("shellies/")));
         assert!(topics.iter().any(|t| t.starts_with("esphome/")));
+        assert!(topics.iter().any(|t| t.starts_with("zigbee2mqtt/")));
     }
 
     #[test]

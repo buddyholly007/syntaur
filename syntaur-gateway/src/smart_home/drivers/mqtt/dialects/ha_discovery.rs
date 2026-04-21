@@ -160,6 +160,7 @@ mod tests {
                 assert_eq!(c.kind, "switch");
                 assert_eq!(c.name, "Kitchen");
             }
+            other => panic!("expected Discovery, got {:?}", std::mem::discriminant(&other)),
         }
     }
 }

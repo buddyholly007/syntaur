@@ -80,6 +80,10 @@ pub async fn scan_with_options(opts: MqttOptions, window: Duration) -> Vec<ScanC
             if let Some(msg) = router.parse(&publish.topic, &publish.payload) {
                 match msg {
                     DialectMessage::Discovery(c) => candidates.push(c),
+                    DialectMessage::Discoveries(list) => candidates.extend(list),
+                    // Phase C variants (State / Availability / BridgeEvent)
+                    // will add arms here.
+                    _ => {}
                 }
             }
         }
