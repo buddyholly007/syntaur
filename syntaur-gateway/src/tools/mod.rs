@@ -51,6 +51,7 @@ pub mod matter;
 pub mod matter_direct;
 pub mod matter_fabric_import;
 pub mod matter_direct_cli;
+pub mod matter_bridge_address;
 // Phase 5: direct protocol tools.
 pub mod camera;
 // Sub-agent delegation: search, coder, researcher specialists.

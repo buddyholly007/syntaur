@@ -54,10 +54,17 @@ enum Subcommand {
     /// cert + key lengths. No network — catches format errors before
     /// you try to use the fabric for real ops.
     ValidateFabric(String),
+    /// populate-from-bridge [--bridge-url WS_URL]
+    /// Query python-matter-server bridge, extract per-node IP addresses,
+    /// dump as JSON `{"node_id": "addr:port"}`. Workaround for rs-matter
+    /// #370 (operational mDNS). Redirect to a file + feed to
+    /// MatterDirectClient::put_address or persist for later sessions.
+    PopulateFromBridge { bridge_url: Option<String> },
 }
 
 fn parse_args(argv: &[String]) -> Result<CliArgs, String> {
     let mut fabric_override = None;
+    let mut bridge_url_override: Option<String> = None;
     let mut json = false;
     let mut positional: Vec<&str> = Vec::new();
     let mut i = 0;
@@ -68,6 +75,14 @@ fn parse_args(argv: &[String]) -> Result<CliArgs, String> {
                 fabric_override = Some(
                     argv.get(i)
                         .ok_or_else(|| "--fabric needs a value".to_string())?
+                        .clone(),
+                );
+            }
+            "--bridge-url" => {
+                i += 1;
+                bridge_url_override = Some(
+                    argv.get(i)
+                        .ok_or_else(|| "--bridge-url needs a value".to_string())?
                         .clone(),
                 );
             }
@@ -96,6 +111,9 @@ fn parse_args(argv: &[String]) -> Result<CliArgs, String> {
         ["read-on-off", id] => Subcommand::ReadOnOff(parse_node_id(id)?),
         ["import-pms", path] => Subcommand::ImportPms(path.to_string()),
         ["validate-fabric", path] => Subcommand::ValidateFabric(path.to_string()),
+        ["populate-from-bridge"] => Subcommand::PopulateFromBridge {
+            bridge_url: bridge_url_override.clone(),
+        },
         [] => return Err(usage()),
         _ => return Err(format!("unknown subcommand: {}\n\n{}", positional.join(" "), usage())),
     };
@@ -120,7 +138,9 @@ fn usage() -> String {
        level <node_id> <0..=254>  LevelControl MoveToLevel\n\
        read-on-off <node_id>      OnOff cluster attribute 0\n\
        import-pms <pms-dir>       dump SyntaurFabricFile from python-matter-server storage\n\
-       validate-fabric <path>     load + summarize a SyntaurFabricFile\n\n\
+       validate-fabric <path>     load + summarize a SyntaurFabricFile\n\
+       populate-from-bridge       query python-matter-server, dump node_id -> addr JSON\n\n\
+       --bridge-url WS_URL        override ws://127.0.0.1:5580/ws for populate-from-bridge\n\
      fabric file resolution: --fabric flag, then SYNTAUR_MATTER_FABRIC_FILE env"
         .into()
 }
@@ -151,6 +171,9 @@ pub async fn run(raw_args: &[String]) -> ! {
         Subcommand::ReadOnOff(id) => read_on_off_cmd(&client, id, args.json).await,
         Subcommand::ImportPms(path) => import_pms_cmd(&path, args.json),
         Subcommand::ValidateFabric(path) => validate_fabric_cmd(&path, args.json),
+        Subcommand::PopulateFromBridge { bridge_url } => {
+            populate_from_bridge_cmd(bridge_url.as_deref(), args.json).await
+        }
     };
 
     match result {
@@ -427,6 +450,43 @@ fn hex_decode(s: &str, field: &str, path: &str) -> Result<Vec<u8>, DirectError> 
         out.push(byte);
     }
     Ok(out)
+}
+
+
+/// `populate-from-bridge` — query python-matter-server, dump addresses.
+/// Output JSON: `{ "node_id (decimal string)": "addr:port", ... }`.
+/// Exit 0 = got at least one address; exit 3 = 0 addresses found (bridge
+/// reached but no nodes or none resolvable — actionable signal).
+async fn populate_from_bridge_cmd(
+    bridge_url: Option<&str>,
+    json_output: bool,
+) -> Result<(), DirectError> {
+    use crate::tools::matter_bridge_address::{fetch_node_addresses, BridgeError};
+
+    let addrs = fetch_node_addresses(bridge_url)
+        .await
+        .map_err(|e: BridgeError| DirectError::Matter(format!("{e}")))?;
+
+    if addrs.is_empty() {
+        return Err(DirectError::OperationalMdnsMissing { node_id: 0 });
+    }
+
+    if json_output {
+        let map: serde_json::Map<String, serde_json::Value> = addrs
+            .iter()
+            .map(|(nid, sa)| (nid.to_string(), serde_json::Value::String(sa.to_string())))
+            .collect();
+        println!("{}", serde_json::Value::Object(map));
+    } else {
+        // Pretty: sorted by node_id ascending
+        let mut sorted: Vec<_> = addrs.iter().collect();
+        sorted.sort_by_key(|(nid, _)| **nid);
+        println!("{} node(s) resolved:", sorted.len());
+        for (nid, sa) in sorted {
+            println!("  {} ({:#x})  ->  {}", nid, nid, sa);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
