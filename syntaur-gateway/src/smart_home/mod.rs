@@ -36,6 +36,7 @@
 
 pub mod api;
 pub mod automation;
+pub mod credentials;
 pub mod devices;
 pub mod diagnostics;
 pub mod drivers;
