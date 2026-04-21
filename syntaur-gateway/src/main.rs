@@ -5554,6 +5554,13 @@ async fn main() {
         run_vault(&raw_args);
         return;
     }
+    // \`syntaur matter-direct &lt;subcommand&gt;\` — pure-Rust Matter Controller
+    // CLI for hardware smoke-testing the upstream-rs-matter cutover. See
+    // tools/matter_direct_cli.rs. Stage 2b methods are gated; the CLI
+    // returns DirectError until fabric loading + CASE/IM are wired.
+    if matches!(raw_args.first().map(|s| s.as_str()), Some("matter-direct")) {
+        crate::tools::matter_direct_cli::run(&raw_args).await;
+    }
 
     let data_dir_pb = crate::resolve_data_dir();
     let data_dir_str = data_dir_pb.to_string_lossy().to_string();

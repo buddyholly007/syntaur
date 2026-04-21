@@ -47,6 +47,8 @@ pub mod media_control;
 // Phase 4: Matter device control via python-matter-server WebSocket.
 pub mod matter;
 pub mod matter_direct;
+pub mod matter_fabric_import;
+pub mod matter_direct_cli;
 // Phase 5: direct protocol tools.
 pub mod camera;
 // Sub-agent delegation: search, coder, researcher specialists.
