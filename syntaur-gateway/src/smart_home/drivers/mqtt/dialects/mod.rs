@@ -24,6 +24,8 @@
 //! `SmartHomeEvent::DeviceStateChanged`. v1 covers `Discovery` only —
 //! enough for the one-shot scan to populate `smart_home_devices`.
 
+use serde_json::Value;
+
 use crate::smart_home::scan::ScanCandidate;
 
 pub mod esphome;
@@ -34,24 +36,44 @@ pub mod shelly_gen2;
 pub mod tasmota;
 pub mod zigbee2mqtt;
 
+/// Fresh state published by a dialect on the runtime path. The supervisor's
+/// hash-diff layer (`state.rs`) consumes these and emits
+/// `SmartHomeEvent::DeviceStateChanged` only on non-empty diffs. `source`
+/// matches `metadata_json.schema` / `Dialect::id()` so subscribers can
+/// filter ("z2m", "shelly_gen2", "tasmota", ...).
+#[derive(Debug, Clone)]
+pub struct DeviceStateUpdate {
+    pub external_id: String,
+    pub state: Value,
+    pub source: String,
+}
+
 /// A dialect-specific message extracted from one MQTT frame.
 ///
-/// v1 populates two variants:
-///   - `Discovery` — one candidate per frame (HA, Tasmota, Shelly, ESPHome).
+/// Variants:
+///   - `Discovery` — one candidate per frame (HA, Tasmota discovery,
+///     Shelly, ESPHome).
 ///   - `Discoveries` — many candidates per frame (Z2M `bridge/devices`
 ///     publishes the whole inventory as one JSON array).
+///   - `State` — Phase C runtime update (Tasmota tele/STATE, Z2M
+///     per-device state, Shelly status, etc.) — flows into the
+///     supervisor's state cache.
+///   - `Availability` — LWT / presence signal. `online=false` marks
+///     the device unreachable; subscribers (dashboards, automations)
+///     react without a full state refresh.
+///   - `BridgeEvent` — dialect-level control-plane signal that is NOT
+///     a state change (z2m `bridge/event` join/leave, bridge/state
+///     coordinator up/down). Opaque JSON preserved for diagnostics.
 ///
-/// Phase C adds:
-///   - `State(DeviceStateUpdate)` — driver subscription delivered fresh values
-///   - `Availability { external_id, online }` — LWT / presence signals
-///   - `BridgeEvent(Value)` — dialect-level control plane (z2m join/leave, etc.)
-///
-/// Keep this enum non-exhaustive so those additions don't break downstream
-/// match arms — matches on `DialectMessage` must include a `_` fallback.
+/// Kept non-exhaustive so matches remain forward-compatible — always
+/// include a `_` fallback.
 #[non_exhaustive]
 pub enum DialectMessage {
     Discovery(ScanCandidate),
     Discoveries(Vec<ScanCandidate>),
+    State(DeviceStateUpdate),
+    Availability { external_id: String, online: bool },
+    BridgeEvent(Value),
 }
 
 /// Parser surface for one smart-home MQTT dialect.
