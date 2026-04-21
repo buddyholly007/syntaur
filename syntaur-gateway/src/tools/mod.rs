@@ -3,6 +3,8 @@ pub mod browser;
 pub mod agent_memory;
 pub mod image_gen;
 pub mod built_in_tools;
+pub mod scheduler_specialist;
+pub mod music_specialist;
 pub mod captcha;
 pub mod captcha_bridge;
 pub mod email;
@@ -17,6 +19,12 @@ pub mod search_everything;
 pub mod code_execute;
 pub mod openapi;
 pub mod home_assistant;
+// Smart Home and Network module — agent-facing tool surface. Scaffolded
+// in Track A week 1 (stub execute() returns "driver not wired yet"); real
+// control/query/automation plumbing lands across weeks 3-10.
+pub mod smart_home_control;
+pub mod smart_home_query;
+pub mod smart_home_automation;
 // Phase 0 voice skill router: embedding-based intent → tool dispatch.
 pub mod router;
 pub mod find_tool;
@@ -171,6 +179,34 @@ impl ToolRegistry {
         if removed > 0 {
             log::info!("[modules] filtered {} tools from disabled modules", removed);
         }
+    }
+
+    /// Restrict the tool surface to a per-agent allowlist.
+    ///
+    /// Called after construction, once the agent_id for the current
+    /// turn is known. Main agents (`main`, `kyron`, `peter`) pass
+    /// `None` and see every tool. Module specialists pass their
+    /// allowlist and lose everything outside their scope — including
+    /// the MCP registry tools, which are not relevant to a focused
+    /// specialist like the scheduler.
+    ///
+    /// Rationale: a 60+-tool surface confuses the LLM's tool
+    /// selection — it picks `search_everything` when the user asks
+    /// "what's on my calendar" because the tool name matches
+    /// superficially. Scoping Thaddeus to ~35 scheduler-specific
+    /// tools makes the right choice obvious.
+    pub fn apply_agent_allowlist(&mut self, allowlist: Option<&[&str]>) {
+        let Some(allow) = allowlist else { return; };
+        let mcp_count = self.mcp.as_ref().map(|m| m.tools().len()).unwrap_or(0);
+        let before = self.extensions.len() + mcp_count;
+        self.extensions.retain(|name, _| allow.contains(&name.as_str()));
+        // MCP tools are fully filtered out for scoped agents — they're
+        // external, generic, and almost never what a specialist needs.
+        // If a specialist genuinely needs an MCP tool, add it to the
+        // allowlist and load an MCP adapter under that name.
+        self.mcp = None;
+        let after = self.extensions.len();
+        log::info!("[agent-scope] restricted tool surface {} → {} (MCP tools cleared)", before, after);
     }
 
     /// Wire shared rate-limiter + circuit-breaker state into the registry so
@@ -340,6 +376,86 @@ impl ToolRegistry {
         reg!(built_in_tools::CompleteTodoTool);
         reg!(built_in_tools::ListTodosTool);
         reg!(built_in_tools::AddCalendarEventTool);
+        // Scheduler specialist toolset (Thaddeus-scoped via apply_agent_allowlist).
+        reg!(scheduler_specialist::ListCalendarEventsTool);
+        reg!(scheduler_specialist::UpdateCalendarEventTool);
+        reg!(scheduler_specialist::DeleteCalendarEventTool);
+        reg!(scheduler_specialist::UpdateTodoTool);
+        reg!(scheduler_specialist::DeleteTodoTool);
+        reg!(scheduler_specialist::ListHabitsTool);
+        reg!(scheduler_specialist::AddHabitTool);
+        reg!(scheduler_specialist::ToggleHabitTool);
+        reg!(scheduler_specialist::ArchiveHabitTool);
+        reg!(scheduler_specialist::ListListsTool);
+        reg!(scheduler_specialist::CreateListTool);
+        reg!(scheduler_specialist::ListItemsTool);
+        reg!(scheduler_specialist::AddListItemTool);
+        reg!(scheduler_specialist::ToggleListItemTool);
+        reg!(scheduler_specialist::DeleteListItemTool);
+        reg!(scheduler_specialist::AddMealTool);
+        reg!(scheduler_specialist::ListSchoolFeedsTool);
+        reg!(scheduler_specialist::AddSchoolFeedTool);
+        reg!(scheduler_specialist::SyncSchoolFeedTool);
+        reg!(scheduler_specialist::DeleteSchoolFeedTool);
+        reg!(scheduler_specialist::ListPatternsTool);
+        reg!(scheduler_specialist::DismissPatternTool);
+        reg!(scheduler_specialist::GetMeetingPrepTool);
+        reg!(scheduler_specialist::ListPendingApprovalsTool);
+        reg!(scheduler_specialist::ApproveTool);
+        reg!(scheduler_specialist::RejectTool);
+        reg!(scheduler_specialist::ProposeEventTool);
+        reg!(scheduler_specialist::FindAvailabilityTool);
+        reg!(scheduler_specialist::ScheduleOverdueTodosTool);
+        reg!(scheduler_specialist::GetSchedulerPrefsTool);
+        reg!(scheduler_specialist::UpdateWorkingHoursTool);
+        reg!(scheduler_specialist::ListCalendarSubscriptionsTool);
+        reg!(scheduler_specialist::SyncCalendarsTool);
+        reg!(scheduler_specialist::ListCalendarConnectionsTool);
+        reg!(scheduler_specialist::ConnectM365CalendarTool);
+        reg!(scheduler_specialist::ListM365CalendarsTool);
+        reg!(scheduler_specialist::SelectCalendarsToSyncTool);
+        reg!(scheduler_specialist::DisconnectCalendarTool);
+        // Music specialist toolset (Silvr-scoped via apply_agent_allowlist).
+        reg!(music_specialist::ListMusicFoldersTool);
+        reg!(music_specialist::AddMusicFolderTool);
+        reg!(music_specialist::RemoveMusicFolderTool);
+        reg!(music_specialist::ScanMusicFolderTool);
+        reg!(music_specialist::GetLibraryStatsTool);
+        reg!(music_specialist::ListTracksTool);
+        reg!(music_specialist::ListAlbumsTool);
+        reg!(music_specialist::ListArtistsTool);
+        reg!(music_specialist::SearchMusicTool);
+        reg!(music_specialist::ListDuplicatesTool);
+        reg!(music_specialist::GetTrackDetailsTool);
+        reg!(music_specialist::IdentifyTrackTool);
+        reg!(music_specialist::ApplyTrackIdentificationTool);
+        reg!(music_specialist::EditTrackTool);
+        reg!(music_specialist::RevertTrackMetadataTool);
+        reg!(music_specialist::AutoLabelLibraryTool);
+        reg!(music_specialist::GetLyricsTool);
+        reg!(music_specialist::GetAlbumNotesTool);
+        reg!(music_specialist::NowPlayingTool);
+        reg!(music_specialist::ListPlaylistsTool);
+        reg!(music_specialist::CreatePlaylistTool);
+        reg!(music_specialist::RenamePlaylistTool);
+        reg!(music_specialist::DeletePlaylistTool);
+        reg!(music_specialist::GetPlaylistTool);
+        reg!(music_specialist::AddToPlaylistTool);
+        reg!(music_specialist::RemoveFromPlaylistTool);
+        reg!(music_specialist::ReorderPlaylistTracksTool);
+        reg!(music_specialist::FavoriteTrackTool);
+        reg!(music_specialist::UnfavoriteTrackTool);
+        reg!(music_specialist::RecordPlayTool);
+        reg!(music_specialist::SaveMusicPreferenceTool);
+        reg!(music_specialist::ListMusicPreferencesTool);
+        reg!(music_specialist::DeleteMusicPreferenceTool);
+        reg!(music_specialist::ListMusicConnectionsTool);
+        reg!(music_specialist::ConnectSpotifyTool);
+        reg!(music_specialist::ConnectAppleMusicTool);
+        reg!(music_specialist::ConnectTidalTool);
+        reg!(music_specialist::ConnectYoutubeMusicTool);
+        reg!(music_specialist::CheckMediaBridgeStatusTool);
+        reg!(music_specialist::DisconnectMusicServiceTool);
         reg!(built_in_tools::LogExpenseTool);
         reg!(built_in_tools::ExpenseSummaryTool);
         reg!(built_in_tools::GetIncomeTool);
@@ -360,6 +476,11 @@ impl ToolRegistry {
         reg!(voice_journal::SearchJournalTool);
         reg!(voice_journal::JournalSummaryTool);
         reg!(voice_journal::ListRecordingsTool);
+
+        // Smart Home and Network (scaffold — real drivers land weeks 3-10).
+        reg!(smart_home_control::SmartHomeControlTool);
+        reg!(smart_home_query::SmartHomeQueryTool);
+        reg!(smart_home_automation::SmartHomeAutomationTool);
 
         // OpenAPI tools registered via add_openapi_tools() after construction
 

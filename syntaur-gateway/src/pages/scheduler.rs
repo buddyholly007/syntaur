@@ -262,10 +262,11 @@ fn theme_picker_modal() -> Markup {
                     p class="sch-border-hint" style="margin: 4px 0 0 0; padding: 0;" { "Lower = more of the painted backdrop shows through. Panels and calendar are independent." }
                 }
 
-                // Adjust + Upload — two side-by-side actions.
+                // Adjust + Upload + Revert — shown side-by-side.
                 div style="padding: 10px 14px 14px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;" {
                     button class="sch-btn-primary" onclick="schEnterBackdropEdit()" { "Adjust position" }
                     button class="sch-btn-ghost" onclick="schBackdropUpload()" { "Upload your own…" }
+                    button id="sch-backdrop-revert-btn" class="sch-btn-ghost" style="display: none;" onclick="schBackdropRevert()" { "Remove custom backdrop" }
                     span class="sch-border-hint" style="padding: 0; flex: 1; text-align: right;" { "PNG · JPG · WebP · 5 MB max" }
                 }
             }
@@ -2867,6 +2868,14 @@ const PAGE_JS: &str = r##"
     const calReadout = document.getElementById('sch-cal-opacity-readout');
     if (calReadout) calReadout.textContent = `${calSlider ? calSlider.value : 55}%`;
 
+    // Revert button only shows when the user actually has a custom upload
+    // to revert. Hidden otherwise so the picker doesn't look cluttered.
+    const revertBtn = document.getElementById('sch-backdrop-revert-btn');
+    if (revertBtn) {
+      const hasCustom = customFile && customFile.length > 0;
+      revertBtn.style.display = hasCustom ? '' : 'none';
+    }
+
     document.getElementById('sch-border-modal').hidden = false;
   };
   window.schPaneOpacityInput = function(el) {
@@ -2924,6 +2933,30 @@ const PAGE_JS: &str = r##"
       }
     };
     input.click();
+  };
+  window.schBackdropRevert = async function() {
+    if (!confirm('Remove your custom backdrop and return to the default?')) return;
+    try {
+      const resp = await fetch('/api/scheduler/backdrop', {
+        method: 'DELETE',
+        headers: { 'Authorization': 'Bearer ' + TOKEN },
+      });
+      const data = await resp.json();
+      if (!data.ok) {
+        (window.schAlert || alert)(data.error || 'Could not remove custom backdrop.');
+        return;
+      }
+      S.prefs.custom_backdrop_file = '';
+      applyCustomBackdropUrl('');
+      // Flip the border to the default if the server moved it there.
+      if (data.border && data.border !== 'unchanged') {
+        S.prefs.border = data.border;
+        applyBorder(data.border);
+      }
+      schCloseBorders();
+    } catch (e) {
+      (window.schAlert || alert)('Could not remove custom backdrop: ' + e.message);
+    }
   };
   window.schCloseBorders = function() { document.getElementById('sch-border-modal').hidden = true; };
   window.schPickBorder = async function(key) {

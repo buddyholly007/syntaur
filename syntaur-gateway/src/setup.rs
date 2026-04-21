@@ -1393,6 +1393,81 @@ pub async fn handle_scheduler_backdrop_upload(
     })))
 }
 
+/// DELETE /api/scheduler/backdrop — revert the user's custom backdrop.
+/// Removes the uploaded file from ~/.syntaur/backdrops/, clears
+/// scheduler_prefs.custom_backdrop_file, and flips the user's border back
+/// to the default ("garden-backdrop") so the UI has something to render.
+pub async fn handle_scheduler_backdrop_delete(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> Result<axum::Json<serde_json::Value>, (StatusCode, String)> {
+    let token = headers.get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .unwrap_or("");
+    let principal = crate::resolve_principal(&state, token).await
+        .map_err(|s| (s, "Unauthorized".to_string()))?;
+    let user_id = principal.user_id();
+
+    let db_path = state.db_path.clone();
+    let (old_filename, had_custom_border): (Option<String>, bool) =
+        tokio::task::spawn_blocking(move || -> (Option<String>, bool) {
+            let conn = match rusqlite::Connection::open(&db_path) {
+                Ok(c) => c,
+                Err(_) => return (None, false),
+            };
+            let row: Option<(String, String)> = conn.query_row(
+                "SELECT custom_backdrop_file, border FROM scheduler_prefs WHERE user_id = ?",
+                rusqlite::params![user_id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            ).ok();
+            match row {
+                Some((f, b)) => {
+                    let fname = if f.is_empty() { None } else { Some(f) };
+                    (fname, b == "custom")
+                }
+                None => (None, false),
+            }
+        }).await.unwrap_or((None, false));
+
+    // Always clear the filename. Flip border off 'custom' only if it
+    // was still 'custom' — don't clobber a user who has already moved
+    // on to a different backdrop choice (the file would still be
+    // stale on disk and worth cleaning up).
+    let db_path2 = state.db_path.clone();
+    let _ = tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
+        let conn = rusqlite::Connection::open(&db_path2)?;
+        let now = chrono::Utc::now().timestamp();
+        if had_custom_border {
+            conn.execute(
+                "UPDATE scheduler_prefs SET custom_backdrop_file = '', border = 'garden-backdrop', updated_at = ? WHERE user_id = ?",
+                rusqlite::params![now, user_id],
+            )?;
+        } else {
+            conn.execute(
+                "UPDATE scheduler_prefs SET custom_backdrop_file = '', updated_at = ? WHERE user_id = ?",
+                rusqlite::params![now, user_id],
+            )?;
+        }
+        Ok(())
+    }).await;
+
+    // Best-effort delete. Leaving an orphan file is acceptable; it
+    // can't leak (filename is unguessable) and gets no further refs.
+    if let Some(old) = old_filename {
+        if old.starts_with("custom-") {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
+            let path = format!("{}/.syntaur/backdrops/{}", home, old);
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    Ok(axum::Json(serde_json::json!({
+        "ok": true,
+        "border": if had_custom_border { "garden-backdrop" } else { "unchanged" },
+    })))
+}
+
 /// POST /api/agent-avatar/{agent_id} — upload custom agent avatar (admin only)
 pub async fn handle_agent_avatar_upload(
     State(state): State<Arc<AppState>>,

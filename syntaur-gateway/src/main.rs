@@ -36,6 +36,7 @@ mod calendar_reminder;
 mod sync;
 mod music;
 mod music_local;
+mod smart_home;
 mod fs_browser;
 pub mod crypto;
 pub mod terminal;
@@ -1769,29 +1770,40 @@ async fn handle_api_message(
     let resolved = resolve_agent(&state, &agent_id, principal.user_id()).await;
     let workspace = resolved.workspace;
 
-    // Load system prompt for agent
-    let mut context_parts = Vec::new();
-    if let Some(custom) = &resolved.custom_prompt {
-        context_parts.push(custom.clone());
-    }
-    // STYLE.md loads FIRST so response-style rules (tool use, length,
-    // handoff) appear at the top of the system prompt where models
-    // weight them most. Identity follows so the agent still has voice.
-    for file in &["STYLE.md", "SOUL.md", "IDENTITY.md", "TOOLS.md", "USER.md", "BRIEF.md", "PLAN.md", "MEMORY.md"] {
-        if let Ok(content) = std::fs::read_to_string(workspace.join(file)) {
-            if !content.trim().is_empty() {
-                context_parts.push(content);
-            }
-        }
-    }
-    let (mut system_prompt, used_persona_template) = if context_parts.is_empty() {
+    // Load system prompt for agent. Seeded persona templates (module_scheduler,
+    // module_tax, …) win over workspace docs so their {{current_date_human}} /
+    // {{personality_doc}} / etc. substitutions actually run. Workspace docs are
+    // the legacy path for custom system agents (Felix, Crimson Lantern) that
+    // don't have a seeded row in module_agent_defaults. `custom_prompt` from
+    // user_agents.system_prompt is a user-explicit override and still prepends.
+    let (mut system_prompt, used_persona_template) =
         match try_default_persona(&state, &agent_id, principal.user_id()).await {
-            Some(prompt) => (prompt, true),
-            None => (format!("You are agent {}", agent_id), false),
+            Some(tmpl) => (tmpl, true),
+            None => {
+                let mut parts = Vec::new();
+                if let Some(custom) = &resolved.custom_prompt {
+                    parts.push(custom.clone());
+                }
+                // STYLE.md first so response-style rules weight highest.
+                for file in &["STYLE.md", "SOUL.md", "IDENTITY.md", "TOOLS.md", "USER.md", "BRIEF.md", "PLAN.md", "MEMORY.md"] {
+                    if let Ok(content) = std::fs::read_to_string(workspace.join(file)) {
+                        if !content.trim().is_empty() {
+                            parts.push(content);
+                        }
+                    }
+                }
+                if parts.is_empty() {
+                    (format!("You are agent {}", agent_id), false)
+                } else {
+                    (parts.join("\n\n---\n\n"), false)
+                }
+            }
+        };
+    if used_persona_template {
+        if let Some(custom) = &resolved.custom_prompt {
+            system_prompt = format!("{}\n\n---\n\n{}", custom, system_prompt);
         }
-    } else {
-        (context_parts.join("\n\n---\n\n"), false)
-    };
+    }
     // Inject per-user personality docs (skip if persona template already includes them)
     // Compute context budget for this model's context window
     let ctx_budget = crate::agents::context_budget::ContextBudget::for_context_window(
@@ -1933,6 +1945,7 @@ async fn handle_api_message(
         tool_registry.add_extension_tools(&[run_skill, delegate, image_gen, edit_image, save_image]);
     }
     tool_registry.apply_module_filter(&state.disabled_tools);
+    tool_registry.apply_agent_allowlist(agent_tool_allowlist(&agent_id));
     let tools = tool_registry.tool_definitions();
     // 15 rounds is enough for every realistic task and caps worst-case
     // tool-call-loop latency at ~60-90s instead of ~3-5 min. Models that
@@ -2284,28 +2297,37 @@ async fn handle_message_start(
         });
 
         let workspace = resolved.workspace;
-        let mut context_parts = Vec::new();
-        if let Some(custom) = &resolved.custom_prompt {
-            context_parts.push(custom.clone());
-        }
-        // STYLE.md loads FIRST so response-style rules (tool use, length,
-    // handoff) appear at the top of the system prompt where models
-    // weight them most. Identity follows so the agent still has voice.
-    for file in &["STYLE.md", "SOUL.md", "IDENTITY.md", "TOOLS.md", "USER.md", "BRIEF.md", "PLAN.md", "MEMORY.md"] {
-            if let Ok(content) = std::fs::read_to_string(workspace.join(file)) {
-                if !content.trim().is_empty() {
-                    context_parts.push(content);
-                }
-            }
-        }
-        let (mut system_prompt, used_persona_template) = if context_parts.is_empty() {
+        // Seeded persona template (module_scheduler, module_tax, …) wins over
+        // workspace docs so substitution vars render. Workspace path is only
+        // for legacy/custom system agents without a seeded row. `custom_prompt`
+        // still prepends in both branches. See handle_api_message for details.
+        let (mut system_prompt, used_persona_template) =
             match try_default_persona(&state_clone, &agent_for_task, principal_user_id).await {
-                Some(prompt) => (prompt, true),
-                None => (format!("You are agent {}", agent_for_task), false),
+                Some(tmpl) => (tmpl, true),
+                None => {
+                    let mut parts = Vec::new();
+                    if let Some(custom) = &resolved.custom_prompt {
+                        parts.push(custom.clone());
+                    }
+                    for file in &["STYLE.md", "SOUL.md", "IDENTITY.md", "TOOLS.md", "USER.md", "BRIEF.md", "PLAN.md", "MEMORY.md"] {
+                        if let Ok(content) = std::fs::read_to_string(workspace.join(file)) {
+                            if !content.trim().is_empty() {
+                                parts.push(content);
+                            }
+                        }
+                    }
+                    if parts.is_empty() {
+                        (format!("You are agent {}", agent_for_task), false)
+                    } else {
+                        (parts.join("\n\n---\n\n"), false)
+                    }
+                }
+            };
+        if used_persona_template {
+            if let Some(custom) = &resolved.custom_prompt {
+                system_prompt = format!("{}\n\n---\n\n{}", custom, system_prompt);
             }
-        } else {
-            (context_parts.join("\n\n---\n\n"), false)
-        };
+        }
         // Inject per-user personality docs (skip if persona template already includes them)
         if !used_persona_template {
             let personality = state_clone.users.personality_prompt(principal_user_id, &agent_for_task, 4000).await;
@@ -2434,6 +2456,7 @@ async fn handle_message_start(
         tr.add_extension_tools(&[run_skill, delegate, image_gen, edit_image, save_image]);
         }
         tr.apply_module_filter(&state.disabled_tools);
+        tr.apply_agent_allowlist(agent_tool_allowlist(&agent_for_task));
         let tool_registry = std::sync::Arc::new(tr);
     let tools = tool_registry.tool_definitions();
         // See handle_api_message for rationale — 15 rounds caps flailing turns.
@@ -6375,6 +6398,14 @@ async fn main() {
         }
     }
 
+    // Smart Home and Network — module init hook. Launches the automation
+    // engine supervisor as a detached tokio task; additional background
+    // workers (diagnostics sweeper, energy roll-up scheduler) hang off
+    // this call as they land.
+    if let Err(e) = smart_home::init(state.db_path.clone()).await {
+        warn!("[smart_home] init failed: {}", e);
+    }
+
     // HTTP server
     let port = config.gateway.port;
     let bind_addr = match config.gateway.bind.as_str() {
@@ -6433,6 +6464,8 @@ async fn main() {
         // which lives on /api/calendar above.
         .route("/api/scheduler/prefs", get(handle_scheduler_prefs_get))
         .route("/api/scheduler/prefs", post(handle_scheduler_prefs_put))
+        .route("/api/scheduler/backdrop", post(setup::handle_scheduler_backdrop_upload))
+        .route("/api/scheduler/backdrop", axum::routing::delete(setup::handle_scheduler_backdrop_delete))
         .route("/api/scheduler/lists", get(handle_scheduler_lists_get))
         .route("/api/scheduler/lists", post(handle_scheduler_lists_post))
         .route("/api/scheduler/habits", get(handle_scheduler_habits_get))
@@ -6589,8 +6622,14 @@ async fn main() {
         .route("/api/music/local/albums", get(music_local::list_albums))
         .route("/api/music/local/artists", get(music_local::list_artists))
         .route("/api/music/local/playlists", get(music_local::list_playlists).post(music_local::create_playlist))
-        .route("/api/music/local/playlists/{id}", get(music_local::get_playlist_tracks).delete(music_local::delete_playlist))
+        .route("/api/music/local/playlists/{id}", get(music_local::get_playlist_tracks).post(music_local::rename_playlist).delete(music_local::delete_playlist))
         .route("/api/music/local/playlists/{id}/tracks", post(music_local::playlist_add_track))
+        .route("/api/music/local/playlists/{id}/tracks/{track_id}", axum::routing::delete(music_local::playlist_remove_track))
+        .route("/api/music/local/playlists/{id}/reorder", post(music_local::playlist_reorder))
+        .route("/api/music/local/tracks/{id}", post(music_local::edit_track))
+        .route("/api/music/local/stats", get(music_local::library_stats))
+        .route("/api/music/connections", get(music_local::list_music_connections))
+        .route("/api/music/connections/{provider}", post(music_local::connect_music_service).delete(music_local::disconnect_music_service))
         .route("/api/music/local/lyrics/{id}", get(music_local::fetch_lyrics))
         .route("/api/music/local/duplicates", get(music_local::list_duplicates))
         .route("/api/music/local/nl_search", post(music_local::nl_search))
@@ -6659,6 +6698,77 @@ async fn main() {
         .route("/api/social/platforms", get(social::handle_platforms))
         .route("/tax", get(pages::tax::render))
         .route("/scheduler", get(pages::scheduler::render))
+        // Smart Home and Network module (Track A week 1 scaffold —
+        // see plans/we-need-to-work-floofy-haven.md). UI route + the
+        // /api/smart-home/* CRUD + scan/control/automation surface.
+        .route("/smart-home", get(pages::smart_home::render))
+        .route(
+            "/api/smart-home/rooms",
+            get(smart_home::api::handle_list_rooms).post(smart_home::api::handle_create_room),
+        )
+        .route(
+            "/api/smart-home/rooms/{id}",
+            axum::routing::delete(smart_home::api::handle_delete_room)
+                .patch(smart_home::api::handle_patch_room),
+        )
+        .route("/api/smart-home/devices", get(smart_home::api::handle_list_devices))
+        .route(
+            "/api/smart-home/devices/{id}/room",
+            post(smart_home::api::handle_assign_device_room),
+        )
+        .route("/api/smart-home/scan", post(smart_home::api::handle_scan))
+        .route("/api/smart-home/scan/confirm", post(smart_home::api::handle_scan_confirm))
+        .route("/api/smart-home/control", post(smart_home::api::handle_control))
+        .route(
+            "/api/smart-home/devices/{id}/refresh-state",
+            post(smart_home::api::handle_refresh_state),
+        )
+        .route(
+            "/api/smart-home/automations",
+            get(smart_home::api::handle_list_automations)
+                .post(smart_home::api::handle_create_automation),
+        )
+        .route(
+            "/api/smart-home/automation/compile",
+            post(smart_home::api::handle_compile_automation),
+        )
+        .route(
+            "/api/smart-home/diagnostics/summary",
+            get(smart_home::api::handle_diagnostics_summary),
+        )
+        .route(
+            "/api/smart-home/diagnostics/sweep",
+            post(smart_home::api::handle_diagnostics_sweep),
+        )
+        .route(
+            "/api/smart-home/energy/summary",
+            get(smart_home::api::handle_energy_summary),
+        )
+        .route(
+            "/api/smart-home/energy/ingest",
+            post(smart_home::api::handle_energy_ingest),
+        )
+        .route(
+            "/api/smart-home/scenes",
+            get(smart_home::api::handle_list_scenes)
+                .post(smart_home::api::handle_create_scene),
+        )
+        .route(
+            "/api/smart-home/scenes/{id}",
+            axum::routing::delete(smart_home::api::handle_delete_scene),
+        )
+        .route(
+            "/api/smart-home/scenes/{id}/activate",
+            post(smart_home::api::handle_activate_scene),
+        )
+        .route(
+            "/api/smart-home/cameras/events",
+            get(smart_home::api::handle_camera_events),
+        )
+        .route(
+            "/api/smart-home/events/stream",
+            get(smart_home::api::handle_events_stream),
+        )
         .route("/chat", get(pages::chat::render))
         .route("/history", get(pages::history::render))
         .route("/knowledge", get(pages::knowledge::render))
@@ -10935,6 +11045,90 @@ fn strip_image_markdown(content: &str) -> String {
 /// NO custom prompt — i.e., fresh users or module-specific agents that haven't
 /// been customized yet. Existing agents with SOUL.md/IDENTITY.md (like Felix/
 /// Peter on Sean's deployment) are unaffected.
+/// Per-agent tool allowlist. Returns `Some(&[names])` for module
+/// specialists that should only see their domain tools; `None` for
+/// main agents (Kyron/Peter) that retain the full tool surface.
+///
+/// Adding a new specialist? Two steps:
+///   1. List every tool the agent legitimately needs here.
+///   2. Confirm the tool is registered under that exact name in
+///      `tools/mod.rs`'s `register_built_in_tools` block.
+///
+/// Keep allowlists tight (≤ 40 tools). The whole point of scoping
+/// is tool-selection clarity — adding "might be nice" tools erodes it.
+fn agent_tool_allowlist(agent_id: &str) -> Option<&'static [&'static str]> {
+    match agent_id {
+        // Scheduler specialist — calendar, todos, habits, lists,
+        // meal, school feeds, patterns, meetings, approvals,
+        // availability, prefs, sync + a few utilities.
+        "thaddeus" | "scheduler" | "module_scheduler" => Some(&[
+            // Calendar CRUD + listing
+            "list_calendar_events", "add_calendar_event", "update_calendar_event", "delete_calendar_event",
+            // Todos CRUD + listing
+            "list_todos", "add_todo", "update_todo", "complete_todo", "delete_todo",
+            // Habits
+            "list_habits", "add_habit", "toggle_habit", "archive_habit",
+            // Lists + items
+            "list_lists", "create_list", "list_items", "add_list_item", "toggle_list_item", "delete_list_item",
+            // Meal planning
+            "add_meal",
+            // School feeds
+            "list_school_feeds", "add_school_feed", "sync_school_feed", "delete_school_feed",
+            // Patterns
+            "list_patterns", "dismiss_pattern",
+            // Meeting prep
+            "get_meeting_prep",
+            // Approval queue
+            "list_pending_approvals", "approve", "reject", "propose_event",
+            // Intelligence
+            "find_availability", "schedule_overdue_todos",
+            // Preferences + sync
+            "get_scheduler_prefs", "update_working_hours",
+            "list_calendar_subscriptions", "sync_calendars",
+            // External calendar connections (Outlook/M365 OAuth, Google)
+            "list_calendar_connections", "connect_m365_calendar", "list_m365_calendars",
+            "select_calendars_to_sync", "disconnect_calendar",
+            // Cross-agent utilities
+            "memory_recall", "memory_save", "handoff",
+        ]),
+        // Music specialist — covers the /music UI end-to-end: library,
+        // metadata, playlists, favorites, prefs, plus setup/auth flows for
+        // every connected streaming service. Existing `music` + `media_control`
+        // tools are kept in scope so Silvr can route playback through PWA /
+        // Home Assistant / media bridge without re-wrapping them.
+        "silvr" | "music" | "module_music" => Some(&[
+            // Library management
+            "list_music_folders", "add_music_folder", "remove_music_folder",
+            "scan_music_folder", "get_library_stats",
+            // Browsing + search
+            "list_tracks", "list_albums", "list_artists", "search_music",
+            "list_duplicates", "get_track_details",
+            // Metadata: identify / edit / revert / auto-label
+            "identify_track", "apply_track_identification", "edit_track",
+            "revert_track_metadata", "auto_label_library",
+            "get_lyrics", "get_album_notes",
+            // Playback status + existing transport tools
+            "now_playing", "music", "media_control",
+            // Playlists
+            "list_playlists", "create_playlist", "rename_playlist", "delete_playlist",
+            "get_playlist", "add_to_playlist", "remove_from_playlist", "reorder_playlist_tracks",
+            // Favorites + history
+            "favorite_track", "unfavorite_track", "record_play",
+            // Preferences (Silvr learning notes about user taste)
+            "save_music_preference", "list_music_preferences", "delete_music_preference",
+            // Streaming service connections (setup + auth flows)
+            "list_music_connections", "connect_spotify", "connect_apple_music",
+            "connect_tidal", "connect_youtube_music",
+            "check_media_bridge_status", "disconnect_music_service",
+            // Cross-agent utilities
+            "memory_recall", "memory_save", "handoff",
+        ]),
+        // Every other agent (including "main", "kyron", "peter", and
+        // the not-yet-scoped specialists) gets the full tool surface.
+        _ => None,
+    }
+}
+
 async fn try_default_persona(
     state: &AppState,
     agent_id: &str,

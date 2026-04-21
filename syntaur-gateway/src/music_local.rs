@@ -2150,3 +2150,258 @@ Tracks:\n{}",
     })))
 }
 
+
+// ─────────────────────────────────────────────────────────────────────
+// Silvr-specialist backend additions (2026-04-21): handlers the agent
+// tools call to cover capabilities that previously existed only in UI.
+// ─────────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct EditTrackBody {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub token: Option<String>,
+}
+
+/// POST /api/music/local/tracks/{id} — update title/artist/album. Sets
+/// metadata_source='user_edit' so auto_label_library can skip this row.
+pub async fn edit_track(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(track_id): AxumPath<i64>,
+    Json(body): Json<EditTrackBody>,
+) -> Result<Json<Value>, StatusCode> {
+    let token = extract_token(&headers, body.token.as_deref());
+    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let n: usize = tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
+        let conn = rusqlite::Connection::open(&db)?;
+        let mut sets: Vec<&str> = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(v) = body.title  { sets.push("title = ?");  params.push(Box::new(v)); }
+        if let Some(v) = body.artist { sets.push("artist = ?"); params.push(Box::new(v)); }
+        if let Some(v) = body.album  { sets.push("album = ?");  params.push(Box::new(v)); }
+        if sets.is_empty() { return Ok(0); }
+        sets.push("metadata_source = ?");
+        params.push(Box::new("user_edit".to_string()));
+        params.push(Box::new(track_id));
+        params.push(Box::new(uid));
+        let sql = format!("UPDATE local_music_tracks SET {} WHERE id = ? AND user_id = ?", sets.join(", "));
+        let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
+        conn.execute(&sql, refs.as_slice())
+    }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+      .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if n == 0 { return Err(StatusCode::NOT_FOUND); }
+    Ok(Json(json!({"ok": true})))
+}
+
+/// GET /api/music/local/stats — aggregate library counts + play sums.
+pub async fn library_stats(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Result<Json<Value>, StatusCode> {
+    let token = extract_token(&headers, q.token.as_deref());
+    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let stats = tokio::task::spawn_blocking(move || -> rusqlite::Result<Value> {
+        let conn = rusqlite::Connection::open(&db)?;
+        let tracks: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM local_music_tracks WHERE user_id = ?",
+            rusqlite::params![uid], |r| r.get(0)).unwrap_or(0);
+        let artists: i64 = conn.query_row(
+            "SELECT COUNT(DISTINCT artist) FROM local_music_tracks WHERE user_id = ?",
+            rusqlite::params![uid], |r| r.get(0)).unwrap_or(0);
+        let albums: i64 = conn.query_row(
+            "SELECT COUNT(DISTINCT artist || '::' || album) FROM local_music_tracks WHERE user_id = ?",
+            rusqlite::params![uid], |r| r.get(0)).unwrap_or(0);
+        let favorites: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM local_music_tracks WHERE user_id = ? AND favorite = 1",
+            rusqlite::params![uid], |r| r.get(0)).unwrap_or(0);
+        let plays: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(play_count), 0) FROM local_music_tracks WHERE user_id = ?",
+            rusqlite::params![uid], |r| r.get(0)).unwrap_or(0);
+        let duration_ms: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(duration_ms), 0) FROM local_music_tracks WHERE user_id = ?",
+            rusqlite::params![uid], |r| r.get(0)).unwrap_or(0);
+        let folders: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM local_music_folders WHERE user_id = ?",
+            rusqlite::params![uid], |r| r.get(0)).unwrap_or(0);
+        let playlists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM local_playlists WHERE user_id = ?",
+            rusqlite::params![uid], |r| r.get(0)).unwrap_or(0);
+        Ok(json!({
+            "tracks": tracks, "artists": artists, "albums": albums,
+            "favorites": favorites, "total_plays": plays,
+            "total_duration_hours": (duration_ms as f64) / 3_600_000.0,
+            "folders": folders, "playlists": playlists,
+        }))
+    }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+      .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(stats))
+}
+
+#[derive(Deserialize)]
+pub struct PlaylistReorderBody {
+    pub track_id: i64,
+    pub new_position: i64,
+    pub token: Option<String>,
+}
+
+/// POST /api/music/local/playlists/{id}/reorder — move one track to
+/// a new 0-indexed position inside the playlist. Other tracks shift.
+pub async fn playlist_reorder(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(pl_id): AxumPath<i64>,
+    Json(body): Json<PlaylistReorderBody>,
+) -> Result<Json<Value>, StatusCode> {
+    let token = extract_token(&headers, body.token.as_deref());
+    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let ok = tokio::task::spawn_blocking(move || -> rusqlite::Result<bool> {
+        let mut conn = rusqlite::Connection::open(&db)?;
+        let owned: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM local_playlists WHERE id = ? AND user_id = ?",
+            rusqlite::params![pl_id, uid], |r| r.get(0)).unwrap_or(0);
+        if owned == 0 { return Ok(false); }
+        let tx = conn.transaction()?;
+        let ids: Vec<i64> = {
+            let mut stmt = tx.prepare(
+                "SELECT track_id FROM local_playlist_tracks WHERE playlist_id = ? ORDER BY position ASC"
+            )?;
+            let rows: Vec<i64> = stmt.query_map(rusqlite::params![pl_id], |r| r.get(0))?
+                .filter_map(|r| r.ok()).collect();
+            rows
+        };
+        let mut reordered: Vec<i64> = ids.into_iter().filter(|&id| id != body.track_id).collect();
+        let new_pos = body.new_position.clamp(0, reordered.len() as i64) as usize;
+        reordered.insert(new_pos, body.track_id);
+        for (i, tid) in reordered.iter().enumerate() {
+            tx.execute(
+                "UPDATE local_playlist_tracks SET position = ? WHERE playlist_id = ? AND track_id = ?",
+                rusqlite::params![i as i64, pl_id, tid],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+      .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if !ok { return Err(StatusCode::NOT_FOUND); }
+    Ok(Json(json!({"ok": true})))
+}
+
+/// GET /api/music/connections — list the user's connected streaming
+/// services (spotify/apple_music/tidal/youtube_music/etc.) with status.
+pub async fn list_music_connections(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Result<Json<Value>, StatusCode> {
+    let token = extract_token(&headers, q.token.as_deref());
+    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let conns = tokio::task::spawn_blocking(move || -> rusqlite::Result<Value> {
+        let conn = rusqlite::Connection::open(&db)?;
+        let mut stmt = conn.prepare(
+            "SELECT provider, status, COALESCE(updated_at, created_at) FROM sync_connections WHERE user_id = ?"
+        )?;
+        let rows: Vec<Value> = stmt.query_map(rusqlite::params![uid], |r| {
+            let provider: String = r.get(0)?;
+            let status: String = r.get(1)?;
+            let updated: i64 = r.get(2).unwrap_or(0);
+            Ok(json!({
+                "provider": provider,
+                "status": status,
+                "updated_at": updated,
+            }))
+        })?.filter_map(|r| r.ok()).collect();
+        Ok(json!({"connections": rows}))
+    }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+      .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(conns))
+}
+
+#[derive(Deserialize)]
+pub struct ConnectServiceBody {
+    /// Provider-specific credential JSON (developer_token + music_user_token
+    /// + storefront for apple_music; access_token + refresh_token for
+    /// spotify; cookies for tidal/youtube_music via media bridge).
+    pub credential: Option<Value>,
+    pub token: Option<String>,
+}
+
+/// POST /api/music/connections/{provider} — store credentials for a
+/// streaming service. For OAuth providers (spotify), the caller first
+/// fetches an OAuth URL (via connect_spotify tool's URL-return path)
+/// then POSTs the returned token blob here. For paste-in providers
+/// (apple_music), the caller supplies developer_token+music_user_token+
+/// storefront directly. For bridge-auth providers (tidal, youtube_music)
+/// the tool points the user at the syntaur-media-bridge CLI which
+/// writes its own cookie store; this endpoint just records the active
+/// status so list_music_connections knows to report them as connected.
+pub async fn connect_music_service(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(provider): AxumPath<String>,
+    Json(body): Json<ConnectServiceBody>,
+) -> Result<Json<Value>, StatusCode> {
+    let token = extract_token(&headers, body.token.as_deref());
+    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
+    let uid = principal.user_id();
+    let allowed = ["spotify", "apple_music", "tidal", "youtube_music", "phone_music_pwa"];
+    if !allowed.contains(&provider.as_str()) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let cred_str = body.credential
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "{}".to_string());
+    let now = chrono::Utc::now().timestamp();
+    let db = state.db_path.clone();
+    let p = provider.clone();
+    tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
+        let conn = rusqlite::Connection::open(&db)?;
+        conn.execute(
+            "INSERT INTO sync_connections (user_id, provider, credential, status, created_at, updated_at) \
+             VALUES (?, ?, ?, 'active', ?, ?) \
+             ON CONFLICT(user_id, provider) DO UPDATE SET \
+               credential = excluded.credential, status = 'active', updated_at = excluded.updated_at",
+            rusqlite::params![uid, p, cred_str, now, now],
+        )?;
+        Ok(())
+    }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+      .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!({"ok": true, "provider": provider, "status": "active"})))
+}
+
+/// DELETE /api/music/connections/{provider} — revoke a connection.
+/// Credentials are cleared from sync_connections; any in-flight tokens
+/// remain valid at the provider until they expire, but Syntaur will no
+/// longer use them.
+pub async fn disconnect_music_service(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(provider): AxumPath<String>,
+    Query(q): Query<TokenQuery>,
+) -> Result<Json<Value>, StatusCode> {
+    let token = extract_token(&headers, q.token.as_deref());
+    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
+    let uid = principal.user_id();
+    let db = state.db_path.clone();
+    let p = provider.clone();
+    let n: usize = tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
+        let conn = rusqlite::Connection::open(&db)?;
+        conn.execute(
+            "DELETE FROM sync_connections WHERE user_id = ? AND provider = ?",
+            rusqlite::params![uid, p],
+        )
+    }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+      .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if n == 0 { return Err(StatusCode::NOT_FOUND); }
+    Ok(Json(json!({"ok": true, "provider": provider})))
+}
