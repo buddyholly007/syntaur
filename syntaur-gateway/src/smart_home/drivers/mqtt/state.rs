@@ -29,6 +29,7 @@ use serde_json::Value;
 use tokio::sync::RwLock;
 
 use super::dialects::DeviceStateUpdate;
+use super::stats::SupervisorStats;
 
 /// Result of an apply that changed cached state. The caller publishes a
 /// `SmartHomeEvent::DeviceStateChanged` with these fields.
@@ -47,14 +48,20 @@ pub struct StateCache {
     /// `(driver, external_id) -> last availability flag`. Kept separate
     /// so an Availability change doesn't invalidate the state hash.
     availability: Arc<RwLock<HashMap<(String, String), bool>>>,
+    stats: SupervisorStats,
 }
 
 impl StateCache {
     pub fn new(db_path: PathBuf) -> Self {
+        Self::with_stats(db_path, SupervisorStats::new())
+    }
+
+    pub fn with_stats(db_path: PathBuf, stats: SupervisorStats) -> Self {
         Self {
             db_path,
             state_hashes: Arc::new(RwLock::new(HashMap::new())),
             availability: Arc::new(RwLock::new(HashMap::new())),
+            stats,
         }
     }
 
@@ -62,11 +69,16 @@ impl StateCache {
     /// merged result differs from the last emission, `Ok(None)` when
     /// suppressed (no diff / device not commissioned). Never panics on
     /// DB errors — they return `Err` but don't poison the cache.
+    pub fn stats_ref(&self) -> &SupervisorStats {
+        &self.stats
+    }
+
     pub async fn apply_state(
         &self,
         driver: &str,
         update: DeviceStateUpdate,
     ) -> Result<Option<EmittedChange>, String> {
+        self.stats.note_state_update();
         let key = (driver.to_string(), update.external_id.clone());
         let incoming_hash = hash_value(&update.state);
         {
@@ -126,6 +138,7 @@ impl StateCache {
             hashes.insert(key, incoming_hash);
         }
 
+        self.stats.note_state_emitted();
         Ok(Some(EmittedChange {
             user_id,
             device_id,
@@ -144,6 +157,7 @@ impl StateCache {
         external_id: String,
         online: bool,
     ) -> Result<Option<EmittedChange>, String> {
+        self.stats.note_availability_update();
         let key = (driver.to_string(), external_id.clone());
         {
             let avail = self.availability.read().await;
@@ -202,6 +216,7 @@ impl StateCache {
             avail.insert(key, online);
         }
 
+        self.stats.note_availability_emitted();
         Ok(Some(EmittedChange {
             user_id,
             device_id,

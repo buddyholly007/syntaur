@@ -32,6 +32,7 @@ use tokio::sync::{mpsc, oneshot};
 use super::command::EncodedCommand;
 use super::dialects::{DialectMessage, DialectRouter};
 use super::state::{EmittedChange, StateCache};
+use super::stats::SessionCounters;
 use crate::smart_home::events::{self, SmartHomeEvent};
 use crate::smart_home::scan::ScanCandidate;
 
@@ -98,6 +99,7 @@ pub struct MqttSession {
     discovery_tx: tokio::sync::mpsc::UnboundedSender<ScanCandidate>,
     cmd_rx: Option<mpsc::Receiver<SessionCommand>>,
     shutdown_rx: Option<oneshot::Receiver<()>>,
+    counters: Arc<SessionCounters>,
 }
 
 impl MqttSession {
@@ -108,6 +110,7 @@ impl MqttSession {
         discovery_tx: tokio::sync::mpsc::UnboundedSender<ScanCandidate>,
         cmd_rx: mpsc::Receiver<SessionCommand>,
         shutdown_rx: oneshot::Receiver<()>,
+        counters: Arc<SessionCounters>,
     ) -> Self {
         Self {
             cfg,
@@ -116,6 +119,7 @@ impl MqttSession {
             discovery_tx,
             cmd_rx: Some(cmd_rx),
             shutdown_rx: Some(shutdown_rx),
+            counters,
         }
     }
 
@@ -160,6 +164,7 @@ impl MqttSession {
                             );
                         }
                     }
+                    self.counters.mark_reconnect(chrono::Utc::now().timestamp());
                     let sleep = backoff_sleep(attempt);
                     attempt = attempt.saturating_add(1);
                     tokio::select! {
@@ -193,12 +198,14 @@ impl MqttSession {
                 );
             }
         }
+        self.counters.mark_connected(chrono::Utc::now().timestamp());
 
         loop {
             tokio::select! {
                 event_res = event_loop.poll() => {
                     let event = event_res.map_err(|e| format!("poll: {e}"))?;
                     if let Event::Incoming(Incoming::Publish(publish)) = event {
+                        self.counters.bump_in();
                         if let Some(msg) = self.router.parse(&publish.topic, &publish.payload) {
                             self.handle_message(msg).await;
                         }
@@ -217,6 +224,8 @@ impl MqttSession {
                                     enc.topic,
                                     e
                                 );
+                            } else {
+                                self.counters.bump_out();
                             }
                         }
                         None => {
@@ -234,14 +243,20 @@ impl MqttSession {
     async fn handle_message(&self, msg: DialectMessage) {
         match msg {
             DialectMessage::Discovery(c) => {
+                self.counters.bump_dialect(c.details.get("schema").and_then(|v| v.as_str()).unwrap_or("unknown")).await;
                 let _ = self.discovery_tx.send(c);
             }
             DialectMessage::Discoveries(list) => {
+                if let Some(first) = list.first() {
+                    let d = first.details.get("schema").and_then(|v| v.as_str()).unwrap_or("unknown");
+                    self.counters.bump_dialect(d).await;
+                }
                 for c in list {
                     let _ = self.discovery_tx.send(c);
                 }
             }
             DialectMessage::State(update) => {
+                self.counters.bump_dialect(&update.source).await;
                 let source = update.source.clone();
                 match self.state_cache.apply_state("mqtt", update).await {
                     Ok(Some(change)) => emit_change(change, source),
@@ -272,6 +287,7 @@ impl MqttSession {
                 }
             }
             DialectMessage::BridgeEvent(v) => {
+                self.state_cache.stats_ref().note_bridge_event();
                 log::info!(
                     "[smart_home::mqtt] bridge event on session {}: {}",
                     self.cfg.label,

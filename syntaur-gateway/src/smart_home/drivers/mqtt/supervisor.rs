@@ -29,6 +29,7 @@ use super::client::{MqttSession, SessionCommand, SessionConfig};
 use super::command::{commands_from_state_patch, MqttCommand};
 use super::dialects::DialectRouter;
 use super::state::StateCache;
+use super::stats::{StatsSnapshot, SupervisorStats};
 use crate::crypto;
 use crate::smart_home::scan::ScanCandidate;
 
@@ -49,11 +50,13 @@ pub struct MqttSupervisor {
     discovery: Arc<RwLock<HashMap<String, ScanCandidate>>>,
     shutdowns: Arc<Mutex<Vec<oneshot::Sender<()>>>>,
     handles: Arc<RwLock<Vec<SessionHandle>>>,
+    stats: SupervisorStats,
 }
 
 impl MqttSupervisor {
     pub fn new(db_path: PathBuf) -> Self {
-        let state_cache = Arc::new(StateCache::new(db_path.clone()));
+        let stats = SupervisorStats::new();
+        let state_cache = Arc::new(StateCache::with_stats(db_path.clone(), stats.clone()));
         Self {
             db_path,
             router: Arc::new(DialectRouter::v1()),
@@ -61,7 +64,13 @@ impl MqttSupervisor {
             discovery: Arc::new(RwLock::new(HashMap::new())),
             shutdowns: Arc::new(Mutex::new(Vec::new())),
             handles: Arc::new(RwLock::new(Vec::new())),
+            stats,
         }
+    }
+
+    /// Read-only stats snapshot for `/api/smart-home/diagnostics`.
+    pub async fn stats_snapshot(&self) -> StatsSnapshot {
+        self.stats.snapshot().await
     }
 
     /// Constructor + spawn rolled into one. Returns the supervisor for
@@ -143,6 +152,7 @@ impl MqttSupervisor {
                     cmd_tx,
                 });
             }
+            let counters = self.stats.session(cfg.user_id, &cfg.label).await;
             let session = MqttSession::new(
                 cfg,
                 self.router.clone(),
@@ -150,6 +160,7 @@ impl MqttSupervisor {
                 discovery_tx.clone(),
                 cmd_rx,
                 shutdown_rx,
+                counters,
             );
             tokio::spawn(session.run());
         }

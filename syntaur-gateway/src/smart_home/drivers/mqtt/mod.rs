@@ -41,6 +41,7 @@ pub mod command;
 pub mod dialects;
 pub mod publisher;
 pub mod state;
+pub mod stats;
 pub mod supervisor;
 
 use dialects::{DialectMessage, DialectRouter};
