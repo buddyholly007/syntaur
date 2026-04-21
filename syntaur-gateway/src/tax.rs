@@ -107,10 +107,11 @@ pub fn start_module_trial(conn: &rusqlite::Connection, user_id: i64, module: &st
 
 /// API: Get module access status for the current user
 pub async fn handle_module_status(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
@@ -1211,10 +1212,11 @@ Respond ONLY with valid JSON: {"vendor":"...","amount":"45.99","date":"2025-12-1
 // ── Receipt List ────────────────────────────────────────────────────────────
 
 pub async fn handle_receipt_list(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await?;
     let sharing_mode = state.sharing_mode.read().await.clone();
     let scope = principal.scope_with_sharing(&sharing_mode);
@@ -1551,10 +1553,11 @@ Respond ONLY with JSON: {"doc_type":"...","tax_year":2025,"issuer":"...","fields
 // ── Tax Document List ───────────────────────────────────────────────────────
 
 pub async fn handle_tax_doc_list(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await?;
     let sharing_mode = state.sharing_mode.read().await.clone();
     let scope = principal.scope_with_sharing(&sharing_mode);
@@ -1607,9 +1610,9 @@ pub async fn handle_tax_doc_list(
 pub async fn handle_tax_doc_image(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<i64>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<(axum::http::HeaderMap, Vec<u8>), StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _principal = crate::resolve_principal_scoped(&state, token, "tax").await?;
     let db = state.db_path.clone();
     let path: String = tokio::task::spawn_blocking(move || -> Result<String, ()> {
@@ -1784,9 +1787,9 @@ pub async fn handle_tax_doc_update_field(
 pub async fn handle_receipt_image(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<i64>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<(axum::http::HeaderMap, Vec<u8>), StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _principal = crate::resolve_principal_scoped(&state, token, "tax").await?;
     let db = state.db_path.clone();
 
@@ -1863,10 +1866,11 @@ pub async fn handle_expense_create(
 }
 
 pub async fn handle_expense_list(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await?;
     let sharing_mode = state.sharing_mode.read().await.clone();
     let scope = principal.scope_with_sharing(&sharing_mode);
@@ -1927,10 +1931,11 @@ pub async fn handle_expense_list(
 // ── Summary ─────────────────────────────────────────────────────────────────
 
 pub async fn handle_expense_summary(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await?;
     let sharing_mode = state.sharing_mode.read().await.clone();
     let scope = principal.scope_with_sharing(&sharing_mode);
@@ -2020,9 +2025,9 @@ pub async fn handle_expense_summary(
 
 pub async fn handle_category_list(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _principal = crate::resolve_principal_scoped(&state, token, "tax").await?;
     let db = state.db_path.clone();
 
@@ -2084,9 +2089,9 @@ pub async fn handle_category_create(
 pub async fn handle_category_delete(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(cat_id): axum::extract::Path<i64>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _ = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
     let db = state.db_path.clone();
@@ -2107,10 +2112,11 @@ pub async fn handle_category_delete(
 // ── Income ───────────────────────────────────────────────────────────────────
 
 pub async fn handle_income_list(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await?;
     let sharing_mode = state.sharing_mode.read().await.clone();
     let scope = principal.scope_with_sharing(&sharing_mode);
@@ -2174,9 +2180,9 @@ pub async fn handle_income_list(
 
 pub async fn handle_update_check(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _principal = crate::resolve_principal_scoped(&state, token, "tax").await?;
 
     let current = env!("CARGO_PKG_VERSION");
@@ -2219,9 +2225,9 @@ pub async fn handle_update_check(
 
 pub async fn handle_bracket_status(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _principal = crate::resolve_principal_scoped(&state, token, "tax").await?;
 
     let warning = brackets_stale();
@@ -2247,10 +2253,11 @@ pub async fn handle_bracket_status(
 // ── CSV Export ───────────────────────────────────────────────────────────────
 
 pub async fn handle_expense_export(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<(axum::http::HeaderMap, String), StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
@@ -2323,10 +2330,11 @@ fn category_to_txf_refnum(category: &str) -> Option<(i32, &'static str)> {
 }
 
 pub async fn handle_txf_export(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<(axum::http::HeaderMap, String), (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
     require_tax_module(&state, principal.user_id()).await?;
@@ -2458,10 +2466,11 @@ pub async fn handle_txf_export(
 // ── CSV Export with IRS Categories ─────────────────────────────────────────
 
 pub async fn handle_csv_irs_export(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<(axum::http::HeaderMap, String), (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
     require_tax_module(&state, principal.user_id()).await?;
@@ -2709,10 +2718,11 @@ pub fn pull_scan_identity(conn: &rusqlite::Connection, uid: i64, year: i64) -> S
 /// - `fy_begin`, `fy_end`, `fy_end_year` — fiscal-year filers (calendar
 ///   filers leave blank).
 pub async fn handle_extension(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<(axum::http::HeaderMap, Vec<u8>), (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
 
@@ -3186,10 +3196,11 @@ async fn analyze_form_4868_with_pdf(
 }
 
 pub async fn handle_analyze_form_4868(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
     let year: i64 = params.get("year").and_then(|y| y.parse().ok())
@@ -3217,10 +3228,11 @@ pub async fn handle_analyze_form_4868(
 /// - `name`, `address`, `city`, `state`, `zip` — override values from the
 ///   profile/scans (same semantics as the main extension endpoint)
 pub async fn handle_extension_envelope(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<(axum::http::HeaderMap, Vec<u8>), (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
     let uid = principal.user_id();
@@ -3315,9 +3327,9 @@ pub async fn handle_extension_envelope(
 pub async fn handle_tax_doc_rescan(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(doc_id): axum::extract::Path<i64>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
     let uid = principal.user_id();
@@ -3347,9 +3359,9 @@ pub async fn handle_tax_doc_rescan(
 /// summary of what was rescanned.
 pub async fn handle_tax_docs_rescan_all(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
     let uid = principal.user_id();
@@ -3387,10 +3399,11 @@ pub async fn handle_tax_docs_rescan_all(
 /// scans" button uses this to pre-populate empty profile inputs without
 /// silently overwriting anything the user has already typed.
 pub async fn handle_profile_suggest_from_scans(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
     let uid = principal.user_id();
@@ -3450,10 +3463,11 @@ pub async fn handle_profile_suggest_from_scans(
 // ── Extension Filing Workflow (stateful) ────────────────────────────────────
 
 pub async fn handle_extension_status(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
     let uid = principal.user_id();
@@ -4125,10 +4139,11 @@ fn classify_insurance_by_amount(amount_cents: i64, vendor: &str) -> String {
 // ── Statement Transaction List Endpoint ─────────────────────────────────────
 
 pub async fn handle_statement_transactions(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await?;
     let sharing_mode = state.sharing_mode.read().await.clone();
     let scope = principal.scope_with_sharing(&sharing_mode);
@@ -4221,10 +4236,11 @@ pub struct PropertyProfileRequest {
 }
 
 pub async fn handle_property_profile_get(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await?;
     let sharing_mode = state.sharing_mode.read().await.clone();
     let scope = principal.scope_with_sharing(&sharing_mode);
@@ -4383,10 +4399,11 @@ pub async fn handle_property_profile_save(
 /// Pulls mortgage interest from 1098s, property tax from tax_documents,
 /// insurance from settlement docs, utilities from statement_transactions.
 pub async fn handle_deduction_autofill(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await?;
     let uid = principal.user_id();
     let db = state.db_path.clone();
@@ -4611,10 +4628,11 @@ pub async fn handle_insurance_classify(
 // ── Item 15: Year-End Tax Prep Wizard ───────────────────────────────────────
 
 pub async fn handle_tax_prep_wizard(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await?;
     let sharing_mode = state.sharing_mode.read().await.clone();
     let scope = principal.scope_with_sharing(&sharing_mode);
@@ -4830,10 +4848,11 @@ pub async fn handle_tax_prep_wizard(
 /// Auto-fetch latest IRS brackets by searching the web.
 /// This is called by an agent tool or can be triggered manually.
 pub async fn handle_brackets_auto_fetch(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
 
@@ -4966,10 +4985,11 @@ Respond with ONLY the JSON, no explanation."#,
 // ── Taxpayer Profile + Dependents ───────────────────────────────────────────
 
 pub async fn handle_taxpayer_profile_get(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
     let sharing_mode = state.sharing_mode.read().await.clone();
@@ -5167,9 +5187,9 @@ pub async fn handle_dependent_save(
 pub async fn handle_dependent_delete(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(dep_id): axum::extract::Path<i64>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
     let uid = principal.user_id();
@@ -5187,10 +5207,11 @@ pub async fn handle_dependent_delete(
 // ── Deduction Questionnaire ────────────────────────────────────────────────
 
 pub async fn handle_questionnaire_get(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
     require_tax_module(&state, principal.user_id()).await?;
@@ -5724,10 +5745,11 @@ pub async fn handle_deduction_deep_scan(
 }
 
 pub async fn handle_deduction_candidates_list(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
     require_tax_module(&state, principal.user_id()).await?;
@@ -5801,9 +5823,9 @@ pub async fn handle_deduction_candidates_list(
 pub async fn handle_deduction_candidate_context(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(candidate_id): axum::extract::Path<i64>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
     let uid = principal.user_id();
@@ -6028,10 +6050,11 @@ pub async fn handle_deduction_bulk_review(
 }
 
 pub async fn handle_deduction_summary(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
     require_tax_module(&state, principal.user_id()).await?;
@@ -6091,10 +6114,11 @@ pub async fn handle_deduction_summary(
 // ── Tax Credits API ─────────────────────────────────────────────────────────
 
 pub async fn handle_credits_list(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await.map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
     let uid = principal.user_id();
     require_tax_module(&state, uid).await?;
@@ -6124,10 +6148,11 @@ pub async fn handle_credits_list(
 }
 
 pub async fn handle_credits_eligibility(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await.map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
     let uid = principal.user_id();
     require_tax_module(&state, uid).await?;
@@ -6226,10 +6251,11 @@ pub async fn handle_energy_improvement_create(
 // ── Estimated Tax Payments ──────────────────────────────────────────────────
 
 pub async fn handle_estimated_payments_list(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await.map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
     let uid = principal.user_id();
     require_tax_module(&state, uid).await?;
@@ -6276,10 +6302,11 @@ pub async fn handle_estimated_payment_create(
 }
 
 pub async fn handle_estimated_recommended(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await.map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
     let uid = principal.user_id();
     require_tax_module(&state, uid).await?;
@@ -6304,10 +6331,11 @@ pub async fn handle_estimated_recommended(
 }
 
 pub async fn handle_tax_projection(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await.map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
     let uid = principal.user_id();
     require_tax_module(&state, uid).await?;
@@ -6512,10 +6540,11 @@ pub async fn handle_asset_create(
 }
 
 pub async fn handle_asset_list(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
     let uid = principal.user_id();
@@ -6571,9 +6600,9 @@ pub async fn handle_asset_list(
 pub async fn handle_depreciation_schedule(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(asset_id): axum::extract::Path<i64>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
     let db = state.db_path.clone();
@@ -6860,10 +6889,11 @@ pub async fn handle_lot_sell(
 }
 
 pub async fn handle_lots_list(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
     let uid = principal.user_id();
@@ -6899,10 +6929,11 @@ pub async fn handle_lots_list(
 }
 
 pub async fn handle_wash_sales(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
     let uid = principal.user_id();
@@ -6919,10 +6950,11 @@ pub async fn handle_wash_sales(
 }
 
 pub async fn handle_form_8949(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
     let uid = principal.user_id();
@@ -6982,10 +7014,11 @@ pub async fn handle_k1_create(
 }
 
 pub async fn handle_k1_list(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
     let uid = principal.user_id();
@@ -7019,10 +7052,11 @@ pub async fn handle_k1_list(
 }
 
 pub async fn handle_capital_gains_summary(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
     let uid = principal.user_id();
@@ -7369,10 +7403,11 @@ pub fn generate_tax_insights(conn: &rusqlite::Connection, user_id: i64, year: i6
 // ── AI Tax Advisor API ──────────────────────────────────────────────────────
 
 pub async fn handle_tax_context(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized".to_string()))?;
     let uid = principal.user_id();
@@ -7388,10 +7423,11 @@ pub async fn handle_tax_context(
 }
 
 pub async fn handle_audit_risk(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized".to_string()))?;
     let uid = principal.user_id();
@@ -7408,10 +7444,11 @@ pub async fn handle_audit_risk(
 }
 
 pub async fn handle_tax_insights(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized".to_string()))?;
     let uid = principal.user_id();
@@ -7685,10 +7722,11 @@ pub fn compute_state_tax(
 // ── State Tax API ───────────────────────────────────────────────────────────
 
 pub async fn handle_state_tax_estimate(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized".to_string()))?;
     let uid = principal.user_id();
@@ -7790,10 +7828,11 @@ pub async fn handle_state_profile_save(
 }
 
 pub async fn handle_state_profile_list(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized".to_string()))?;
     let uid = principal.user_id();
@@ -7959,9 +7998,9 @@ pub async fn handle_entity_create(
 
 pub async fn handle_entity_list(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized".to_string()))?;
     let uid = principal.user_id();
@@ -7987,11 +8026,12 @@ pub async fn handle_entity_list(
 }
 
 pub async fn handle_entity_summary(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Path(entity_id): axum::extract::Path<i64>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized".to_string()))?;
     let year: i64 = params.get("year").and_then(|s| s.parse().ok()).unwrap_or(2025);
@@ -8064,11 +8104,12 @@ pub async fn handle_shareholder_save(
 
 /// Generate K-1 data for all shareholders of an entity.
 pub async fn handle_entity_k1_generate(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Path(entity_id): axum::extract::Path<i64>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _p = crate::resolve_principal_scoped(&state, token, "tax").await.map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized".to_string()))?;
     let year: i64 = params.get("year").and_then(|s| s.parse().ok()).unwrap_or(2025);
     let db = state.db_path.clone();
@@ -8128,11 +8169,12 @@ pub async fn handle_1099_issue(
 }
 
 pub async fn handle_1099_list(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Path(entity_id): axum::extract::Path<i64>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let _p = crate::resolve_principal_scoped(&state, token, "tax").await.map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized".to_string()))?;
     let year: i64 = params.get("year").and_then(|s| s.parse().ok()).unwrap_or(2025);
     let db = state.db_path.clone();
@@ -8153,10 +8195,11 @@ pub async fn handle_1099_list(
 
 /// Compare entity structures: sole prop vs S-Corp vs LLC.
 pub async fn handle_entity_comparison(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized".to_string()))?;
     let uid = principal.user_id();
@@ -8506,10 +8549,11 @@ fn irs_mailing_address(state: &str, has_payment: bool) -> &'static str {
 // ── Print Return API ────────────────────────────────────────────────────────
 
 pub async fn handle_print_return(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<axum::response::Html<String>, (StatusCode, String)> {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let token = crate::security::bearer_from_headers(&headers);
     let principal = crate::resolve_principal_scoped(&state, token, "tax").await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "unauthorized".to_string()))?;
     let uid = principal.user_id();
