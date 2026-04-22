@@ -22,6 +22,7 @@ members = [
     "crates/rust-nexia",
     "crates/syntaur-matter",
     "crates/syntaur-matter-ble",
+    "crates/syntaur-matter-ip",
 ]
 
 [workspace.package]

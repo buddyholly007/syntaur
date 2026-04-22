@@ -8369,6 +8369,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "syntaur-matter-ip"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-io",
+ "embassy-time-queue-utils",
+ "env_logger",
+ "futures-lite",
+ "log",
+ "mdns-sd",
+ "rs-matter",
+ "serde",
+ "serde_json",
+ "syntaur-matter",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "syntaur-mod"
 version = "0.1.0"
 dependencies = [

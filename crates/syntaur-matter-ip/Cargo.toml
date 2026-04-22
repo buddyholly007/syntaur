@@ -1,0 +1,29 @@
+[package]
+name = "syntaur-matter-ip"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+name = "syntaur_matter_ip"
+path = "src/lib.rs"
+
+[[bin]]
+name = "matter-ip-commission"
+path = "src/bin/matter_ip_commission.rs"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+syntaur-matter = { path = "../syntaur-matter" }
+# rs-matter for Matter::run + PaseInitiator + ImClient — same pin as the rest of the workspace.
+rs-matter = { git = "https://github.com/project-chip/rs-matter", rev = "993a0763e450183acb5181073223ab48e44b8c2e", default-features = false, features = ["os", "rustcrypto", "log"] }
+embassy-time-queue-utils = { version = "0.3", features = ["generic-queue-64"] }
+async-io = "2"
+futures-lite = "2"
+# mDNS resolver for _matterc._udp.local to find the ephemeral commissioning port.
+mdns-sd = "0.13"
