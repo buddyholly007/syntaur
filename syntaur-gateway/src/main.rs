@@ -6784,6 +6784,77 @@ async fn main() {
             "/api/smart-home/events/stream",
             get(smart_home::api::handle_events_stream),
         )
+        // Path C — Matter fabric management + BLE commissioning.
+        // See vault/projects/path_c_plan.md. The /commission route
+        // currently 501s until syntaur-matter-ble's BTP session layer
+        // lands (Phase 4).
+        .route(
+            "/api/smart-home/matter/fabric/init",
+            post(smart_home::matter_bridge::handle_init_fabric),
+        )
+        .route(
+            "/api/smart-home/matter/fabrics",
+            get(smart_home::matter_bridge::handle_list_fabrics),
+        )
+        .route(
+            "/api/smart-home/matter/pair/decode",
+            post(smart_home::matter_bridge::handle_decode_pairing),
+        )
+        .route(
+            "/api/smart-home/matter/commission",
+            post(smart_home::matter_bridge::handle_commission),
+        )
+        .route(
+            "/api/smart-home/matter/auto_recommission",
+            get(smart_home::matter_bridge::handle_get_auto_recommission)
+                .post(smart_home::matter_bridge::handle_set_auto_recommission),
+        )
+        // Vendor LAN drivers (rust-aidot, rust-kasa). One-time cloud
+        // harvest + pure-LAN runtime. Temporary surface — will fold
+        // into smart_home/drivers/ once the framework absorbs them.
+        .route(
+            "/api/smart-home/vendor/harvest/{vendor}",
+            post(smart_home::vendor_bridge::handle_harvest),
+        )
+        .route(
+            "/api/smart-home/vendor/devices",
+            get(smart_home::vendor_bridge::handle_list_devices),
+        )
+        .route(
+            "/api/smart-home/vendor/action",
+            post(smart_home::vendor_bridge::handle_action),
+        )
+        // Nexia (Trane) thermostat — cloud-REST driver. The one
+        // sanctioned vendor-cloud exception. See vault entry
+        // projects/trane_nexia_thermostat.md.
+        .route(
+            "/api/smart-home/nexia/creds",
+            post(smart_home::nexia_bridge::handle_save_creds),
+        )
+        .route(
+            "/api/smart-home/nexia/thermostats",
+            get(smart_home::nexia_bridge::handle_list_thermostats),
+        )
+        .route(
+            "/api/smart-home/nexia/setpoint",
+            post(smart_home::nexia_bridge::handle_setpoint),
+        )
+        .route(
+            "/api/smart-home/nexia/mode",
+            post(smart_home::nexia_bridge::handle_mode),
+        )
+        .route(
+            "/api/smart-home/nexia/fan",
+            post(smart_home::nexia_bridge::handle_fan),
+        )
+        .route(
+            "/api/smart-home/nexia/run_mode",
+            post(smart_home::nexia_bridge::handle_run_mode),
+        )
+        .route(
+            "/api/smart-home/nexia/em_heat",
+            post(smart_home::nexia_bridge::handle_em_heat),
+        )
         .route("/chat", get(pages::chat::render))
         .route("/history", get(pages::history::render))
         .route("/knowledge", get(pages::knowledge::render))

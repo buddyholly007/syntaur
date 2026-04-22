@@ -1,0 +1,37 @@
+[package]
+name = "syntaur-matter"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+name = "syntaur_matter"
+path = "src/lib.rs"
+
+[[bin]]
+name = "matter-fabric"
+path = "src/bin/matter_fabric.rs"
+
+[[bin]]
+name = "matter-pair"
+path = "src/bin/matter_pair.rs"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+# Same rs-matter pin as syntaur-gateway — Phase 1 only exercises
+# FabricCredentials + NocGenerator, but keep the pin aligned so Phase 3
+# (commissioner state machine) can share all types with the existing
+# Stage 2b code without version skew.
+rs-matter = { git = "https://github.com/project-chip/rs-matter", rev = "993a0763e450183acb5181073223ab48e44b8c2e", default-features = false, features = ["os", "rustcrypto", "log"] }
+embassy-time-queue-utils = { version = "0.3", features = ["generic-queue-64"] }
+# XChaCha20-Poly1305 envelope for encrypted fabric-at-rest storage.
+chacha20poly1305 = "0.10"
+rand = "0.8"
+hex = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3"

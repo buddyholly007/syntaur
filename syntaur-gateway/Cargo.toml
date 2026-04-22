@@ -88,6 +88,32 @@ url = "2.5.8"
 # eventual cutover. See vault: projects/syntaur_smart_home_module.md.
 rs-matter = { git = "https://github.com/project-chip/rs-matter", rev = "993a0763e450183acb5181073223ab48e44b8c2e", default-features = false, features = ["os", "rustcrypto", "log"] }
 
+
+# Stage 2b runtime deps for matter_direct.rs. async-io provides
+# Async<UdpSocket> (rs-matter's UDP transport impl expects exactly that);
+# futures-lite provides block_on + or() combinators for the single-thread
+# spawn_blocking driver that sidesteps rs-matter's RefCell-on-multi-thread-
+# tokio problem.
+async-io = "2"
+futures-lite = "2"
+
+# embassy-time (a transitive dep of rs-matter via "os" feature) declares an
+# extern __embassy_time_queue_item_from_waker whose implementation lives
+# in embassy-time-queue-utils behind the generic-queue-* feature. rs-matter
+# declares this as a *dev-dependency* only, so downstream consumers hit an
+# undefined-symbol link error the moment they actually invoke Matter::run.
+# Queue depth 64 matches upstream tests.
+embassy-time-queue-utils = { version = "0.3", features = ["generic-queue-64"] }
+
+# Vendor LAN drivers + Syntaur Matter stack (Path C). Path-deps for the new
+# crates/ members. rust-nexia is the cloud-REST Trane/Nexia thermostat
+# exception documented in vault/projects/trane_nexia_thermostat.md.
+rust-aidot = { path = "../crates/rust-aidot" }
+rust-kasa = { path = "../crates/rust-kasa" }
+rust-nexia = { path = "../crates/rust-nexia" }
+syntaur-matter = { path = "../crates/syntaur-matter" }
+syntaur-matter-ble = { path = "../crates/syntaur-matter-ble" }
+
 [dev-dependencies]
 # Used by #[cfg(test)] modules (crypto, schema migrations, etc.).
 # Was previously referenced without being declared — `cargo test` failed

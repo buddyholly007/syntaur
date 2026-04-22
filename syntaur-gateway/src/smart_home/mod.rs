@@ -47,6 +47,15 @@ pub mod presence;
 pub mod rooms;
 pub mod scan;
 
+// Path C + vendor LAN + Nexia — additive HTTP route modules. Wired
+// as siblings to api.rs; each owns its /api/smart-home/<bucket>/*
+// subtree. See vault/projects/path_c_plan.md for Matter;
+// vault/projects/rust_aidot.md + rust_kasa.md for vendor LAN;
+// vault/projects/trane_nexia_thermostat.md for Nexia.
+pub mod matter_bridge;
+pub mod nexia_bridge;
+pub mod vendor_bridge;
+
 /// Module-wide init hook. Called from `main.rs` once the `AppState`
 /// and database pool are ready. Launches the automation engine
 /// supervisor as a detached background task so enabled time-triggered

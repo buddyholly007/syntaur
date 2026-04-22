@@ -17,6 +17,11 @@ members = [
     "mace",
     "syntaur-isolation-tests",
     "crates/syntaur-zwave",
+    "crates/rust-aidot",
+    "crates/rust-kasa",
+    "crates/rust-nexia",
+    "crates/syntaur-matter",
+    "crates/syntaur-matter-ble",
 ]
 
 [workspace.package]

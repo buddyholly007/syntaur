@@ -133,8 +133,10 @@
 #![allow(dead_code)] // CLI integration uses these; lint sees only library tree.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -326,6 +328,146 @@ impl MatterDirectClient {
         self.read_bool_attr(node_id, CLUSTER_ON_OFF, ATTR_ON_OFF).await
     }
 
+    /// Stage 2b end-to-end smoke: establish a PASE session (passcode-only,
+    /// no fabric) and read one attribute. Proves the rs-matter runtime
+    /// works against a real device — PASE doesn't use destination_id or
+    /// the fabric trust chain, so it bypasses the fabric-state drift that
+    /// blocks CASE against orphan-IPK devices.
+    ///
+    /// Prerequisite: the device must be in commissioning mode (a valid
+    /// setup pin code accepted). For an existing-fabric device, have the
+    /// current admin call `AdministratorCommissioning::OpenCommissioning
+    /// Window` first; the returned `setup_pin_code` feeds this method.
+    ///
+    /// Reads `BasicInformation::VendorName` (endpoint 0, cluster 0x28,
+    /// attr 1) — a widely-implemented attribute that returns a UTF-8
+    /// string identifying the device vendor.
+    pub async fn pase_test(
+        &self,
+        node_id: u64,
+        passcode: u32,
+    ) -> Result<String, DirectError> {
+        let addr = self.resolve_addr(node_id).await?;
+        Self::with_pase_op(node_id, addr, passcode, move |ex| {
+            Box::pin(async move {
+                use rs_matter::im::client::ImClient;
+                use rs_matter::im::AttrResp;
+                let resp = ImClient::read_single_attr(
+                    ex,
+                    0, // endpoint 0 = root / BasicInformation
+                    CLUSTER_BASIC_INFORMATION,
+                    1, // attr 1 = VendorName
+                    false,
+                )
+                .await
+                .map_err(|e| DirectError::ImFailed {
+                    node_id,
+                    reason: format!("read_single_attr(0/28/1): {e:?}"),
+                })?;
+                match resp {
+                    AttrResp::Data(d) => {
+                        let bytes = d.data.str().map_err(|e| DirectError::AttrTypeMismatch {
+                            node_id,
+                            cluster: CLUSTER_BASIC_INFORMATION,
+                            attr: 1,
+                            reason: format!("TLV str decode: {e:?}"),
+                        })?;
+                        Ok(String::from_utf8_lossy(bytes).into_owned())
+                    }
+                    AttrResp::Status(s) => Err(DirectError::AttrStatus {
+                        node_id,
+                        cluster: CLUSTER_BASIC_INFORMATION,
+                        attr: 1,
+                        status: format!("{:?}", s.status),
+                    }),
+                }
+            })
+        })
+        .await
+    }
+
+    /// PASE-over-IP driver — sibling of `with_matter_op`, but simpler:
+    /// no fabric load (PASE is pre-fabric, passcode-only), no
+    /// destination_id computation, no trust chain. Used by `pase_test`
+    /// and will be reused by the future commissioning state machine.
+    async fn with_pase_op<F, R>(
+        node_id: u64,
+        addr: SocketAddr,
+        passcode: u32,
+        op: F,
+    ) -> Result<R, DirectError>
+    where
+        F: for<'e> FnOnce(
+                &'e mut rs_matter::transport::exchange::Exchange<'_>,
+            )
+                -> Pin<Box<dyn Future<Output = Result<R, DirectError>> + 'e>>
+            + Send
+            + 'static,
+        R: Send + 'static,
+    {
+        use std::net::UdpSocket;
+        use std::time::Duration;
+
+        tokio::task::spawn_blocking(move || -> Result<R, DirectError> {
+            futures_lite::future::block_on(async move {
+                use rs_matter::crypto::test_only_crypto;
+                use rs_matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
+                use rs_matter::sc::pase::PaseInitiator;
+                use rs_matter::transport::exchange::Exchange;
+                use rs_matter::transport::network::{Address, NoNetwork};
+                use rs_matter::utils::epoch::sys_epoch;
+                use rs_matter::Matter;
+
+                let crypto = test_only_crypto();
+                let matter =
+                    Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, sys_epoch, 0);
+                matter.initialize_transport_buffers().map_err(|e| {
+                    DirectError::Matter(format!("initialize_transport_buffers: {e:?}"))
+                })?;
+
+                let socket = async_io::Async::<UdpSocket>::bind(([0u8, 0, 0, 0], 0u16))
+                    .map_err(|e| DirectError::Matter(format!("udp bind: {e}")))?;
+
+                let transport_fut = async {
+                    let tres = matter.run(&crypto, &socket, &socket, NoNetwork).await;
+                    Err::<R, DirectError>(DirectError::Matter(format!(
+                        "transport exited prematurely: {tres:?}"
+                    )))
+                };
+
+                let op_fut = async {
+                    let mut ex = Exchange::initiate_unsecured(
+                        &matter,
+                        &crypto,
+                        Address::Udp(addr),
+                    )
+                    .await
+                    .map_err(|e| DirectError::CaseFailed {
+                        node_id,
+                        reason: format!("unsecured exchange (pre-PASE): {e:?}"),
+                    })?;
+                    PaseInitiator::initiate(&mut ex, &crypto, passcode)
+                        .await
+                        .map_err(|e| DirectError::CaseFailed {
+                            node_id,
+                            reason: format!("PASE handshake: {e:?}"),
+                        })?;
+                    op(&mut ex).await
+                };
+
+                let timeout_fut = async {
+                    async_io::Timer::after(Duration::from_secs(30)).await;
+                    Err::<R, DirectError>(DirectError::Timeout { node_id, seconds: 30 })
+                };
+
+                let op_or_timeout = futures_lite::future::or(op_fut, timeout_fut);
+                futures_lite::future::or(transport_fut, op_or_timeout).await
+            })
+        })
+        .await
+        .map_err(|e| DirectError::Matter(format!("spawn_blocking join: {e}")))?
+    }
+
     /// Internal: read CurrentLevel (cluster 0x0008, attr 0x0000), Option
     /// because the spec marks it nullable.
     async fn read_current_level(&self, node_id: u64) -> Result<Option<u8>, DirectError> {
@@ -385,36 +527,24 @@ impl MatterDirectClient {
         cmd: u32,
         payload_tlv: &[u8],
     ) -> Result<(), DirectError> {
-        let _core = self.ensure_core().await?;
-        let _addr = self.resolve_addr(node_id).await?;
-        // Stage 2b: see module docs § "What's gated as Stage 2b". The
-        // CASE+IM stack IS instantiated at this point (ensure_core
-        // succeeded). What's missing is the per-call exchange driver:
-        //   let mut transport = pin!(matter.run(crypto, &sock, &sock, NoNetwork));
-        //   let mut op = pin!(async {
-        //       let mut ex = Exchange::initiate_unsecured(matter, crypto, addr).await?;
-        //       CaseInitiator::initiate(&mut ex, crypto, fab_idx, node_id).await?;
-        //       let payload_tlv = TLVElement::new(payload_tlv);
-        //       let resp = ImClient::invoke_single_cmd(
-        //           &mut ex, ENDPOINT_LIGHT, cluster, cmd, payload_tlv, None
-        //       ).await?;
-        //       match resp {
-        //           CmdResp::Status(s) if s.status.status == IMStatusCode::Success => Ok(()),
-        //           CmdResp::Status(s) => Err(DirectError::ImFailed {
-        //               node_id, reason: format!("status {:?}", s.status),
-        //           }),
-        //           CmdResp::Cmd(_) => Ok(()),  // command returned data; ignore
-        //       }
-        //   });
-        //   match select(&mut transport, &mut op).await { ... }
-        //
-        // Gating dependency: a real fabric file. See module docs §C.
-        let _ = (cluster, cmd, payload_tlv);
-        Err(DirectError::ImFailed {
-            node_id,
-            reason: "stage 2b: per-call CASE+IM exchange driver not wired (needs a real fabric file; see module-level § \"What's gated as Stage 2b\")"
-                .into(),
+        let core = self.ensure_core().await?;
+        let addr = self.resolve_addr(node_id).await?;
+        let payload_owned: Vec<u8> = payload_tlv.to_vec();
+        core.with_matter_op(node_id, addr, "invoke_single_cmd", move |ex| {
+            Box::pin(async move {
+                use rs_matter::im::client::ImClient;
+                use rs_matter::tlv::TLVElement;
+                let data = TLVElement::new(&payload_owned);
+                ImClient::invoke_single_cmd(ex, ENDPOINT_LIGHT, cluster, cmd, data, None)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| DirectError::ImFailed {
+                        node_id,
+                        reason: format!("invoke_single_cmd({cluster:#06x}/{cmd:#06x}): {e:?}"),
+                    })
+            })
         })
+        .await
     }
 
     async fn read_bool_attr(
@@ -423,21 +553,35 @@ impl MatterDirectClient {
         cluster: u32,
         attr: u32,
     ) -> Result<bool, DirectError> {
-        let _core = self.ensure_core().await?;
-        let _addr = self.resolve_addr(node_id).await?;
-        // Stage 2b: see invoke_with_payload comment for the planned
-        // CASE-then-ImClient::read_single_attr wiring. Decoding bool out
-        // of AttrResp::Data is a one-liner once the stack is up:
-        //   match resp {
-        //       AttrResp::Data(d) => d.data.bool().map_err(|e| AttrTypeMismatch{..}),
-        //       AttrResp::Status(s) => Err(AttrStatus{..}),
-        //   }
-        Err(DirectError::ImFailed {
-            node_id,
-            reason: format!(
-                "stage 2b: read_bool_attr({cluster:#06x}/{attr:#06x}) needs CASE+IM exchange driver"
-            ),
+        let core = self.ensure_core().await?;
+        let addr = self.resolve_addr(node_id).await?;
+        core.with_matter_op(node_id, addr, "read_bool_attr", move |ex| {
+            Box::pin(async move {
+                use rs_matter::im::AttrResp;
+                use rs_matter::im::client::ImClient;
+                let resp = ImClient::read_single_attr(ex, ENDPOINT_LIGHT, cluster, attr, false)
+                    .await
+                    .map_err(|e| DirectError::ImFailed {
+                        node_id,
+                        reason: format!("read_single_attr({cluster:#06x}/{attr:#06x}): {e:?}"),
+                    })?;
+                match resp {
+                    AttrResp::Data(d) => d.data.bool().map_err(|e| DirectError::AttrTypeMismatch {
+                        node_id,
+                        cluster,
+                        attr,
+                        reason: format!("TLV bool decode: {e:?}"),
+                    }),
+                    AttrResp::Status(s) => Err(DirectError::AttrStatus {
+                        node_id,
+                        cluster,
+                        attr,
+                        status: format!("{:?}", s.status),
+                    }),
+                }
+            })
         })
+        .await
     }
 
     async fn read_u8_attr(
@@ -446,14 +590,35 @@ impl MatterDirectClient {
         cluster: u32,
         attr: u32,
     ) -> Result<u8, DirectError> {
-        let _core = self.ensure_core().await?;
-        let _addr = self.resolve_addr(node_id).await?;
-        Err(DirectError::ImFailed {
-            node_id,
-            reason: format!(
-                "stage 2b: read_u8_attr({cluster:#06x}/{attr:#06x}) needs CASE+IM exchange driver"
-            ),
+        let core = self.ensure_core().await?;
+        let addr = self.resolve_addr(node_id).await?;
+        core.with_matter_op(node_id, addr, "read_u8_attr", move |ex| {
+            Box::pin(async move {
+                use rs_matter::im::AttrResp;
+                use rs_matter::im::client::ImClient;
+                let resp = ImClient::read_single_attr(ex, ENDPOINT_LIGHT, cluster, attr, false)
+                    .await
+                    .map_err(|e| DirectError::ImFailed {
+                        node_id,
+                        reason: format!("read_single_attr({cluster:#06x}/{attr:#06x}): {e:?}"),
+                    })?;
+                match resp {
+                    AttrResp::Data(d) => d.data.u8().map_err(|e| DirectError::AttrTypeMismatch {
+                        node_id,
+                        cluster,
+                        attr,
+                        reason: format!("TLV u8 decode: {e:?}"),
+                    }),
+                    AttrResp::Status(s) => Err(DirectError::AttrStatus {
+                        node_id,
+                        cluster,
+                        attr,
+                        status: format!("{:?}", s.status),
+                    }),
+                }
+            })
         })
+        .await
     }
 }
 
@@ -678,84 +843,141 @@ impl MatterCore {
         })
     }
 
-    /// Stage 2b dispatcher (skeleton). Every per-call rs-matter operation
-    /// should route through this — keeps the `Matter::new` + `fabrics.add`
-    /// + UDP-socket + `Matter::run` + `select(transport, op_future)`
-    /// boilerplate in ONE place instead of duplicated across the 3 stubs.
+    /// Per-call CASE+IM runtime. Every `set_*` / `read_*` routes through
+    /// here so the `Matter::new` + `fabrics.add` + UDP-socket + `Matter::run`
+    /// + race-against-op boilerplate lives in ONE place.
     ///
-    /// Current state: returns a Stage-2b gap error that names the op.
-    /// The implementer fills in the body using the rs-matter pattern from
-    /// `rs-matter/tests/case.rs` (993a0763) — see vault:
-    /// projects/claude_coord_broker.md for spec, projects/syntaur_smart_home_module.md
-    /// for the wider Matter pipeline context.
+    /// Canonical pattern: `rs-matter/tests/case.rs` @ rev 993a0763 — we use
+    /// `test_only_crypto()` (safe for controllers; DAC_PRIVKEY inside is
+    /// only invoked when presenting device attestation, which we never do)
+    /// and build `CanonPkcSecretKey` + `CanonAeadKey` (IPK) from raw bytes
+    /// via their `From<&[u8; N]>` impls.
     ///
-    /// Expected signature when wired:
+    /// Concurrency: rs-matter internals hold `RefCell`, so the rs-matter
+    /// futures cannot migrate threads. We isolate the whole run on a
+    /// `spawn_blocking` worker driven by `futures_lite::future::block_on`
+    /// — single OS thread, no reactor coupling with tokio's multi-thread
+    /// scheduler.
     ///
-    /// ```text
-    /// async fn with_matter_op<F, R>(
-    ///     &self,
-    ///     node_id: u64,
-    ///     addr: SocketAddr,
-    ///     op_label: &'static str,
-    ///     op: F,
-    /// ) -> Result<R, DirectError>
-    /// where
-    ///     F: for<'e> FnOnce(&'e mut Exchange<'_>) -> Pin<Box<dyn Future<Output = Result<R, rs_matter::Error>> + 'e>>
-    ///         + Send + 'static,
-    ///     R: Send + 'static,
-    /// ```
-    ///
-    /// Implementation sketch (see tests/case.rs for canonical pattern):
-    ///
-    /// 1. `tokio::task::spawn_blocking(move || futures_lite::future::block_on(async { ... }))`
-    /// 2. Inside block_on:
-    ///    - `let crypto = /* rs_matter::crypto::rustcrypto::RustCryptoCrypto::default() */;`
-    ///    - `let matter = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, sys_epoch, 0);`
-    ///    - `matter.initialize_transport_buffers()?;`
-    ///    - `let secret_key = /* CanonPkcSecretKey from &self.secret_key_raw */;`
-    ///    - `let ipk_arr: [u8; 16] = self.ipk_raw[..].try_into()?;`
-    ///    - `let fab_idx = matter.with_state(|s| s.fabrics.add(&crypto, secret_key.reference(),`
-    ///      `  &self.root_cert, &self.noc, &self.icac, Some(ipk_arr.reference()),`
-    ///      `  self.fabric.vendor_id, self.fabric.controller_node_id))?.fab_idx();`
-    ///    - `let socket = async_io::Async::<UdpSocket>::bind(([0,0,0,0], 0))?;`
-    ///    - `let transport = pin!(matter.run(&crypto, &socket, &socket, NoNetwork));`
-    ///    - `let op_fut = pin!(async {`
-    ///      `    let mut ex = Exchange::initiate_unsecured(&matter, &crypto, Address::Udp(addr)).await?;`
-    ///      `    CaseInitiator::initiate(&mut ex, &crypto, fab_idx, node_id).await?;`
-    ///      `    op(&mut ex).await`
-    ///      `});`
-    ///    - `let timeout = pin!(Timer::after(Duration::from_secs(30)));`
-    ///    - Match `select!(transport, op_fut, timeout)` to handle each outcome
-    ///      (op_fut success → return R; timeout → DirectError::Timeout;
-    ///       transport exits first → DirectError::Matter(...))
-    ///
-    /// Open API questions to resolve by reading rs-matter source (all in
-    /// `rs-matter/src/` at rev 993a0763):
-    ///   - `crypto/canon.rs::CanonPkcSecretKey` — is there a `from_raw(&[u8; 32])`
-    ///     constructor, or must we go through `RustCryptoCrypto::import_secret_key`?
-    ///   - `fabric_table.rs::Fabrics::add` — exact arg types. Tests call with
-    ///     `.reference()` accessors on CanonPkcSecretKey + Ipk wrappers.
-    ///   - `dm/devices/test.rs` — is it always in scope with default features,
-    ///     or gated by `#[cfg(test)]`? (Tests use it from integration tests
-    ///     that compile the crate with test config, which may not match our
-    ///     binary compile.)
-    ///   - `crypto/rustcrypto/mod.rs` — name of the concrete Crypto impl
-    ///     for the `rustcrypto` feature we enabled.
-    ///
-    /// Time estimate: 2-4 hours focused work with rs-matter source open +
-    /// iterative `cargo build` cycles. Should produce ~150 lines of new
-    /// code in this module.
-    #[allow(dead_code)]
-    fn with_matter_op_stage_2b_placeholder(&self, node_id: u64, op_label: &str) -> DirectError {
-        DirectError::ImFailed {
-            node_id,
-            reason: format!(
-                "stage 2b runtime: {op_label} not wired. Fabric ready                  (root={}B noc={}B icac={}B key=32 ipk=16); rs-matter                  API pointers in with_matter_op_stage_2b_placeholder                  doc comment + rs-matter/tests/case.rs @993a0763 is the                  template. Est. 2-4h dedicated session.",
-                self.root_cert.len(),
-                self.noc.len(),
-                self.icac.len(),
-            ),
-        }
+    /// Three-way race: the `Matter::run` transport future should never
+    /// complete normally; if it does, we treat that as an error. The op
+    /// future either completes (success path) or the 30s timeout fires.
+    async fn with_matter_op<F, R>(
+        self: Arc<Self>,
+        node_id: u64,
+        addr: SocketAddr,
+        op_label: &'static str,
+        op: F,
+    ) -> Result<R, DirectError>
+    where
+        F: for<'e> FnOnce(
+                &'e mut rs_matter::transport::exchange::Exchange<'_>,
+            )
+                -> Pin<Box<dyn Future<Output = Result<R, DirectError>> + 'e>>
+            + Send
+            + 'static,
+        R: Send + 'static,
+    {
+        use std::net::UdpSocket;
+        use std::time::Duration;
+
+        tokio::task::spawn_blocking(move || -> Result<R, DirectError> {
+            futures_lite::future::block_on(async move {
+                use rs_matter::crypto::{test_only_crypto, CanonAeadKey, CanonPkcSecretKey};
+                use rs_matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
+                use rs_matter::sc::case::CaseInitiator;
+                use rs_matter::transport::exchange::Exchange;
+                use rs_matter::transport::network::{Address, NoNetwork};
+                use rs_matter::utils::epoch::sys_epoch;
+                use rs_matter::Matter;
+
+                let crypto = test_only_crypto();
+                let matter =
+                    Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, sys_epoch, 0);
+                matter.initialize_transport_buffers().map_err(|e| {
+                    DirectError::Matter(format!("initialize_transport_buffers: {e:?}"))
+                })?;
+
+                // Build CanonPkcSecretKey from the 32-byte scalar cached at
+                // MatterCore::build (length already validated there).
+                let sk_arr: [u8; 32] = self
+                    .secret_key_raw
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| DirectError::Matter("secret_key_raw != 32B".into()))?;
+                let secret_key = CanonPkcSecretKey::from(&sk_arr);
+
+                // Build CanonAeadKey (IPK is a 16-byte AEAD-shaped key).
+                let ipk_arr: [u8; 16] = self
+                    .ipk_raw
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| DirectError::Matter("ipk_raw != 16B".into()))?;
+                let ipk = CanonAeadKey::from(&ipk_arr);
+
+                let fab_idx = matter
+                    .with_state(|state| {
+                        state
+                            .fabrics
+                            .add(
+                                &crypto,
+                                secret_key.reference(),
+                                &self.root_cert,
+                                &self.noc,
+                                &self.icac,
+                                Some(ipk.reference()),
+                                self.fabric.vendor_id,
+                                self.fabric.controller_node_id,
+                            )
+                            .map(|f| f.fab_idx())
+                    })
+                    .map_err(|e| DirectError::Matter(format!("fabrics.add: {e:?}")))?;
+
+                let socket = async_io::Async::<UdpSocket>::bind(([0u8, 0, 0, 0], 0u16))
+                    .map_err(|e| DirectError::Matter(format!("udp bind: {e}")))?;
+
+                let transport_fut = async {
+                    let tres = matter.run(&crypto, &socket, &socket, NoNetwork).await;
+                    Err::<R, DirectError>(DirectError::Matter(format!(
+                        "transport exited prematurely: {tres:?}"
+                    )))
+                };
+
+                let op_fut = async {
+                    let mut ex = Exchange::initiate_unsecured(
+                        &matter,
+                        &crypto,
+                        Address::Udp(addr),
+                    )
+                    .await
+                    .map_err(|e| DirectError::CaseFailed {
+                        node_id,
+                        reason: format!("unsecured exchange: {e:?}"),
+                    })?;
+                    CaseInitiator::initiate(&mut ex, &crypto, fab_idx, node_id)
+                        .await
+                        .map_err(|e| DirectError::CaseFailed {
+                            node_id,
+                            reason: format!("CASE handshake: {e:?}"),
+                        })?;
+                    op(&mut ex).await
+                };
+
+                let timeout_fut = async {
+                    async_io::Timer::after(Duration::from_secs(30)).await;
+                    Err::<R, DirectError>(DirectError::Timeout {
+                        node_id,
+                        seconds: 30,
+                    })
+                };
+
+                let _ = op_label;
+                let op_or_timeout = futures_lite::future::or(op_fut, timeout_fut);
+                futures_lite::future::or(transport_fut, op_or_timeout).await
+            })
+        })
+        .await
+        .map_err(|e| DirectError::Matter(format!("spawn_blocking join: {e}")))?
     }
 }
 

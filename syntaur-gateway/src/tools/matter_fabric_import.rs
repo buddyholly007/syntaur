@@ -235,7 +235,23 @@ pub struct ImportedFabric {
     /// builds, but back-end specific. rs-matter expects the raw 32-byte private
     /// scalar; callers should slice the trailing 32 bytes after verifying the
     /// length is `>= 32`. The full blob is returned here so callers can choose.
+    ///
+    /// **May be empty.** Recent python-matter-server versions don't persist
+    /// the controller's operational keypair — they regenerate it on every
+    /// boot and sign a fresh NOC against the stable CA on startup. In that
+    /// case this field is empty and callers should fall back to
+    /// [`sign_self_noc`] to issue their own NOC using
+    /// [`ca_signing_key_serialized`].
     pub noc_signing_key_serialized: Vec<u8>,
+    /// Serialized P-256 CA signing keypair (`ExampleOpCredsCAKey<ca_index>`).
+    ///
+    /// Same 97-byte `pub_key (65) || priv_key (32)` format as
+    /// `noc_signing_key_serialized`. This key signs the NOC chain — callers
+    /// that need to issue their own NOC on this fabric (because
+    /// `noc_signing_key_serialized` is empty, or they want a separate
+    /// controller identity on the same fabric) should use this + the
+    /// [`sign_self_noc`] helper.
+    pub ca_signing_key_serialized: Vec<u8>,
     /// IPK (Identity Protection Key / epoch key). 16 bytes, extracted from
     /// `f/<fabric>/k/0`. Most installs only have a single epoch key.
     pub ipk: [u8; 16],
@@ -403,7 +419,14 @@ fn find_nodes_file(dir: &Path) -> Option<PathBuf> {
         if stem == "chip" {
             continue;
         }
+        // python-matter-server <=5.x writes this file with a 16-char
+        // lowercase-hex stem; recent versions (≥6.0 / ~2026-04) have
+        // switched to the decimal representation of the compressed
+        // fabric id (up to 20 chars). Accept both.
         if stem.len() == 16 && stem.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Some(p);
+        }
+        if (1..=20).contains(&stem.len()) && stem.chars().all(|c| c.is_ascii_digit()) {
             return Some(p);
         }
     }
@@ -411,9 +434,16 @@ fn find_nodes_file(dir: &Path) -> Option<PathBuf> {
 }
 
 fn file_stem_as_hex(p: &PathBuf) -> Option<String> {
-    p.file_stem()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_ascii_lowercase())
+    let stem = p.file_stem().and_then(|s| s.to_str())?;
+    // Decimal filename: convert to 16-char lowercase hex for
+    // downstream parse_compressed_hex.
+    if stem.chars().all(|c| c.is_ascii_digit()) {
+        if let Ok(n) = stem.parse::<u64>() {
+            return Some(format!("{:016x}", n));
+        }
+    }
+    // Already hex — normalize case.
+    Some(stem.to_ascii_lowercase())
 }
 
 fn parse_chip_json(
@@ -428,12 +458,28 @@ fn parse_chip_json(
         return Err(ImportError::MissingSdkConfig);
     }
 
-    // Resolve fabric admin metadata (vendor_id + fabric_id).
-    let admins = chip
+    // Resolve fabric admin metadata (vendor_id + fabric_id). The
+    // DEFAULT_CA_INDEX is 0, but installs that were commissioned before the
+    // connectedhomeip `_caKeysBackwardCompatibilityRewrite` landed (or older
+    // python-matter-server versions that still use the legacy 1-based index)
+    // keep their entry under a different key. Fall back to the first
+    // populated admin entry and carry *its* index forward as the effective
+    // ca_index so the `ExampleCA*CA*<n>` key lookups match.
+    let (effective_ca_index, admins) = chip
         .repl_config
         .ca_list
         .get(&ca_index.to_string())
+        .map(|a| (ca_index, a))
+        .or_else(|| {
+            chip.repl_config
+                .ca_list
+                .iter()
+                .filter(|(_, v)| !v.is_empty())
+                .min_by_key(|(k, _)| k.to_string())
+                .and_then(|(k, v)| k.parse::<u32>().ok().map(|idx| (idx, v)))
+        })
         .ok_or(ImportError::MissingCaList(ca_index))?;
+    let ca_index = effective_ca_index;
     let admin = admins
         .first()
         .ok_or(ImportError::NoFabricAdmin { ca_index })?;
@@ -444,25 +490,32 @@ fn parse_chip_json(
     let icac_der = decode_optional(sdk, &format!("ExampleCAIntermediateCert{}", ca_index))?;
     let icac_tlv = decode_optional(sdk, &format!("f/{:x}/i", fabric_index))?;
     let noc_tlv = decode_required(sdk, &format!("f/{:x}/n", fabric_index))?;
-    let op_keypair = decode_required(sdk, &format!("f/{:x}/o", fabric_index))?;
+    // `f/<fabric>/o` holds the controller's operational keypair. Recent
+    // python-matter-server builds don't persist this — the SDK generates a
+    // fresh keypair each boot + re-signs the NOC — so tolerate the absence
+    // and let the caller self-sign via `sign_self_noc()` using the (stable)
+    // CA key.
+    let op_keypair = decode_optional(sdk, &format!("f/{:x}/o", fabric_index))?.unwrap_or_default();
+    // CA signing keypair (stable across reboots). Required when we have to
+    // self-issue a NOC.
+    let ca_keypair =
+        decode_optional(sdk, &format!("ExampleOpCredsCAKey{}", ca_index))?.unwrap_or_default();
 
-    // IPK lives in keyset 0 (f/<fabric>/k/0). The keyset is a Matter-TLV blob
-    // containing one or more 16-byte epoch keys; for nearly every fabric this
-    // is a single key. We slice off the trailing 16 bytes which, in the
-    // canonical single-key encoding, is the IPK material. Callers that need
-    // formal TLV decoding (e.g. multi-epoch installs) should re-parse
-    // `f/<fabric>/k/0` themselves; we expose the raw blob for that case via
-    // the helper below.
+    // IPK lives in keyset 0 (f/<fabric>/k/0). The TLV shape is:
+    //   struct { u8 tag1, u8 tag2, list tag3 { struct { u8 tag4 (epoch_n),
+    //              uXX tag5 (start_time), bytes[16] tag6 (epoch_key), ... }*, ... } }
+    // The epoch_key is always encoded as `30 06 10 <16 bytes>` (byte-string,
+    // ctx-tag 6, length 0x10 = 16, then 16 bytes of key material). Finding
+    // the first such pattern gives us epoch 0 (the IPK for most installs
+    // that never rotate). The earlier "trailing 16 bytes" heuristic picked
+    // up TLV end-of-container markers instead of real key material on
+    // installs that have multiple zeroed epoch slots serialized.
     let keyset_key = format!("f/{:x}/k/0", fabric_index);
     let keyset = decode_required(sdk, &keyset_key)?;
-    if keyset.len() < 16 {
-        return Err(ImportError::BadIpk {
-            key: keyset_key,
-            len: keyset.len(),
-        });
-    }
-    let mut ipk = [0u8; 16];
-    ipk.copy_from_slice(&keyset[keyset.len() - 16..]);
+    let ipk = extract_first_epoch_key(&keyset).ok_or(ImportError::BadIpk {
+        key: keyset_key,
+        len: keyset.len(),
+    })?;
 
     // node_id + label live in the fabric metadata TLV at f/<fabric>/m. We do
     // NOT decode TLV here; instead we recover the controller's node id from
@@ -491,12 +544,17 @@ fn parse_chip_json(
         .collect();
     commissioned.sort_by_key(|d| d.node_id);
 
+    // Pull the controller node_id straight from the NOC subject DN. If the
+    // parse fails (unexpected TLV shape), leave 0 and let the caller figure
+    // it out — but log the diagnostic rather than silently zero it.
+    let node_id = extract_node_id_from_cert_tlv(&noc_tlv).unwrap_or(0);
+
     Ok(ImportedFabric {
         fabric_id: admin.fabric_id,
         compressed_fabric_id,
         vendor_id: admin.vendor_id,
         fabric_label: String::new(), // TODO: decode from TLV metadata blob
-        node_id: 0, // TODO: pull from NOC subject DN; left to rs-matter side
+        node_id,
         root_ca_cert: CertBlob {
             der: Some(root_der),
             tlv: Some(root_tlv),
@@ -507,9 +565,206 @@ fn parse_chip_json(
         },
         noc: noc_tlv,
         noc_signing_key_serialized: op_keypair,
+        ca_signing_key_serialized: ca_keypair,
         ipk,
         commissioned_devices: commissioned,
     })
+}
+
+/// Scan a Matter-TLV cert (RCAC / ICAC / NOC) for the subject-DN (tag 6)
+/// and return the value stored under the given DN context tag, if any.
+///
+/// Handles u8/u16/u32/u64 context-tagged integers. Returns `None` on any
+/// malformed structure — parsing is best-effort (the caller is free to
+/// fall back to 0). Keeps the dependency surface tiny: a full TLV parser
+/// lives in rs-matter, but pulling that in here would drag all of its
+/// features (and a `Crypto` backend for cert verification) into the
+/// importer, which currently has zero rs-matter deps.
+fn dn_value_by_tag(cert_tlv: &[u8], dn_tag: u8) -> Option<u64> {
+    // Subject DN starts with `37 06` (list with context tag 6). Find that
+    // two-byte prefix, then walk the inner elements until the list
+    // terminator `18`.
+    let mut i = 0;
+    while i + 1 < cert_tlv.len() {
+        if cert_tlv[i] == 0x37 && cert_tlv[i + 1] == 0x06 {
+            let mut j = i + 2;
+            while j < cert_tlv.len() && cert_tlv[j] != 0x18 {
+                match cert_tlv[j] {
+                    0x24 => {
+                        // u8 context-tagged: 3 bytes total
+                        if j + 2 >= cert_tlv.len() {
+                            return None;
+                        }
+                        if cert_tlv[j + 1] == dn_tag {
+                            return Some(cert_tlv[j + 2] as u64);
+                        }
+                        j += 3;
+                    }
+                    0x25 => {
+                        // u16 context-tagged: 4 bytes total
+                        if j + 3 >= cert_tlv.len() {
+                            return None;
+                        }
+                        if cert_tlv[j + 1] == dn_tag {
+                            return Some(
+                                (cert_tlv[j + 2] as u64) | ((cert_tlv[j + 3] as u64) << 8),
+                            );
+                        }
+                        j += 4;
+                    }
+                    0x26 => {
+                        // u32 context-tagged: 6 bytes total
+                        if j + 5 >= cert_tlv.len() {
+                            return None;
+                        }
+                        if cert_tlv[j + 1] == dn_tag {
+                            let mut v = 0u64;
+                            for k in 0..4 {
+                                v |= (cert_tlv[j + 2 + k] as u64) << (8 * k);
+                            }
+                            return Some(v);
+                        }
+                        j += 6;
+                    }
+                    0x27 => {
+                        // u64 context-tagged: 10 bytes total
+                        if j + 9 >= cert_tlv.len() {
+                            return None;
+                        }
+                        if cert_tlv[j + 1] == dn_tag {
+                            let mut v = 0u64;
+                            for k in 0..8 {
+                                v |= (cert_tlv[j + 2 + k] as u64) << (8 * k);
+                            }
+                            return Some(v);
+                        }
+                        j += 10;
+                    }
+                    _ => return None,
+                }
+            }
+            return None;
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Extract `matter-node-id` (DN tag 0x11) from a Matter-TLV NOC.
+pub fn extract_node_id_from_cert_tlv(noc_tlv: &[u8]) -> Option<u64> {
+    dn_value_by_tag(noc_tlv, 0x11)
+}
+
+/// Scan a keyset TLV blob (`f/<fabric>/k/0`) for the first 16-byte epoch
+/// key. Returns `None` if no such field exists (malformed blob) or if the
+/// only keys present are all-zero sentinels (typically epochs 1/2 that
+/// haven't been used).
+///
+/// Pattern: `0x30 0x06 0x10 <16 bytes>` = byte-string with context tag 6,
+/// length 16. That's the TLV encoding for `epoch_key` in the CHIP SDK's
+/// `GroupKeySetStructExt` representation.
+fn extract_first_epoch_key(keyset: &[u8]) -> Option<[u8; 16]> {
+    let mut i = 0;
+    while i + 19 <= keyset.len() {
+        if keyset[i] == 0x30 && keyset[i + 1] == 0x06 && keyset[i + 2] == 0x10 {
+            let bytes = &keyset[i + 3..i + 19];
+            if bytes.iter().any(|b| *b != 0) {
+                let mut out = [0u8; 16];
+                out.copy_from_slice(bytes);
+                return Some(out);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Extract `matter-rcac-id` (DN tag 0x14) from a Matter-TLV RCAC.
+pub fn extract_rcac_id_from_cert_tlv(rcac_tlv: &[u8]) -> Option<u64> {
+    dn_value_by_tag(rcac_tlv, 0x14)
+}
+
+/// Self-sign a fresh NOC on an existing fabric using the persisted CA
+/// signing key. Used when `noc_signing_key_serialized` is empty (recent
+/// python-matter-server doesn't persist the operational keypair).
+///
+/// Generates a fresh P-256 keypair, issues a NOC with:
+/// - subject = `{matter-node-id: node_id, matter-fabric-id: fabric_id}`
+/// - issuer  = `{matter-rcac-id: <parsed from rcac_tlv>}`
+/// - signed directly by RCAC (no ICAC in chain — devices accept because
+///   their stored fabric RCAC matches)
+///
+/// Arguments:
+/// - `ca_keypair_serialized`: 97-byte `pub(65) || priv(32)` CA signing key
+///   (from `ExampleOpCredsCAKey<N>` in chip.json)
+/// - `rcac_tlv`: The RCAC TLV bytes (from `f/<fabric>/r`) — used for
+///   issuer rcac-id lookup
+/// - `fabric_id`: Matter fabric ID (e.g. 2)
+/// - `node_id`: Controller node ID to claim (e.g. 112233 — matches the
+///   ACL subject so we get Administer privilege immediately)
+///
+/// Returns `(our_secret_key_raw_32B, our_noc_tlv)`.
+pub fn sign_self_noc(
+    ca_keypair_serialized: &[u8],
+    rcac_tlv: &[u8],
+    fabric_id: u64,
+    node_id: u64,
+) -> Result<(Vec<u8>, Vec<u8>), ImportError> {
+    use rs_matter::commissioner::noc_generator::NocGenerator;
+    use rs_matter::crypto::{test_only_crypto, CanonPkcSecretKey, Crypto, SecretKey, SigningSecretKey};
+
+    if ca_keypair_serialized.len() < 32 {
+        return Err(ImportError::BadIpk {
+            key: "ca_signing_key_serialized".into(),
+            len: ca_keypair_serialized.len(),
+        });
+    }
+    let rcac_id = extract_rcac_id_from_cert_tlv(rcac_tlv).ok_or_else(|| {
+        ImportError::BadCompressedFabricId(
+            "could not parse matter-rcac-id from RCAC subject DN".into(),
+        )
+    })?;
+
+    let crypto = test_only_crypto();
+
+    // CA secret key = trailing 32 bytes of the P256Keypair serialization.
+    let n = ca_keypair_serialized.len();
+    let ca_raw: [u8; 32] = ca_keypair_serialized[n - 32..].try_into().map_err(|_| {
+        ImportError::BadIpk {
+            key: "ca_signing_key_serialized[-32..]".into(),
+            len: 32,
+        }
+    })?;
+    let ca_secret = CanonPkcSecretKey::from(&ca_raw);
+
+    // Fresh P-256 keypair for OUR controller identity.
+    let our_key = crypto
+        .generate_secret_key()
+        .map_err(|e| ImportError::BadCompressedFabricId(format!("generate_secret_key: {e:?}")))?;
+
+    // Build a CSR from our key — `generate_noc` expects one (so the NOC
+    // issuer can verify the caller owns the matching private key).
+    let mut csr_buf = [0u8; 256];
+    let csr = our_key
+        .csr(&mut csr_buf)
+        .map_err(|e| ImportError::BadCompressedFabricId(format!("csr: {e:?}")))?;
+    let csr_owned = csr.to_vec();
+
+    // Load existing CA into a NOC generator and issue our NOC.
+    let mut gen = NocGenerator::from_root_ca(&crypto, ca_secret, rcac_tlv, fabric_id, rcac_id)
+        .map_err(|e| ImportError::BadCompressedFabricId(format!("NocGenerator: {e:?}")))?;
+    let noc_creds = gen
+        .generate_noc(&crypto, &csr_owned, node_id, &[])
+        .map_err(|e| ImportError::BadCompressedFabricId(format!("generate_noc: {e:?}")))?;
+
+    // Extract our raw 32-byte private scalar for the SyntaurFabricFile.
+    let mut our_canon = rs_matter::crypto::CanonPkcSecretKey::new();
+    our_key
+        .write_canon(&mut our_canon)
+        .map_err(|e| ImportError::BadCompressedFabricId(format!("write_canon: {e:?}")))?;
+    let our_secret_bytes = our_canon.access().to_vec();
+
+    Ok((our_secret_bytes, noc_creds.noc.to_vec()))
 }
 
 fn decode_required(

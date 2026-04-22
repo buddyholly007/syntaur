@@ -1,0 +1,39 @@
+[package]
+name = "syntaur-matter-ble"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+name = "syntaur_matter_ble"
+path = "src/lib.rs"
+
+[[bin]]
+name = "matter-ble-scan"
+path = "src/bin/matter_ble_scan.rs"
+[[bin]]
+name = "matter-ble-commission"
+path = "src/bin/matter_ble_commission.rs"
+
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+syntaur-matter = { path = "../syntaur-matter" }
+# Cross-platform BLE central. Uses BlueZ on Linux, CoreBluetooth on
+# macOS, WinRT on Windows. Saves us bluer-Linux-only lock-in.
+btleplug = "0.11"
+futures = "0.3"
+uuid = "1"
+log = { workspace = true }
+env_logger = { workspace = true }
+# BTP codec is inlined in src/btp.rs (rs-matter internals are private).
+# rs-matter transport integration for PASE + IM over BTP (Phase 4b).
+rs-matter = { git = "https://github.com/project-chip/rs-matter", rev = "993a0763e450183acb5181073223ab48e44b8c2e", default-features = false, features = ["os", "rustcrypto", "log"] }
+embassy-time-queue-utils = { version = "0.3", features = ["generic-queue-64"] }
+# flume — runtime-agnostic channels for the BTP↔rs-matter bridge across
+# the tokio / spawn_blocking / futures_lite::block_on divide.
+flume = { version = "0.11", default-features = false, features = ["async"] }
+futures-lite = "2"

@@ -60,6 +60,15 @@ enum Subcommand {
     /// #370 (operational mDNS). Redirect to a file + feed to
     /// MatterDirectClient::put_address or persist for later sessions.
     PopulateFromBridge { bridge_url: Option<String>, save_to: Option<String> },
+    /// pase-test <node_id> <passcode>
+    /// Open an unsecured exchange, run PASE with the given setup pin code,
+    /// and read BasicInformation::VendorName. Bypasses CASE/fabric —
+    /// proves the rs-matter runtime works against a real device without
+    /// depending on fabric state that may have drifted.
+    ///
+    /// Get the passcode via python-matter-server's
+    /// `open_commissioning_window` WS command first.
+    PaseTest(u64, u32),
 }
 
 fn parse_args(argv: &[String]) -> Result<CliArgs, String> {
@@ -124,6 +133,13 @@ fn parse_args(argv: &[String]) -> Result<CliArgs, String> {
             bridge_url: bridge_url_override.clone(),
             save_to: save_to_override.clone(),
         },
+        ["pase-test", id, passcode] => {
+            let n = parse_node_id(id)?;
+            let p: u32 = passcode
+                .parse()
+                .map_err(|_| format!("passcode must be a u32 setup pin code, got {passcode}"))?;
+            Subcommand::PaseTest(n, p)
+        }
         [] => return Err(usage()),
         _ => return Err(format!("unknown subcommand: {}\n\n{}", positional.join(" "), usage())),
     };
@@ -150,6 +166,8 @@ fn usage() -> String {
        import-pms <pms-dir>       dump SyntaurFabricFile from python-matter-server storage\n\
        validate-fabric <path>     load + summarize a SyntaurFabricFile\n\
        populate-from-bridge       query python-matter-server, dump node_id -> addr JSON\n\
+       pase-test <node> <passcode>  PASE + read BasicInformation.VendorName (no fabric needed;\n\
+                                  get passcode from python-matter-server's open_commissioning_window)\n\
        --bridge-url WS_URL        override ws://127.0.0.1:5580/ws for populate-from-bridge\n\
        --save PATH                persist addresses to PATH (atomic). Loaded by\n\
                                   MatterDirectClient::new if SYNTAUR_MATTER_ADDRESSES_FILE\n\
@@ -187,6 +205,7 @@ pub async fn run(raw_args: &[String]) -> ! {
         Subcommand::PopulateFromBridge { bridge_url, save_to } => {
             populate_from_bridge_cmd(bridge_url.as_deref(), save_to.as_deref(), args.json).await
         }
+        Subcommand::PaseTest(id, passcode) => pase_test_cmd(&client, id, passcode, args.json).await,
     };
 
     match result {
@@ -234,6 +253,24 @@ async fn list_cmd(client: &MatterDirectClient, json: bool) -> Result<(), DirectE
                 n.label.as_deref().unwrap_or("(no label)"),
             );
         }
+    }
+    Ok(())
+}
+
+async fn pase_test_cmd(
+    client: &MatterDirectClient,
+    node_id: u64,
+    passcode: u32,
+    json: bool,
+) -> Result<(), DirectError> {
+    let vendor_name = client.pase_test(node_id, passcode).await?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({ "ok": true, "node_id": node_id, "vendor_name": vendor_name })
+        );
+    } else {
+        println!("node {node_id} vendor_name = {vendor_name:?}");
     }
     Ok(())
 }
@@ -298,7 +335,9 @@ async fn read_on_off_cmd(
 /// because SyntaurFabricFile is the minimum rs-matter needs to build a
 /// FabricMgr. Run with `--output /path/out.json` or redirect stdout.
 fn import_pms_cmd(pms_dir: &str, json_output: bool) -> Result<(), DirectError> {
-    use crate::tools::matter_fabric_import::{import_from_storage_dir, ImportError};
+    use crate::tools::matter_fabric_import::{
+        import_from_storage_dir, sign_self_noc, ImportError,
+    };
 
     let pms_path = std::path::Path::new(pms_dir);
     let imported = import_from_storage_dir(pms_path).map_err(|e: ImportError| {
@@ -308,22 +347,6 @@ fn import_pms_cmd(pms_dir: &str, json_output: bool) -> Result<(), DirectError> {
         }
     })?;
 
-    // Controller signing key is stored as a full serialized P-256 keypair
-    // in python-matter-server; the trailing 32 bytes are the raw scalar.
-    // If the blob isn't a standard 97-byte keypair, caller has to fix up.
-    let secret_key = if imported.noc_signing_key_serialized.len() >= 32 {
-        let n = imported.noc_signing_key_serialized.len();
-        &imported.noc_signing_key_serialized[n - 32..]
-    } else {
-        return Err(DirectError::FabricParseError {
-            path: pms_dir.to_string(),
-            reason: format!(
-                "noc_signing_key too short: {} bytes (expected >= 32)",
-                imported.noc_signing_key_serialized.len()
-            ),
-        });
-    };
-
     // Required TLV certs — error if absent, can't build a fabric without them.
     let root_tlv = imported.root_ca_cert.tlv.as_ref().ok_or_else(|| {
         DirectError::FabricParseError {
@@ -331,18 +354,67 @@ fn import_pms_cmd(pms_dir: &str, json_output: bool) -> Result<(), DirectError> {
             reason: "root_ca_cert.tlv missing from python-matter-server storage".into(),
         }
     })?;
-    let icac_tlv = match imported.icac.as_ref() {
-        Some(cb) => cb.tlv.as_ref().map(|v| hex_encode(v)),
-        None => None,
+
+    // Prefer the persisted operational keypair when present. Recent
+    // python-matter-server builds don't write `f/<fabric>/o` (they use an
+    // ephemeral controller keypair + re-sign the NOC on every boot), so
+    // fall back to self-issuing our own NOC on the existing fabric using
+    // the stable CA signing key.
+    let (secret_key_hex_str, noc_hex_str) =
+        if imported.noc_signing_key_serialized.len() >= 32 {
+            let n = imported.noc_signing_key_serialized.len();
+            (
+                hex_encode(&imported.noc_signing_key_serialized[n - 32..]),
+                hex_encode(&imported.noc),
+            )
+        } else if imported.ca_signing_key_serialized.len() >= 32 && imported.node_id != 0 {
+            let (our_secret, our_noc) = sign_self_noc(
+                &imported.ca_signing_key_serialized,
+                root_tlv,
+                imported.fabric_id,
+                imported.node_id,
+            )
+            .map_err(|e| DirectError::FabricParseError {
+                path: pms_dir.to_string(),
+                reason: format!("self-sign NOC: {e}"),
+            })?;
+            eprintln!(
+                "[import-pms] f/{:x}/o missing — self-signed NOC for node_id={} via stable CA key",
+                1, imported.node_id
+            );
+            (hex_encode(&our_secret), hex_encode(&our_noc))
+        } else {
+            return Err(DirectError::FabricParseError {
+                path: pms_dir.to_string(),
+                reason: format!(
+                    "no operational keypair (f/<fabric>/o missing, len={}) and no CA signing key \
+                     available for self-sign fallback (ExampleOpCredsCAKey<N> len={}, parsed node_id={})",
+                    imported.noc_signing_key_serialized.len(),
+                    imported.ca_signing_key_serialized.len(),
+                    imported.node_id,
+                ),
+            });
+        };
+
+    // When we self-sign directly against the RCAC, we drop the ICAC from
+    // the chain — devices validate against the fabric's stored RCAC, which
+    // matches. Persist ICAC only when we reused the persisted op key.
+    let icac_tlv = if imported.noc_signing_key_serialized.len() >= 32 {
+        match imported.icac.as_ref() {
+            Some(cb) => cb.tlv.as_ref().map(|v| hex_encode(v)),
+            None => None,
+        }
+    } else {
+        None
     };
     let syntaur_file = serde_json::json!({
         "fabric_id": imported.fabric_id,
         "vendor_id": imported.vendor_id,
         "controller_node_id": imported.node_id,
         "root_cert_hex": hex_encode(root_tlv),
-        "noc_hex": hex_encode(&imported.noc),
+        "noc_hex": noc_hex_str,
         "icac_hex": icac_tlv,
-        "secret_key_hex": hex_encode(secret_key),
+        "secret_key_hex": secret_key_hex_str,
         "ipk_hex": hex_encode(&imported.ipk),
     });
 
