@@ -31,6 +31,7 @@ mod setup;
 mod license;
 mod tax;
 mod tax_pdf;
+mod ledger;
 mod financial;
 mod calendar_reminder;
 mod sync;
@@ -167,6 +168,11 @@ pub struct AppState {
     pub uploaded_files: Option<Arc<connectors::sources::uploaded_files::UploadedFilesConnector>>,
     /// Terminal module manager (mod-coders). None when module is disabled.
     pub terminal: Option<Arc<terminal::TerminalManager>>,
+    /// Ledger sub-feature of the Tax module. Reads from the bind-mounted
+    /// `ledger.db` (formerly the openclawprod VM's `~/.openclaw/lcm.db`).
+    /// `None` when the file is absent so /api/ledger/* returns 503 rather
+    /// than panicking. Migrated 2026-04-22.
+    pub ledger: Option<Arc<crate::ledger::LedgerService>>,
 }
 
 /// Run the `bootstrap-admin` CLI subcommand. Parses `--name <name>` from
@@ -6362,6 +6368,28 @@ async fn main() {
                 None
             }
         },
+        ledger: {
+            // Bind-mounted from `/mnt/cherry_family_nas/syntaur/data/ledger.db`
+            // in production. Path is overridable via SYNTAUR_LEDGER_DB env.
+            let path = std::env::var("SYNTAUR_LEDGER_DB")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::path::PathBuf::from("/data/ledger.db"));
+            if path.exists() {
+                match crate::ledger::LedgerService::open(&path) {
+                    Ok(svc) => {
+                        info!("[ledger] opened {}", path.display());
+                        Some(Arc::new(svc))
+                    }
+                    Err(e) => {
+                        log::warn!("[ledger] open failed at {}: {}", path.display(), e);
+                        None
+                    }
+                }
+            } else {
+                log::info!("[ledger] no DB at {} — /api/ledger/* will return 503", path.display());
+                None
+            }
+        },
     });
 
     // Calendar reminder background task: checks for upcoming events every 60s.
@@ -6918,6 +6946,15 @@ async fn main() {
         .route("/api/open-url", get(handle_open_url))
         .route("/api/bug-reports", post(handle_bug_report_submit))
         .route("/api/bug-reports", get(handle_bug_report_list))
+        // Ledger sub-feature (migrated from rust-ledger 2026-04-22).
+        // Read-only at v1; writes via the existing rust-ledger CLI on
+        // gaming PC are still safe (single SQLite DB, both sides see
+        // the same file). Auth: read-only, principal-resolution only.
+        .route("/api/ledger/entities", get(ledger::api::handle_entities))
+        .route("/api/ledger/accounts", get(ledger::api::handle_accounts))
+        .route("/api/ledger/transactions", get(ledger::api::handle_transactions))
+        .route("/api/ledger/reports/expense_summary", get(ledger::api::handle_expense_summary))
+        .route("/api/ledger/account_balance", get(ledger::api::handle_account_balance))
         .route("/api/tax/receipts", post(tax::handle_receipt_upload))
         .route("/api/tax/receipts", get(tax::handle_receipt_list))
         .route("/api/tax/receipts/{id}/image", get(tax::handle_receipt_image))
