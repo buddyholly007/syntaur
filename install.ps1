@@ -7,7 +7,10 @@
 $ErrorActionPreference = "Stop"
 
 $Brand = "Syntaur"
-$Version = "0.4.3"
+# MUST match the VERSION file at repo root. Run scripts/sync-version.sh
+# before tagging a release so this and install.sh stay in sync with the
+# workspace version in Cargo.toml. install.ps1 ships standalone.
+$Version = "0.5.0"
 $Binary = "syntaur.exe"
 $InstallDir = "$env:LOCALAPPDATA\Syntaur"
 $DashboardUrl = "http://localhost:18789"

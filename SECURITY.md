@@ -10,16 +10,17 @@ Only the current release line receives security fixes:
 
 | Version | Supported |
 | ------- | --------- |
-| 0.4.x   | ✅ fixes land here |
+| 0.5.x   | ✅ fixes land here |
+| 0.4.x   | ⚠️ 60-day maintenance window from 0.5.0 release date; critical fixes only |
 | < 0.4   | ❌ unsupported |
 
-**v0.4.3 highlight:** `lift_bearer_to_body_and_query` middleware removed.
-Every handler now calls `security::bearer_from_headers(&headers)` directly;
-the request body and URL are no longer load-bearing for the session token
-on JSON endpoints. (SSE/WS/media long-lived `?token=` migration to
-stream-tokens is still in progress — see Known gaps below.)
+**v0.5.0 highlights:**
+- `LegacyAdmin` principal + every `gateway.auth.token` / `gateway.auth.password` config-file login path deleted. Every login now hits a real user row.
+- Handler-layer defense-in-depth for the first-run bootstrap endpoints — non-loopback peers are rejected at the handler *and* the middleware, not just the middleware.
+- Bearer-header migration completed: all JSON handlers read the token from `Authorization: Bearer …` via `security::bearer_from_headers`. The request body and URL query no longer carry session tokens on JSON endpoints.
+- Stream-token mint/validate pipeline (`POST /api/auth/stream-token`, `resolve_principal_for_stream`) is live for SSE/WS/media endpoints; the message-stream SSE is the first converted reference. Remaining long-lived-`?token=` handlers migrate incrementally in 0.5.x — see Known gaps below.
 
-When we cut 0.5, 0.4 will move to a 60-day maintenance window before being dropped.
+When 0.6 ships, 0.5 moves to the same 60-day maintenance window.
 
 ## Reporting a vulnerability
 

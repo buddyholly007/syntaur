@@ -4,13 +4,20 @@
 # For macOS/Windows, cross-compilation or CI is needed
 set -e
 
-VERSION="0.1.0"
-WORKSPACE="/home/sean/syntaur-workspace"
+# Source of truth for the release version. `scripts/sync-version.sh`
+# keeps Cargo.toml / install.sh / install.ps1 / landing badge aligned
+# with this same VERSION file; CI version-check.yml fails the build if
+# anything drifted.
+WORKSPACE="$(cd "$(dirname "$0")" && pwd)"
+cd "$WORKSPACE"
+if [ ! -f VERSION ]; then
+  echo "error: VERSION file missing at repo root — run scripts/sync-version.sh or create it" >&2
+  exit 1
+fi
+VERSION="$(tr -d '[:space:]' < VERSION)"
 OUTPUT="$WORKSPACE/release"
 
 echo "Building Syntaur v$VERSION..."
-
-cd "$WORKSPACE"
 
 # Build gateway
 echo "  Building gateway..."

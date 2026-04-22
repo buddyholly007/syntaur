@@ -2317,6 +2317,48 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX IF NOT EXISTS idx_sh_creds_user_provider ON smart_home_credentials(user_id, provider);
     "#,
+
+    // v64: dashboard theme + layout.
+    //
+    // `user_appearance` — per-user theme preferences. Drives the global
+    // oklch() theme tokens and the JS sunrise/sunset ticker.
+    //   accent:        sage | indigo | ochre | gray (midday hue preset)
+    //   theme_mode:    auto (sunrise/sunset) | light | dark | schedule
+    //   hue_shift:     0=fixed hue, 1=sine-shift ±20° through the day
+    //   latitude/lon:  for sunrise calc; NULL falls back to schedule
+    //   light/dark_start_min: minutes-from-midnight for `schedule` mode
+    //                          (default 07:00 → 19:00)
+    //
+    // `dashboard_layout` — user's widget grid. `layout_json` is an array
+    // of `{id,kind,x,y,w,h,config}` items consumed by gridstack.js in
+    // the browser; server only serializes + validates shape.
+    r#"
+    CREATE TABLE IF NOT EXISTS user_appearance (
+        user_id          INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        accent           TEXT NOT NULL DEFAULT 'sage',
+        theme_mode       TEXT NOT NULL DEFAULT 'auto',
+        hue_shift        INTEGER NOT NULL DEFAULT 1,
+        latitude         REAL,
+        longitude        REAL,
+        light_start_min  INTEGER NOT NULL DEFAULT 420,
+        dark_start_min   INTEGER NOT NULL DEFAULT 1140,
+        updated_at       INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS dashboard_layout (
+        user_id     INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        layout_json TEXT NOT NULL DEFAULT '[]',
+        updated_at  INTEGER NOT NULL
+    );
+    "#,
+
+    // v65: ambient mode toggle for the dashboard theme engine.
+    //   ambient_mode = 0 → still / sleek (default)
+    //   ambient_mode = 1 → subtle 6s breath on --accent-c + weather-hue
+    //                      reflection + dusk motes
+    r#"
+    ALTER TABLE user_appearance ADD COLUMN ambient_mode INTEGER NOT NULL DEFAULT 0;
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

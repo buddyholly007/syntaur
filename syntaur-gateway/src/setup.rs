@@ -1684,7 +1684,10 @@ pub struct HardwareScanResponse {
     pub compute_kind: String,
     /// "VRAM" | "unified" | "RAM"
     pub compute_memory_kind: String,
-    /// Suggested inference runtime: "CUDA" | "Metal" | "ROCm" | "llama.cpp-CPU"
+    /// Suggested inference runtime: "CUDA" | "Metal" | "Vulkan" | "llama.cpp-CPU".
+    /// AMD is Vulkan (not ROCm) — Vulkan works on any Radeon + iGPU without
+    /// the ROCm install matrix, at 60-80% of CUDA perf. TTS (Orpheus) and
+    /// vision (Frigate ONNX) roles stay CUDA-only; see GPU_ROLES in the wizard.
     pub compute_runtime: Option<String>,
     pub disk_free_gb: String,
     pub tier: String,
@@ -1768,8 +1771,16 @@ elif command -v rocm-smi >/dev/null 2>&1; then
   V=$(rocm-smi --showmeminfo vram --csv 2>/dev/null | tail -1 | awk -F, '{print $2}')
   [ -n "$N" ] && echo "amd=$N|$V"
 elif command -v lspci >/dev/null 2>&1; then
-  I=$(lspci 2>/dev/null | grep -iE 'vga|3d|display' | grep -iE 'intel.*(arc|xe)' | head -1 | sed 's/.*: *//')
-  [ -n "$I" ] && echo "intel-gpu=$I|0"
+  # AMD/Radeon via lspci — catches Radeon hosts without rocm-smi
+  # (the common case; Vulkan doesn't need ROCm). VRAM is unknown from
+  # lspci alone, reported as 0; classifier falls back to RAM-based tier.
+  A=$(lspci 2>/dev/null | grep -iE 'vga|3d|display' | grep -iE 'amd|ati|radeon' | head -1 | sed 's/.*: *//')
+  if [ -n "$A" ]; then
+    echo "amd=$A|0"
+  else
+    I=$(lspci 2>/dev/null | grep -iE 'vga|3d|display' | grep -iE 'intel.*(arc|xe)' | head -1 | sed 's/.*: *//')
+    [ -n "$I" ] && echo "intel-gpu=$I|0"
+  fi
 fi
 if [ "$OS" = "Darwin" ]; then
   CPU=$(sysctl -n machdep.cpu.brand_string 2>/dev/null)
@@ -1827,7 +1838,11 @@ pub(crate) fn parse_probe_output(stdout: &str) -> LocalCompute {
             name: Some(name),
             memory_gb: mb.map(|m| m / 1024.0),
             memory_kind: "VRAM".into(),
-            runtime_hint: Some("ROCm".into()),
+            // Vulkan, not ROCm — Radeon support matrix is too narrow and the
+            // install story is brutal on non-supported cards. Vulkan
+            // llama.cpp gets ~60-80% of CUDA perf on almost any Radeon
+            // (plus Vega/RDNA iGPUs) with no extra install burden.
+            runtime_hint: Some("Vulkan".into()),
         };
     }
     if let Some(v) = kv.get("intel-gpu") {

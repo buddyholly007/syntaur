@@ -20,6 +20,13 @@ members = [
 ]
 
 [workspace.package]
+# Single source of truth for the main product version. All crates that
+# track the Syntaur release line inherit this via `version.workspace = true`.
+# Independent sub-crates (crates/rust-aidot, crates/rust-kasa, crates/rust-nexia,
+# crates/syntaur-matter, crates/syntaur-matter-ble, crates/syntaur-zwave,
+# mcp-server-filesystem-rs, syntaur-hwscan, syntaur-license-server, syntaur-mod)
+# keep their own versions so they can be released on their own cadence.
+version = "0.5.0"
 edition = "2021"
 license = "MIT"
 authors = ["Sean"]

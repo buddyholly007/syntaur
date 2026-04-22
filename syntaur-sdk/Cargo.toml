@@ -1,6 +1,6 @@
 [package]
 name = "syntaur-sdk"
-version = "0.4.0"
+version.workspace = true
 edition.workspace = true
 description = "SDK for building Syntaur modules — tools, services, and extensions"
 license = "MIT"

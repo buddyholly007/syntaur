@@ -1,6 +1,6 @@
 [package]
 name = "syntaur-setup"
-version = "0.4.0"
+version.workspace = true
 edition.workspace = true
 description = "First-run configuration generator for Syntaur"
 
