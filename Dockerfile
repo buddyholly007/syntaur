@@ -10,7 +10,13 @@
 # only security-critical addition past the base runtime.
 
 # ─── Builder stage ────────────────────────────────────────────────────────
-FROM rust:1.84-slim-bookworm AS builder
+# Rust 1.85 stabilized `edition = "2024"`, which transitive deps
+# (avif-serialize 0.8.8, etc.) now require. Claudevm builds locally
+# on 1.94.x; pinning the CI image to 1.88 gives us headroom without
+# chasing every release. Bump when a future dep needs a newer
+# minimum — documented by the specific "feature `edition2024` is
+# required" cargo-resolve error (what 1.84 hit on 2026-04-22).
+FROM rust:1.88-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev ca-certificates \
