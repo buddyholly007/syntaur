@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Syntaur git pre-commit hook — refuses commits if the working tree has
+# drifted past the last successful deploy stamp. Encourages a
+# commit-then-ship rhythm over accumulation of undeployed changes.
+#
+# Override for legitimate batch-commit work:
+#     SYNTAUR_SHIP_OVERRIDE=1 git commit ...
+#
+# Installed by: ln -s ../../syntaur-ship/hooks/pre-commit .git/hooks/pre-commit
+# (syntaur-ship Phase 8 ships a `syntaur-ship hooks install` subcommand)
+
+set -euo pipefail
+
+# Bypass in CI or when explicitly overridden.
+if [[ "${SYNTAUR_SHIP_OVERRIDE:-0}" == "1" ]]; then exit 0; fi
+if [[ "${CI:-}" == "true" ]]; then exit 0; fi
+
+STAMP="$HOME/.syntaur/ship/deploy-stamp.json"
+if [[ ! -f "$STAMP" ]]; then
+    # No prior deploy recorded — can't compare. Allow commit.
+    exit 0
+fi
+
+# Extract last deployed HEAD SHA.
+deployed_head=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$STAMP'))
+    print(d.get('git_head',''))
+except Exception:
+    pass
+" 2>/dev/null)
+
+if [[ -z "$deployed_head" ]]; then exit 0; fi
+
+current_head=$(git rev-parse HEAD 2>/dev/null || echo "")
+if [[ "$current_head" == "$deployed_head" ]]; then
+    # HEAD matches last deploy — a new commit on top is fine.
+    exit 0
+fi
+
+# HEAD diverges. Count commits ahead.
+ahead=$(git rev-list --count "$deployed_head..HEAD" 2>/dev/null || echo "?")
+if [[ "$ahead" != "?" ]] && (( ahead <= 3 )); then
+    # 1-3 commits ahead is normal churn — allow.
+    exit 0
+fi
+
+# More than 3 undeployed commits — nudge the operator.
+echo "───────────────────────────────────────────────────────────────────────────" >&2
+echo "⚠ syntaur-ship pre-commit: $ahead commits past last deployed ($deployed_head)" >&2
+echo "  Consider running `~/deploy.sh` (or syntaur-ship) to ship what you have" >&2
+echo "  before stacking more work. Prod drift accumulates risk." >&2
+echo "" >&2
+echo "  Override: SYNTAUR_SHIP_OVERRIDE=1 git commit ..." >&2
+echo "───────────────────────────────────────────────────────────────────────────" >&2
+exit 1

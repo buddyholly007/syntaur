@@ -244,6 +244,10 @@ fn run_full_inner(cfg: &Config, opts: &RunOptions, ctx: &StageContext) -> Result
         let mut stamp = build_stamp(cfg, opts)?;
         stamp.pre_deploy_snapshot = Some(snapshot_name);
         state::write_stamp(&cfg.state_dir, &stamp)?;
+        // Phase 7: cosign-sign the stamp if a local key pair exists.
+        // First-run setup: `cd ~/.syntaur/ship && cosign generate-key-pair`
+        // Non-fatal if cosign is missing or not configured.
+        let _ = crate::stamp_sign::sign_stamp(&cfg.state_dir);
         log::info!(
             "✓ deploy stamp written: version={} git_head={} gateway_sha={}",
             stamp.version,
@@ -516,6 +520,46 @@ pub fn run_journal(cfg: &Config, last: usize) -> Result<()> {
     Ok(())
 }
 
-pub fn run_verify_stamp(_cfg: &Config, _path: Option<&str>) -> Result<()> {
-    anyhow::bail!("verify-stamp: not yet implemented (Phase 7)")
+pub fn run_verify_stamp(cfg: &Config, path: Option<&str>) -> Result<()> {
+    let stamp_path = match path {
+        Some(p) => std::path::PathBuf::from(p),
+        None => cfg.state_dir.join("deploy-stamp.json"),
+    };
+    // Default pubkey location — either alongside the stamp (tool's
+    // own key) or committed into the repo for third-party verification.
+    let pubkey = cfg.state_dir.join("cosign.pub");
+    let pubkey = if pubkey.exists() {
+        pubkey
+    } else {
+        cfg.workspace.join("syntaur-ship/cosign.pub")
+    };
+    crate::stamp_sign::verify_stamp(&stamp_path, &pubkey)
+}
+
+pub fn run_hooks_install(cfg: &Config) -> Result<()> {
+    let hooks_src = cfg.workspace.join("syntaur-ship/hooks");
+    let hooks_dst = cfg.workspace.join(".git/hooks");
+    if !hooks_dst.exists() {
+        anyhow::bail!("{}/.git/hooks missing — is this a git repo?", cfg.workspace.display());
+    }
+    for name in ["pre-commit", "pre-push"] {
+        let src = hooks_src.join(name);
+        let dst = hooks_dst.join(name);
+        if !src.exists() {
+            log::warn!("[hooks] skipping {name} — {} missing", src.display());
+            continue;
+        }
+        std::fs::copy(&src, &dst)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&dst)?.permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&dst, perms)?;
+        }
+        log::info!("[hooks] installed {} → {}", src.display(), dst.display());
+    }
+    println!("✓ git hooks installed in {}", hooks_dst.display());
+    println!("  Override with `SYNTAUR_SHIP_OVERRIDE=1 git commit/push ...` when needed.");
+    Ok(())
 }

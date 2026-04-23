@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Syntaur git pre-push hook — final safety gate. Refuses pushes that
+# skip the Mac Mini + TrueNAS + viewer pipeline. If the operator
+# ran `git push` directly instead of `~/deploy.sh` / `syntaur-ship`,
+# abort with a pointer to the pipeline.
+#
+# Rationale: GitHub is step 3 of the 5-step pipeline. Getting bytes
+# onto origin/main without first verifying Mac Mini + TrueNAS leaves
+# prod stale even though main looks current. That's the exact
+# mistake class Phase 8 blocks.
+#
+# Override:  SYNTAUR_SHIP_OVERRIDE=1 git push ...
+# (CI-assist commits like dependabot should pass this via env, not
+# by adding branches to the bypass list.)
+
+set -euo pipefail
+
+if [[ "${SYNTAUR_SHIP_OVERRIDE:-0}" == "1" ]]; then exit 0; fi
+if [[ "${CI:-}" == "true" ]]; then exit 0; fi
+
+STAMP="$HOME/.syntaur/ship/deploy-stamp.json"
+if [[ ! -f "$STAMP" ]]; then
+    # No stamp yet — bootstrap case. Allow so initial setup works.
+    exit 0
+fi
+
+# Read what's being pushed: the ref/oid arrives on stdin.
+while read -r local_ref local_oid remote_ref remote_oid; do
+    [[ -z "$local_oid" ]] && continue
+    deployed_head=$(python3 -c "
+import json
+print(json.load(open('$STAMP')).get('git_head',''))
+" 2>/dev/null)
+    if [[ -z "$deployed_head" ]]; then continue; fi
+
+    # Is the local_oid we're about to push an ancestor of, equal to,
+    # or identical to the deployed_head? If so — pipeline has
+    # previously run. Allow.
+    if [[ "$local_oid" == "$deployed_head" ]]; then exit 0; fi
+    if git merge-base --is-ancestor "$local_oid" "$deployed_head" 2>/dev/null; then exit 0; fi
+
+    # Count commits between deployed_head and the push. If ≤ 3,
+    # allow as routine interim push.
+    ahead=$(git rev-list --count "$deployed_head..$local_oid" 2>/dev/null || echo "99")
+    if (( ahead <= 3 )); then exit 0; fi
+
+    echo "───────────────────────────────────────────────────────────────────────────" >&2
+    echo "⚠ syntaur-ship pre-push: $ahead commits past last deployed ($deployed_head)" >&2
+    echo "  You're about to push changes that haven't gone through the Mac Mini" >&2
+    echo "  smoke + TrueNAS deploy pipeline. Prefer:" >&2
+    echo "" >&2
+    echo "      ssh sean@192.168.1.150 'bash ~/deploy.sh'" >&2
+    echo "      # or:" >&2
+    echo "      ssh sean@192.168.1.150 'syntaur-ship'" >&2
+    echo "" >&2
+    echo "  Override: SYNTAUR_SHIP_OVERRIDE=1 git push ..." >&2
+    echo "───────────────────────────────────────────────────────────────────────────" >&2
+    exit 1
+done
+
+exit 0

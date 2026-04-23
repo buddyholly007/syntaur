@@ -38,6 +38,7 @@ mod journal;
 mod pipeline;
 mod release;
 mod stages;
+mod stamp_sign;
 mod state;
 
 #[derive(Parser, Debug)]
@@ -113,6 +114,8 @@ enum Command {
     VerifyStamp {
         stamp_path: Option<String>,
     },
+    /// Install git pre-commit + pre-push hooks in the workspace. Phase 8.
+    HooksInstall,
 }
 
 fn main() -> ExitCode {
@@ -155,6 +158,7 @@ fn main() -> ExitCode {
         Some(Command::VerifyStamp { stamp_path }) => {
             pipeline::run_verify_stamp(&cfg, stamp_path.as_deref())
         }
+        Some(Command::HooksInstall) => pipeline::run_hooks_install(&cfg),
     };
 
     match result {
