@@ -1208,7 +1208,20 @@ async function runScan() {
         `${scan.gpu_name} <span class="text-oc-500">(${scan.gpu_vram_gb} ${memUnit(scan.compute_memory_kind)})</span> ${kindBadge(scan.compute_kind)}`
         + (scan.compute_runtime ? ` <span class="text-xs text-gray-500">via ${scan.compute_runtime}</span>` : '');
       selectLlm('local');
-      document.getElementById('llm-local-desc').textContent = `Run a model on your ${scan.gpu_name}`;
+      // AMD on Linux can't use Ollama's default CUDA build. Offer a
+      // one-click Vulkan llama.cpp installer (see setup_install.rs);
+      // progress shown in-place. Manual link kept as fallback for users
+      // who want to pick their own runtime.
+      if (scan.compute_kind === 'amd') {
+        document.getElementById('llm-local-desc').innerHTML =
+          `Run a model on your ${scan.gpu_name} via Vulkan. `
+          + `<button type="button" onclick="event.stopPropagation(); startLlamaVulkanInstall()" `
+          +   `class="mt-2 text-xs px-3 py-1.5 rounded bg-oc-600 hover:bg-oc-500 text-white">Install automatically</button> `
+          + `<span id="llama-vulkan-status" class="text-xs text-gray-400 ml-2"></span>`
+          + `<br><a href="https://github.com/ggerganov/llama.cpp/releases" target="_blank" class="text-xs text-gray-500 hover:text-gray-300" onclick="event.stopPropagation()">Or install manually &#8599;</a>`;
+      } else {
+        document.getElementById('llm-local-desc').textContent = `Run a model on your ${scan.gpu_name}`;
+      }
     } else if (scan.network_compute && scan.network_compute.length > 0) {
       // Split probed (real capacity) vs discovered-only (mDNS, no capacity).
       // Render probed first, discovered-only second with the hint line.
@@ -1351,13 +1364,19 @@ async function enableFirewallAndRescan() {
   }
 }
 
-// GPU Role Assignment
+// GPU Role Assignment.
+// `runtimes` limits which compute kinds can claim the role. LLM + embedding
+// run on any backend (llama.cpp Vulkan/CUDA/Metal/CPU). TTS (Orpheus) and
+// image generation have no working Vulkan path today — they need CUDA
+// (NVIDIA) or Metal (Apple). STT (whisper.cpp) works on Vulkan but
+// benefits from CUDA/Metal acceleration, so we allow it everywhere but
+// note the tradeoff in the UI.
 const GPU_ROLES = [
-  { id: 'llm', name: 'AI Brain (LLM)', desc: 'Main AI model for chat and reasoning', minVram: 6, recommended: 16 },
-  { id: 'stt', name: 'Voice Input (STT)', desc: 'Speech-to-text for voice commands', minVram: 2, recommended: 4 },
-  { id: 'tts', name: 'Voice Output (TTS)', desc: 'Text-to-speech for AI voice responses', minVram: 3, recommended: 4 },
-  { id: 'imggen', name: 'Image Generation', desc: 'Create images from text descriptions', minVram: 6, recommended: 12 },
-  { id: 'embedding', name: 'Document Search', desc: 'Index and search through your files', minVram: 1, recommended: 2 },
+  { id: 'llm', name: 'AI Brain (LLM)', desc: 'Main AI model for chat and reasoning', minVram: 6, recommended: 16, runtimes: ['nvidia','apple','amd','intel-gpu','cpu'] },
+  { id: 'stt', name: 'Voice Input (STT)', desc: 'Speech-to-text for voice commands', minVram: 2, recommended: 4, runtimes: ['nvidia','apple','amd','cpu'] },
+  { id: 'tts', name: 'Voice Output (TTS)', desc: 'Text-to-speech for AI voice responses', minVram: 3, recommended: 4, runtimes: ['nvidia','apple'] },
+  { id: 'imggen', name: 'Image Generation', desc: 'Create images from text descriptions', minVram: 6, recommended: 12, runtimes: ['nvidia','apple'] },
+  { id: 'embedding', name: 'Document Search', desc: 'Index and search through your files', minVram: 1, recommended: 2, runtimes: ['nvidia','apple','amd','intel-gpu','cpu'] },
 ];
 
 let gpuRoleAssignments = {};
@@ -1373,7 +1392,11 @@ function renderGpuRoles(gpus) {
   })[g.kind] || 'GB VRAM';
   list.innerHTML = gpus.map((gpu, i) => {
     const vram = parseFloat(gpu.vram_gb);
-    const eligible = GPU_ROLES.filter(r => vram >= r.minVram);
+    // Eligible = has enough memory AND role's runtimes list includes this
+    // GPU kind. This is how AMD gets LLM + embedding but not TTS/imggen.
+    const eligible = GPU_ROLES.filter(r =>
+      vram >= r.minVram && (!r.runtimes || r.runtimes.includes(gpu.kind))
+    );
     return `
       <div class="p-3 rounded-lg bg-gray-800">
         <div class="flex items-center justify-between mb-2">
@@ -1406,6 +1429,9 @@ function suggestRole(gpu, allGpus, role) {
   const isLargest = gpu === sorted[0] || gpu.name === sorted[0].name;
   const isSmallest = gpu === sorted[sorted.length - 1] || gpu.name === sorted[sorted.length - 1].name;
 
+  // Runtime gate first — no point defaulting a Vulkan-only card to TTS.
+  if (role.runtimes && !role.runtimes.includes(gpu.kind)) return false;
+
   if (allGpus.length === 1) {
     // Single GPU — assign all roles it can handle
     return vram >= role.minVram;
@@ -1436,14 +1462,21 @@ function toggleGpuRole(gpuIdx, roleId, btn) {
 
 function suggestGpuConfig(gpus) {
   const el = document.getElementById('gpu-role-suggestion');
+  // Radeon hosts: the LLM runs on Vulkan llama.cpp but voice/image roles
+  // stay NVIDIA or Apple only, so the role table above already hides
+  // them. Surface the *why* here so the choice looks intentional.
+  const hasAmd = gpus.some(g => g.kind === 'amd');
+  const amdNote = hasAmd
+    ? '<br><span class="text-xs text-gray-500">AMD hosts run the LLM via Vulkan llama.cpp. Voice (Orpheus) and image generation have no Vulkan backend today — those roles are hidden on AMD cards and can use a cloud service or a separate NVIDIA/Apple host.</span>'
+    : '';
   if (gpus.length === 1) {
     const vram = parseFloat(gpus[0].vram_gb);
     if (vram >= 24) {
-      el.innerHTML = '<strong class="text-gray-400">Recommended:</strong> Your GPU has plenty of VRAM — it can handle all AI tasks (chat, voice, images) simultaneously.';
+      el.innerHTML = '<strong class="text-gray-400">Recommended:</strong> Your GPU has plenty of VRAM — it can handle all AI tasks (chat, voice, images) simultaneously.' + amdNote;
     } else if (vram >= 12) {
-      el.innerHTML = '<strong class="text-gray-400">Recommended:</strong> Run your AI model + voice on this GPU. Image generation may need the model to be unloaded temporarily.';
+      el.innerHTML = '<strong class="text-gray-400">Recommended:</strong> Run your AI model + voice on this GPU. Image generation may need the model to be unloaded temporarily.' + amdNote;
     } else {
-      el.innerHTML = '<strong class="text-gray-400">Recommended:</strong> Focus this GPU on the AI model. Use cloud services for voice and images for the best experience.';
+      el.innerHTML = '<strong class="text-gray-400">Recommended:</strong> Focus this GPU on the AI model. Use cloud services for voice and images for the best experience.' + amdNote;
     }
   } else {
     const sorted = [...gpus].sort((a, b) => parseFloat(b.vram_gb) - parseFloat(a.vram_gb));
@@ -1522,7 +1555,7 @@ async function testGpuConnection() {
       renderGpuRoles(gpusWithHost);
     } else if (data.connected) {
       result.className = 'text-sm mt-2 text-yellow-400';
-      result.textContent = 'Connected successfully but no NVIDIA GPU found on that computer. It may have an AMD or Intel GPU (not yet supported for remote scanning), or no GPU at all.';
+      result.textContent = 'Connected successfully but no GPU detected. Syntaur scans for NVIDIA (CUDA), AMD (Vulkan), Apple (Metal), and Intel (OpenVINO). If this computer has a GPU the scan missed, let us know.';
     } else {
       result.className = 'text-sm mt-2 text-red-400';
       result.textContent = data.error || 'Could not connect. Make sure you completed Steps 1 and 2, and that the IP address and username are correct.';
@@ -1656,6 +1689,80 @@ async function testLlm() {
     result.className = 'text-sm mt-2 text-red-400';
     result.textContent = 'Network error';
   }
+}
+
+// One-click Vulkan llama.cpp install for AMD hosts. See
+// setup_install.rs — kicks off background install, polls status, points
+// the 'Network LLM' slot at http://127.0.0.1:1235 when ready.
+let llamaVulkanPollTimer = null;
+
+async function startLlamaVulkanInstall() {
+  const status = document.getElementById('llama-vulkan-status');
+  if (!status) return;
+  status.className = 'text-xs text-gray-400 ml-2';
+  status.textContent = 'Starting...';
+  try {
+    const resp = await fetch('/api/setup/install-llama-vulkan', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
+    });
+    if (!resp.ok) {
+      const msg = await resp.text();
+      status.className = 'text-xs text-red-400 ml-2';
+      status.textContent = msg || 'Could not start install';
+      return;
+    }
+    pollLlamaVulkanStatus();
+  } catch(e) {
+    status.className = 'text-xs text-red-400 ml-2';
+    status.textContent = 'Network error starting install';
+  }
+}
+
+function pollLlamaVulkanStatus() {
+  if (llamaVulkanPollTimer) clearInterval(llamaVulkanPollTimer);
+  const status = document.getElementById('llama-vulkan-status');
+  llamaVulkanPollTimer = setInterval(async () => {
+    try {
+      const resp = await fetch('/api/setup/install-llama-vulkan/status');
+      const data = await resp.json();
+      const label = {
+        idle: 'Idle',
+        fetching_release: 'Fetching llama.cpp release info...',
+        downloading: data.mb_total
+          ? `Downloading runtime (${data.mb_done}/${data.mb_total} MB)...`
+          : `Downloading runtime (${data.mb_done || 0} MB)...`,
+        extracting: 'Extracting runtime...',
+        writing_service: 'Configuring service...',
+        starting_service: 'Starting llama-server...',
+        waiting_for_model: 'Downloading model — first run takes 1–3 minutes...',
+        done: `Ready at ${data.url}. Use the 'Network LLM' option.`,
+        error: `Install failed: ${data.message || 'unknown error'}`,
+      }[data.phase] || data.phase;
+      if (data.phase === 'done') {
+        clearInterval(llamaVulkanPollTimer);
+        llamaVulkanPollTimer = null;
+        status.className = 'text-xs text-green-400 ml-2';
+        status.textContent = label;
+        // Point the Network LLM card at the freshly-started server and
+        // nudge the wizard over to it.
+        const netInput = document.getElementById('llm-opt-network');
+        if (netInput) netInput.querySelector('input').checked = true;
+        selectLlm('network');
+        const desc = document.getElementById('llm-network-desc');
+        if (desc) desc.textContent = `Your local Vulkan llama.cpp server at ${data.url}`;
+      } else if (data.phase === 'error') {
+        clearInterval(llamaVulkanPollTimer);
+        llamaVulkanPollTimer = null;
+        status.className = 'text-xs text-red-400 ml-2';
+        status.textContent = label;
+      } else {
+        status.className = 'text-xs text-gray-400 ml-2';
+        status.textContent = label;
+      }
+    } catch(e) {
+      // Network blip — just keep polling.
+    }
+  }, 2000);
 }
 
 // Step 2b: Fallback provider

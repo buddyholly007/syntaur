@@ -28,6 +28,8 @@ mod voice_api;
 mod modules;
 mod pages;
 mod setup;
+mod setup_install;
+mod dashboard_api;
 mod license;
 mod tax;
 mod tax_pdf;
@@ -6501,6 +6503,7 @@ async fn main() {
         .route("/api/scheduler/prefs", post(handle_scheduler_prefs_put))
         .route("/api/scheduler/backdrop", post(setup::handle_scheduler_backdrop_upload))
         .route("/api/scheduler/backdrop", axum::routing::delete(setup::handle_scheduler_backdrop_delete))
+        .route("/api/scheduler/today", get(handle_scheduler_today))
         .route("/api/scheduler/lists", get(handle_scheduler_lists_get))
         .route("/api/scheduler/lists", post(handle_scheduler_lists_post))
         .route("/api/scheduler/habits", get(handle_scheduler_habits_get))
@@ -6904,6 +6907,11 @@ async fn main() {
         .route("/api/setup/check-tailscale", get(setup::handle_check_tailscale))
         .route("/api/setup/ssh-pubkey", get(setup::handle_ssh_pubkey))
         .route("/api/setup/test-gpu", post(setup::handle_test_gpu))
+        .route("/api/setup/install-llama-vulkan", post(setup_install::handle_install_start))
+        .route("/api/setup/install-llama-vulkan/status", get(setup_install::handle_install_status))
+        .route("/api/appearance", get(dashboard_api::handle_get_appearance).post(dashboard_api::handle_post_appearance))
+        .route("/api/dashboard/layout", get(dashboard_api::handle_get_layout).post(dashboard_api::handle_post_layout))
+        .route("/api/dashboard/system", get(dashboard_api::handle_get_system))
         .route("/api/upload", post(setup::handle_file_upload))
         .route("/api/setup/test-llm", post(setup::handle_test_llm))
         .route("/api/setup/test-telegram", post(setup::handle_test_telegram))
@@ -7947,6 +7955,99 @@ async fn handle_scheduler_prefs_put(
         Ok(())
     }).await.ok();
     Ok(Json(serde_json::json!({"ok": true})))
+}
+
+/// GET /api/scheduler/today — condensed feed for the dashboard Today widget.
+///
+/// Returns `{ events: [{id,title,time_label,past}], week: [{label,count}...],
+/// weather: null }`. `events` is today's calendar in ascending start order;
+/// `week` is event counts for each of the next 7 days (for the weekbar
+/// sparkline). Weather is a placeholder — no provider wired yet.
+async fn handle_scheduler_today(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    use chrono::{Local, Timelike};
+    let token = crate::security::bearer_from_headers(&headers);
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+
+    // Compute today's local-date range + the 7-day window covering the
+    // weekbar. We pass ISO-formatted strings to SQLite because the
+    // `calendar_events.start_time` column stores TEXT — lexicographic
+    // comparison on ISO-8601 is date-correct.
+    let now_local = Local::now();
+    let today_start = now_local.date_naive().and_hms_opt(0, 0, 0).unwrap();
+    let today_end   = now_local.date_naive().and_hms_opt(23, 59, 59).unwrap();
+    let week_end    = today_start + chrono::Duration::days(7);
+    let today_start_iso = today_start.format("%Y-%m-%dT%H:%M:%S").to_string();
+    let today_end_iso   = today_end.format("%Y-%m-%dT%H:%M:%S").to_string();
+    let week_end_iso    = week_end.format("%Y-%m-%dT%H:%M:%S").to_string();
+    let now_iso = now_local.naive_local().format("%Y-%m-%dT%H:%M:%S").to_string();
+    let now_min = (now_local.hour() * 60 + now_local.minute()) as i64;
+
+    let db = state.db_path.clone();
+    let (events, week) = tokio::task::spawn_blocking(move || -> rusqlite::Result<(Vec<serde_json::Value>, Vec<serde_json::Value>)> {
+        let conn = rusqlite::Connection::open(&db)?;
+        // Today's events.
+        let mut stmt = conn.prepare(
+            "SELECT id, title, start_time, end_time, all_day FROM calendar_events
+             WHERE user_id = ? AND start_time >= ? AND start_time <= ?
+             ORDER BY start_time ASC LIMIT 20",
+        )?;
+        let events: Vec<serde_json::Value> = stmt.query_map(
+            rusqlite::params![uid, &today_start_iso, &today_end_iso],
+            |r| {
+                let id: i64 = r.get(0)?;
+                let title: String = r.get(1)?;
+                let start: String = r.get(2)?;
+                let _end: Option<String> = r.get(3)?;
+                let all_day: i64 = r.get(4)?;
+                let past = start.as_str() < now_iso.as_str();
+                // Time label = "14:30" (HH:MM) or "All day" for all-day events.
+                let time_label = if all_day == 1 {
+                    String::from("All day")
+                } else {
+                    start.get(11..16).unwrap_or("").to_string()
+                };
+                Ok(serde_json::json!({
+                    "id": id,
+                    "title": title,
+                    "time_label": time_label,
+                    "past": past,
+                }))
+            }
+        )?.filter_map(Result::ok).collect();
+
+        // Per-day counts for the next 7 days (weekbar sparkline).
+        let mut week: Vec<serde_json::Value> = Vec::with_capacity(7);
+        for day in 0..7i64 {
+            let day_start = today_start + chrono::Duration::days(day);
+            let day_end   = day_start + chrono::Duration::days(1);
+            let ds = day_start.format("%Y-%m-%dT%H:%M:%S").to_string();
+            let de = day_end.format("%Y-%m-%dT%H:%M:%S").to_string();
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM calendar_events WHERE user_id = ? AND start_time >= ? AND start_time < ?",
+                rusqlite::params![uid, ds, de],
+                |r| r.get(0),
+            ).unwrap_or(0);
+            week.push(serde_json::json!({
+                "label": day_start.format("%a").to_string(),
+                "count": count,
+            }));
+        }
+        Ok((events, week))
+    })
+    .await
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let _ = (week_end_iso, now_min); // silence unused warnings if we prune
+    Ok(Json(serde_json::json!({
+        "events": events,
+        "week": week,
+        "weather": serde_json::Value::Null,
+    })))
 }
 
 async fn handle_scheduler_lists_get(

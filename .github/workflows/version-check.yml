@@ -21,53 +21,64 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Extract workspace version
+      - name: Extract canonical version (VERSION file is source of truth)
         id: canon
         run: |
-          VERSION=$(grep -E '^version\s*=' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
-          if [ -z "$VERSION" ]; then
-            # Fallback: grab from a known bin Cargo.toml
-            VERSION=$(grep -E '^version\s*=' syntaur-gateway/Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ ! -f VERSION ]; then
+            echo "::error::VERSION file missing at repo root. It is the authoritative source."
+            exit 1
           fi
+          VERSION=$(tr -d '[:space:]' < VERSION)
           if [ -z "$VERSION" ]; then
-            echo "::error::Could not extract canonical version from Cargo.toml"
+            echo "::error::VERSION file is empty"
             exit 1
           fi
           echo "Canonical version: $VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
+      - name: Check workspace Cargo.toml
+        run: |
+          V="${{ steps.canon.outputs.version }}"
+          if ! grep -qE "^version = \"$V\"" Cargo.toml; then
+            echo "::error file=Cargo.toml::[workspace.package] version mismatch (want $V). Run scripts/sync-version.sh"
+            grep -nE "^version = " Cargo.toml | head -5
+            exit 1
+          fi
+
       - name: Check install.sh
         run: |
           V="${{ steps.canon.outputs.version }}"
-          if [ ! -f install.sh ]; then
-            echo "install.sh missing — skipping"
-            exit 0
-          fi
-          grep -qE "^VERSION=\"$V\"" install.sh || {
-            echo "::error file=install.sh::VERSION mismatch (want $V, see install.sh header)"
-            grep -nE "^VERSION=" install.sh || true
+          if ! grep -qE "^VERSION=\"$V\"" install.sh; then
+            echo "::error file=install.sh::VERSION mismatch (want $V). Run scripts/sync-version.sh"
+            grep -nE "^VERSION=" install.sh | head -3
             exit 1
-          }
-
-      - name: Check landing page (if present)
-        run: |
-          V="${{ steps.canon.outputs.version }}"
-          if [ -d landing ]; then
-            if grep -rE "v[0-9]+\.[0-9]+\.[0-9]+" landing/ 2>/dev/null | grep -vE "v$V" | grep -E "v[0-9]+\.[0-9]+\.[0-9]+"; then
-              echo "::warning file=landing/::Landing page may reference an out-of-date version"
-            fi
           fi
 
-      - name: Check README (informational)
+      - name: Check install.ps1
         run: |
           V="${{ steps.canon.outputs.version }}"
-          if grep -qE "v[0-9]+\.[0-9]+\.[0-9]+" README.md; then
-            if ! grep -qE "v$V|version $V" README.md; then
-              echo "::warning file=README.md::README does not reference the canonical version $V"
+          if ! grep -qE "^\\\$Version = \"$V\"" install.ps1; then
+            echo "::error file=install.ps1::\$Version mismatch (want $V). Run scripts/sync-version.sh"
+            grep -nE "^\\\$Version = " install.ps1 | head -3
+            exit 1
+          fi
+
+      - name: Check landing page version badge
+        run: |
+          V="${{ steps.canon.outputs.version }}"
+          if [ -f landing/index.html ]; then
+            if ! grep -qE "<!-- VERSION-BADGE -->v$V<!-- /VERSION-BADGE -->" landing/index.html; then
+              echo "::error file=landing/index.html::VERSION-BADGE mismatch (want v$V). Run scripts/sync-version.sh"
+              grep -nE "VERSION-BADGE" landing/index.html | head -3
+              exit 1
             fi
           fi
 
       - name: Summary
         run: |
-          echo "Canonical version: ${{ steps.canon.outputs.version }}"
-          echo "install.sh: ✓"
+          echo "All version strings match: ${{ steps.canon.outputs.version }}"
+          echo "  - VERSION file ✓"
+          echo "  - Cargo.toml [workspace.package] ✓"
+          echo "  - install.sh ✓"
+          echo "  - install.ps1 ✓"
+          echo "  - landing/index.html VERSION-BADGE ✓"

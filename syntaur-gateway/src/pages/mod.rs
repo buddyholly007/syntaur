@@ -41,6 +41,8 @@ pub mod settings_agents;
 pub mod settings_legacy;
 pub mod setup;
 pub mod shared;
+pub mod theme;
+pub mod dashboard_widgets;
 pub mod onboarding;
 pub mod profile;
 pub mod register;

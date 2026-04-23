@@ -1,6 +1,6 @@
 [package]
 name = "syntaur-gateway"
-version = "0.4.3"
+version.workspace = true
 edition.workspace = true
 
 [dependencies]

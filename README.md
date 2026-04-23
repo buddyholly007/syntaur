@@ -30,15 +30,15 @@ The installer creates a **Syntaur** shortcut in your app launcher (Linux), Appli
 
 ## What You Get
 
-- **AI Chat** — talk to your AI through a polished web interface with markdown, code blocks, and tool visualization
-- **88 tools** — web search, email, file management, browser automation, office documents, smart home control, and more
-- **Modular** — enable only what you need, install add-on modules
-- **Private** — runs 100% on your hardware. Your conversations never leave your network
-- **Multiple LLM backends** — local GPU (Ollama), network LLM, or cloud API (OpenRouter free tier, OpenAI, Anthropic)
-- **Always-on fallback** — configure 2+ backends so you're never stuck during an outage
-- **Voice** — talk to your AI with wake word, speech-to-text, and natural text-to-speech
-- **Smart Home** — control lights, thermostats, and more through Home Assistant
-- **Telegram** — chat from your phone, get push notifications, approve actions remotely
+- **AI Chat** — web interface with markdown, code blocks, and tool visualization
+- **100+ built-in tools** — web search, email, file management, browser automation, office documents, smart home control, social media, finance, and more
+- **Modular** — enable only what you need
+- **Private by default** — your conversations never leave your network when you use a local or LAN LLM. Cloud APIs are optional.
+- **Multiple LLM backends** — local GPU (llama.cpp Vulkan for AMD, CUDA for NVIDIA, Metal for Apple, or Ollama), LAN LLM, or cloud API (OpenRouter free tier, Groq, Cerebras, OpenAI, Anthropic)
+- **Fallback chain** — configure 2+ backends so an outage doesn't stop you
+- **Voice** — wake word, speech-to-text, and text-to-speech (currently NVIDIA/Apple; AMD voice backends not yet shipped)
+- **Smart Home** — built-in Matter + Kasa (TP-Link) + aidot (Wi-Fi bulb) drivers; MQTT with Shelly / OpenMQTTGateway / Zigbee2MQTT dialects; Home Assistant is optional, not required
+- **Telegram** — chat from your phone, get notifications, approve actions remotely
 
 ## System Requirements
 
@@ -51,7 +51,7 @@ The installer creates a **Syntaur** shortcut in your app launcher (Linux), Appli
 
 ## How It Works
 
-Syntaur is a single binary (~35MB) that runs as a background service. It serves a web dashboard at `http://localhost:18789` where you can:
+Syntaur is a single binary (~60 MB release build, ~35 MB stripped) that runs as a background service. It serves a web dashboard at `http://localhost:18789` where you can:
 
 1. **Chat** — full-featured conversation with your AI
 2. **Manage modules** — enable/disable capabilities
@@ -60,16 +60,22 @@ Syntaur is a single binary (~35MB) that runs as a background service. It serves 
 
 ## LLM Options
 
-| Backend | Privacy | Speed | Cost |
-|---|---|---|---|
-| **Local GPU** (Ollama) | Full | Fast | Free |
-| **Network LLM** | LAN-only | Fast | Free |
-| **OpenRouter** | Cloud | Fast | Free tier available |
-| **OpenAI** | Cloud | Fast | ~$5-15/mo |
-| **Anthropic** | Cloud | Fast | ~$10-30/mo |
+| Backend | Privacy | Cost |
+|---|---|---|
+| **Local GPU — NVIDIA / Apple** | Full | Free (Ollama, llama.cpp, MLX) |
+| **Local GPU — AMD (Vulkan)** | Full | Free (one-click llama.cpp install) |
+| **Local CPU** | Full | Free (slow but works on any box) |
+| **LAN LLM** (another box on your network) | LAN-only | Free |
+| **OpenRouter** | Cloud | Free tier available |
+| **Groq / Cerebras** | Cloud | Free tier |
+| **OpenAI / Anthropic** | Cloud | Pay-per-use (optional) |
 
-The setup wizard auto-detects your hardware and recommends the best configuration with automatic fallbacks.
+The setup wizard auto-detects your hardware and recommends a configuration with automatic fallbacks. A free cloud API (OpenRouter / Groq / Cerebras) is always an option — you never need to buy credits to use Syntaur.
 
 ## License
 
-3-day free trial with full access. License key for continued use.
+**Free tier** — AI chat, web search, file management, shell & code, Telegram, community modules.
+
+**Pro tier ($49 one-time)** — voice assistant, smart home, email/SMS, office docs, browser automation, social media, finance, security cameras. Perpetual license — pay once, use forever.
+
+See the [landing page](https://syntaur.dev) for a full feature split.

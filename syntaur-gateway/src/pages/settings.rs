@@ -865,37 +865,219 @@ fn module_tile(ico: &str, name: &str, url: &str, desc: &str) -> Markup {
 // ── Appearance ─────────────────────────────────────────────
 fn appearance_theme_body() -> Markup {
     html! {
-        div class="ss-card" {
+        // Ambient theme tokens — used only for the live preview strip on
+        // this page (via body.syntaur-ambient in the JS below). Per-module
+        // themes (Music, Knowledge, etc.) are unaffected.
+        style { (PreEscaped(crate::pages::theme::THEME_STYLE)) }
+        div class="ss-card sd-appearance-root" {
             p class="ss-help" {
-                "The dashboard uses a calm-neutral palette by default. Each module has its "
-                "own theme (cyberpunk music, parchment knowledge, retro-CRT coders, LCARS tax) — "
-                "those won't change."
+                "These settings control the "
+                strong { "Dashboard" }
+                " only. Each module (Music, Knowledge, Coders, Tax) keeps its own theme."
             }
-            div class="ss-field" {
-                label class="ss-label" { "Dashboard density" }
-                div class="ss-radio-row" {
-                    label class="ss-radio" { input type="radio" name="density" value="comfy" checked; " Comfortable" }
-                    label class="ss-radio" { input type="radio" name="density" value="compact"; " Compact" }
+
+            // Live preview strip — shows the chosen palette at a glance.
+            div class="sd-preview" id="sd-preview" {
+                div class="sd-preview-card" {
+                    div class="sd-label" { "Preview" }
+                    div class="sd-big-num" { "24" }
+                    div class="sd-mute" { "widgets available" }
                 }
-                p class="ss-help" { "Compact trims padding in cards and widgets by ~30%." }
+                div class="sd-preview-card sd-preview-card-accent" {
+                    div class="sd-label" { "Accent" }
+                    div class="sd-preview-accent-block" {}
+                }
             }
+
             div class="ss-field" {
                 label class="ss-label" { "Accent" }
-                div class="ss-swatch-row" {
-                    div class="ss-swatch" data-color="#7aa2ff" style="background:#7aa2ff" title="Calm blue (default)" {}
-                    div class="ss-swatch" data-color="#7fbf8a" style="background:#7fbf8a" title="Sage" {}
-                    div class="ss-swatch" data-color="#f0b470" style="background:#f0b470" title="Amber" {}
-                    div class="ss-swatch" data-color="#d97a7a" style="background:#d97a7a" title="Clay" {}
-                    div class="ss-swatch" data-color="#b797c7" style="background:#b797c7" title="Lavender" {}
+                div class="sd-accent-row" {
+                    @for (key, name, hue) in [("sage","Sage",135.0), ("indigo","Soft indigo",265.0), ("ochre","Dusk ochre",70.0), ("gray","Warm gray",260.0)] {
+                        button type="button" class="sd-accent-chip" data-accent=(key)
+                               style=(format!("--swatch: oklch(0.68 0.08 {hue})")) {
+                            span class="sd-accent-swatch" {}
+                            span class="sd-accent-name" { (name) }
+                        }
+                    }
                 }
-                p class="ss-help" { "Changes the dashboard accent color only; module themes are unaffected." }
+                p class="ss-help" { "Hue drifts ±18° through the day (if Hue shift is on) so morning feels cool and dusk feels warm." }
             }
-            p class="ss-help" style="color:var(--ss-warn)" {
-                "(Live preview + persistence wiring coming — this pane currently shows options only.)"
+
+            div class="ss-field" {
+                label class="ss-label" { "Theme mode" }
+                div class="ss-radio-row" {
+                    label class="ss-radio" { input type="radio" name="theme_mode" value="auto"; " Auto (sunrise → sunset)" }
+                    label class="ss-radio" { input type="radio" name="theme_mode" value="light"; " Light always" }
+                    label class="ss-radio" { input type="radio" name="theme_mode" value="dark"; " Dark always" }
+                    label class="ss-radio" { input type="radio" name="theme_mode" value="schedule"; " Schedule" }
+                }
+                p class="ss-help" { "Auto needs your location below. Schedule uses your fixed light/dark times." }
+            }
+
+            div class="ss-field" {
+                label class="ss-label" { "Hue shift through the day" }
+                label class="ss-toggle" {
+                    input type="checkbox" id="sd-hue-shift";
+                    span class="ss-toggle-track" { span class="ss-toggle-thumb" {} }
+                    span { " Warmer at dusk, cooler at dawn (±18°)" }
+                }
+            }
+
+            div class="ss-field" {
+                label class="ss-label" { "Ambient mode" }
+                label class="ss-toggle" {
+                    input type="checkbox" id="sd-ambient-mode";
+                    span class="ss-toggle-track" { span class="ss-toggle-thumb" {} }
+                    span { " Subtle breathing + dusk motes + weather reflection" }
+                }
+                p class="ss-help" { "Adds a faint living feel to the dashboard. Off by default. Honors your OS reduced-motion setting." }
+            }
+
+            div class="ss-field sd-location-field" {
+                label class="ss-label" { "Location (for sunrise/sunset)" }
+                div class="sd-location-row" {
+                    input type="number" id="sd-lat" class="ss-input" step="0.0001" placeholder="Latitude (e.g. 47.6062)";
+                    input type="number" id="sd-lon" class="ss-input" step="0.0001" placeholder="Longitude (e.g. -122.3321)";
+                    button type="button" class="ss-btn" id="sd-geolocate" { "Use my location" }
+                }
+                p class="ss-help" { "Only stored on this install — never sent anywhere else." }
+            }
+
+            div class="sd-schedule-field ss-field" id="sd-schedule-field" style="display:none" {
+                label class="ss-label" { "Schedule (24-hour)" }
+                div class="sd-location-row" {
+                    label class="sd-inline" { "Light starts " input type="time" id="sd-light-start" class="ss-input" value="07:00"; }
+                    label class="sd-inline" { "Dark starts " input type="time" id="sd-dark-start" class="ss-input" value="19:00"; }
+                }
+            }
+
+            div class="ss-save-row" {
+                button type="button" class="ss-btn ss-btn-primary" id="sd-appearance-save" { "Save" }
+                span class="ss-save-status" id="sd-appearance-status" {}
             }
         }
+
+        style { (PreEscaped(APPEARANCE_STYLE)) }
+        script { (PreEscaped(crate::pages::theme::THEME_SCRIPT)) }
+        script { (PreEscaped(APPEARANCE_SCRIPT)) }
     }
 }
+
+const APPEARANCE_STYLE: &str = r##"
+.sd-appearance-root { background: var(--bg-card, inherit); }
+.sd-preview { display: flex; gap: 12px; margin: 12px 0 24px; padding: 16px; background: var(--bg-elev); border: 1px solid var(--line); border-radius: 14px; }
+.sd-preview-card { flex:1; padding: 16px; background: var(--bg-card); border: 1px solid var(--line); border-radius: 12px; }
+.sd-preview-card-accent { display:flex; flex-direction:column; justify-content:space-between; }
+.sd-preview-accent-block { margin-top: 8px; height: 32px; border-radius: 8px; background: var(--accent); }
+.sd-big-num { font-size: 32px; font-weight: 700; color: var(--fg); font-variant-numeric: tabular-nums; line-height: 1; }
+.sd-mute { color: var(--fg-mute); font-size: 13px; margin-top: 4px; }
+.sd-label { color: var(--fg-mute); font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; font-weight: 600; }
+.sd-accent-row { display: flex; gap: 10px; flex-wrap: wrap; }
+.sd-accent-chip { display: flex; align-items: center; gap: 10px; padding: 8px 14px 8px 10px; border-radius: 999px; border: 1px solid var(--line, rgba(255,255,255,0.1)); background: transparent; color: inherit; font: inherit; cursor: pointer; transition: border-color 200ms, background 200ms; }
+.sd-accent-chip:hover { border-color: var(--swatch); }
+.sd-accent-chip[data-active="true"] { border-color: var(--swatch); background: color-mix(in oklab, var(--swatch) 14%, transparent); }
+.sd-accent-swatch { width: 20px; height: 20px; border-radius: 50%; background: var(--swatch); flex-shrink: 0; box-shadow: 0 0 0 1px rgb(0 0 0 / 0.1); }
+.sd-accent-name { color: inherit; font-size: 14px; }
+.sd-location-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.sd-location-row .ss-input { flex: 1; min-width: 180px; }
+.sd-inline { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+.ss-save-row { margin-top: 24px; display: flex; gap: 12px; align-items: center; }
+.ss-save-status { color: var(--fg-mute); font-size: 13px; }
+"##;
+
+const APPEARANCE_SCRIPT: &str = r##"
+(function() {
+  const root = document.querySelector('.sd-appearance-root');
+  if (!root) return;
+  // Enable ambient preview on this page only (not all of Settings).
+  document.body.classList.add('syntaur-ambient');
+
+  const $ = sel => root.querySelector(sel);
+  const chips = root.querySelectorAll('.sd-accent-chip');
+  const modeRadios = root.querySelectorAll('input[name=theme_mode]');
+  const hueShift = $('#sd-hue-shift');
+  const ambientMode = $('#sd-ambient-mode');
+  const lat = $('#sd-lat'), lon = $('#sd-lon');
+  const geoBtn = $('#sd-geolocate');
+  const scheduleField = $('#sd-schedule-field');
+  const lightStart = $('#sd-light-start'), darkStart = $('#sd-dark-start');
+  const saveBtn = $('#sd-appearance-save'), status = $('#sd-appearance-status');
+
+  const DEFAULT = { accent:'sage', theme_mode:'auto', hue_shift:1, latitude:null, longitude:null, light_start_min:420, dark_start_min:1140, ambient_mode:0 };
+  let state = { ...DEFAULT };
+
+  function toHM(min) { const h = Math.floor(min/60), m = min%60; return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`; }
+  function fromHM(s) { if (!s) return 0; const [h,m] = s.split(':').map(Number); return h*60+m; }
+
+  function hydrateUI() {
+    chips.forEach(c => c.dataset.active = (c.dataset.accent === state.accent) ? 'true' : 'false');
+    modeRadios.forEach(r => { r.checked = (r.value === state.theme_mode); });
+    hueShift.checked = !!state.hue_shift;
+    if (ambientMode) ambientMode.checked = !!state.ambient_mode;
+    lat.value = state.latitude != null ? state.latitude : '';
+    lon.value = state.longitude != null ? state.longitude : '';
+    lightStart.value = toHM(state.light_start_min);
+    darkStart.value = toHM(state.dark_start_min);
+    scheduleField.style.display = (state.theme_mode === 'schedule') ? 'block' : 'none';
+    if (window.SyntaurTheme) window.SyntaurTheme.setPref(state);
+  }
+
+  function collect() {
+    state.hue_shift = hueShift.checked ? 1 : 0;
+    state.ambient_mode = ambientMode && ambientMode.checked ? 1 : 0;
+    state.latitude = lat.value ? parseFloat(lat.value) : null;
+    state.longitude = lon.value ? parseFloat(lon.value) : null;
+    state.light_start_min = fromHM(lightStart.value);
+    state.dark_start_min = fromHM(darkStart.value);
+    if (window.SyntaurTheme) window.SyntaurTheme.setPref(state);
+  }
+
+  chips.forEach(c => c.addEventListener('click', () => {
+    state.accent = c.dataset.accent;
+    hydrateUI();
+  }));
+  modeRadios.forEach(r => r.addEventListener('change', () => {
+    state.theme_mode = r.value;
+    scheduleField.style.display = (r.value === 'schedule') ? 'block' : 'none';
+    collect();
+  }));
+  [hueShift, ambientMode, lat, lon, lightStart, darkStart].forEach(el => el && el.addEventListener('input', collect));
+  if (ambientMode) ambientMode.addEventListener('change', collect);
+
+  geoBtn.addEventListener('click', () => {
+    if (!navigator.geolocation) { status.textContent = 'Geolocation not supported'; return; }
+    status.textContent = 'Locating…';
+    navigator.geolocation.getCurrentPosition(pos => {
+      lat.value = pos.coords.latitude.toFixed(4);
+      lon.value = pos.coords.longitude.toFixed(4);
+      collect();
+      status.textContent = 'Location set';
+      setTimeout(() => status.textContent = '', 2500);
+    }, err => { status.textContent = 'Could not get location (' + err.message + ')'; });
+  });
+
+  saveBtn.addEventListener('click', async () => {
+    collect();
+    status.textContent = 'Saving…';
+    try {
+      const r = await fetch('/api/appearance', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(state)
+      });
+      if (!r.ok) { status.textContent = 'Save failed'; return; }
+      status.textContent = 'Saved';
+      setTimeout(() => status.textContent = '', 2000);
+    } catch { status.textContent = 'Save failed'; }
+  });
+
+  // Initial load
+  fetch('/api/appearance', { credentials:'same-origin' })
+    .then(r => r.ok ? r.json() : null)
+    .then(d => { if (d && d.accent) state = d; hydrateUI(); })
+    .catch(() => hydrateUI());
+})();
+"##;
 
 // ── Privacy & data ─────────────────────────────────────────
 fn privacy_data_body() -> Markup {
