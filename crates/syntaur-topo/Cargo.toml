@@ -1,0 +1,24 @@
+[package]
+name = "syntaur-topo"
+version = "0.1.0"
+edition.workspace = true
+description = "Network topology + routing rules for Sean's LAN. Single source of truth so deploy-guard, syntaur-ship, and Claude never hardcode the wrong jump host."
+
+[lib]
+name = "syntaur_topo_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "syntaur-topo"
+path = "src/bin/syntaur_topo.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_yaml = "0.9"
+serde_json = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+# Auto-detect current host for `path <to>` + "from current" queries.
+# `hostname` crate reads the Unix hostname — fast + pure Rust.
+hostname = "0.4"
