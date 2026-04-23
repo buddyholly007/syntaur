@@ -234,6 +234,11 @@ fn run_full_inner(cfg: &Config, opts: &RunOptions, ctx: &StageContext) -> Result
     // abort) — prod is already live at this point; drift here means
     // repair at source + redeploy, not roll back.
     let _ = stages::version_audit::run(ctx);
+    // Phase 6: refresh the Win11 nightly-tester binary so overnight
+    // tests hit the just-deployed version. Non-fatal — prod already up.
+    if !opts.social_only {
+        let _ = stages::win11::run(ctx);
+    }
 
     if !opts.dry_run {
         let mut stamp = build_stamp(cfg, opts)?;
@@ -469,12 +474,14 @@ fn human_duration(d: chrono::Duration) -> String {
     }
 }
 
-pub fn run_release(_cfg: &Config, _version: &str) -> Result<()> {
-    anyhow::bail!("release: not yet implemented (Phase 6)")
+pub fn run_release(cfg: &Config, version: &str) -> Result<()> {
+    crate::release::run(cfg, version)
 }
 
-pub fn run_refresh_windows(_cfg: &Config) -> Result<()> {
-    anyhow::bail!("refresh-windows: not yet implemented (Phase 6)")
+pub fn run_refresh_windows(cfg: &Config) -> Result<()> {
+    let opts = RunOptions::default();
+    let ctx = StageContext { cfg, opts: &opts };
+    stages::win11::run(&ctx)
 }
 
 pub fn run_version_sweep(cfg: &Config) -> Result<()> {

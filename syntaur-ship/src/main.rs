@@ -36,6 +36,7 @@ mod coord;
 mod guards;
 mod journal;
 mod pipeline;
+mod release;
 mod stages;
 mod state;
 
