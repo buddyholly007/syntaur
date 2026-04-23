@@ -25,6 +25,18 @@ members = [
     "crates/syntaur-matter-ble",
     "crates/syntaur-matter-ip",
 ]
+# `rust-aidot-harvest` is INTENTIONALLY excluded from the workspace.
+# It depends on the `rsa` crate, which has an unpatched timing-attack
+# advisory (RUSTSEC-2023-0071 — "Marvin Attack"). The advisory is a
+# decryption-side sidechannel against RSA PRIVATE keys; we only
+# ENCRYPT with a vendor public key during one-time device onboarding,
+# so the attack isn't reachable in our code. Keeping rsa out of the
+# main lockfile keeps `cargo audit` clean across all our runtime
+# crates. Build that crate explicitly when you need to re-onboard:
+#   cd crates/rust-aidot-harvest && cargo build --release
+exclude = [
+    "crates/rust-aidot-harvest",
+]
 
 [workspace.package]
 # Single source of truth for the main product version. All crates that
@@ -54,3 +66,12 @@ opt-level = "s"
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# ── CVE-driven patches ────────────────────────────────────────────────
+# rustls-webpki 0.102.8 has three open advisories (RUSTSEC-2026-0049,
+# -0098, -0104) pulled in transitively via rumqttd/rumqttc. rumqttd
+# 0.20.0 is the latest upstream release (Sept 2025) so a version bump
+# on our MQTT deps isn't available; the patch override forces all
+# downstream callers to the fixed version 0.103.x.
+[patch.crates-io]
+rustls-webpki = { git = "https://github.com/rustls/webpki", tag = "v/0.103.13" }

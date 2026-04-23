@@ -45,12 +45,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 mod crypto;
-mod harvest;
 mod protocol;
 
 pub use crypto::{decrypt_body, encrypt_body, pad_key_to_16};
-pub use harvest::{harvest, HarvestError};
 pub use protocol::{DeviceClient, FrameType, MAGIC, PORT};
+// One-time cloud harvest lives in the separate `rust-aidot-harvest`
+// crate (workspace-excluded) to keep the `rsa` crate off the main
+// lockfile — see its Cargo.toml for the rationale.
 
 /// On-disk inventory (one-time cloud harvest, then never touched again at runtime).
 #[derive(Debug, Clone, Serialize, Deserialize)]

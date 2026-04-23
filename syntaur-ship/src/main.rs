@@ -31,6 +31,7 @@
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;
 
+mod ci_audit;
 mod config;
 mod coord;
 mod guards;
@@ -74,6 +75,13 @@ struct Cli {
     /// Deploy only `rust-social-manager`, leaving the gateway running.
     #[arg(long, global = true)]
     social_only: bool,
+
+    /// Override the blocking CI-failure gate. Use ONLY when deploying
+    /// despite known failing workflows (e.g. upstream-only CVE that
+    /// can't be fixed right now). Logged into the deploy journal as
+    /// an auditable skip.
+    #[arg(long, global = true)]
+    force_ci_drift: bool,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -140,6 +148,7 @@ fn main() -> ExitCode {
         skip_mac: cli.skip_mac,
         skip_git: cli.skip_git,
         social_only: cli.social_only,
+        force_ci_drift: cli.force_ci_drift,
     };
 
     let result = match cli.command {

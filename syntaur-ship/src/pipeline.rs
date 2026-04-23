@@ -29,6 +29,11 @@ pub struct RunOptions {
     pub skip_mac: bool,
     pub skip_git: bool,
     pub social_only: bool,
+    /// Override the blocking CI-failure gate. Use when deploying
+    /// DESPITE known CI failures (e.g. a CVE that's upstream-only and
+    /// can't be fixed until an unrelated release cadence). Logged into
+    /// the journal as an explicit skip-flag so it's auditable.
+    pub force_ci_drift: bool,
 }
 
 pub struct StageContext<'a> {
@@ -81,10 +86,51 @@ pub fn run_full(cfg: &Config, opts: &RunOptions) -> Result<()> {
         }
     }
 
-    // CI gate — warn if latest release-sign.yml failed (current v0.5.0
-    // situation). Non-blocking per Phase 5 scope.
-    if !opts.dry_run {
-        let _ = guards::check_ci_status();
+    // Pre-deploy BLOCKING CI gate: refuse to deploy if any workflow on
+    // the current HEAD is failing. Override via --force-ci-drift.
+    // Catches the class of "I didn't notice CI was red" that had me
+    // deploy past 5 consecutive cargo-audit failures before Sean
+    // flagged the email notifications. Runs in dry-run too so
+    // `syntaur-ship check` catches CI drift before the real run.
+    let head = run_capture(
+        "git",
+        &["-C", cfg.workspace.to_str().unwrap(), "rev-parse", "HEAD"],
+    )
+    .unwrap_or_default()
+    .trim()
+    .to_string();
+    let pre_failures = crate::ci_audit::run(&head);
+    if !pre_failures.is_empty() {
+        if opts.force_ci_drift || opts.dry_run {
+            let tag = if opts.dry_run { "[ci-gate] (dry-run)" } else { "[ci-gate]" };
+            log::warn!(
+                "{tag} ⚠ {} CI workflow(s) failing on HEAD {}:",
+                pre_failures.len(),
+                &head[..head.len().min(10)]
+            );
+            for f in &pre_failures {
+                log::warn!("   ✗ {f}");
+            }
+            if !opts.dry_run {
+                log::warn!("[ci-gate] proceeding anyway because --force-ci-drift is set");
+            }
+        } else {
+            let list = pre_failures
+                .iter()
+                .map(|f| format!("  ✗ {f}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            anyhow::bail!(
+                "CI gate: {} workflow(s) failing on HEAD {}:\n{list}\n\nFix them or re-run with --force-ci-drift (logged).",
+                pre_failures.len(),
+                &head[..head.len().min(10)]
+            );
+        }
+    } else {
+        log::info!(
+            "[ci-gate] ✓ all CI workflows passing on HEAD {}",
+            &head[..head.len().min(10)]
+        );
     }
 
     let ctx = StageContext { cfg, opts };
@@ -241,6 +287,24 @@ fn run_full_inner(cfg: &Config, opts: &RunOptions, ctx: &StageContext) -> Result
     // abort) — prod is already live at this point; drift here means
     // repair at source + redeploy, not roll back.
     let _ = stages::version_audit::run(ctx);
+
+    // Post-deploy CI audit: poll ALL workflows on the current HEAD and
+    // surface failures. Replaces the old narrow release-sign-only
+    // check. Motivated by the rustls-webpki/cargo-audit miss: the tool
+    // was silent about 5+ consecutive cargo-audit failures because it
+    // only polled one workflow. Now every red workflow on this HEAD
+    // appears in the deploy output, so ending a session with a failing
+    // CI is visible instead of hidden.
+    let head = run_capture(
+        "git",
+        &["-C", ctx.cfg.workspace.to_str().unwrap(), "rev-parse", "HEAD"],
+    )
+    .unwrap_or_default()
+    .trim()
+    .to_string();
+    let ci_failures = crate::ci_audit::run(&head);
+    crate::ci_audit::log_failures(&ci_failures, &head[..head.len().min(10)]);
+
     // Phase 6: refresh the Win11 nightly-tester binary so overnight
     // tests hit the just-deployed version. Non-fatal — prod already up.
     if !opts.social_only {
@@ -287,6 +351,7 @@ fn build_stamp(cfg: &Config, opts: &RunOptions) -> Result<DeployStamp> {
     if opts.skip_mac { skip_flags.push("skip-mac".into()); }
     if opts.skip_git { skip_flags.push("skip-git".into()); }
     if opts.social_only { skip_flags.push("social-only".into()); }
+    if opts.force_ci_drift { skip_flags.push("force-ci-drift".into()); }
 
     let cargo_lock_sha256 = guards::cargo_lock_sha(&cfg.workspace).ok();
     Ok(DeployStamp {
@@ -469,6 +534,7 @@ fn collect_skip_flags(opts: &RunOptions) -> Vec<String> {
     if opts.skip_mac { v.push("skip-mac".into()); }
     if opts.skip_git { v.push("skip-git".into()); }
     if opts.social_only { v.push("social-only".into()); }
+    if opts.force_ci_drift { v.push("force-ci-drift".into()); }
     v
 }
 

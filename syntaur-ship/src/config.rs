@@ -63,7 +63,7 @@ impl Config {
             mac_mini: "sean@192.168.1.58".into(),
             truenas_user: "truenas_admin".into(),
             truenas_ip: "192.168.1.239".into(),
-            truenas_jump: "sean@192.168.1.69".into(),
+            truenas_jump: "root@192.168.1.3".into(),
             bin_dir: "/mnt/cherry_family_nas/syntaur/bin".into(),
             viewer_host: "sean@192.168.1.69".into(),
             health_url: "http://192.168.1.239:18789/health".into(),

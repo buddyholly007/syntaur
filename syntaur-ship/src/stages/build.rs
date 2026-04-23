@@ -8,17 +8,33 @@
 //! output he'd see running it by hand.
 
 use anyhow::{Context, Result};
+use std::path::PathBuf;
 use std::process::Command;
 
 use crate::pipeline::StageContext;
 
+/// Resolve `cargo` to an absolute path. Non-interactive SSH shells on
+/// claudevm don't source ~/.cargo/env so `cargo` isn't on PATH; we
+/// prefer ~/.cargo/bin/cargo, fall back to `cargo` (works in login
+/// shells), bail with a clear message if neither resolves.
+fn cargo_bin() -> PathBuf {
+    if let Ok(home) = std::env::var("HOME") {
+        let p = PathBuf::from(home).join(".cargo/bin/cargo");
+        if p.exists() {
+            return p;
+        }
+    }
+    PathBuf::from("cargo")
+}
+
 pub fn run(ctx: &StageContext) -> Result<()> {
     let ws = ctx.cfg.workspace.to_str().unwrap();
     let sm = ctx.cfg.social_manager.to_str().unwrap();
+    let cargo = cargo_bin();
 
     log::info!(">> cd {ws} && cargo build --release -p syntaur-gateway -p mace");
     if !ctx.opts.dry_run {
-        let status = Command::new("cargo")
+        let status = Command::new(&cargo)
             .args(["build", "--release", "-p", "syntaur-gateway", "-p", "mace"])
             .current_dir(&ctx.cfg.workspace)
             .status()
@@ -31,7 +47,7 @@ pub fn run(ctx: &StageContext) -> Result<()> {
     if ctx.cfg.social_manager.join("Cargo.toml").exists() {
         log::info!(">> cd {sm} && cargo build --release");
         if !ctx.opts.dry_run {
-            let status = Command::new("cargo")
+            let status = Command::new(&cargo)
                 .args(["build", "--release"])
                 .current_dir(&ctx.cfg.social_manager)
                 .status()

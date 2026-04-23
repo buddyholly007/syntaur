@@ -129,20 +129,17 @@ struct KasaHarvestReq {
 // ── impls ──────────────────────────────────────────────────────────────
 
 async fn harvest_aidot(body: Value) -> Result<Json<Value>, (StatusCode, String)> {
-    let req: AidotHarvestReq = serde_json::from_value(body)
+    // STUB: `rust_aidot::harvest` was moved to the standalone
+    // `rust-aidot-harvest` binary. Matter/vendor-bridge session will
+    // rewire this to shell out to that binary; until then, return a
+    // helpful error instead of blocking the whole syntaur-gateway
+    // build. This path is only hit by the Smart-Home setup flow.
+    let _: AidotHarvestReq = serde_json::from_value(body)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("bad body: {e}")))?;
-    let country = req.country.as_deref().unwrap_or("United States");
-    let inv = rust_aidot::harvest(&req.email, &req.password, country)
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("harvest: {e}")))?;
-    write_json_0600(&aidot_inventory_path(), &inv)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("persist: {e}")))?;
-    Ok(Json(json!({
-        "ok": true,
-        "vendor": "aidot",
-        "count": inv.devices.len(),
-        "path": aidot_inventory_path().display().to_string(),
-    })))
+    Err((
+        StatusCode::NOT_IMPLEMENTED,
+        "aidot harvest temporarily disabled while the API is reworked (use `rust-aidot-harvest` CLI)".to_string(),
+    ))
 }
 
 async fn harvest_kasa(body: Value) -> Result<Json<Value>, (StatusCode, String)> {

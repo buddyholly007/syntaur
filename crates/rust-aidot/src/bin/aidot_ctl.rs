@@ -1,13 +1,17 @@
 //! Thin CLI around rust-aidot — reads the inventory JSON + runs one action.
 //!
 //! Examples:
-//!   aidot-ctl harvest <email> <password>  # ONE-time setup; writes the inventory JSON
 //!   aidot-ctl list
 //!   aidot-ctl on  "Office Light 2"
 //!   aidot-ctl off "Office Light 2"
 //!   aidot-ctl dim "Office Light 2" 50
 //!   aidot-ctl rgbw "Office Light 2" 255 0 0 0
 //!   aidot-ctl status "Office Light 2"
+//!
+//! The one-time cloud harvest lives in the separate `rust-aidot-harvest`
+//! crate (workspace-excluded to keep `rsa` out of the main lockfile):
+//!
+//!   cd crates/rust-aidot-harvest && cargo run --release -- <email> <password>
 //!
 //! Looks up the device's IP from the harvested inventory's `properties.ipAddress`.
 //! Inventory path override: `$AIDOT_INVENTORY`; default `~/.syntaur/aidot_inventory.json`.
@@ -23,29 +27,15 @@ async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
     let argv: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
-    // `harvest` runs BEFORE the inventory exists, so handle it first.
-    if let ["harvest", email, password] = argv.as_slice() {
-        let country = std::env::var("AIDOT_COUNTRY").unwrap_or_else(|_| "United States".into());
-        eprintln!("[aidot] harvesting from prod-us-api.arnoo.com as {email}");
-        let inv = rust_aidot::harvest(email, password, &country).await?;
-        let path = inventory_path();
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).ok();
-        }
-        let bytes = serde_json::to_vec_pretty(&inv)?;
-        std::fs::write(&path, &bytes)?;
-        // 0600 — contains per-device AES keys + passwords.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-        }
+    if matches!(argv.as_slice(), ["harvest", ..]) {
         eprintln!(
-            "[aidot] wrote {} devices to {}",
-            inv.devices.len(),
-            path.display()
+            "[aidot-ctl] `harvest` was moved to a separate binary to keep the \
+             runtime build free of the `rsa` crate (RUSTSEC-2023-0071).\n\
+             \n\
+             Build + run it with:\n\
+               cd crates/rust-aidot-harvest && cargo run --release -- <email> <password>"
         );
-        return Ok(());
+        std::process::exit(2);
     }
 
     let inventory = load_inventory()?;

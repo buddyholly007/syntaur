@@ -11,6 +11,12 @@ path = "src/lib.rs"
 name = "aidot-ctl"
 path = "src/bin/aidot_ctl.rs"
 
+# NOTE: cloud-harvest used to be a feature here, gated on `rsa`. It
+# now lives in the separate, workspace-excluded `rust-aidot-harvest`
+# crate so that `rsa` (RUSTSEC-2023-0071, no upstream fix available)
+# never ends up in the main workspace Cargo.lock. See that crate's
+# Cargo.toml for the rationale. This crate is LAN-only.
+
 [dependencies]
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -20,8 +26,3 @@ anyhow = { workspace = true }
 aes = "0.8"
 cipher = "0.4"
 chrono = "0.4"
-# For the one-time cloud harvest (runs once at setup, never again).
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-rsa = "0.9"
-base64 = "0.22"
-rand = "0.8"
