@@ -132,6 +132,14 @@ fn stash_prev(ctx: &StageContext, dst_name: &str, ts: &str) -> Result<()> {
             String::from_utf8_lossy(&out.stderr)
         );
     }
+    // Log the remote script's decision so auto-rollback readers can
+    // tell which binaries have .prev stashes and which don't.
+    let remote_out = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    match remote_out.as_str() {
+        "stashed" => log::info!("   ↳ stashed {dst_name}.prev-{ts}"),
+        "no-prior" => log::info!("   ↳ no prior {dst_name} — no rollback target for this binary"),
+        other => log::warn!("   ↳ unexpected stash output for {dst_name}: {other}"),
+    }
     Ok(())
 }
 
@@ -201,10 +209,16 @@ fn docker_restart(cfg: &crate::config::Config) -> Result<()> {
 }
 
 fn health_loop(cfg: &crate::config::Config, max_secs: u64) -> bool {
+    // claudevm has no direct route to TrueNAS (.239) — LAN-segmented
+    // by design. All /health probes hop through the gaming-PC jump
+    // host SSH, which has the route. (False-positive auto-rollback
+    // 2026-04-23 was this code using direct curl — matching the fix
+    // already applied in version_audit.rs + pipeline.rs::run_status.)
     for _ in 0..max_secs {
-        let out = Command::new("curl")
-            .args(["-sf", "--max-time", "3", &cfg.health_url])
-            .output();
+        let ssh_cmd = format!("curl -sf --max-time 3 {}", cfg.health_url);
+        let mut args = cfg.truenas_ssh_args();
+        args.push(ssh_cmd);
+        let out = Command::new("ssh").args(&args).output();
         if let Ok(o) = out {
             if o.status.success() && !o.stdout.is_empty() {
                 return true;
