@@ -20,7 +20,12 @@ FROM rust:1.88-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev ca-certificates \
+    libdbus-1-dev \
   && rm -rf /var/lib/apt/lists/*
+# libdbus-1-dev is needed by libdbus-sys (pulled in transitively via
+# rs-matter → bluer → dbus for BLE commissioning). Claudevm has it
+# pre-installed which is why local builds don't hit this; CI's fresh
+# rust:1.88-slim-bookworm image doesn't.
 
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
