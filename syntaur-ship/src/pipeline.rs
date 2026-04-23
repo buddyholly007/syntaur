@@ -1,17 +1,8 @@
-//! Pipeline orchestrator. Runs stages in order, aborts on first failure.
+//! Pipeline orchestrator (Phase 2 — adds snapshot + rollback wiring).
 //!
-//! Phase 1 wires the existing deploy.sh stages behind the same stage
-//! interface later phases will extend. The `run_full` function is the
-//! no-flag default — equivalent to `./deploy.sh`.
-//!
-//! Later phases slot in additional stages (snapshot, version sweep,
-//! canary, win11) by extending the vector in `run_full`. The stage
-//! order is: preflight → snapshot → build → mac_mini → git_push →
-//! truenas → canary → version_audit → viewer → win11 → journal.
-//!
-//! Every stage implements the same contract: given an `&Context` and
-//! the `RunOptions`, it returns `Ok(())` on success or `Err(anyhow)`
-//! on failure (which aborts the whole pipeline).
+//! Stage order for `run_full`:
+//!   preflight → snapshot (NEW) → build → mac_mini → git_push →
+//!   truenas (now with .prev + auto-rollback) → viewer.
 
 use anyhow::Result;
 use chrono::Utc;
@@ -41,12 +32,10 @@ pub fn run_full(cfg: &Config, opts: &RunOptions) -> Result<()> {
     );
     let ctx = StageContext { cfg, opts };
 
-    // Phase 1 stages (parity with deploy.sh):
-    //   preflight → build → mac_mini → git_push → truenas → viewer.
-    // Phase 2 inserts snapshot before mac_mini; Phase 3 inserts
-    // version_audit after truenas; Phase 4 appends journal.
-
     stages::preflight::run(&ctx)?;
+    // Phase 2: snapshot BEFORE any TrueNAS writes. If any later stage
+    // fails we still have a restore point.
+    let snapshot_name = stages::snapshot::run(&ctx)?;
     if !opts.skip_build {
         stages::build::run(&ctx)?;
     } else {
@@ -70,7 +59,8 @@ pub fn run_full(cfg: &Config, opts: &RunOptions) -> Result<()> {
     }
 
     if !opts.dry_run {
-        let stamp = build_stamp(cfg, opts)?;
+        let mut stamp = build_stamp(cfg, opts)?;
+        stamp.pre_deploy_snapshot = Some(snapshot_name);
         state::write_stamp(&cfg.state_dir, &stamp)?;
         log::info!(
             "✓ deploy stamp written: version={} git_head={} gateway_sha={}",
@@ -110,13 +100,11 @@ fn build_stamp(cfg: &Config, opts: &RunOptions) -> Result<DeployStamp> {
         git_head,
         version,
         gateway_sha256: state::sha256_file(&gateway_bin)?,
-        mace_sha256: if mace_bin.exists() {
-            Some(state::sha256_file(&mace_bin)?)
-        } else { None },
+        mace_sha256: if mace_bin.exists() { Some(state::sha256_file(&mace_bin)?) } else { None },
         social_manager_sha256: if Path::new(&sm_bin).exists() {
             Some(state::sha256_file(&sm_bin)?)
         } else { None },
-        pre_deploy_snapshot: None, // set by Phase 2 snapshot stage
+        pre_deploy_snapshot: None,
         deploy_session: cfg.coord_session.clone(),
         skip_flags,
     })
@@ -124,12 +112,12 @@ fn build_stamp(cfg: &Config, opts: &RunOptions) -> Result<DeployStamp> {
 
 fn read_version_file(ws: &std::path::Path) -> Result<String> {
     let p = ws.join("VERSION");
-    let s = std::fs::read_to_string(&p)
-        .map_err(|e| anyhow::anyhow!("read {}: {}", p.display(), e))?;
-    Ok(s.trim().to_string())
+    Ok(std::fs::read_to_string(&p)
+        .map_err(|e| anyhow::anyhow!("read {}: {}", p.display(), e))?
+        .trim()
+        .to_string())
 }
 
-/// Run a command, capture stdout as string.
 pub fn run_capture(prog: &str, args: &[&str]) -> Result<String> {
     let out = std::process::Command::new(prog)
         .args(args)
@@ -138,24 +126,67 @@ pub fn run_capture(prog: &str, args: &[&str]) -> Result<String> {
     if !out.status.success() {
         anyhow::bail!(
             "{} {:?} exited {} — stderr: {}",
-            prog,
-            args,
-            out.status,
+            prog, args, out.status,
             String::from_utf8_lossy(&out.stderr)
         );
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-// ── stub entry points filled in by later phases ────────────────────────
+// ── Phase 2 subcommands ────────────────────────────────────────────────
+
+pub fn run_rollback(cfg: &Config, zfs: Option<&str>) -> Result<()> {
+    let opts = RunOptions::default();
+    let ctx = StageContext { cfg, opts: &opts };
+    match zfs {
+        Some(snap) => {
+            log::warn!("ZFS rollback requested: {snap}");
+            stages::snapshot::rollback(&ctx, snap)?;
+            // Restart the container after ZFS rollback since the
+            // binary on disk may have changed state.
+            log::info!(">> docker restart syntaur after ZFS rollback");
+            let mut args = cfg.truenas_ssh_args();
+            args.push("docker restart syntaur".into());
+            std::process::Command::new("ssh").args(&args).status()?;
+        }
+        None => {
+            log::info!("Binary rollback: restoring latest .prev-* for each binary on TrueNAS");
+            stages::truenas::manual_binary_rollback(&ctx)?;
+        }
+    }
+    Ok(())
+}
+
+pub fn run_snapshot_list(cfg: &Config) -> Result<()> {
+    let opts = RunOptions::default();
+    let ctx = StageContext { cfg, opts: &opts };
+    println!("=== ZFS snapshots (syntaur-ship pre-deploy) ===");
+    let snaps = stages::snapshot::list(&ctx)?;
+    if snaps.is_empty() {
+        println!("   (none)");
+    } else {
+        for s in &snaps {
+            println!("   {s}");
+        }
+    }
+    println!();
+    println!("=== .prev binaries on TrueNAS ===");
+    let prevs = stages::truenas::list_prev_binaries(&ctx)?;
+    if prevs.is_empty() {
+        println!("   (none)");
+    } else {
+        for p in &prevs {
+            println!("   {p}");
+        }
+    }
+    Ok(())
+}
+
+// ── Later-phase stubs ──────────────────────────────────────────────────
 
 pub fn run_status(_cfg: &Config) -> Result<()> {
     println!("status: not yet implemented (Phase 4)");
     Ok(())
-}
-
-pub fn run_rollback(_cfg: &Config, _zfs: Option<&str>) -> Result<()> {
-    anyhow::bail!("rollback: not yet implemented (Phase 2)")
 }
 
 pub fn run_release(_cfg: &Config, _version: &str) -> Result<()> {
@@ -168,10 +199,6 @@ pub fn run_refresh_windows(_cfg: &Config) -> Result<()> {
 
 pub fn run_version_sweep(_cfg: &Config) -> Result<()> {
     anyhow::bail!("version-sweep: not yet implemented (Phase 3)")
-}
-
-pub fn run_snapshot_list(_cfg: &Config) -> Result<()> {
-    anyhow::bail!("snapshot-list: not yet implemented (Phase 2)")
 }
 
 pub fn run_journal(_cfg: &Config, _last: usize) -> Result<()> {
