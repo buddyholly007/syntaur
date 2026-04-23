@@ -33,6 +33,7 @@ use std::process::ExitCode;
 
 mod config;
 mod coord;
+mod guards;
 mod journal;
 mod pipeline;
 mod stages;

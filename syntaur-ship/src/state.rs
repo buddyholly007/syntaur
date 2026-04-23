@@ -37,6 +37,12 @@ pub struct DeployStamp {
     pub deploy_session: String,
     /// The `--skip-*` flags in effect (empty list for the happy path).
     pub skip_flags: Vec<String>,
+    /// SHA-256 of Cargo.lock at deploy time. Phase 5 uses this to
+    /// detect dependency drift — if Cargo.lock differs from the last
+    /// successful deploy's stamp, --skip-build is silently ignored
+    /// (deps shifted, rebuild required).
+    #[serde(default)]
+    pub cargo_lock_sha256: Option<String>,
 }
 
 pub fn stamp_path(state_dir: &Path) -> std::path::PathBuf {

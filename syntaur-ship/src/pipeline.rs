@@ -9,10 +9,18 @@ use chrono::Utc;
 use std::time::Instant;
 
 use crate::config::Config;
-use crate::coord;
+use crate::coord::{self, LockResult};
+use crate::guards;
 use crate::journal::{self, JournalEntry};
 use crate::stages;
 use crate::state::{self, DeployStamp};
+
+/// Broker file lock is scoped to the file every commit touches —
+/// Cargo.lock. Any session editing that file while we hold the lock
+/// gets blocked by the broker's PreToolUse hook.
+const LOCK_FILE: &str = "openclaw-workspace/Cargo.lock";
+/// Phase 5: deploys typically take 5-15 min; 30min TTL is generous.
+const LOCK_TTL_SECS: i64 = 1800;
 
 #[derive(Debug, Clone, Default)]
 pub struct RunOptions {
@@ -34,6 +42,51 @@ pub fn run_full(cfg: &Config, opts: &RunOptions) -> Result<()> {
         "=== syntaur-ship pipeline starting (dry_run={} skip_build={} skip_mac={} skip_git={} social_only={}) ===",
         opts.dry_run, opts.skip_build, opts.skip_mac, opts.skip_git, opts.social_only,
     );
+
+    // Phase 5: PID guard + broker lock + CI gate. Acquired BEFORE any
+    // work starts; released on drop of _pid / via `defer_release` at
+    // the end of this function.
+    let _pid = if !opts.dry_run {
+        Some(guards::PidLock::try_acquire(&cfg.state_dir)?)
+    } else {
+        None
+    };
+
+    // Broker lock on Cargo.lock — blocks concurrent Edits by other
+    // sessions for the deploy's duration.
+    let mut lock_acquired = false;
+    if !opts.dry_run {
+        match coord::try_lock(
+            cfg,
+            LOCK_FILE,
+            &format!(
+                "syntaur-ship deploy by {}",
+                cfg.coord_session
+            ),
+            LOCK_TTL_SECS,
+        )? {
+            LockResult::Acquired { ttl_secs } => {
+                log::info!("[coord-lock] acquired {LOCK_FILE} (TTL {ttl_secs}s)");
+                lock_acquired = true;
+            }
+            LockResult::HeldByOther { holder, intent, expires_in_secs } => {
+                anyhow::bail!(
+                    "coord lock on {LOCK_FILE} held by session '{holder}' ({intent}); expires in {expires_in_secs}s. \
+                     Wait for that session to finish or coordinate with them."
+                );
+            }
+            LockResult::BrokerUnavailable => {
+                log::warn!("[coord-lock] broker unreachable; proceeding without lock (degraded)");
+            }
+        }
+    }
+
+    // CI gate — warn if latest release-sign.yml failed (current v0.5.0
+    // situation). Non-blocking per Phase 5 scope.
+    if !opts.dry_run {
+        let _ = guards::check_ci_status();
+    }
+
     let ctx = StageContext { cfg, opts };
 
     if !opts.dry_run {
@@ -117,10 +170,37 @@ pub fn run_full(cfg: &Config, opts: &RunOptions) -> Result<()> {
         let _ = coord::broadcast_info(cfg, &msg);
     }
 
+    // Phase 5: release the broker lock on completion (success or
+    // failure). `_pid` drops here too, removing the PID file.
+    if lock_acquired {
+        let _ = coord::release_lock(cfg, LOCK_FILE);
+        log::debug!("[coord-lock] released {LOCK_FILE}");
+    }
+
     result
 }
 
 fn run_full_inner(cfg: &Config, opts: &RunOptions, ctx: &StageContext) -> Result<()> {
+    // Phase 5: Cargo.lock drift — if deps changed since last successful
+    // deploy, --skip-build is unsafe and we silently force a rebuild.
+    // Prevents the class of bug where a stale binary ships after an
+    // upstream dep bump.
+    let skip_build_effective = if opts.skip_build {
+        let current_sha = guards::cargo_lock_sha(&cfg.workspace).ok();
+        let last_sha = state::read_stamp(&cfg.state_dir).ok().flatten()
+            .and_then(|s| s.cargo_lock_sha256);
+        match (current_sha, last_sha) {
+            (Some(c), Some(l)) if c == l => true,
+            (Some(_), Some(_)) => {
+                log::warn!("[cargo-lock] drift detected since last deploy — overriding --skip-build, rebuilding");
+                false
+            }
+            _ => true, // No prior stamp; honor --skip-build.
+        }
+    } else {
+        false
+    };
+
     stages::preflight::run(ctx)?;
     // Phase 3a: version sweep BEFORE build — abort deploy if the 5
     // public version surfaces disagree. Cheap local file reads; no
@@ -129,10 +209,10 @@ fn run_full_inner(cfg: &Config, opts: &RunOptions, ctx: &StageContext) -> Result
     // Phase 2: snapshot BEFORE any TrueNAS writes. If any later stage
     // fails we still have a restore point.
     let snapshot_name = stages::snapshot::run(ctx)?;
-    if !opts.skip_build {
+    if !skip_build_effective {
         stages::build::run(ctx)?;
     } else {
-        log::warn!("[preflight] --skip-build set; reusing existing target/release binaries");
+        log::warn!("[preflight] --skip-build honored; reusing existing target/release binaries");
     }
     if !opts.social_only {
         if !opts.skip_mac {
@@ -192,11 +272,13 @@ fn build_stamp(cfg: &Config, opts: &RunOptions) -> Result<DeployStamp> {
     if opts.skip_git { skip_flags.push("skip-git".into()); }
     if opts.social_only { skip_flags.push("social-only".into()); }
 
+    let cargo_lock_sha256 = guards::cargo_lock_sha(&cfg.workspace).ok();
     Ok(DeployStamp {
         deployed_at: Utc::now(),
         git_head,
         version,
         gateway_sha256: state::sha256_file(&gateway_bin)?,
+        cargo_lock_sha256,
         mace_sha256: if mace_bin.exists() { Some(state::sha256_file(&mace_bin)?) } else { None },
         social_manager_sha256: if Path::new(&sm_bin).exists() {
             Some(state::sha256_file(&sm_bin)?)
