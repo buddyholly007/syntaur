@@ -67,38 +67,40 @@ fn read_file_string(p: &std::path::Path) -> Result<String> {
 }
 
 fn health_version(url: &str) -> Result<String> {
-    let out = Command::new("curl")
-        .args(["-sf", "--max-time", "5", url])
-        .output()?;
-    if !out.status.success() {
-        anyhow::bail!("curl {url}: {}", String::from_utf8_lossy(&out.stderr));
-    }
-    let v: Value = serde_json::from_slice(&out.stdout)?;
+    // claudevm → TrueNAS (.239) has no direct route — LAN segmentation.
+    // All /health probes hop through the gaming-PC jump host SSH, which
+    // has the route. deploy.sh gets away with direct curl only during
+    // the post-`docker restart` window when NAT state is fresh.
+    let proxied = proxied_curl(url).ok_or_else(|| anyhow::anyhow!("jump-proxied curl failed"))?;
+    let v: Value = serde_json::from_slice(proxied.as_bytes())?;
     Ok(v["version"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("no .version in /health"))?
         .to_string())
 }
 
-fn landing_badge(cfg: &crate::config::Config) -> Result<String> {
-    // Prod's root responds with the gateway dashboard or landing — the
-    // landing is typically served at the marketing site, not prod. For
-    // our internal prod we check the prod dashboard HTML for the
-    // VERSION-BADGE comment marker, which the gateway embeds if the
-    // landing assets are bundled. If the marker isn't there, report
-    // the finding rather than fail.
-    let out = Command::new("curl")
+fn proxied_curl(url: &str) -> Option<String> {
+    let ssh_cmd = format!("curl -sf --max-time 5 {url}");
+    let out = Command::new("ssh")
         .args([
-            "-sf",
-            "--max-time",
-            "5",
-            &cfg.health_url.replace("/health", "/"),
+            "-o", "ConnectTimeout=5",
+            "-J", "sean@192.168.1.69",
+            "truenas_admin@192.168.1.239",
+            &ssh_cmd,
         ])
-        .output()?;
-    if !out.status.success() {
-        anyhow::bail!("curl prod /");
+        .output()
+        .ok()?;
+    if !out.status.success() || out.stdout.is_empty() {
+        return None;
     }
-    let body = String::from_utf8_lossy(&out.stdout);
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn landing_badge(cfg: &crate::config::Config) -> Result<String> {
+    // Go through the jump host — same reason as health_version.
+    let root = cfg.health_url.replace("/health", "/");
+    let body = proxied_curl(&root)
+        .ok_or_else(|| anyhow::anyhow!("jump-proxied curl of {root} failed"))?;
     let marker = "<!-- VERSION-BADGE -->v";
     let end = "<!-- /VERSION-BADGE -->";
     let Some(i) = body.find(marker) else {

@@ -6,8 +6,11 @@
 
 use anyhow::Result;
 use chrono::Utc;
+use std::time::Instant;
 
 use crate::config::Config;
+use crate::coord;
+use crate::journal::{self, JournalEntry};
 use crate::stages;
 use crate::state::{self, DeployStamp};
 
@@ -26,45 +29,131 @@ pub struct StageContext<'a> {
 }
 
 pub fn run_full(cfg: &Config, opts: &RunOptions) -> Result<()> {
+    let start = Instant::now();
     log::info!(
         "=== syntaur-ship pipeline starting (dry_run={} skip_build={} skip_mac={} skip_git={} social_only={}) ===",
         opts.dry_run, opts.skip_build, opts.skip_mac, opts.skip_git, opts.social_only,
     );
     let ctx = StageContext { cfg, opts };
 
-    stages::preflight::run(&ctx)?;
+    if !opts.dry_run {
+        let git_head = run_capture("git", &["-C", cfg.workspace.to_str().unwrap(), "rev-parse", "--short", "HEAD"])
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let _ = coord::broadcast_intent(
+            cfg,
+            &format!(
+                "syntaur-ship deploy starting — HEAD={} session={}. ETA 10min. Other sessions should hold git pushes to openclaw-workspace.",
+                git_head, cfg.coord_session
+            ),
+        );
+    }
+
+    // Wrap the whole pipeline in a closure so we can emit a journal
+    // entry + broker notification on BOTH success and failure.
+    let result = run_full_inner(cfg, opts, &ctx);
+    let duration_ms = start.elapsed().as_millis();
+
+    // Write journal entry regardless of outcome (unless dry-run).
+    if !opts.dry_run {
+        let outcome = if result.is_ok() { "success" } else { "aborted" };
+        let (failed_stage, failure_reason) = match &result {
+            Ok(()) => (None, None),
+            Err(e) => (Some("unknown".into()), Some(format!("{e:#}"))),
+        };
+        // Read back the stamp we wrote (on success path) for the journal.
+        let stamp_opt = state::read_stamp(&cfg.state_dir).unwrap_or(None);
+        let entry = match stamp_opt {
+            Some(s) if result.is_ok() => JournalEntry {
+                timestamp: s.deployed_at,
+                outcome: outcome.into(),
+                version: s.version,
+                git_head: s.git_head,
+                gateway_sha256: Some(s.gateway_sha256),
+                pre_deploy_snapshot: s.pre_deploy_snapshot,
+                deploy_session: s.deploy_session,
+                skip_flags: s.skip_flags,
+                failed_stage,
+                failure_reason,
+                duration_ms,
+            },
+            _ => {
+                // Failure path — build a minimal entry.
+                let git_head = run_capture("git", &["-C", cfg.workspace.to_str().unwrap(), "rev-parse", "HEAD"])
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                let version = read_version_file(&cfg.workspace).unwrap_or_default();
+                JournalEntry {
+                    timestamp: Utc::now(),
+                    outcome: outcome.into(),
+                    version,
+                    git_head,
+                    gateway_sha256: None,
+                    pre_deploy_snapshot: None,
+                    deploy_session: cfg.coord_session.clone(),
+                    skip_flags: collect_skip_flags(opts),
+                    failed_stage,
+                    failure_reason,
+                    duration_ms,
+                }
+            }
+        };
+        if let Err(e) = journal::append(&cfg.vault_dir, &entry) {
+            log::warn!("[journal] append failed: {e}");
+        }
+        let msg = match &result {
+            Ok(()) => format!(
+                "✓ syntaur-ship: v{} deployed to prod in {:.1}s (session {})",
+                entry.version, duration_ms as f64 / 1000.0, cfg.coord_session
+            ),
+            Err(e) => format!(
+                "✗ syntaur-ship: deploy ABORTED after {:.1}s — {}",
+                duration_ms as f64 / 1000.0,
+                format!("{e:#}").chars().take(200).collect::<String>()
+            ),
+        };
+        let _ = coord::broadcast_info(cfg, &msg);
+    }
+
+    result
+}
+
+fn run_full_inner(cfg: &Config, opts: &RunOptions, ctx: &StageContext) -> Result<()> {
+    stages::preflight::run(ctx)?;
     // Phase 3a: version sweep BEFORE build — abort deploy if the 5
     // public version surfaces disagree. Cheap local file reads; no
     // network. Fix at source + re-run rather than shipping drift.
-    stages::version_sweep::run(&ctx)?;
+    stages::version_sweep::run(ctx)?;
     // Phase 2: snapshot BEFORE any TrueNAS writes. If any later stage
     // fails we still have a restore point.
-    let snapshot_name = stages::snapshot::run(&ctx)?;
+    let snapshot_name = stages::snapshot::run(ctx)?;
     if !opts.skip_build {
-        stages::build::run(&ctx)?;
+        stages::build::run(ctx)?;
     } else {
         log::warn!("[preflight] --skip-build set; reusing existing target/release binaries");
     }
     if !opts.social_only {
         if !opts.skip_mac {
-            stages::mac_mini::run(&ctx)?;
+            stages::mac_mini::run(ctx)?;
         } else {
             log::warn!("[mac_mini] --skip-mac set; skipping smoke (emergency only)");
         }
         if !opts.skip_git {
-            stages::git_push::run(&ctx)?;
+            stages::git_push::run(ctx)?;
         } else {
             log::warn!("[git_push] --skip-git set; not propagating to origin");
         }
     }
-    stages::truenas::run(&ctx)?;
+    stages::truenas::run(ctx)?;
     if !opts.social_only {
-        stages::viewer::run(&ctx)?;
+        stages::viewer::run(ctx)?;
     }
     // Phase 3a: post-deploy version audit on live prod. Warns (doesn't
     // abort) — prod is already live at this point; drift here means
     // repair at source + redeploy, not roll back.
-    let _ = stages::version_audit::run(&ctx);
+    let _ = stages::version_audit::run(ctx);
 
     if !opts.dry_run {
         let mut stamp = build_stamp(cfg, opts)?;
@@ -190,11 +279,112 @@ pub fn run_snapshot_list(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-// ── Later-phase stubs ──────────────────────────────────────────────────
+// ── Phase 4 subcommands ────────────────────────────────────────────────
 
-pub fn run_status(_cfg: &Config) -> Result<()> {
-    println!("status: not yet implemented (Phase 4)");
+pub fn run_status(cfg: &Config) -> Result<()> {
+    println!("=== syntaur-ship status ===\n");
+
+    // Local deploy stamp (last successful deploy).
+    match state::read_stamp(&cfg.state_dir)? {
+        Some(s) => {
+            let age = Utc::now().signed_duration_since(s.deployed_at);
+            println!(
+                "last successful deploy: v{} git={} @ {} ({} ago)",
+                s.version,
+                &s.git_head[..s.git_head.len().min(10)],
+                s.deployed_at.format("%Y-%m-%d %H:%M UTC"),
+                human_duration(age)
+            );
+            println!("  gateway sha256: {}", &s.gateway_sha256[..16]);
+            if let Some(snap) = &s.pre_deploy_snapshot {
+                println!("  pre-deploy snapshot: {snap}");
+            }
+            if !s.skip_flags.is_empty() {
+                println!("  skip flags: {}", s.skip_flags.join(", "));
+            }
+        }
+        None => println!("last successful deploy: (none recorded yet)"),
+    }
+
+    // Live prod. claudevm has no direct route to TrueNAS (.239) —
+    // hop through the gaming-PC jump host SSH and curl from there.
+    println!();
+    let ssh_cmd = format!("curl -sf --max-time 5 {}", cfg.health_url);
+    let mut ssh_args = cfg.truenas_ssh_args();
+    ssh_args.push(ssh_cmd);
+    let prod_info = std::process::Command::new("ssh").args(&ssh_args).output();
+    match prod_info {
+        Ok(o) if o.status.success() && !o.stdout.is_empty() => {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&o.stdout) {
+                println!(
+                    "prod ({}): v{} uptime={}s agents={} providers={}",
+                    cfg.health_url,
+                    v["version"].as_str().unwrap_or("?"),
+                    v["uptime_secs"].as_i64().unwrap_or(0),
+                    v["agents"].as_array().map(|a| a.len()).unwrap_or(0),
+                    v["providers"].as_array().map(|a| a.len()).unwrap_or(0),
+                );
+            }
+        }
+        _ => println!("prod ({}): unreachable (jump-proxied)", cfg.health_url),
+    }
+
+    // Local /VERSION for reference.
+    if let Ok(v) = std::fs::read_to_string(cfg.workspace.join("VERSION")) {
+        println!("local HEAD VERSION: {}", v.trim());
+    }
+
+    // Head commit + ahead-of-last-deploy count.
+    if let Ok(head) = run_capture(
+        "git",
+        &["-C", cfg.workspace.to_str().unwrap(), "rev-parse", "--short", "HEAD"],
+    ) {
+        println!("local HEAD commit:   {}", head.trim());
+    }
+
+    // Recent journal tail.
+    println!();
+    println!("=== recent deploys ===");
+    let recents = journal::read_recent(&cfg.vault_dir, 5).unwrap_or_default();
+    if recents.is_empty() {
+        println!("  (no journal entries yet)");
+    } else {
+        for e in &recents {
+            println!(
+                "  {} {:<8} v{} {} {}ms{}",
+                e.timestamp.format("%Y-%m-%d %H:%M UTC"),
+                e.outcome,
+                e.version,
+                &e.git_head[..e.git_head.len().min(10)],
+                e.duration_ms,
+                if e.skip_flags.is_empty() { String::new() } else { format!(" [{}]", e.skip_flags.join(",")) },
+            );
+        }
+    }
+
     Ok(())
+}
+
+fn collect_skip_flags(opts: &RunOptions) -> Vec<String> {
+    let mut v = Vec::new();
+    if opts.skip_build { v.push("skip-build".into()); }
+    if opts.skip_mac { v.push("skip-mac".into()); }
+    if opts.skip_git { v.push("skip-git".into()); }
+    if opts.social_only { v.push("social-only".into()); }
+    v
+}
+
+fn human_duration(d: chrono::Duration) -> String {
+    let secs = d.num_seconds().max(0);
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86400)
+    }
 }
 
 pub fn run_release(_cfg: &Config, _version: &str) -> Result<()> {
@@ -209,15 +399,32 @@ pub fn run_version_sweep(cfg: &Config) -> Result<()> {
     let opts = RunOptions::default();
     let ctx = StageContext { cfg, opts: &opts };
     stages::version_sweep::run(&ctx)?;
-    // Also hit the live prod surfaces (non-fatal — informational).
-    let audit_opts = RunOptions::default();
-    let audit_ctx = StageContext { cfg, opts: &audit_opts };
-    let _ = stages::version_audit::run(&audit_ctx);
+    let _ = stages::version_audit::run(&ctx);
     Ok(())
 }
 
-pub fn run_journal(_cfg: &Config, _last: usize) -> Result<()> {
-    anyhow::bail!("journal: not yet implemented (Phase 4)")
+pub fn run_journal(cfg: &Config, last: usize) -> Result<()> {
+    let entries = journal::read_recent(&cfg.vault_dir, last)?;
+    if entries.is_empty() {
+        println!("(no deploys recorded in {}/deploys/)", cfg.vault_dir.display());
+        return Ok(());
+    }
+    for e in &entries {
+        println!(
+            "{} {:<8} v{} {} {}ms {}{}",
+            e.timestamp.format("%Y-%m-%d %H:%M UTC"),
+            e.outcome,
+            e.version,
+            &e.git_head[..e.git_head.len().min(10)],
+            e.duration_ms,
+            if e.pre_deploy_snapshot.is_some() { "📸" } else { "  " },
+            if e.skip_flags.is_empty() { String::new() } else { format!(" [{}]", e.skip_flags.join(",")) },
+        );
+        if let Some(reason) = &e.failure_reason {
+            println!("    ↳ {}", reason.chars().take(200).collect::<String>());
+        }
+    }
+    Ok(())
 }
 
 pub fn run_verify_stamp(_cfg: &Config, _path: Option<&str>) -> Result<()> {

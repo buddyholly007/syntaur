@@ -32,6 +32,8 @@ use clap::{Parser, Subcommand};
 use std::process::ExitCode;
 
 mod config;
+mod coord;
+mod journal;
 mod pipeline;
 mod stages;
 mod state;
