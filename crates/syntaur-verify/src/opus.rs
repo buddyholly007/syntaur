@@ -16,7 +16,7 @@ use anyhow::{anyhow, Context, Result};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
-use crate::run::{Finding, FindingKind, Severity};
+use crate::run::{Finding, FindingEdit, FindingKind, Severity};
 
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const DEFAULT_MODEL: &str = "anthropic/claude-opus-4";
@@ -76,12 +76,46 @@ impl OpusClient {
     /// structured findings response. Errors bubble up; the caller
     /// decides whether to fail the run or continue with heuristic-
     /// only Findings.
+    ///
+    /// Phase 2a shim — delegates to `analyze_module_with_source` with
+    /// no attached source context. Prefer the `_with_source` form for
+    /// Phase 2b auto-fix since Opus needs code to propose edits.
     pub async fn analyze_module(
         &self,
         module_slug: &str,
         url: &str,
         screenshot_path: &Path,
         changed_paths: &[String],
+    ) -> Result<Vec<Finding>> {
+        self.analyze_module_with_source(
+            module_slug,
+            url,
+            screenshot_path,
+            changed_paths,
+            &[],
+            /* request_edits = */ false,
+        )
+        .await
+    }
+
+    /// Phase 2b entry point. In addition to the screenshot + changed
+    /// paths, attaches module-relevant source files (already truncated
+    /// to a byte budget by the caller — we just embed them verbatim)
+    /// and — if `request_edits` is set — asks Opus to return
+    /// `{file, old_string, new_string}` edits for each regression so
+    /// the auto-fix loop can apply them precisely.
+    ///
+    /// Keeping the two modes behind one function avoids duplicating
+    /// the HTTP + parse plumbing; the prompt branches on
+    /// `request_edits` and whether `source_files` is non-empty.
+    pub async fn analyze_module_with_source(
+        &self,
+        module_slug: &str,
+        url: &str,
+        screenshot_path: &Path,
+        changed_paths: &[String],
+        source_files: &[(String, String)],
+        request_edits: bool,
     ) -> Result<Vec<Finding>> {
         let png = std::fs::read(screenshot_path)
             .with_context(|| format!("reading screenshot {}", screenshot_path.display()))?;
@@ -98,13 +132,45 @@ impl OpusClient {
                 .join("\n")
         };
 
+        let source_section = if source_files.is_empty() {
+            String::new()
+        } else {
+            let mut s = String::from("\n\nRelevant source files (workspace-relative paths):\n");
+            for (path, body) in source_files {
+                s.push_str(&format!("\n===== {} =====\n", path));
+                s.push_str(body);
+                if !body.ends_with('\n') {
+                    s.push('\n');
+                }
+            }
+            s
+        };
+
+        let edits_clause = if request_edits {
+            ",\n      \"edits\": [ /* optional: precise source edits to fix this regression */\n        {\n          \"file\": \"workspace-relative path from the list above\",\n          \"old_string\": \"EXACT current text from the file (must be unique in the file; include enough surrounding lines to make it unique)\",\n          \"new_string\": \"replacement text\"\n        }\n      ]"
+        } else {
+            ""
+        };
+
+        let edits_rules = if request_edits {
+            "\n\nWhen you return `edits` for a regression:\n\
+- Only propose edits for files shown above. Do NOT invent new files.\n\
+- `old_string` must match EXACTLY (bytes, whitespace, indentation) and appear ONLY ONCE in the file. If you can't make it unique with 1-3 surrounding lines, widen the window until you can.\n\
+- Prefer the smallest edit that fixes the regression. Multiple small edits beat one large one.\n\
+- Keep total new code under ~40 lines per finding — large rewrites belong in a manual review, not auto-fix.\n\
+- Do NOT propose edits for `improvement` findings — only for `regression`.\n\
+- If you can see the regression on screen but the code context doesn't let you fix it precisely, omit `edits` (set null or leave out). A regression without edits is still useful — it tells the human what to look at."
+        } else {
+            ""
+        };
+
         let prompt = format!(
             "You are auditing one module of the Syntaur web application.
 
 Module slug: {module_slug}
 URL path: {url}
 Source paths changed since last successful deploy:
-{changes_summary}
+{changes_summary}{source_section}
 
 Look at the attached screenshot and identify TWO categories of issues:
 
@@ -126,14 +192,14 @@ Output ONLY a JSON object with this exact shape — NO prose, no code fences:
       \"kind\": \"regression\" | \"improvement\",
       \"title\": \"short noun phrase (5-10 words)\",
       \"detail\": \"one-sentence explanation of what is wrong + where on the page\",
-      \"suggested_fix\": \"optional: natural-language description of how to fix\"
+      \"suggested_fix\": \"optional: natural-language description of how to fix\"{edits_clause}
     }}
   ]
 }}
 
 If the module looks clean with no suggestions, output {{\"findings\": []}}.
 Be strict about regressions — a first-time user would not forgive them.
-Be practical about improvements — only surface things with clear user value."
+Be practical about improvements — only surface things with clear user value.{edits_rules}"
         );
 
         let body = serde_json::json!({
@@ -200,6 +266,13 @@ Be practical about improvements — only surface things with clear user value."
                         detail.push_str(&fix);
                     }
                 }
+                // Policy: only regressions carry edits. If Opus
+                // returned edits on an improvement we drop them —
+                // auto-fix is for breakage, not style tweaks.
+                let edits = match severity {
+                    Severity::Regression => f.edits.filter(|v| !v.is_empty()),
+                    Severity::Suggestion => None,
+                };
                 Finding {
                     module_slug: module_slug.to_string(),
                     kind,
@@ -208,6 +281,7 @@ Be practical about improvements — only surface things with clear user value."
                     detail,
                     artifact: Some(screenshot_path.to_path_buf()),
                     captured_at: now,
+                    edits,
                 }
             })
             .collect();
@@ -262,4 +336,6 @@ struct RawFinding {
     detail: String,
     #[serde(default)]
     suggested_fix: Option<String>,
+    #[serde(default)]
+    edits: Option<Vec<FindingEdit>>,
 }

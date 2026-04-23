@@ -34,12 +34,38 @@ pub struct PageCapture {
 
 impl Browser {
     pub async fn launch() -> Result<Self> {
+        // Chromium 147 (snap on claudevm, Arch chromium on gaming PC)
+        // refuses several of chromiumoxide's built-in DEFAULT_ARGS —
+        // most visibly `--disable-background-networking`, which makes
+        // the browser exit with "unrecognized command line flag"
+        // before CDP can connect. Fix: opt out of the entire legacy
+        // DEFAULT_ARGS list and pass a minimal, Chromium-147-friendly
+        // set ourselves. Also switch to `--headless=new` (the modern
+        // headless pipeline) — the legacy `--headless` mode is on
+        // its way out and has diverging CDP semantics from headed
+        // Chromium, which is what we'll eventually want to match
+        // against baselines.
         let (inner, mut handler) = CdpBrowser::launch(
             BrowserConfig::builder()
-                // headless + no-sandbox for CI/VM environments
-                .arg("--no-sandbox")
-                .arg("--disable-gpu")
-                .arg("--hide-scrollbars")
+                .no_sandbox()
+                .new_headless_mode()
+                .disable_default_args()
+                .args([
+                    // Essential stability flags for headless/VM/container runs.
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    // Suppress prompts that would block the CDP session.
+                    "--disable-popup-blocking",
+                    "--disable-prompt-on-repost",
+                    // Keep keyring/password prompts from freezing startup.
+                    "--password-store=basic",
+                    "--use-mock-keychain",
+                    // Deterministic color + locale for screenshot diffs.
+                    "--force-color-profile=srgb",
+                    "--lang=en-US",
+                ])
                 // Consistent viewport — Phase 3 will parameterize.
                 .window_size(1440, 900)
                 .build()

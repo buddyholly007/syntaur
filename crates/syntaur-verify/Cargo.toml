@@ -41,3 +41,8 @@ base64 = "0.22"
 # plaintext-in-code. syntaur-vault is path-dep'd as the agent
 # client library.
 syntaur-vault = { path = "../syntaur-vault" }
+
+[dev-dependencies]
+# Phase 2b fix.rs apply/revert tests run against a throwaway
+# workspace tree — tempfile keeps them hermetic.
+tempfile = "3"

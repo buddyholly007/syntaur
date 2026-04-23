@@ -101,11 +101,22 @@ jobs:
         with:
           key: release-${{ matrix.target }}-${{ matrix.package }}
 
-      - name: Install Linux GUI deps (syntaur-viewer only)
-        if: runner.os == 'Linux' && matrix.package == 'syntaur-viewer'
+      - name: Install Linux build deps
+        # syntaur-gateway transitively depends on libdbus-sys (via
+        # syntaur-vault → keyring) which needs libdbus-1-dev + pkg-config
+        # at build time. Prior to v0.5.0 this only surfaced as an apt
+        # transitive of libwebkitgtk-6.0-dev, which we installed for the
+        # viewer matrix entry only — the gateway entry got no deps and
+        # panicked in the libdbus-sys build script on the Ubuntu runner.
+        # Install libdbus-1-dev unconditionally on Linux; GUI deps remain
+        # viewer-only so non-viewer builds stay fast.
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev
+          sudo apt-get install -y libdbus-1-dev pkg-config
+          if [ "${{ matrix.package }}" = "syntaur-viewer" ]; then
+            sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev
+          fi
 
       - name: Build release
         run: cargo build --release --target ${{ matrix.target }} -p ${{ matrix.package }}

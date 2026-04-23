@@ -86,4 +86,28 @@ impl ModuleMap {
         }
         affected
     }
+
+    /// Reverse lookup: for a module slug, return the source paths
+    /// that could affect it — both module-specific rules AND
+    /// cross-cutting `*` rules (theme, shared, main, Cargo*).
+    ///
+    /// Used by Phase 2b to gather source context before asking Opus
+    /// for auto-fix edits. Module-specific paths are emitted first
+    /// so truncation-at-budget in the caller drops cross-cutting
+    /// files last.
+    pub fn paths_for(&self, slug: &str) -> Vec<String> {
+        let mut specific = Vec::new();
+        let mut shared = Vec::new();
+        for r in &self.rules {
+            let matches_slug = r.affects.iter().any(|a| a == slug);
+            let cross_cut = r.affects.iter().any(|a| a == "*");
+            if matches_slug {
+                specific.push(r.path.clone());
+            } else if cross_cut {
+                shared.push(r.path.clone());
+            }
+        }
+        specific.extend(shared);
+        specific
+    }
 }

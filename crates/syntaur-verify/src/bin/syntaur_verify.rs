@@ -18,9 +18,10 @@ use clap::Parser;
 use syntaur_verify_core::{
     browser::Browser,
     changeset::{deploy_stamp_head, resolve_against},
+    fix::{apply_edits, Budgets, FixAttempt},
     module_map::{Module, ModuleMap},
     opus::OpusClient,
-    run::{Finding, FindingKind, Severity, VerifyRun},
+    run::{Finding, FindingEdit, FindingKind, Severity, VerifyRun},
 };
 
 #[derive(Parser, Debug)]
@@ -64,6 +65,47 @@ struct Cli {
     /// syntaur-verify runs inside syntaur-ship.
     #[arg(long)]
     with_opus: bool,
+
+    /// Phase 2b — if Opus returns structured edits for a regression,
+    /// apply them, rebuild, reload the gateway, and re-verify the
+    /// module. Revert on re-regression. Implies `--with-opus`.
+    #[arg(long)]
+    auto_fix: bool,
+
+    /// Max auto-fix iterations per module before giving up +
+    /// reverting. Default 3 (Sean's call — "if we can't fix it in 3
+    /// tries the human should see it").
+    #[arg(long, default_value_t = 3)]
+    max_iter: usize,
+
+    /// Max total lines-of-code changed across all iterations per
+    /// module before the budget forces revert. Default 200 — a
+    /// single-module autofix is not a refactor.
+    #[arg(long, default_value_t = 200)]
+    max_loc: usize,
+
+    /// Max bytes of source code attached to each Opus call as code
+    /// context (for proposing precise edits). Default 40960.
+    #[arg(long, default_value_t = 40_960)]
+    max_source_bytes: usize,
+
+    /// Shell command to rebuild the gateway after applying edits.
+    /// Runs in the workspace dir. Default: the release build that
+    /// syntaur-ship itself uses.
+    #[arg(long, default_value = "cargo build --release -p syntaur-gateway")]
+    rebuild_cmd: String,
+
+    /// Shell command to reload/restart the live gateway at the
+    /// target URL between rebuild and re-verify. REQUIRED when
+    /// `--auto-fix` is set — otherwise we'd be re-verifying the
+    /// old binary and the loop can't converge. Example:
+    ///   --reload-cmd 'ssh sean@mac-mini "systemctl --user restart syntaur-gateway"'
+    #[arg(long)]
+    reload_cmd: Option<String>,
+
+    /// Seconds to wait after reload before re-verifying. Default 3.
+    #[arg(long, default_value_t = 3)]
+    reload_wait_secs: u64,
 }
 
 fn main() -> ExitCode {
@@ -111,8 +153,28 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
         module_map: module_map_arg,
         target_url: target_url_arg,
         runs_dir: runs_dir_arg,
-        with_opus,
+        with_opus: with_opus_flag,
+        auto_fix,
+        max_iter,
+        max_loc,
+        max_source_bytes,
+        rebuild_cmd,
+        reload_cmd,
+        reload_wait_secs,
     } = cli;
+    // Auto-fix implies Opus vision (can't fix without findings).
+    let with_opus = with_opus_flag || auto_fix;
+    if auto_fix && reload_cmd.is_none() {
+        return Err(anyhow!(
+            "--auto-fix requires --reload-cmd — otherwise re-verify hits the OLD binary \
+             and the loop can't converge. Set --reload-cmd 'true' if the target already \
+             auto-reloads (e.g. cargo-watch)."
+        ));
+    }
+    let budgets = Budgets {
+        max_iterations: max_iter,
+        max_loc,
+    };
 
     let workspace = workspace_arg.unwrap_or_else(|| home.join("openclaw-workspace"));
     let module_map_path = module_map_arg
@@ -129,10 +191,14 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
             .unwrap_or_else(|_| "http://192.168.1.58:18789".to_string()),
     };
 
-    // Figure out which modules need verifying.
+    // Figure out which modules need verifying. `current_changeset`
+    // is passed through to Opus so the model sees the same "what
+    // changed" context the impact-map used. None when `--module`
+    // skips the changeset pass.
     let against_label = against_arg
         .clone()
         .unwrap_or_else(|| "(deploy stamp)".to_string());
+    let mut current_changeset: Option<Vec<String>> = None;
     let modules: Vec<Module> = if let Some(slug) = &module_arg {
         let m = map
             .module(slug)
@@ -170,6 +236,7 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
             impacted.len(),
             impacted.iter().cloned().collect::<Vec<_>>().join(",")
         );
+        current_changeset = Some(changeset.paths.clone());
         impacted
             .iter()
             .filter_map(|slug| map.module(slug).cloned())
@@ -236,6 +303,7 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
                             detail: format!("expected 2xx, got {}", status),
                             artifact: Some(cap.screenshot_path.clone()),
                             captured_at: Utc::now(),
+                            edits: None,
                         });
                     }
                 }
@@ -254,6 +322,7 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
                             detail: msg.clone(),
                             artifact: Some(cap.screenshot_path.clone()),
                             captured_at: Utc::now(),
+                            edits: None,
                         });
                     }
                 }
@@ -266,21 +335,105 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
                         detail: format!("{}ms to render (target <5s)", cap.elapsed_ms),
                         artifact: Some(cap.screenshot_path.clone()),
                         captured_at: Utc::now(),
+                        edits: None,
                     });
                 }
 
                 // Phase 2: Opus vision findings. One call per module.
+                // Auto-fix (2b): also attach source context + request
+                // structured edits, then run the apply/build/reload/
+                // re-verify loop.
                 if let Some(client) = &opus {
-                    match client
-                        .analyze_module(&module.slug, &url, &cap.screenshot_path, &[])
-                        .await
-                    {
-                        Ok(opus_findings) => {
+                    let changed = current_changeset.as_deref().unwrap_or(&[]);
+                    let sources = if auto_fix {
+                        collect_source_context(&workspace, &map, &module.slug, max_source_bytes)
+                    } else {
+                        Vec::new()
+                    };
+
+                    let opus_result = client
+                        .analyze_module_with_source(
+                            &module.slug,
+                            &url,
+                            &cap.screenshot_path,
+                            changed,
+                            &sources,
+                            /* request_edits = */ auto_fix,
+                        )
+                        .await;
+
+                    match opus_result {
+                        Ok(mut opus_findings) => {
                             log::info!(
                                 "  ↳ Opus returned {} finding(s) for {}",
                                 opus_findings.len(),
                                 module.slug
                             );
+                            if auto_fix
+                                && opus_findings
+                                    .iter()
+                                    .any(|f| f.severity == Severity::Regression)
+                            {
+                                match try_autofix(
+                                    &workspace,
+                                    &map,
+                                    &module.slug,
+                                    &url,
+                                    &run_dir,
+                                    &browser,
+                                    client,
+                                    &opus_findings,
+                                    &rebuild_cmd,
+                                    reload_cmd.as_deref(),
+                                    reload_wait_secs,
+                                    budgets,
+                                    max_source_bytes,
+                                    changed,
+                                )
+                                .await
+                                {
+                                    Ok(AutoFixOutcome::Clean { iterations, loc, final_findings }) => {
+                                        log::info!(
+                                            "  ↳ auto-fix CLEAN after {iterations} iter, {loc} LoC"
+                                        );
+                                        opus_findings = final_findings;
+                                        opus_findings.push(Finding {
+                                            module_slug: module.slug.clone(),
+                                            kind: FindingKind::Other,
+                                            severity: Severity::Suggestion,
+                                            title: format!(
+                                                "auto-fix applied ({iterations} iter, {loc} LoC)"
+                                            ),
+                                            detail: "regressions were auto-fixed and re-verified clean"
+                                                .to_string(),
+                                            artifact: None,
+                                            captured_at: Utc::now(),
+                                            edits: None,
+                                        });
+                                    }
+                                    Ok(AutoFixOutcome::Reverted { iterations, reason }) => {
+                                        log::warn!(
+                                            "  ↳ auto-fix REVERTED after {iterations} iter: {reason}"
+                                        );
+                                        opus_findings.push(Finding {
+                                            module_slug: module.slug.clone(),
+                                            kind: FindingKind::Other,
+                                            severity: Severity::Suggestion,
+                                            title: format!(
+                                                "auto-fix reverted ({iterations} iter): {reason}"
+                                            ),
+                                            detail: "regressions persist; human review needed"
+                                                .to_string(),
+                                            artifact: None,
+                                            captured_at: Utc::now(),
+                                            edits: None,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        log::error!("  ↳ auto-fix crashed: {e:#}");
+                                    }
+                                }
+                            }
                             findings.extend(opus_findings);
                         }
                         Err(e) => {
@@ -300,6 +453,7 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
                     detail: format!("{e:#}"),
                     artifact: None,
                     captured_at: Utc::now(),
+                    edits: None,
                 });
             }
         }
@@ -378,6 +532,265 @@ fn parse_run_id_ts(id: &str) -> chrono::DateTime<Utc> {
     chrono::NaiveDateTime::parse_from_str(id, "%Y%m%d-%H%M%S")
         .map(|n| n.and_utc())
         .unwrap_or_else(|_| Utc::now())
+}
+
+// ── Phase 2b: source context gathering + auto-fix loop ──────────
+
+/// For one module, read workspace source files the impact map
+/// associates with that module slug (module-specific first, cross-
+/// cutting second) and pack them into `(path, body)` tuples for the
+/// Opus prompt. Per-file contents are truncated at `max_source_bytes
+/// / 2` and the total is capped at `max_source_bytes` so one huge
+/// file can't starve the others.
+fn collect_source_context(
+    workspace: &std::path::Path,
+    map: &syntaur_verify_core::module_map::ModuleMap,
+    slug: &str,
+    max_source_bytes: usize,
+) -> Vec<(String, String)> {
+    let per_file_cap = max_source_bytes / 2;
+    let mut budget = max_source_bytes;
+    let mut out: Vec<(String, String)> = Vec::new();
+    for rel in map.paths_for(slug) {
+        if budget < 256 {
+            break;
+        }
+        let abs = workspace.join(&rel);
+        let body = match std::fs::read_to_string(&abs) {
+            Ok(b) => b,
+            Err(_) => {
+                // Mapped path may not exist (e.g. YAML ahead of
+                // repo). Skip silently — impact map is source of
+                // truth for what MIGHT matter, not what DOES exist.
+                continue;
+            }
+        };
+        let trimmed = truncate_source(&body, per_file_cap.min(budget));
+        budget = budget.saturating_sub(trimmed.len());
+        out.push((rel, trimmed));
+    }
+    out
+}
+
+fn truncate_source(body: &str, max_bytes: usize) -> String {
+    if body.len() <= max_bytes {
+        return body.to_string();
+    }
+    // Keep the top (usually imports + struct defs) and the first
+    // portion of implementation. Tag the truncation so Opus knows
+    // it's not a complete view and won't fabricate edits past the
+    // cutoff.
+    let head = &body[..max_bytes.min(body.len())];
+    // Snap to the last newline to avoid splitting a line.
+    let snap = head.rfind('\n').unwrap_or(head.len());
+    format!(
+        "{}\n// ... (truncated {} bytes — do not propose edits below this point) ...\n",
+        &head[..snap],
+        body.len() - snap
+    )
+}
+
+#[derive(Debug)]
+enum AutoFixOutcome {
+    Clean {
+        iterations: usize,
+        loc: usize,
+        final_findings: Vec<Finding>,
+    },
+    Reverted {
+        iterations: usize,
+        reason: String,
+    },
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn try_autofix(
+    workspace: &std::path::Path,
+    map: &syntaur_verify_core::module_map::ModuleMap,
+    module_slug: &str,
+    url: &str,
+    run_dir: &std::path::Path,
+    browser: &Browser,
+    client: &OpusClient,
+    initial_findings: &[Finding],
+    rebuild_cmd: &str,
+    reload_cmd: Option<&str>,
+    reload_wait_secs: u64,
+    budgets: Budgets,
+    max_source_bytes: usize,
+    changed: &[String],
+) -> Result<AutoFixOutcome> {
+    // Collect edits from the initial pass. If none, nothing to do.
+    let mut pending_edits = collect_edits(initial_findings);
+    if pending_edits.is_empty() {
+        return Ok(AutoFixOutcome::Reverted {
+            iterations: 0,
+            reason: "no edits proposed".into(),
+        });
+    }
+
+    let mut attempts: Vec<FixAttempt> = Vec::new();
+    let mut loc_total: usize = 0;
+    let mut iter: usize = 0;
+
+    let revert_all = |attempts: &[FixAttempt]| {
+        for a in attempts.iter().rev() {
+            if let Err(e) = a.revert() {
+                log::error!("[autofix] revert iter {} failed: {e:#}", a.iteration);
+            }
+        }
+    };
+
+    loop {
+        iter += 1;
+        if iter > budgets.max_iterations {
+            revert_all(&attempts);
+            return Ok(AutoFixOutcome::Reverted {
+                iterations: iter - 1,
+                reason: format!("max_iter={} exhausted", budgets.max_iterations),
+            });
+        }
+
+        // Budget check — refuse to START an iter that would bust
+        // the LoC cap (cheap pre-apply estimate via edit diffs).
+        let projected: usize = pending_edits
+            .iter()
+            .map(|e| syntaur_verify_core::fix::count_loc_delta(&e.old_string, &e.new_string))
+            .sum();
+        if loc_total + projected > budgets.max_loc {
+            revert_all(&attempts);
+            return Ok(AutoFixOutcome::Reverted {
+                iterations: iter - 1,
+                reason: format!(
+                    "LoC budget: {} applied + {} projected > {}",
+                    loc_total, projected, budgets.max_loc
+                ),
+            });
+        }
+
+        log::info!(
+            "[autofix] iter {} — applying {} edit(s)",
+            iter,
+            pending_edits.len()
+        );
+        let attempt = match apply_edits(workspace, iter, &pending_edits) {
+            Ok(a) => a,
+            Err(e) => {
+                log::warn!("[autofix] apply failed: {e:#}");
+                revert_all(&attempts);
+                return Ok(AutoFixOutcome::Reverted {
+                    iterations: iter,
+                    reason: format!("apply failed: {e}"),
+                });
+            }
+        };
+        loc_total += attempt.loc_applied;
+        attempts.push(attempt);
+
+        // Rebuild. If this fails the new code is syntactically or
+        // semantically invalid — revert everything and bail.
+        log::info!("[autofix] iter {iter} — rebuilding with `{rebuild_cmd}`");
+        if let Err(e) = run_shell(rebuild_cmd, workspace) {
+            log::warn!("[autofix] rebuild failed: {e:#}");
+            revert_all(&attempts);
+            return Ok(AutoFixOutcome::Reverted {
+                iterations: iter,
+                reason: format!("rebuild failed: {e}"),
+            });
+        }
+
+        // Reload target. Reload command is required (validated
+        // upstream) so no branching here.
+        if let Some(cmd) = reload_cmd {
+            log::info!("[autofix] iter {iter} — reloading target with `{cmd}`");
+            if let Err(e) = run_shell(cmd, workspace) {
+                log::warn!("[autofix] reload failed: {e:#}");
+                revert_all(&attempts);
+                return Ok(AutoFixOutcome::Reverted {
+                    iterations: iter,
+                    reason: format!("reload failed: {e}"),
+                });
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(reload_wait_secs)).await;
+
+        // Re-verify this module only. Fresh screenshot + fresh Opus
+        // call with updated source context (the edits are now in
+        // the working tree). Iteration suffix so we don't clobber
+        // the initial screenshot (useful for post-mortem).
+        let reverify_slug = format!("{}-iter{}", module_slug, iter);
+        let cap = browser.capture(url, &reverify_slug, run_dir).await?;
+        let sources = collect_source_context(workspace, map, module_slug, max_source_bytes);
+        let new_findings = client
+            .analyze_module_with_source(
+                module_slug,
+                url,
+                &cap.screenshot_path,
+                changed,
+                &sources,
+                /* request_edits = */ true,
+            )
+            .await?;
+
+        let regressions: Vec<&Finding> = new_findings
+            .iter()
+            .filter(|f| f.severity == Severity::Regression)
+            .collect();
+
+        if regressions.is_empty() {
+            log::info!("[autofix] iter {iter} — CLEAN");
+            // Success — keep the attempts (don't revert). Return
+            // the final (non-regression) findings so the outer run
+            // report can include Opus's post-fix suggestions too.
+            return Ok(AutoFixOutcome::Clean {
+                iterations: iter,
+                loc: loc_total,
+                final_findings: new_findings,
+            });
+        }
+
+        // Still regressions — if any NEW edits were proposed, try
+        // another iteration. Otherwise revert + give up.
+        pending_edits = collect_edits(&new_findings);
+        if pending_edits.is_empty() {
+            revert_all(&attempts);
+            return Ok(AutoFixOutcome::Reverted {
+                iterations: iter,
+                reason: format!(
+                    "{} regression(s) remain, no further edits proposed",
+                    regressions.len()
+                ),
+            });
+        }
+    }
+}
+
+fn collect_edits(findings: &[Finding]) -> Vec<FindingEdit> {
+    let mut out = Vec::new();
+    for f in findings {
+        if f.severity != Severity::Regression {
+            continue;
+        }
+        if let Some(edits) = &f.edits {
+            out.extend(edits.iter().cloned());
+        }
+    }
+    out
+}
+
+/// Run a shell command in `cwd`. Inherits stdout/stderr so the
+/// user sees cargo progress. Returns an error on non-zero exit.
+fn run_shell(cmd: &str, cwd: &std::path::Path) -> Result<()> {
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .current_dir(cwd)
+        .status()
+        .with_context(|| format!("spawning `{cmd}`"))?;
+    if !status.success() {
+        anyhow::bail!("`{cmd}` exited with {status}");
+    }
+    Ok(())
 }
 
 fn resolve_mac_mini_staging_url() -> Result<String> {

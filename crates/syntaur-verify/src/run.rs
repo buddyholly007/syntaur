@@ -39,6 +39,18 @@ pub enum FindingKind {
     Other,
 }
 
+/// A precise source-code edit suggested by Opus, consumable by the
+/// Phase 2b auto-fix loop. Shape deliberately mirrors Claude Code's
+/// `Edit` tool — `old_string` must match the file EXACTLY and be
+/// unique, preventing silent multi-replace. File paths are relative
+/// to the workspace root.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FindingEdit {
+    pub file: String,
+    pub old_string: String,
+    pub new_string: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Finding {
     pub module_slug: String,
@@ -49,6 +61,10 @@ pub struct Finding {
     /// Path to a supporting artifact (screenshot, diff image, log).
     pub artifact: Option<PathBuf>,
     pub captured_at: DateTime<Utc>,
+    /// Structured edits Opus proposes for auto-fix (Phase 2b).
+    /// Empty/None for heuristic-only findings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edits: Option<Vec<FindingEdit>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

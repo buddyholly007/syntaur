@@ -26,12 +26,14 @@
 
 pub mod browser;
 pub mod changeset;
+pub mod fix;
 pub mod module_map;
 pub mod opus;
 pub mod run;
 
 pub use browser::{Browser, PageCapture};
 pub use changeset::{ChangeSet, resolve_against};
+pub use fix::{apply_edits, count_loc_delta, AppliedEdit, Budgets, FixAttempt};
 pub use module_map::{Module, ModuleMap};
 pub use opus::OpusClient;
-pub use run::{Finding, FindingKind, Severity, VerifyRun};
+pub use run::{Finding, FindingEdit, FindingKind, Severity, VerifyRun};

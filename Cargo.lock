@@ -8330,6 +8330,7 @@ dependencies = [
  "serde_yaml",
  "syntaur-topo",
  "syntaur-vault",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
 ]
