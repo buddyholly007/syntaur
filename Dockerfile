@@ -39,6 +39,15 @@ COPY mcp-protocol mcp-protocol
 COPY mcp-server-filesystem-rs mcp-server-filesystem-rs
 COPY mcp-server-search-rs mcp-server-search-rs
 COPY mace mace
+COPY syntaur-ship syntaur-ship
+# All workspace-member sub-crates under `crates/`. The workspace root
+# Cargo.toml lists each of syntaur-zwave, rust-aidot, rust-kasa,
+# rust-nexia, syntaur-matter*, and cargo has to be able to read every
+# member's manifest before it can resolve the gateway build. The
+# `rust-aidot-harvest` crate is `workspace.exclude`d (keeps `rsa` out
+# of the lockfile — see its Cargo.toml), so this bulk COPY is safe:
+# the resolver skips excluded paths, the builder never touches them.
+COPY crates crates
 
 RUN cargo build --release \
     -p syntaur-gateway \
