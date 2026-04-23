@@ -10,13 +10,12 @@
 # only security-critical addition past the base runtime.
 
 # ─── Builder stage ────────────────────────────────────────────────────────
-# Rust 1.85 stabilized `edition = "2024"`, which transitive deps
-# (avif-serialize 0.8.8, etc.) now require. Claudevm builds locally
-# on 1.94.x; pinning the CI image to 1.88 gives us headroom without
-# chasing every release. Bump when a future dep needs a newer
-# minimum — documented by the specific "feature `edition2024` is
-# required" cargo-resolve error (what 1.84 hit on 2026-04-22).
-FROM rust:1.88-slim-bookworm AS builder
+# Match claudevm's toolchain (1.94.x). Earlier bumps 1.84 → 1.88
+# unblocked edition2024 parsing but then hit `round_char_boundary`
+# (stabilized >=1.89) in syntaur-gateway. Rather than chase each
+# transitive MSRV bump one-commit-at-a-time, pin to what the
+# interactive dev environment actually uses so CI matches local.
+FROM rust:1.94-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev ca-certificates \
@@ -59,6 +58,10 @@ COPY syntaur-ship syntaur-ship
 # of the lockfile — see its Cargo.toml), so this bulk COPY is safe:
 # the resolver skips excluded paths, the builder never touches them.
 COPY crates crates
+# syntaur-defaults is NOT a crate — it's the agent-template data dir
+# that syntaur-gateway reads at compile time via `include_str!()`.
+# Missing → "couldn't read syntaur-defaults/agent-template/AGENTS.md".
+COPY syntaur-defaults syntaur-defaults
 
 RUN cargo build --release \
     -p syntaur-gateway \
