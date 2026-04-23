@@ -15,6 +15,8 @@
 pub mod agent;
 pub mod crypto;
 pub mod file;
+pub mod import;
+pub mod keyring_store;
 pub mod vault;
 
 pub use agent::{AgentRequest, AgentResponse, Status};

@@ -24,7 +24,7 @@ use clap::{Parser, Subcommand};
 
 use syntaur_vault_core::{
     agent::{self, AgentRequest, AgentResponse},
-    default_pidfile_path, default_socket_path, default_vault_path,
+    default_pidfile_path, default_socket_path, default_vault_path, import, keyring_store,
 };
 
 #[derive(Parser, Debug)]
@@ -63,6 +63,17 @@ enum Commands {
     Unlock {
         #[arg(long, default_value = "1800")]
         ttl_secs: u64,
+        /// After a successful unlock, persist the passphrase in the
+        /// OS keychain (gnome-keyring on Linux). Subsequent unlocks
+        /// fetch automatically — no prompt. Harmless + silent on
+        /// headless hosts where no keyring daemon is running.
+        #[arg(long)]
+        save_to_keyring: bool,
+        /// Ignore an existing keychain entry and prompt for the
+        /// passphrase as if none were stored. Useful after a
+        /// passphrase rotation.
+        #[arg(long)]
+        no_keyring: bool,
     },
     /// Tell the agent to zero the in-memory key and exit.
     Lock,
@@ -96,6 +107,23 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// One-shot migration: scan CLAUDE.md-style files for known
+    /// secret patterns and bulk-insert into the vault. Use after
+    /// `unlock`. Does NOT modify the source files — it prints
+    /// replacement suggestions you can apply by hand.
+    Import {
+        /// One or more files to scan (e.g. CLAUDE.md).
+        files: Vec<PathBuf>,
+        /// Don't prompt for each match; auto-accept all.
+        #[arg(long)]
+        yes: bool,
+        /// Show what would be imported without writing to the vault.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Remove the stored passphrase from the OS keychain. After this,
+    /// `unlock` prompts interactively again.
+    KeyringClear,
     /// Run the agent daemon in the foreground. Used internally by
     /// `unlock`/`init` which spawn a detached child of this. Users
     /// usually don't call this directly.
@@ -116,7 +144,11 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Commands::Agent { detach } => run_agent(vault_path, socket_path, detach),
         Commands::Init { ttl_secs } => cmd_init(&socket_path, &vault_path, ttl_secs),
-        Commands::Unlock { ttl_secs } => cmd_unlock(&socket_path, &vault_path, ttl_secs),
+        Commands::Unlock {
+            ttl_secs,
+            save_to_keyring,
+            no_keyring,
+        } => cmd_unlock(&socket_path, &vault_path, ttl_secs, save_to_keyring, no_keyring),
         Commands::Lock => cmd_lock(&socket_path),
         Commands::Status => cmd_status(&socket_path),
         Commands::Get { name } => cmd_get(&socket_path, &name),
@@ -128,6 +160,12 @@ fn main() -> ExitCode {
         } => cmd_set(&socket_path, &name, &description, &notes, &tags),
         Commands::Rm { name } => cmd_rm(&socket_path, &name),
         Commands::List { json } => cmd_list(&socket_path, json),
+        Commands::Import {
+            files,
+            yes,
+            dry_run,
+        } => cmd_import(&socket_path, &files, yes, dry_run),
+        Commands::KeyringClear => cmd_keyring_clear(&vault_path),
     };
 
     match result {
@@ -238,29 +276,135 @@ fn cmd_init(socket: &std::path::Path, vault: &std::path::Path, ttl: u64) -> Resu
     }
 }
 
-fn cmd_unlock(socket: &std::path::Path, vault: &std::path::Path, ttl: u64) -> Result<()> {
+fn cmd_unlock(
+    socket: &std::path::Path,
+    vault: &std::path::Path,
+    ttl: u64,
+    save_to_keyring: bool,
+    no_keyring: bool,
+) -> Result<()> {
     if !vault.exists() {
         bail!(
             "no vault at {} — run `syntaur-vault init` first",
             vault.display()
         );
     }
-    let pw = prompt_passphrase("vault passphrase: ")?;
+
+    // Try keyring first unless explicitly disabled. Silent fallback
+    // to prompt if no entry / no keyring daemon.
+    let (pw, from_keyring) = if no_keyring {
+        (prompt_passphrase("vault passphrase: ")?, false)
+    } else {
+        match keyring_store::fetch(vault) {
+            Ok(Some(p)) => (p, true),
+            Ok(None) => (prompt_passphrase("vault passphrase: ")?, false),
+            Err(e) => {
+                // Keyring unreachable (headless, etc.). Don't whine —
+                // just fall back. Print a debug hint so Sean knows
+                // the --save-to-keyring flag wouldn't help here.
+                eprintln!(
+                    "[syntaur-vault] (keyring unavailable: {e:#}; falling back to prompt)"
+                );
+                (prompt_passphrase("vault passphrase: ")?, false)
+            }
+        }
+    };
+
     ensure_agent_running(socket)?;
     match agent::request(
         socket,
         &AgentRequest::Unlock {
-            passphrase: pw,
+            passphrase: pw.clone(),
             ttl_secs: ttl,
         },
     )? {
         AgentResponse::Ok => {
-            println!("✓ unlocked for {ttl}s");
+            let src = if from_keyring { " (from keyring)" } else { "" };
+            println!("✓ unlocked for {ttl}s{src}");
+            if save_to_keyring && !from_keyring {
+                match keyring_store::save(vault, &pw) {
+                    Ok(()) => println!("  ✓ passphrase saved to OS keyring"),
+                    Err(e) => eprintln!("  ⚠ could not save to keyring: {e:#}"),
+                }
+            }
             Ok(())
         }
         AgentResponse::Error { message } => Err(anyhow!("{message}")),
         other => Err(anyhow!("unexpected response: {other:?}")),
     }
+}
+
+fn cmd_keyring_clear(vault: &std::path::Path) -> Result<()> {
+    keyring_store::clear(vault)?;
+    println!("✓ cleared passphrase from OS keyring for {}", vault.display());
+    Ok(())
+}
+
+fn cmd_import(
+    socket: &std::path::Path,
+    files: &[PathBuf],
+    yes: bool,
+    dry_run: bool,
+) -> Result<()> {
+    if files.is_empty() {
+        bail!("no files to scan — pass one or more paths (e.g. ~/.claude/CLAUDE.md)");
+    }
+    let paths: Vec<&std::path::Path> = files.iter().map(|p| p.as_path()).collect();
+    let findings = import::scan_files(&paths)?;
+    if findings.is_empty() {
+        println!("(no known secret patterns matched in the given files)");
+        return Ok(());
+    }
+
+    println!("Found {} secret(s):", findings.len());
+    println!();
+    for f in &findings {
+        let tags = f.tags.join(",");
+        println!("  [{name}] {desc}", name = f.rule_name, desc = f.description);
+        println!("    tags:    {tags}");
+        println!("    source:  {}:{}", f.source_file, f.line_no);
+        println!("    value:   {}", import::redact(&f.value));
+        println!();
+    }
+
+    if dry_run {
+        println!("--dry-run: not writing to vault");
+        return Ok(());
+    }
+
+    if !yes && io::stdin().is_terminal() {
+        eprint!("Import all {} into the vault? [y/N] ", findings.len());
+        use std::io::Write;
+        io::stderr().flush().ok();
+        let mut ans = String::new();
+        io::stdin().read_line(&mut ans)?;
+        if !matches!(ans.trim().to_lowercase().as_str(), "y" | "yes") {
+            println!("aborted.");
+            return Ok(());
+        }
+    }
+
+    for f in &findings {
+        let req = AgentRequest::Set {
+            name: f.rule_name.to_string(),
+            value: f.value.clone(),
+            description: f.description.to_string(),
+            notes: format!("imported from {}:{}", f.source_file, f.line_no),
+            tags: f.tags.clone(),
+        };
+        match agent::request(socket, &req)? {
+            AgentResponse::Ok => println!("  ✓ {}", f.rule_name),
+            AgentResponse::Error { message } => {
+                eprintln!("  ⚠ {}: {message}", f.rule_name);
+            }
+            other => eprintln!("  ⚠ {}: unexpected response: {other:?}", f.rule_name),
+        }
+    }
+
+    println!();
+    println!("Next step: replace the plaintext in your CLAUDE.md with vault references.");
+    println!("Example: `$(syntaur-vault get openrouter)` or fetch at service start.");
+    Ok(())
 }
 
 fn cmd_lock(socket: &std::path::Path) -> Result<()> {

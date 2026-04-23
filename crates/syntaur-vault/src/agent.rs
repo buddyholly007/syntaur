@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::{self, MasterKey, NONCE_LEN, SALT_LEN};
+use crate::crypto::{self, MasterKey, SALT_LEN};
 use crate::file::VaultFile;
 use crate::vault::{Entry, EntryMeta, Vault};
 

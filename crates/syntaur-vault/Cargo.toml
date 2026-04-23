@@ -31,3 +31,14 @@ nix = { version = "0.29", features = ["process"] }
 # `syntaur-vault agent --internal-daemon` after the parent CLI exec's
 # itself as a child. Plain crate, no transitive bloat.
 daemonize = "0.5"
+# `import` subcommand: curated-rule regex matcher against CLAUDE.md.
+regex = "1"
+# OS keychain: on hosts with gnome-keyring / kwallet / macOS keychain
+# the passphrase can be stored there so `unlock` doesn't prompt after
+# first use. `sync-secret-service` talks D-Bus Secret Service (works
+# with gnome-keyring AND kwallet — Sean's CachyOS box is kwallet).
+# Without an explicit backend feature keyring 3.x silently falls back
+# to a no-op, which looks like success but never persists. Learned
+# that the hard way on 2026-04-23. On headless claudevm the call
+# errors cleanly; we catch and fall back to prompt.
+keyring = { version = "3", features = ["sync-secret-service"] }
