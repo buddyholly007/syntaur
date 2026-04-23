@@ -1017,6 +1017,46 @@ async fn handle_health(State(state): State<Arc<AppState>>) -> Json<serde_json::V
     }))
 }
 
+/// `/api/version-proof` — verifiable provenance of the running binary.
+///
+/// Returns the build-time git commit + timestamp (embedded by
+/// `build.rs`), the current binary's SHA-256 (computed from
+/// `/proc/self/exe` once + cached), and the user-visible version.
+///
+/// External auditors use this to verify "the binary running on prod
+/// is actually built from commit X" by cross-referencing the SHA-256
+/// against the one cosign-signed at that commit's release tag.
+async fn handle_version_proof(
+    State(_state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    static BINARY_SHA: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let binary_sha = BINARY_SHA.get_or_init(|| {
+        std::fs::read("/proc/self/exe")
+            .ok()
+            .map(|bytes| {
+                use sha2::Digest;
+                let mut h = sha2::Sha256::new();
+                h.update(&bytes);
+                hex::encode(h.finalize())
+            })
+            .unwrap_or_else(|| "unknown".into())
+    });
+    let version = env!("CARGO_PKG_VERSION");
+    Json(serde_json::json!({
+        "version": version,
+        "git_commit": env!("SYNTAUR_GIT_COMMIT"),
+        "git_commit_short": env!("SYNTAUR_GIT_COMMIT_SHORT"),
+        "built_at": env!("SYNTAUR_BUILD_TIMESTAMP"),
+        "binary_sha256": binary_sha,
+        "cosign_bundle_url": format!(
+            "https://github.com/buddyholly007/syntaur/releases/download/v{version}/syntaur-gateway-linux-x86_64.cosign.bundle"
+        ),
+        "release_url": format!(
+            "https://github.com/buddyholly007/syntaur/releases/tag/v{version}"
+        ),
+    }))
+}
+
 async fn handle_stats(State(state): State<Arc<AppState>>) -> Json<GatewayStats> {
     let mut stats = state.stats.lock().await;
     stats.uptime_secs = state.start_time.elapsed().as_secs();
@@ -6475,6 +6515,7 @@ async fn main() {
     let app = Router::new()
         .route("/voice/tts/{filename}", get(voice::handle_tts_audio))
         .route("/health", get(handle_health))
+        .route("/api/version-proof", get(handle_version_proof))
         .route("/stats", get(handle_stats))
         .route("/messages", get(handle_messages))
         .route("/api/message", post(handle_api_message))

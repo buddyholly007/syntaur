@@ -1,6 +1,8 @@
 //! Stage modules. Each exports a `pub fn run(ctx: &StageContext)`.
 
+pub mod backup_freshness;
 pub mod build;
+pub mod canary;
 pub mod git_push;
 pub mod mac_mini;
 pub mod preflight;

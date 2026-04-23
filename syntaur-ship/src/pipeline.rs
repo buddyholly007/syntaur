@@ -206,6 +206,10 @@ fn run_full_inner(cfg: &Config, opts: &RunOptions, ctx: &StageContext) -> Result
     // public version surfaces disagree. Cheap local file reads; no
     // network. Fix at source + re-run rather than shipping drift.
     stages::version_sweep::run(ctx)?;
+    // Backup-freshness gate: refuse to deploy if no independent
+    // TrueNAS snapshot in the last 24h. Catches silently-broken
+    // backup/replication tasks. Override via SYNTAUR_SHIP_ALLOW_STALE_BACKUP=1.
+    stages::backup_freshness::run(ctx)?;
     // Phase 2: snapshot BEFORE any TrueNAS writes. If any later stage
     // fails we still have a restore point.
     let snapshot_name = stages::snapshot::run(ctx)?;
@@ -220,6 +224,9 @@ fn run_full_inner(cfg: &Config, opts: &RunOptions, ctx: &StageContext) -> Result
         } else {
             log::warn!("[mac_mini] --skip-mac set; skipping smoke (emergency only)");
         }
+        // Canary: re-probe Mac Mini /health after 45s to catch
+        // delayed-crash bugs before rsync'ing to TrueNAS.
+        stages::canary::run(ctx)?;
         if !opts.skip_git {
             stages::git_push::run(ctx)?;
         } else {
