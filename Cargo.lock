@@ -8271,6 +8271,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "syntaur-topo",
  "thiserror 1.0.69",
  "tokio",
 ]

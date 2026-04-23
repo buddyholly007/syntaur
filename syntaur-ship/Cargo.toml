@@ -23,5 +23,11 @@ chrono = { version = "0.4", features = ["serde"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 sha2 = "0.10"
 hex = "0.4"
+# LAN topology source-of-truth. Previously config.rs hardcoded
+# 192.168.1.239 (TrueNAS), 192.168.1.3 (jump), 192.168.1.58 (Mac
+# Mini), 192.168.1.69 (viewer), 192.168.1.150 (broker) in five
+# places. Now resolved from ~/vault/syntaur-topology.yaml with env
+# overrides as escape hatches.
+syntaur-topo = { path = "../crates/syntaur-topo" }
 # Process orchestration: we shell out to ssh/rsync/git/cargo/docker. Using
 # std::process rather than pulling another dep keeps the attack surface small.
