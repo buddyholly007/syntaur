@@ -40,10 +40,28 @@ pub struct CommissionableDevice {
 /// Scan for up to `timeout` and return every commissionable device
 /// whose discriminator (12-bit) matches `want_discriminator`, OR if
 /// `want_discriminator` is `None` return every Matter-commissionable
-/// device seen.
+/// device seen. Passes the returned devices' `want_upper_nibble`
+/// match is the caller's responsibility (the scan here exits as
+/// soon as it has collected at least one Matter device, to avoid
+/// burning the peer's commissioning window).
 pub async fn scan_for_discriminator(
     want_discriminator: Option<u16>,
     timeout: Duration,
+) -> Result<Vec<CommissionableDevice>, btleplug::Error> {
+    scan_for_discriminator_ext(want_discriminator, timeout, Duration::from_millis(1500)).await
+}
+
+/// Like [`scan_for_discriminator`], but explicitly controls the
+/// "grace window" — how long we keep scanning AFTER the first
+/// matching Matter-advertising device is seen, to collect duplicates
+/// / RPAs of the same device / neighbors. Short grace window (~1.5s)
+/// minimizes the time spent scanning once we have something to connect
+/// to, which matters when the peer's BLE commissioning window is
+/// counting down.
+pub async fn scan_for_discriminator_ext(
+    want_discriminator: Option<u16>,
+    timeout: Duration,
+    post_first_hit_grace: Duration,
 ) -> Result<Vec<CommissionableDevice>, btleplug::Error> {
     let manager = Manager::new().await?;
     let adapters = manager.adapters().await?;
@@ -60,10 +78,22 @@ pub async fn scan_for_discriminator(
 
     let mut events = central.events().await?;
     let mut hits: Vec<CommissionableDevice> = Vec::new();
-    let deadline = tokio::time::Instant::now() + timeout;
+    let hard_deadline = tokio::time::Instant::now() + timeout;
+    // Set once we see our first Matter-service advertisement — stops
+    // the loop `post_first_hit_grace` later instead of after the full
+    // `timeout`. Keeps the peer's commissioning window intact.
+    let mut soft_deadline: Option<tokio::time::Instant> = None;
 
     loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let now = tokio::time::Instant::now();
+        let remaining_hard = hard_deadline.saturating_duration_since(now);
+        let remaining = match soft_deadline {
+            Some(soft) => {
+                let remaining_soft = soft.saturating_duration_since(now);
+                remaining_soft.min(remaining_hard)
+            }
+            None => remaining_hard,
+        };
         if remaining.is_zero() {
             break;
         }
@@ -102,8 +132,16 @@ pub async fn scan_for_discriminator(
         if !hits.iter().any(|h| h.address == dev.address) {
             hits.push(dev.clone());
         }
-        if want_discriminator.is_some() && !hits.is_empty() {
+        if want_discriminator.is_some() {
+            // Exact match requested and found — stop immediately.
             break;
+        }
+        // No exact filter: start a short grace window after first hit
+        // so duplicates of the same device + any RPA variants + any
+        // neighbors in range get collected, but we don't burn the full
+        // `timeout` on a peer whose commissioning window is ticking.
+        if soft_deadline.is_none() && !hits.is_empty() {
+            soft_deadline = Some(tokio::time::Instant::now() + post_first_hit_grace);
         }
     }
 

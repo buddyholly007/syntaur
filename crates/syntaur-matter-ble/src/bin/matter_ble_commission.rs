@@ -24,7 +24,9 @@ use std::env;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use syntaur_matter::commission::{Commissioner, WifiCredentials};
+use syntaur_matter::commission::{
+    Commissioner, NetworkCredentials, ThreadCredentials, WifiCredentials,
+};
 use syntaur_matter::{load_fabric, parse_manual_code, parse_qr};
 use syntaur_matter_ble::{btp::BleCommissionExchange, scan_for_discriminator};
 
@@ -58,6 +60,8 @@ struct Args {
     assigned_node_id: u64,
     wifi_ssid: Option<String>,
     wifi_psk: Option<String>,
+    thread_dataset_hex: Option<String>,
+    thread_dataset_file: Option<String>,
     scan_timeout: Duration,
 }
 
@@ -68,6 +72,8 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut assigned_node_id: Option<u64> = None;
     let mut wifi_ssid = None;
     let mut wifi_psk = None;
+    let mut thread_dataset_hex = None;
+    let mut thread_dataset_file = None;
     let mut scan_timeout = 15u64;
 
     let mut i = 1;
@@ -102,6 +108,16 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
                 wifi_psk = Some(argv.get(i + 1).cloned().ok_or("--wifi-psk needs a value")?);
                 i += 2;
             }
+            "--thread-dataset-hex" => {
+                thread_dataset_hex =
+                    Some(argv.get(i + 1).cloned().ok_or("--thread-dataset-hex needs a value")?);
+                i += 2;
+            }
+            "--thread-dataset-file" => {
+                thread_dataset_file =
+                    Some(argv.get(i + 1).cloned().ok_or("--thread-dataset-file needs a value")?);
+                i += 2;
+            }
             "--timeout-secs" => {
                 scan_timeout = argv
                     .get(i + 1)
@@ -122,6 +138,8 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         assigned_node_id: assigned_node_id.ok_or("--assigned-node-id is required")?,
         wifi_ssid,
         wifi_psk,
+        thread_dataset_hex,
+        thread_dataset_file,
         scan_timeout: Duration::from_secs(scan_timeout),
     })
 }
@@ -129,7 +147,10 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
 fn print_usage() {
     eprintln!(
         "\n  matter-ble-commission --fabric-label <LABEL> (--qr MT:...|--code XXXX-XXX-XXXX) \\
-                        --assigned-node-id <N> [--wifi-ssid S --wifi-psk P] [--timeout-secs N]\n"
+                        --assigned-node-id <N> \\
+                        [--wifi-ssid S --wifi-psk P] \\
+                        [--thread-dataset-hex HEX | --thread-dataset-file PATH] \\
+                        [--timeout-secs N]\n"
     );
 }
 
@@ -183,19 +204,18 @@ async fn run(args: Args) -> Result<(), String> {
         .await
         .map_err(|e| format!("BTP session open: {e}"))?;
 
-    let wifi = match (args.wifi_ssid.as_ref(), args.wifi_psk.as_ref()) {
-        (Some(s), Some(p)) => {
-            log::info!("wifi creds provided — ssid={:?}", s);
-            Some(WifiCredentials {
-                ssid: s.as_bytes().to_vec(),
-                psk: p.as_bytes().to_vec(),
-            })
+    let network = resolve_network(&args)?;
+    match &network {
+        Some(NetworkCredentials::Wifi(w)) => {
+            log::info!("WiFi network handoff — ssid={:?} ({} B PSK)", String::from_utf8_lossy(&w.ssid), w.psk.len());
         }
-        _ => {
-            log::info!("no wifi creds — device must be thread-class or already on a network");
-            None
+        Some(NetworkCredentials::Thread(t)) => {
+            log::info!("Thread network handoff — {}-byte operational dataset", t.operational_dataset.len());
         }
-    };
+        None => {
+            log::info!("no network creds — device must be already on a network (IP/OCW path)");
+        }
+    }
 
     log::info!(
         "running Commissioner state machine (8 steps) against assigned_node_id {}",
@@ -203,7 +223,7 @@ async fn run(args: Args) -> Result<(), String> {
     );
     let commissioner = Commissioner::new(&fabric);
     let commissioned = commissioner
-        .commission(&mut exchange, args.assigned_node_id, wifi)
+        .commission(&mut exchange, args.assigned_node_id, network)
         .await
         .map_err(|e| format!("commissioning: {e}"))?;
 
@@ -214,4 +234,32 @@ async fn run(args: Args) -> Result<(), String> {
         commissioned.add_noc_response.len()
     );
     Ok(())
+}
+
+fn resolve_network(args: &Args) -> Result<Option<NetworkCredentials>, String> {
+    let wifi = match (args.wifi_ssid.as_ref(), args.wifi_psk.as_ref()) {
+        (Some(s), Some(p)) => Some(WifiCredentials {
+            ssid: s.as_bytes().to_vec(),
+            psk: p.as_bytes().to_vec(),
+        }),
+        _ => None,
+    };
+    let thread = match (args.thread_dataset_hex.as_deref(), args.thread_dataset_file.as_deref()) {
+        (Some(hex), _) => {
+            let bytes = hex::decode(hex.trim()).map_err(|e| format!("--thread-dataset-hex decode: {e}"))?;
+            Some(ThreadCredentials { operational_dataset: bytes })
+        }
+        (_, Some(path)) => {
+            let raw = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
+            let bytes = hex::decode(raw.trim()).map_err(|e| format!("{path} hex decode: {e}"))?;
+            Some(ThreadCredentials { operational_dataset: bytes })
+        }
+        _ => None,
+    };
+    match (wifi, thread) {
+        (Some(_), Some(_)) => Err("specify only one of --wifi-* or --thread-dataset-*".into()),
+        (Some(w), None) => Ok(Some(NetworkCredentials::Wifi(w))),
+        (None, Some(t)) => Ok(Some(NetworkCredentials::Thread(t))),
+        (None, None) => Ok(None),
+    }
 }

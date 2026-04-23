@@ -77,8 +77,11 @@ const BTP_OPCODE_HANDSHAKE: u8 = 0x6C;
 
 // Preferred session parameters. The peer may downgrade in its handshake
 // response; we always accept the peer's choice as the session floor.
-const BTP_PREF_MTU: u16 = 247;
-const BTP_PREF_WINDOW: u8 = 4;
+// Using Matter spec minimums (MTU=23, window=1) for the initial
+// handshake — some devices silent-drop larger requests. Post-handshake
+// we could renegotiate upward if the peer allows.
+const BTP_PREF_MTU: u16 = 23;
+const BTP_PREF_WINDOW: u8 = 1;
 
 // Spec minimums.
 const BTP_MIN_MTU: u16 = 23;
@@ -195,8 +198,15 @@ impl BtpHdr {
 
 fn encode_handshake_request(versions_bitmap: u32, mtu: u16, window: u8) -> Vec<u8> {
     let mut out = Vec::with_capacity(9);
+    // Matter Core §4.17.3.1: handshake request flags MUST be H|M|B|E —
+    // it's a complete single-segment management frame. Eve firmware
+    // enforces this strictly; earlier flags=0x60 (H|M only) was
+    // silently dropped without responding on C2.
     let hdr = BtpHdr {
-        flags: flags::HANDSHAKE | flags::MANAGEMENT,
+        flags: flags::HANDSHAKE
+            | flags::MANAGEMENT
+            | flags::BEGINNING_SEGMENT
+            | flags::ENDING_SEGMENT,
         opcode: BTP_OPCODE_HANDSHAKE,
         ..Default::default()
     };
@@ -269,7 +279,9 @@ impl Default for BtpState {
 impl BtpSession {
     /// Connect, discover characteristics, subscribe, handshake.
     pub async fn open(device: CommissionableDevice) -> Result<Self, BtpError> {
+        log::debug!("[btp] open: Manager::new");
         let manager = Manager::new().await?;
+        log::debug!("[btp] open: adapters");
         let adapter = manager
             .adapters()
             .await?
@@ -277,9 +289,7 @@ impl BtpSession {
             .next()
             .ok_or(BtpError::NoAdapter)?;
 
-        // btleplug can't look up a peripheral purely by address without
-        // a prior scan seeding its internal map. Re-scan briefly so the
-        // address we got from CommissionableDevice is fresh.
+        log::debug!("[btp] open: start_scan (refresh cache for {})", device.address);
         adapter
             .start_scan(ScanFilter {
                 services: vec![MATTER_SERVICE_UUID],
@@ -303,17 +313,49 @@ impl BtpSession {
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
         };
+        log::debug!("[btp] open: found peripheral in cache");
         let _ = adapter.stop_scan().await;
+        log::debug!("[btp] open: stop_scan done");
 
-        // Force a fresh GATT session — if a prior connection left the bulb
-        // with stale BTP state, reconnecting resets it.
-        let _ = peripheral.disconnect().await;
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        peripheral.connect().await?;
+        let pre_connected = peripheral.is_connected().await.unwrap_or(false);
+        log::debug!("[btp] open: pre_connected={pre_connected}");
+        if pre_connected {
+            let _ = peripheral.disconnect().await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+
+        log::debug!("[btp] open: connect()");
+        match tokio::time::timeout(Duration::from_secs(15), peripheral.connect()).await {
+            Ok(Ok(())) => log::debug!("[btp] open: connect OK"),
+            Ok(Err(e)) => {
+                log::warn!("[btp] open: connect returned btleplug error: {e:?}");
+                return Err(e.into());
+            }
+            Err(_) => {
+                log::warn!("[btp] open: connect() hung past 15s — giving up");
+                return Err(BtpError::Protocol("connect() timed out at 15s"));
+            }
+        }
         tokio::time::sleep(Duration::from_millis(300)).await;
-        peripheral.discover_services().await?;
+
+        log::debug!("[btp] open: discover_services");
+        match tokio::time::timeout(Duration::from_secs(10), peripheral.discover_services()).await {
+            Ok(Ok(())) => log::debug!("[btp] open: discover_services OK"),
+            Ok(Err(e)) => {
+                log::warn!("[btp] open: discover_services error: {e:?}");
+                return Err(e.into());
+            }
+            Err(_) => {
+                log::warn!("[btp] open: discover_services hung past 10s");
+                return Err(BtpError::Protocol("discover_services timed out"));
+            }
+        }
 
         let characteristics = peripheral.characteristics();
+        log::debug!("[btp] open: discovered characteristics:");
+        for ch in characteristics.iter() {
+            log::debug!("[btp]   {} props={:?}", ch.uuid, ch.properties);
+        }
         let c1 = characteristics
             .iter()
             .find(|c| c.uuid == BTP_CHAR_C1)
@@ -324,6 +366,11 @@ impl BtpSession {
             .find(|c| c.uuid == BTP_CHAR_C2)
             .cloned()
             .ok_or(BtpError::MissingCharacteristic("C2"))?;
+        log::info!(
+            "[btp] C1 props={:?}, C2 props={:?}",
+            c1.properties,
+            c2.properties
+        );
 
         if !c1.properties.contains(CharPropFlags::WRITE)
             && !c1.properties.contains(CharPropFlags::WRITE_WITHOUT_RESPONSE)
@@ -369,16 +416,23 @@ impl BtpSession {
     /// our preferred MTU/window, waits for the response on C2, and
     /// stores the negotiated minimums in `self.state`.
     async fn do_handshake(&self) -> Result<(), BtpError> {
-        // Give CCCD enable time to land on the peer side.
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        // We support BTP version 4 only for now; spec says bit 4 of
-        // the versions bitmap marks version 4.
-        let frame = encode_handshake_request(0x00001234u32, BTP_PREF_MTU, BTP_PREF_WINDOW);
+        // Give CCCD enable time to land on the peer side — some firmware
+        // (Eve, AiDot) doesn't fully register the subscription before
+        // processing BTP frames. 5s is overkill but eliminates the class.
+        tokio::time::sleep(Duration::from_millis(5000)).await;
+        // Supported Versions is a list of up to 8 nibble-packed version
+        // numbers, NOT a bitmap. chip-sdk sends 0x04 meaning "first
+        // supported version = 4, no others". LE u32 = 0x00000004.
+        let frame = encode_handshake_request(0x00000004u32, BTP_PREF_MTU, BTP_PREF_WINDOW);
         log::debug!("[btp] handshake TX {} bytes: {:02x?}", frame.len(), &frame);
+        // Matter Core §4.17.1.3.1: writes to C1 SHALL be Write Command
+        // (ATT opcode 0x52). chip-sdk does this. Using Write Request
+        // works at ATT layer but some devices' BTP layer only fires on
+        // Write Command, not Write Request.
         self.peripheral
             .write(&self.c1, &frame, WriteType::WithoutResponse)
             .await?;
-        log::debug!("[btp] handshake write ACKed, awaiting C2 indication");
+        log::debug!("[btp] handshake Write Command sent (spec §4.17.1.3.1)");
 
         let resp_frame = self.recv_raw_frame(Duration::from_secs(10)).await?;
         let (hdr, consumed) = BtpHdr::decode(&resp_frame)?;
@@ -960,13 +1014,20 @@ mod tests {
 
     #[test]
     fn handshake_request_encoding() {
-        let frame = encode_handshake_request(0x00001234u32, 247, 8);
-        assert_eq!(frame[0], flags::HANDSHAKE | flags::MANAGEMENT);
+        let frame = encode_handshake_request(0x00000004u32, 247, 8);
+        // Matter Core §4.17.3.1: handshake = H|M|B|E = 0x65
+        assert_eq!(
+            frame[0],
+            flags::HANDSHAKE
+                | flags::MANAGEMENT
+                | flags::BEGINNING_SEGMENT
+                | flags::ENDING_SEGMENT
+        );
         assert_eq!(frame[1], BTP_OPCODE_HANDSHAKE);
-        // 4 bytes versions bitmap + 2 MTU + 1 window = 7 payload bytes
+        // 4 bytes version list + 2 MTU + 1 window = 7 payload bytes
         assert_eq!(frame.len(), 2 + 7);
-        // Version 4 bit set in the bitmap.
-        assert_eq!(u32::from_le_bytes([frame[2], frame[3], frame[4], frame[5]]), 4);
+        // Version 4 in first nibble (low-nibble of byte[2]), rest zero.
+        assert_eq!([frame[2], frame[3], frame[4], frame[5]], [0x04, 0, 0, 0]);
         assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 247);
         assert_eq!(frame[8], 8);
     }

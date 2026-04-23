@@ -35,8 +35,9 @@ use rs_matter::transport::exchange::Exchange;
 use crate::fabric::FabricHandle;
 use crate::sign::sign_device_noc;
 use crate::tlv_build::{
-    add_noc, add_or_update_wifi_network, add_trusted_root_certificate, arm_fail_safe,
-    commissioning_complete, connect_network, csr_request, set_regulatory_config,
+    add_noc, add_or_update_thread_network, add_or_update_wifi_network,
+    add_trusted_root_certificate, arm_fail_safe, commissioning_complete, connect_network,
+    csr_request, extract_thread_extpanid, set_regulatory_config,
 };
 use crate::MatterFabricError;
 
@@ -53,6 +54,7 @@ pub const CMD_CSR_REQUEST: u32 = 0x04;
 pub const CMD_ADD_NOC: u32 = 0x06;
 pub const CMD_ADD_TRUSTED_ROOT_CERT: u32 = 0x0B;
 pub const CMD_ADD_OR_UPDATE_WIFI_NETWORK: u32 = 0x02;
+pub const CMD_ADD_OR_UPDATE_THREAD_NETWORK: u32 = 0x03;
 pub const CMD_CONNECT_NETWORK: u32 = 0x06;
 
 /// Endpoint 0 on every commissionable device — the root node, where
@@ -74,6 +76,26 @@ pub struct WifiCredentials {
     pub ssid: Vec<u8>,
     /// WPA2/WPA3 pre-shared key. For open networks pass an empty slice.
     pub psk: Vec<u8>,
+}
+
+/// Thread credentials pushed to the device during commissioning. The
+/// `operational_dataset` is a raw Thread TLV blob (per Thread spec
+/// §8.10) carrying network key + channel + extended PAN ID + mesh-local
+/// prefix. Same dataset every device on the same mesh receives; no
+/// per-device customization.
+#[derive(Debug, Clone)]
+pub struct ThreadCredentials {
+    pub operational_dataset: Vec<u8>,
+}
+
+/// Network credentials to push during commissioning. The right variant
+/// depends on the device's physical radio — WiFi devices want WiFi,
+/// Thread devices want Thread. Mis-matching will surface as a
+/// `NETWORK_CONFIG` status from the device at the AddOrUpdate step.
+#[derive(Debug, Clone)]
+pub enum NetworkCredentials {
+    Wifi(WifiCredentials),
+    Thread(ThreadCredentials),
 }
 
 /// Supplied by the caller — abstracts over the underlying transport
@@ -140,14 +162,15 @@ impl<'a> Commissioner<'a> {
 
     /// Run the full commission flow against an already-PASE-authenticated
     /// exchange. `assigned_node_id` is what we'll give the device on
-    /// our fabric. `wifi` is required for devices whose only rendezvous
-    /// channel is BLE (must be handed WiFi credentials before CASE can
-    /// reach them); pass `None` for already-WiFi devices.
+    /// our fabric. `network` is required for BLE-rendezvous devices
+    /// (must be handed WiFi OR Thread credentials before the device
+    /// can reach the IP network and CASE can be established). Pass
+    /// `None` for already-on-network devices (Track A / OCW path).
     pub async fn commission<E: CommissionExchange>(
         &self,
         ex: &mut E,
         assigned_node_id: u64,
-        wifi: Option<WifiCredentials>,
+        network: Option<NetworkCredentials>,
     ) -> Result<CommissionedDevice, MatterFabricError> {
         // Step 1 — ArmFailSafe: gates the rest; if the sequence fails
         // the device rolls back any writes after this window expires.
@@ -232,22 +255,45 @@ impl<'a> Commissioner<'a> {
             )
             .await?;
 
-        // Step 7 — WiFi handoff (if applicable).
-        if let Some(wifi) = wifi {
-            let _ = ex
-                .invoke(
-                    CLUSTER_NETWORK_COMMISSIONING,
-                    CMD_ADD_OR_UPDATE_WIFI_NETWORK,
-                    add_or_update_wifi_network(&wifi.ssid, &wifi.psk, 3),
-                )
-                .await?;
-            let _ = ex
-                .invoke(
-                    CLUSTER_NETWORK_COMMISSIONING,
-                    CMD_CONNECT_NETWORK,
-                    connect_network(&wifi.ssid, 4),
-                )
-                .await?;
+        // Step 7 — network handoff (if applicable). The NetworkID passed
+        // to ConnectNetwork is the SSID for WiFi and the 8-byte
+        // Extended PAN ID for Thread (Matter spec §11.8.6.6.1).
+        match network {
+            Some(NetworkCredentials::Wifi(wifi)) => {
+                let _ = ex
+                    .invoke(
+                        CLUSTER_NETWORK_COMMISSIONING,
+                        CMD_ADD_OR_UPDATE_WIFI_NETWORK,
+                        add_or_update_wifi_network(&wifi.ssid, &wifi.psk, 3),
+                    )
+                    .await?;
+                let _ = ex
+                    .invoke(
+                        CLUSTER_NETWORK_COMMISSIONING,
+                        CMD_CONNECT_NETWORK,
+                        connect_network(&wifi.ssid, 4),
+                    )
+                    .await?;
+            }
+            Some(NetworkCredentials::Thread(thread)) => {
+                let extpanid = extract_thread_extpanid(&thread.operational_dataset)
+                    .map_err(MatterFabricError::Matter)?;
+                let _ = ex
+                    .invoke(
+                        CLUSTER_NETWORK_COMMISSIONING,
+                        CMD_ADD_OR_UPDATE_THREAD_NETWORK,
+                        add_or_update_thread_network(&thread.operational_dataset, 3),
+                    )
+                    .await?;
+                let _ = ex
+                    .invoke(
+                        CLUSTER_NETWORK_COMMISSIONING,
+                        CMD_CONNECT_NETWORK,
+                        connect_network(&extpanid, 4),
+                    )
+                    .await?;
+            }
+            None => {}
         }
 
         // Step 8 — CommissioningComplete. Device now switches to CASE

@@ -1,93 +1,93 @@
 //! IP-side Matter commissioner for multi-admin fabric joins.
 //!
-//! Counterpart to [`syntaur_matter_ble::BleCommissionExchange`]. Where BLE
-//! commissions fresh devices, IP commissioning takes an existing device
-//! that another admin (HA, Apple Home, Google Home) has asked to open a
-//! commissioning window — and joins it as a second admin on Syntaur's
-//! fabric. No BLE involved; runs entirely over UDP against the device's
-//! `_matterc._udp` commissionable listener.
+//! Held-session PASE design: `connect()` spawns a dedicated spawn_blocking
+//! task that establishes ONE PASE session and processes invoke commands
+//! over flume channels. The Exchange is held alive across all 8
+//! Commissioner state-machine steps, matching Matter spec.
 //!
-//! ## Flow
+//! ## Architecture
 //!
 //! ```text
-//!   HA admin (existing fabric)
-//!           │
-//!           │  AdministratorCommissioning.OpenCommissioningWindow
-//!           ▼
-//!    ┌───────────────────────────────────┐
-//!    │  Device enters commissioning mode │
-//!    │  Broadcasts _matterc._udp mDNS    │
-//!    │  Accepts PASE with new passcode   │
-//!    └───────────────────────────────────┘
-//!           ▲
-//!           │  PASE(passcode) + 8-step Commissioner over UDP
-//!           │  (ArmFailSafe → CSRRequest → AddTrustedRoot → AddNOC
-//!           │   → AddOrUpdateWiFiNetwork → ConnectNetwork → CommissioningComplete)
-//!           │
-//!   Syntaur commissioner (this crate)
+//!    ┌──────── caller (tokio runtime) ────────┐
+//!    │  IpCommissionExchange::invoke(...)     │
+//!    │    → cmd_tx.send(Invoke{...}).await    │
+//!    │    → resp_rx.recv().await              │
+//!    └────────┬───────────────────────────────┘
+//!             │ flume channels
+//!    ┌────────▼── spawn_blocking thread ────────┐
+//!    │  futures_lite::block_on(async {          │
+//!    │    let matter = Matter::new(...);        │
+//!    │    let socket = async_io Udp;            │
+//!    │    transport_fut = matter.run(...);      │
+//!    │    driver_fut = async {                  │
+//!    │      let mut ex = Exchange::initiate();  │
+//!    │      PaseInitiator::initiate(passcode);  │
+//!    │      loop {                              │
+//!    │        match cmd_rx.recv().await {       │
+//!    │          Invoke => im.invoke_single_cmd  │
+//!    │            → resp_tx.send();             │
+//!    │          Shutdown => break;              │
+//!    │        }                                 │
+//!    │      }                                   │
+//!    │    };                                    │
+//!    │    futures_lite::or(transport, driver)   │
+//!    │  });                                     │
+//!    └──────────────────────────────────────────┘
 //! ```
-//!
-//! ## Why per-invoke PASE
-//!
-//! Matter spec prefers a single PASE session spanning all 8 commissioning
-//! steps. The current MVP uses a fresh PASE for each step (matching the
-//! BLE implementation) — devices tolerate this during OCW windows, and
-//! this keeps the transport lifetime simple. If a specific device rejects
-//! mid-sequence, upgrade to held-session PASE.
-//!
-//! See `crates/syntaur-matter-ble/src/btp.rs` for the BLE counterpart
-//! and the rs-matter `Matter::run` bridging rationale.
 
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use syntaur_matter::commission::CommissionExchange;
 use syntaur_matter::error::MatterFabricError;
 
-/// IP-side `CommissionExchange` — uses `_matterc._udp` listener as
-/// commissioning transport. Each `invoke()` opens a fresh UDP PASE
-/// session and runs one `ImClient::invoke_single_cmd`.
+/// Command sent from the caller's invoke() to the driver task.
+enum DriverCmd {
+    Invoke {
+        cluster: u32,
+        command: u32,
+        payload: Vec<u8>,
+    },
+    Shutdown,
+}
+
+type InvokeResult = Result<Vec<u8>, MatterFabricError>;
+
+/// Held-session IP-side commissioner. `connect()` opens PASE once; all
+/// subsequent `invoke()` calls reuse that same exchange.
 pub struct IpCommissionExchange {
-    /// Pre-resolved device address (via mDNS after OCW).
-    pub peer_addr: SocketAddr,
-    /// Setup pin code from the OCW response.
-    pub passcode: u32,
+    cmd_tx: flume::Sender<DriverCmd>,
+    resp_rx: flume::Receiver<InvokeResult>,
+    #[allow(dead_code)]
+    cancel: Arc<AtomicBool>,
+    #[allow(dead_code)]
+    driver: Option<tokio::task::JoinHandle<Result<(), MatterFabricError>>>,
 }
 
 impl IpCommissionExchange {
-    /// Construct from a known peer address + passcode. Use the `mdns`
-    /// module to discover the address from a freshly-OCW'd device.
-    pub fn new(peer_addr: SocketAddr, passcode: u32) -> Self {
-        Self { peer_addr, passcode }
-    }
-
-    /// Core primitive: spin up rs-matter's `Matter::run` on a blocking
-    /// thread, establish PASE over UDP with `passcode`, then run `op`
-    /// against the authenticated exchange. Mirrors
-    /// `tools/matter_direct::with_pase_op` — the stage2b primitive that
-    /// has been field-tested reading BasicInformation attributes.
-    pub async fn with_pase_op<R>(
+    /// Open PASE to `peer_addr` with `passcode`, hold the session, and
+    /// return an exchange ready for `Commissioner::commission` to drive.
+    pub async fn connect(
         peer_addr: SocketAddr,
         passcode: u32,
-        op: impl for<'e> FnOnce(
-                &'e mut rs_matter::transport::exchange::Exchange<'_>,
-            )
-                -> Pin<Box<dyn std::future::Future<Output = Result<R, MatterFabricError>> + 'e>>
-            + Send
-            + 'static,
-    ) -> Result<R, MatterFabricError>
-    where
-        R: Send + 'static,
-    {
-        use std::net::UdpSocket;
-        use std::time::Duration;
+    ) -> Result<Self, MatterFabricError> {
+        let (cmd_tx, cmd_rx) = flume::bounded::<DriverCmd>(4);
+        let (resp_tx, resp_rx) = flume::bounded::<InvokeResult>(4);
+        let (ready_tx, ready_rx) = flume::bounded::<Result<(), MatterFabricError>>(1);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_drv = Arc::clone(&cancel);
 
-        tokio::task::spawn_blocking(move || -> Result<R, MatterFabricError> {
+        let driver = tokio::task::spawn_blocking(move || -> Result<(), MatterFabricError> {
             futures_lite::future::block_on(async move {
+                use std::net::UdpSocket;
                 use rs_matter::crypto::test_only_crypto;
                 use rs_matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
+                use rs_matter::im::client::ImClient;
+                use rs_matter::im::CmdResp;
                 use rs_matter::sc::pase::PaseInitiator;
+                use rs_matter::tlv::TLVElement;
                 use rs_matter::transport::exchange::Exchange;
                 use rs_matter::transport::network::{Address, NoNetwork};
                 use rs_matter::utils::epoch::sys_epoch;
@@ -105,38 +105,110 @@ impl IpCommissionExchange {
 
                 let transport_fut = async {
                     let tres = matter.run(&crypto, &socket, &socket, NoNetwork).await;
-                    Err::<R, MatterFabricError>(MatterFabricError::Matter(format!(
+                    Err::<(), MatterFabricError>(MatterFabricError::Matter(format!(
                         "transport exited prematurely: {tres:?}"
                     )))
                 };
 
-                let op_fut = async {
-                    let mut ex = Exchange::initiate_unsecured(
+                let driver_fut = async {
+                    // 1. Establish PASE once.
+                    let mut ex = match Exchange::initiate_unsecured(
                         &matter,
                         &crypto,
                         Address::Udp(peer_addr),
                     )
                     .await
-                    .map_err(|e| {
-                        MatterFabricError::Matter(format!(
-                            "unsecured exchange (pre-PASE) to {peer_addr}: {e:?}"
-                        ))
-                    })?;
-                    PaseInitiator::initiate(&mut ex, &crypto, passcode)
-                        .await
-                        .map_err(|e| {
-                            MatterFabricError::Matter(format!(
+                    {
+                        Ok(e) => e,
+                        Err(e) => {
+                            let _ = ready_tx
+                                .send_async(Err(MatterFabricError::Matter(format!(
+                                    "unsecured exchange (pre-PASE) to {peer_addr}: {e:?}"
+                                ))))
+                                .await;
+                            return Err::<(), MatterFabricError>(MatterFabricError::Matter(
+                                format!("exchange setup failed"),
+                            ));
+                        }
+                    };
+
+                    if let Err(e) = PaseInitiator::initiate(&mut ex, &crypto, passcode).await {
+                        let _ = ready_tx
+                            .send_async(Err(MatterFabricError::Matter(format!(
                                 "PASE handshake to {peer_addr} with passcode {passcode}: {e:?}"
-                            ))
-                        })?;
-                    op(&mut ex).await
+                            ))))
+                            .await;
+                        return Err(MatterFabricError::Matter("PASE failed".into()));
+                    }
+
+                    // 2. Signal ready to caller.
+                    let _ = ready_tx.send_async(Ok(())).await;
+                    log::info!("[ip-commission] PASE established, entering command loop");
+
+                    // 3. Process invoke commands until shutdown.
+                    loop {
+                        if cancel_drv.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        match cmd_rx.recv_async().await {
+                            Ok(DriverCmd::Invoke {
+                                cluster,
+                                command,
+                                payload,
+                            }) => {
+                                let tlv = TLVElement::new(&payload);
+                                let r: InvokeResult = match ImClient::invoke_single_cmd(
+                                    &mut ex, 0, cluster, command, tlv, None,
+                                )
+                                .await
+                                {
+                                    Ok(CmdResp::Cmd(data)) => Ok(data.data.raw_data().to_vec()),
+                                    Ok(CmdResp::Status(s)) => {
+                                        if s.status.status
+                                            == rs_matter::im::IMStatusCode::Success
+                                        {
+                                            Ok(Vec::new())
+                                        } else {
+                                            Err(MatterFabricError::Matter(format!(
+                                                "IM status {:?} cluster={cluster:#x} cmd={command:#x}",
+                                                s.status
+                                            )))
+                                        }
+                                    }
+                                    Err(e) => Err(MatterFabricError::Matter(format!(
+                                        "invoke_single_cmd cluster={cluster:#x} cmd={command:#x}: {e:?}"
+                                    ))),
+                                };
+                                let _ = resp_tx.send_async(r).await;
+                            }
+                            Ok(DriverCmd::Shutdown) => break,
+                            Err(_) => break, // caller dropped
+                        }
+                    }
+                    Ok(())
                 };
 
-                futures_lite::future::or(transport_fut, op_fut).await
+                futures_lite::future::or(transport_fut, driver_fut).await
             })
+        });
+
+        // Wait for PASE to be established (or fail).
+        match ready_rx.recv_async().await {
+            Ok(Ok(())) => log::debug!("IP commissioner PASE ready"),
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                return Err(MatterFabricError::Matter(
+                    "driver task closed before PASE ready".into(),
+                ));
+            }
+        }
+
+        Ok(Self {
+            cmd_tx,
+            resp_rx,
+            cancel,
+            driver: Some(driver),
         })
-        .await
-        .map_err(|e| MatterFabricError::Matter(format!("spawn_blocking join: {e}")))?
     }
 }
 
@@ -153,47 +225,32 @@ impl CommissionExchange for IpCommissionExchange {
                 + 'a,
         >,
     > {
-        let peer_addr = self.peer_addr;
-        let passcode = self.passcode;
         Box::pin(async move {
-            Self::with_pase_op::<Vec<u8>>(peer_addr, passcode, move |ex| {
-                Box::pin(async move {
-                    use rs_matter::im::client::ImClient;
-                    use rs_matter::im::CmdResp;
-                    use rs_matter::tlv::TLVElement;
-
-                    let tlv_payload = TLVElement::new(&payload);
-                    let resp = ImClient::invoke_single_cmd(
-                        ex,
-                        0, // endpoint 0 for commissioning cluster commands
-                        cluster,
-                        command,
-                        tlv_payload,
-                        None,
-                    )
-                    .await
-                    .map_err(|e| {
-                        MatterFabricError::Matter(format!(
-                            "invoke_single_cmd cluster={cluster:#x} cmd={command:#x}: {e:?}"
-                        ))
-                    })?;
-                    match resp {
-                        CmdResp::Cmd(data) => Ok(data.data.raw_data().to_vec()),
-                        CmdResp::Status(s) => {
-                            if s.status.status == rs_matter::im::IMStatusCode::Success {
-                                Ok(Vec::new())
-                            } else {
-                                Err(MatterFabricError::Matter(format!(
-                                    "IM status {:?} (cluster={cluster:#x} cmd={command:#x})",
-                                    s.status
-                                )))
-                            }
-                        }
-                    }
+            self.cmd_tx
+                .send_async(DriverCmd::Invoke {
+                    cluster,
+                    command,
+                    payload,
                 })
-            })
-            .await
+                .await
+                .map_err(|_| {
+                    MatterFabricError::Matter("driver task closed".into())
+                })?;
+            self.resp_rx
+                .recv_async()
+                .await
+                .map_err(|_| MatterFabricError::Matter("driver task closed mid-response".into()))?
         })
+    }
+}
+
+impl Drop for IpCommissionExchange {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        let _ = self.cmd_tx.try_send(DriverCmd::Shutdown);
+        if let Some(h) = self.driver.take() {
+            h.abort();
+        }
     }
 }
 
@@ -206,7 +263,7 @@ pub mod mdns {
     //! a service name like `<SHORT_DISCRIMINATOR>._matterc._udp.local` and
     //! TXT records containing `D=<discriminator>`, `CM=<commissioning_mode>`,
     //! `VP=<vendor_id>+<product_id>`. The SRV record gives the ephemeral
-    //! UDP port the device is listening on (NOT 5540 — that's operational).
+    //! UDP port the device is listening on.
 
     use std::net::{IpAddr, SocketAddr};
     use std::time::Duration;
@@ -215,8 +272,6 @@ pub mod mdns {
 
     /// Block up to `timeout` waiting for a Matter commissionable device to
     /// appear in mDNS. Returns the first matching device's socket address.
-    /// If `want_discriminator` is Some, match exactly (full 12-bit);
-    /// otherwise return the first commissionable device seen.
     pub fn discover(
         want_discriminator: Option<u16>,
         timeout: Duration,
@@ -249,7 +304,7 @@ pub mod mdns {
                 let port = info.get_port();
                 if let Some(ip) = info.get_addresses().iter().find_map(|a| match a {
                     IpAddr::V4(v4) => Some(IpAddr::V4(*v4)),
-                    IpAddr::V6(_) => None, // prefer IPv4 for simplicity
+                    IpAddr::V6(_) => None,
                 }) {
                     return Ok(SocketAddr::new(ip, port));
                 }

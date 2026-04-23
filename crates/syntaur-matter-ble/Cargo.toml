@@ -37,3 +37,4 @@ embassy-time-queue-utils = { version = "0.3", features = ["generic-queue-64"] }
 # the tokio / spawn_blocking / futures_lite::block_on divide.
 flume = { version = "0.11", default-features = false, features = ["async"] }
 futures-lite = "2"
+hex = "0.4"

@@ -196,8 +196,25 @@ pub fn add_or_update_wifi_network(ssid: &[u8], psk: &[u8], breadcrumb: u64) -> V
     b.into_bytes()
 }
 
+/// NetworkCommissioning::AddOrUpdateThreadNetwork(cluster 0x0031, cmd 0x03):
+/// `{ 0: octets OperationalDataset (Thread TLV blob, ≤254 B),
+///    1: u64 breadcrumb }`.
+///
+/// The operational dataset is Thread's own TLV-encoded set of network
+/// credentials (network key, channel, extended PAN ID, mesh-local prefix,
+/// etc.) — we pass it opaquely; the device parses it per Thread spec.
+pub fn add_or_update_thread_network(operational_dataset: &[u8], breadcrumb: u64) -> Vec<u8> {
+    let mut b = TlvBuf::new();
+    b.start_struct()
+        .octets1(0, operational_dataset)
+        .u64(1, breadcrumb)
+        .end();
+    b.into_bytes()
+}
+
 /// NetworkCommissioning::ConnectNetwork(cluster 0x0031, cmd 0x06):
-/// `{ 0: octets NetworkID (SSID for WiFi), 1: u64 breadcrumb }`.
+/// `{ 0: octets NetworkID (SSID for WiFi, 8-byte Extended PAN ID for Thread),
+///    1: u64 breadcrumb }`.
 pub fn connect_network(network_id: &[u8], breadcrumb: u64) -> Vec<u8> {
     let mut b = TlvBuf::new();
     b.start_struct()
@@ -205,6 +222,30 @@ pub fn connect_network(network_id: &[u8], breadcrumb: u64) -> Vec<u8> {
         .u64(1, breadcrumb)
         .end();
     b.into_bytes()
+}
+
+/// Extract the 8-byte Extended PAN ID from a Thread operational dataset TLV
+/// blob. Thread TLV type 0x02 = Extended PAN ID, always 8 bytes. Used as
+/// the NetworkID for [`connect_network`] on Thread devices.
+pub fn extract_thread_extpanid(operational_dataset: &[u8]) -> Result<[u8; 8], String> {
+    let mut i = 0;
+    while i + 2 <= operational_dataset.len() {
+        let t = operational_dataset[i];
+        let len = operational_dataset[i + 1] as usize;
+        if i + 2 + len > operational_dataset.len() {
+            return Err(format!("malformed thread TLV at offset {i}: len={len} exceeds blob"));
+        }
+        if t == 0x02 {
+            if len != 8 {
+                return Err(format!("extended pan id TLV len {len} (want 8)"));
+            }
+            let mut out = [0u8; 8];
+            out.copy_from_slice(&operational_dataset[i + 2..i + 10]);
+            return Ok(out);
+        }
+        i += 2 + len;
+    }
+    Err("extended pan id TLV (type 0x02) not found in operational dataset".into())
 }
 
 #[cfg(test)]

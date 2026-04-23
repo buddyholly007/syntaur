@@ -27,3 +27,8 @@ async-io = "2"
 futures-lite = "2"
 # mDNS resolver for _matterc._udp.local to find the ephemeral commissioning port.
 mdns-sd = "0.13"
+flume = { version = "0.11", default-features = false, features = ["async"] }
+
+[[bin]]
+name = "matter-discover"
+path = "src/bin/matter_discover.rs"

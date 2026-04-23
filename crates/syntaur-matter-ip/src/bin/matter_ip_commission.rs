@@ -1,34 +1,11 @@
-//! `matter-ip-commission` — CLI driver for IP-side multi-admin commissioning.
-//!
-//! Prerequisite: the target device is already on another fabric (HA,
-//! Apple Home, Google Home) and that admin has opened a commissioning
-//! window. We receive the setup pin + manual code from the admin, then
-//! discover the device via mDNS and drive the 8-step Commissioner
-//! state machine over UDP.
-//!
-//! ## Usage
-//!
-//! ```text
-//! matter-ip-commission \
-//!     --fabric-label primary \
-//!     --setup-pin 14596893 \
-//!     --discriminator 0xe9 \
-//!     --assigned-node-id 200 \
-//!     [--peer-addr 192.168.20.52:5540]   # skip mDNS discovery
-//!     [--wifi-ssid NAME --wifi-psk PASSWORD]
-//!     [--timeout-secs 60]
-//! ```
-//!
-//! If `--peer-addr` is provided, mDNS discovery is skipped. Otherwise
-//! we listen for `_matterc._udp.local` broadcasts matching the
-//! discriminator for up to 30s.
+//! `matter-ip-commission` — held-session CLI for multi-admin commissioning.
 
 use std::env;
 use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use syntaur_matter::commission::{Commissioner, WifiCredentials};
+use syntaur_matter::commission::{Commissioner, NetworkCredentials, WifiCredentials};
 use syntaur_matter::load_fabric;
 use syntaur_matter_ip::{mdns, IpCommissionExchange};
 
@@ -63,6 +40,7 @@ struct Args {
     assigned_node_id: u64,
     wifi_ssid: Option<String>,
     wifi_psk: Option<String>,
+    #[allow(dead_code)]
     timeout: Duration,
 }
 
@@ -92,12 +70,13 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             }
             "--discriminator" => {
                 let v = take(&mut i, "--discriminator")?;
-                let v = v.strip_prefix("0x").unwrap_or(&v);
-                discriminator = Some(
-                    u16::from_str_radix(v, if v.contains(|c: char| !c.is_ascii_digit()) { 16 } else { 10 })
-                        .or_else(|_| v.parse::<u16>())
-                        .map_err(|e| format!("--discriminator: {e}"))?,
-                );
+                let stripped = v.strip_prefix("0x").unwrap_or(&v);
+                let parsed = if stripped != v {
+                    u16::from_str_radix(stripped, 16)
+                } else {
+                    stripped.parse::<u16>()
+                };
+                discriminator = Some(parsed.map_err(|e| format!("--discriminator: {e}"))?);
             }
             "--peer-addr" => {
                 let v = take(&mut i, "--peer-addr")?;
@@ -137,9 +116,6 @@ fn print_usage() {
   matter-ip-commission --fabric-label LABEL --setup-pin N --assigned-node-id ID \
                        (--discriminator 0xXXX | --peer-addr IP:PORT) \
                        [--wifi-ssid S --wifi-psk P] [--timeout-secs N]
-
-  Joins Syntaur fabric as a second admin on a device that another fabric
-  has opened via AdministratorCommissioning.OpenCommissioningWindow.
 "#
     );
 }
@@ -151,47 +127,38 @@ async fn run(args: Args) -> Result<(), String> {
     let peer_addr = match args.peer_addr {
         Some(a) => a,
         None => {
-            let d = args
-                .discriminator
-                .ok_or("--peer-addr or --discriminator required")?;
-            log::info!(
-                "mDNS discovery for _matterc._udp with discriminator {:#x} (up to 30s)",
-                d
-            );
+            let d = args.discriminator.ok_or("--peer-addr or --discriminator required")?;
+            log::info!("mDNS discover _matterc._udp disc={:#x} (30s)", d);
             tokio::task::spawn_blocking(move || mdns::discover(Some(d), Duration::from_secs(30)))
                 .await
                 .map_err(|e| format!("mdns spawn: {e}"))?
-                .map_err(|e| format!("mdns discover: {e}"))?
+                .map_err(|e| format!("mdns: {e}"))?
         }
     };
     log::info!("target peer: {peer_addr}");
 
-    let mut exchange = IpCommissionExchange::new(peer_addr, args.setup_pin);
+    log::info!("opening PASE (held across all 8 invokes)...");
+    let mut exchange = IpCommissionExchange::connect(peer_addr, args.setup_pin)
+        .await
+        .map_err(|e| format!("PASE connect: {e}"))?;
+    log::info!("PASE established; starting Commissioner");
 
-    let wifi = match (args.wifi_ssid.as_ref(), args.wifi_psk.as_ref()) {
-        (Some(s), Some(p)) => {
-            log::info!("wifi creds supplied — ssid={:?}", s);
-            Some(WifiCredentials {
-                ssid: s.as_bytes().to_vec(),
-                psk: p.as_bytes().to_vec(),
-            })
-        }
-        _ => {
-            log::info!(
-                "no wifi creds — second-admin join on an already-networked device (typical)"
-            );
-            None
-        }
+    let network: Option<NetworkCredentials> = match (args.wifi_ssid.as_ref(), args.wifi_psk.as_ref()) {
+        (Some(s), Some(p)) => Some(NetworkCredentials::Wifi(WifiCredentials {
+            ssid: s.as_bytes().to_vec(),
+            psk: p.as_bytes().to_vec(),
+        })),
+        _ => None,
     };
 
     log::info!(
-        "running Commissioner (8 steps) as second-admin into fabric {:?} as node {}",
+        "Commissioner::commission fabric={:?} node_id={}",
         args.fabric_label,
         args.assigned_node_id
     );
     let commissioner = Commissioner::new(&fabric);
     let commissioned = commissioner
-        .commission(&mut exchange, args.assigned_node_id, wifi)
+        .commission(&mut exchange, args.assigned_node_id, network)
         .await
         .map_err(|e| format!("commission: {e}"))?;
 
