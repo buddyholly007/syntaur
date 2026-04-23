@@ -19,6 +19,7 @@ use syntaur_verify_core::{
     browser::Browser,
     changeset::{deploy_stamp_head, resolve_against},
     module_map::{Module, ModuleMap},
+    opus::OpusClient,
     run::{Finding, FindingKind, Severity, VerifyRun},
 };
 
@@ -55,6 +56,14 @@ struct Cli {
     /// Runs directory (run artifacts + screenshots). Default: ~/.syntaur-verify/runs
     #[arg(long)]
     runs_dir: Option<PathBuf>,
+
+    /// Also run Claude Opus (via OpenRouter) over each screenshot for
+    /// visual regression + UX improvement findings. Requires the
+    /// `openrouter` key in syntaur-vault. Off by default because it
+    /// hits a paid API; Phase 6 will flip this on automatically when
+    /// syntaur-verify runs inside syntaur-ship.
+    #[arg(long)]
+    with_opus: bool,
 }
 
 fn main() -> ExitCode {
@@ -102,6 +111,7 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
         module_map: module_map_arg,
         target_url: target_url_arg,
         runs_dir: runs_dir_arg,
+        with_opus,
     } = cli;
 
     let workspace = workspace_arg.unwrap_or_else(|| home.join("openclaw-workspace"));
@@ -180,6 +190,21 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
     let browser = Browser::launch().await?;
     log::info!("[verify] Chromium up; target_url={}", target_url);
 
+    let opus = if with_opus {
+        match OpusClient::from_vault() {
+            Ok(c) => {
+                log::info!("[verify] Opus client armed — vision findings enabled");
+                Some(c)
+            }
+            Err(e) => {
+                log::warn!("[verify] Opus disabled ({e:#}); heuristic-only run");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let mut covered: Vec<String> = Vec::new();
 
     for module in &modules {
@@ -242,6 +267,28 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
                         artifact: Some(cap.screenshot_path.clone()),
                         captured_at: Utc::now(),
                     });
+                }
+
+                // Phase 2: Opus vision findings. One call per module.
+                if let Some(client) = &opus {
+                    match client
+                        .analyze_module(&module.slug, &url, &cap.screenshot_path, &[])
+                        .await
+                    {
+                        Ok(opus_findings) => {
+                            log::info!(
+                                "  ↳ Opus returned {} finding(s) for {}",
+                                opus_findings.len(),
+                                module.slug
+                            );
+                            findings.extend(opus_findings);
+                        }
+                        Err(e) => {
+                            log::warn!("  ↳ Opus failed for {}: {e:#}", module.slug);
+                            // Don't fail the whole run on an Opus error —
+                            // heuristic findings are still valid.
+                        }
+                    }
                 }
             }
             Err(e) => {

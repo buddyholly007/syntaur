@@ -8317,16 +8317,19 @@ name = "syntaur-verify"
 version = "0.5.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chromiumoxide",
  "chrono",
  "clap",
  "env_logger",
  "futures",
  "log",
+ "reqwest",
  "serde",
  "serde_json",
  "serde_yaml",
  "syntaur-topo",
+ "syntaur-vault",
  "thiserror 1.0.69",
  "tokio",
 ]
