@@ -425,14 +425,16 @@ impl BtpSession {
         // supported version = 4, no others". LE u32 = 0x00000004.
         let frame = encode_handshake_request(0x00000004u32, BTP_PREF_MTU, BTP_PREF_WINDOW);
         log::debug!("[btp] handshake TX {} bytes: {:02x?}", frame.len(), &frame);
-        // Matter Core §4.17.1.3.1: writes to C1 SHALL be Write Command
-        // (ATT opcode 0x52). chip-sdk does this. Using Write Request
-        // works at ATT layer but some devices' BTP layer only fires on
-        // Write Command, not Write Request.
+        // Matter Core §4.17.3.2: writes to C1 for the Connect Handshake
+        // MUST use ATT Write Request (opcode 0x12), NOT Write Command
+        // (0x52). project-chip/connectedhomeip issue #3160 + PR #3161
+        // fixed this exact silent-drop bug on Android CHIPTool. Eve /
+        // AiDot firmware silently drops Write Command handshakes even
+        // though the bytes match spec.
         self.peripheral
-            .write(&self.c1, &frame, WriteType::WithoutResponse)
+            .write(&self.c1, &frame, WriteType::WithResponse)
             .await?;
-        log::debug!("[btp] handshake Write Command sent (spec §4.17.1.3.1)");
+        log::debug!("[btp] handshake Write Request sent (per spec §4.17.3.2 / CHIP PR #3161)");
 
         let resp_frame = self.recv_raw_frame(Duration::from_secs(10)).await?;
         let (hdr, consumed) = BtpHdr::decode(&resp_frame)?;
@@ -523,8 +525,9 @@ impl BtpSession {
             hdr.encode(&mut frame);
             frame.extend_from_slice(&sdu[offset..chunk_end]);
 
+            // Matter §4.17.3.2: C1 writes use ATT Write Request.
             self.peripheral
-                .write(&self.c1, &frame, WriteType::WithoutResponse)
+                .write(&self.c1, &frame, WriteType::WithResponse)
                 .await?;
 
             offset = chunk_end;
@@ -594,8 +597,9 @@ impl BtpSession {
         };
         let mut frame = Vec::with_capacity(4);
         hdr.encode(&mut frame);
+        // Matter §4.17.3.2: C1 writes use ATT Write Request.
         self.peripheral
-            .write(&self.c1, &frame, WriteType::WithoutResponse)
+            .write(&self.c1, &frame, WriteType::WithResponse)
             .await?;
         Ok(())
     }
