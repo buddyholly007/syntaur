@@ -99,8 +99,10 @@ fn prune_old_snapshots(ctx: &StageContext) -> Result<()> {
     let to_delete = &names[..names.len() - RETAIN_SNAPSHOTS];
     for snap in to_delete {
         log::info!("   prune old snapshot: {snap}");
-        // zfs.snapshot.delete takes [id, options]. id is full "pool@name".
-        let payload = format!(r#"{snap:?}, {{"recursive":true}}"#);
+        // zfs.snapshot.delete takes TWO positional args: id (string) and
+        // options (object). Single-quote-wrap the object JSON to stop
+        // remote shell from brace-expanding it into separate tokens.
+        let payload = format!(r#"{snap:?} '{{"recursive":true}}'"#);
         let args = ssh_args(ctx, "zfs.snapshot.delete", &payload);
         let status = Command::new("ssh").args(&args).status();
         if let Err(e) = status {
@@ -123,7 +125,9 @@ pub fn rollback(ctx: &StageContext, snapshot: &str) -> Result<()> {
         log::info!("   (dry-run, skipped)");
         return Ok(());
     }
-    let payload = format!(r#"{full:?}, {{"recursive":true,"force":true}}"#);
+    // zfs.snapshot.rollback takes TWO args: id (string) + options (obj).
+    // Single-quote the options object to survive remote brace-expansion.
+    let payload = format!(r#"{full:?} '{{"recursive":true,"force":true}}'"#);
     let args = ssh_args(ctx, "zfs.snapshot.rollback", &payload);
     let output = Command::new("ssh").args(&args).output()?;
     if !output.status.success() {
