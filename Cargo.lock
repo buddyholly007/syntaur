@@ -458,6 +458,7 @@ dependencies = [
  "futures-util",
  "log",
  "pin-project-lite",
+ "tokio",
  "tungstenite 0.23.0",
 ]
 
@@ -1239,6 +1240,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "tokio",
  "tracing",
  "url",
  "which",
@@ -8308,6 +8310,25 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "zeroize",
+]
+
+[[package]]
+name = "syntaur-verify"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "chromiumoxide",
+ "chrono",
+ "clap",
+ "env_logger",
+ "futures",
+ "log",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "syntaur-topo",
+ "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]

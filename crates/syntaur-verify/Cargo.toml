@@ -1,0 +1,33 @@
+[package]
+name = "syntaur-verify"
+version.workspace = true
+edition.workspace = true
+description = "Autonomous post-build visual + functional + security audit for the Syntaur gateway. Phase 1: scaffold + chromiumoxide harness + change→module impact map. Later phases layer Opus-driven auto-fix, persistent baselines, persona coverage, user-flow scripts, pipeline integration."
+
+[lib]
+name = "syntaur_verify_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "syntaur-verify"
+path = "src/bin/syntaur_verify.rs"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_yaml = "0.9"
+serde_json = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+chrono = { version = "0.4", features = ["serde"] }
+# CDP-based headless Chromium driver. More fidelity than
+# fantoccini/WebDriver — we need console capture + network events +
+# evaluate() for interaction walks. tokio-based.
+chromiumoxide = { version = "0.7", features = ["tokio-runtime"], default-features = false }
+futures = "0.3"
+# Topo manifest lookups so verify knows what URL to hit for each
+# module (staging=Mac Mini, prod=TrueNAS) without hardcoded IPs.
+syntaur-topo = { path = "../syntaur-topo" }

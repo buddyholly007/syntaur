@@ -1,0 +1,141 @@
+# Module Impact Map for syntaur-verify.
+#
+# Maps source-file paths to the user-facing modules they affect.
+# When a build touches a path, every module listed under its rule
+# is re-verified. Special rule target `"*"` expands to every module
+# in this file — used for cross-cutting files (theme, shared,
+# route wiring, Cargo deps) where ANY change can break ANY surface.
+#
+# Editing rules: add a rule for any new page file, and for any new
+# API file that a page consumes. If unsure whether a file is
+# cross-cutting, err toward `"*"` — the cost of an extra module
+# verify is cheap compared to a shipped regression.
+
+version: 1
+
+# The 16 user-facing modules. Slug + URL must match whatever
+# routes the gateway exposes. (Landing intentionally at `/` —
+# it's a module for verify purposes even if it's the index.)
+modules:
+  - slug: landing
+    url: /
+    description: Public landing page
+  - slug: dashboard
+    url: /dashboard
+    description: Main customizable widget grid
+  - slug: chat
+    url: /chat
+    description: Agent chat surface
+  - slug: scheduler
+    url: /scheduler
+    description: Thaddeus's calendar module
+  - slug: music
+    url: /music
+    description: Silvr's music library + playback
+  - slug: journal
+    url: /journal
+    description: Journal + moments + voice capture
+  - slug: knowledge
+    url: /knowledge
+    description: RAG / notebooks / research knowledge base
+  - slug: research
+    url: /research
+    description: Deep-research surface
+  - slug: smart-home
+    url: /smart-home
+    description: Smart-home module (scan, devices, scenes, energy)
+  - slug: settings
+    url: /settings
+    description: All settings tabs
+  - slug: profile
+    url: /profile
+    description: Per-user profile page
+  - slug: history
+    url: /history
+    description: Chat/deploy/activity history
+  - slug: coders
+    url: /coders
+    description: Web-terminal module
+  - slug: social
+    url: /social
+    description: Crimson Lantern social dashboard
+  - slug: tax
+    url: /tax
+    description: Tax module (receipts, expenses, dashboards)
+  - slug: modules
+    url: /modules
+    description: Module catalog / marketplace
+
+rules:
+  # ── Direct page-file mappings ─────────────────────────────────
+  - path: syntaur-gateway/src/pages/landing.rs
+    affects: [landing]
+  - path: syntaur-gateway/src/pages/dashboard.rs
+    affects: [dashboard]
+  - path: syntaur-gateway/src/pages/dashboard_widgets.rs
+    affects: [dashboard]
+  - path: syntaur-gateway/src/pages/chat.rs
+    affects: [chat, dashboard]   # chat widget also embedded in dashboard
+  - path: syntaur-gateway/src/pages/scheduler.rs
+    affects: [scheduler]
+  - path: syntaur-gateway/src/pages/music.rs
+    affects: [music]
+  - path: syntaur-gateway/src/pages/journal.rs
+    affects: [journal]
+  - path: syntaur-gateway/src/pages/knowledge.rs
+    affects: [knowledge]
+  - path: syntaur-gateway/src/pages/research.rs
+    affects: [research]
+  - path: syntaur-gateway/src/pages/smart_home.rs
+    affects: [smart-home]
+  - path: syntaur-gateway/src/pages/settings.rs
+    affects: [settings]
+  - path: syntaur-gateway/src/pages/settings_agents.rs
+    affects: [settings]
+  - path: syntaur-gateway/src/pages/settings_legacy.rs
+    affects: [settings]
+  - path: syntaur-gateway/src/pages/voice_setup.rs
+    affects: [settings]
+  - path: syntaur-gateway/src/pages/tailscale_setup.rs
+    affects: [settings]
+  - path: syntaur-gateway/src/pages/setup.rs
+    affects: [settings, landing]
+  - path: syntaur-gateway/src/pages/profile.rs
+    affects: [profile]
+  - path: syntaur-gateway/src/pages/history.rs
+    affects: [history]
+  - path: syntaur-gateway/src/pages/coders.rs
+    affects: [coders]
+  - path: syntaur-gateway/src/pages/social.rs
+    affects: [social]
+  - path: syntaur-gateway/src/pages/tax.rs
+    affects: [tax]
+  - path: syntaur-gateway/src/pages/modules.rs
+    affects: [modules]
+  - path: syntaur-gateway/src/pages/onboarding.rs
+    affects: [landing]
+  - path: syntaur-gateway/src/pages/register.rs
+    affects: [landing]
+
+  # ── API files → their pages ───────────────────────────────────
+  - path: syntaur-gateway/src/dashboard_api.rs
+    affects: [dashboard]
+
+  # ── Cross-cutting: theme + shared + route wiring → EVERY module
+  - path: syntaur-gateway/src/pages/theme.rs
+    affects: ["*"]
+  - path: syntaur-gateway/src/pages/shared.rs
+    affects: ["*"]
+  - path: syntaur-gateway/src/pages/mod.rs
+    affects: ["*"]
+  - path: syntaur-gateway/src/main.rs
+    affects: ["*"]
+
+  # ── Dep changes cascade — a rumqtt bump or rustls patch can
+  # break any module in a surprising way; verify everything.
+  - path: Cargo.lock
+    affects: ["*"]
+  - path: Cargo.toml
+    affects: ["*"]
+  - path: syntaur-gateway/Cargo.toml
+    affects: ["*"]

@@ -26,6 +26,7 @@ members = [
     "crates/syntaur-matter-ip",
     "crates/syntaur-vault",
     "crates/syntaur-topo",
+    "crates/syntaur-verify",
 ]
 # `rust-aidot-harvest` is INTENTIONALLY excluded from the workspace.
 # It depends on the `rsa` crate, which has an unpatched timing-attack
