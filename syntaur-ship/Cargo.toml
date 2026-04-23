@@ -1,0 +1,27 @@
+[package]
+name = "syntaur-ship"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Canonical deploy pipeline for Syntaur — enforces consistency, preservation, and rollback across claudevm, Mac Mini, TrueNAS, and Win11 VM."
+
+[[bin]]
+name = "syntaur-ship"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+sha2 = "0.10"
+hex = "0.4"
+# Process orchestration: we shell out to ssh/rsync/git/cargo/docker. Using
+# std::process rather than pulling another dep keeps the attack surface small.

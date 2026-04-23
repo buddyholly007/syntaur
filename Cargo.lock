@@ -7055,6 +7055,7 @@ dependencies = [
  "cookie",
  "cookie_store",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2",
@@ -8422,6 +8423,24 @@ dependencies = [
  "serde",
  "serde_json",
  "syntaur-sdk",
+]
+
+[[package]]
+name = "syntaur-ship"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "env_logger",
+ "hex",
+ "log",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]

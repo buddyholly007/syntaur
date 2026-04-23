@@ -16,6 +16,7 @@ members = [
     "rust-media-bridge",
     "mace",
     "syntaur-isolation-tests",
+    "syntaur-ship",
     "crates/syntaur-zwave",
     "crates/rust-aidot",
     "crates/rust-kasa",
