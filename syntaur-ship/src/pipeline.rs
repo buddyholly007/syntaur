@@ -33,6 +33,10 @@ pub fn run_full(cfg: &Config, opts: &RunOptions) -> Result<()> {
     let ctx = StageContext { cfg, opts };
 
     stages::preflight::run(&ctx)?;
+    // Phase 3a: version sweep BEFORE build — abort deploy if the 5
+    // public version surfaces disagree. Cheap local file reads; no
+    // network. Fix at source + re-run rather than shipping drift.
+    stages::version_sweep::run(&ctx)?;
     // Phase 2: snapshot BEFORE any TrueNAS writes. If any later stage
     // fails we still have a restore point.
     let snapshot_name = stages::snapshot::run(&ctx)?;
@@ -57,6 +61,10 @@ pub fn run_full(cfg: &Config, opts: &RunOptions) -> Result<()> {
     if !opts.social_only {
         stages::viewer::run(&ctx)?;
     }
+    // Phase 3a: post-deploy version audit on live prod. Warns (doesn't
+    // abort) — prod is already live at this point; drift here means
+    // repair at source + redeploy, not roll back.
+    let _ = stages::version_audit::run(&ctx);
 
     if !opts.dry_run {
         let mut stamp = build_stamp(cfg, opts)?;
@@ -197,8 +205,15 @@ pub fn run_refresh_windows(_cfg: &Config) -> Result<()> {
     anyhow::bail!("refresh-windows: not yet implemented (Phase 6)")
 }
 
-pub fn run_version_sweep(_cfg: &Config) -> Result<()> {
-    anyhow::bail!("version-sweep: not yet implemented (Phase 3)")
+pub fn run_version_sweep(cfg: &Config) -> Result<()> {
+    let opts = RunOptions::default();
+    let ctx = StageContext { cfg, opts: &opts };
+    stages::version_sweep::run(&ctx)?;
+    // Also hit the live prod surfaces (non-fatal — informational).
+    let audit_opts = RunOptions::default();
+    let audit_ctx = StageContext { cfg, opts: &audit_opts };
+    let _ = stages::version_audit::run(&audit_ctx);
+    Ok(())
 }
 
 pub fn run_journal(_cfg: &Config, _last: usize) -> Result<()> {
