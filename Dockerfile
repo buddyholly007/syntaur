@@ -20,11 +20,16 @@ FROM rust:1.94-slim-bookworm AS builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev ca-certificates \
     libdbus-1-dev \
+    g++ \
   && rm -rf /var/lib/apt/lists/*
 # libdbus-1-dev is needed by libdbus-sys (pulled in transitively via
 # rs-matter → bluer → dbus for BLE commissioning). Claudevm has it
-# pre-installed which is why local builds don't hit this; CI's fresh
-# rust:1.88-slim-bookworm image doesn't.
+# pre-installed; rust:*-slim-bookworm doesn't.
+#
+# g++ is needed at LINK time — `-lstdc++` is required by the C++
+# bits in aws-lc-sys + onnxruntime (via ort/fastembed). The image's
+# default `gcc` doesn't include libstdc++-dev; `g++` pulls it in.
+# Symptom: "rust-lld: error: unable to find library -lstdc++".
 
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
