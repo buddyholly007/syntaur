@@ -28,39 +28,12 @@ pub struct OpusClient {
 }
 
 impl OpusClient {
-    /// Fetch the `openrouter` key from the local syntaur-vault agent.
-    /// Errors loudly if the vault is locked — we want that surfaced,
-    /// not silently skipped.
+    /// Fetch the `openrouter` key from the local syntaur-vault agent,
+    /// falling back to the `OPENROUTER_API_KEY` env var. Env-var path
+    /// is used by CI and by syntaur-ship Phase 6 where the vault agent
+    /// isn't running. Errors loudly if both are missing.
     pub fn from_vault() -> Result<Self> {
-        use syntaur_vault_core::{
-            agent::{request, AgentRequest, AgentResponse},
-            default_socket_path,
-        };
-        let socket = default_socket_path();
-        if !socket.exists() {
-            anyhow::bail!(
-                "vault agent not running at {} — run `syntaur-vault unlock` first. \
-                 syntaur-verify needs the `openrouter` entry to call Opus.",
-                socket.display()
-            );
-        }
-        let resp = request(
-            &socket,
-            &AgentRequest::Get {
-                name: "openrouter".to_string(),
-            },
-        )
-        .context("asking vault for openrouter key")?;
-        let api_key = match resp {
-            AgentResponse::Value { value } => value,
-            AgentResponse::Error { message } => {
-                anyhow::bail!(
-                    "vault refused openrouter: {message} — run `syntaur-vault list` + \
-                     `syntaur-vault set openrouter` if missing"
-                )
-            }
-            other => anyhow::bail!("unexpected vault response: {other:?}"),
-        };
+        let api_key = Self::resolve_api_key()?;
         let model =
             std::env::var("SYNTAUR_VERIFY_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
         Ok(Self {
@@ -70,6 +43,45 @@ impl OpusClient {
                 .timeout(std::time::Duration::from_secs(120))
                 .build()?,
         })
+    }
+
+    /// Try vault socket first, fall back to `OPENROUTER_API_KEY` env.
+    fn resolve_api_key() -> Result<String> {
+        use syntaur_vault_core::{
+            agent::{request, AgentRequest, AgentResponse},
+            default_socket_path,
+        };
+        let socket = default_socket_path();
+        if socket.exists() {
+            let resp = request(
+                &socket,
+                &AgentRequest::Get {
+                    name: "openrouter".to_string(),
+                },
+            )
+            .context("asking vault for openrouter key")?;
+            match resp {
+                AgentResponse::Value { value } => return Ok(value),
+                AgentResponse::Error { message } => {
+                    log::warn!(
+                        "[opus] vault has no openrouter entry ({message}); trying env var"
+                    );
+                }
+                other => anyhow::bail!("unexpected vault response: {other:?}"),
+            }
+        }
+        // Env fallback — used by CI, syntaur-ship Phase 6, and any
+        // headless run where the vault agent isn't started.
+        if let Ok(k) = std::env::var("OPENROUTER_API_KEY") {
+            if !k.is_empty() {
+                return Ok(k);
+            }
+        }
+        anyhow::bail!(
+            "no openrouter key: vault agent not running at {} and OPENROUTER_API_KEY env is unset. \
+             Run `syntaur-vault unlock` OR `export OPENROUTER_API_KEY=sk-or-…`",
+            socket.display()
+        )
     }
 
     /// Send one screenshot + module context to Opus and parse the
