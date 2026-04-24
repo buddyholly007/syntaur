@@ -27,8 +27,10 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 
-use crate::run::FindingEdit;
+use crate::corpus::{Corpus, CorpusMeta};
+use crate::run::{Finding, FindingEdit};
 
 /// Caps for one auto-fix pass — Sean's call ("3 iterations, 200 LoC").
 #[derive(Debug, Clone, Copy)]
@@ -254,6 +256,50 @@ pub fn count_loc_delta(old: &str, new: &str) -> usize {
     let added = new.lines().filter(|l| !old_lines.contains(l)).count();
     let removed = old.lines().filter(|l| !new_lines.contains(l)).count();
     added + removed
+}
+
+/// Phase 3 hook — after `try_autofix` accepts a round of edits (the
+/// re-verify comes back clean), persist the before/after screenshots
+/// + the edits + a small meta blob to the regression corpus.
+///
+/// Separated from the auto-fix loop so the CLI + future callers can
+/// archive without duplicating the file-ops boilerplate. Called
+/// exactly once per accepted fix; do NOT call on rollback / revert.
+///
+/// Returns the archive directory so the caller can log / announce it.
+/// Errors are returned, not swallowed — a corpus-write failure is
+/// unusual enough to surface, but the caller is free to demote it to
+/// a warning.
+pub fn archive_accepted_fix(
+    corpus: &Corpus,
+    trigger: &Finding,
+    before_png_path: &Path,
+    after_png_path: &Path,
+    edits: &[FindingEdit],
+    head_rev: &str,
+) -> Result<PathBuf> {
+    let before = std::fs::read(before_png_path).with_context(|| {
+        format!(
+            "reading before-fix screenshot {}",
+            before_png_path.display()
+        )
+    })?;
+    let after = std::fs::read(after_png_path).with_context(|| {
+        format!(
+            "reading after-fix screenshot {}",
+            after_png_path.display()
+        )
+    })?;
+    let meta = CorpusMeta {
+        module: trigger.module_slug.clone(),
+        kind: trigger.kind.clone(),
+        severity: trigger.severity,
+        title: trigger.title.clone(),
+        detail: trigger.detail.clone(),
+        captured_at: Utc::now(),
+        head_rev: head_rev.to_string(),
+    };
+    corpus.archive(&before, &after, edits, meta)
 }
 
 #[cfg(test)]

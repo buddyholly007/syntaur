@@ -2,23 +2,120 @@
 //! screenshot it, and collect the console log.
 //!
 //! Phase 1 scope: single-page render + PNG screenshot + console
-//! messages. Phase 3 adds viewport sweep (desktop/tablet/mobile).
-//! Phase 4 adds interaction walks (click element, wait, screenshot
-//! again). Keep this surface small now so the Phase 3+4 additions
-//! don't require touching the CLI wiring.
+//! messages. Phase 3 adds viewport sweep (desktop/tablet/mobile) via
+//! the CDP Emulation domain — `Browser::launch_with_viewport` sets
+//! device metrics + mobile emulation at launch time so every page
+//! opened on the instance uses that profile. Phase 4 adds interaction
+//! walks (click element, wait, screenshot again). Keep this surface
+//! small now so later additions don't require touching the CLI wiring.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
+use chromiumoxide::handler::viewport::Viewport as CdpViewport;
 use chromiumoxide::{Browser as CdpBrowser, BrowserConfig};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
+/// Cross-device viewport target. Phase 3 sweeps all three per module
+/// so baselines can catch e.g. a tablet-only layout regression that
+/// a desktop-only pass would miss.
+///
+/// Dimensions match the widely-cited "reference devices" that most
+/// design systems QA against:
+///   * Desktop: 1440x900 (MacBook Air / common laptop)
+///   * Tablet : 768x1024 (iPad portrait)
+///   * Mobile : 375x812  (iPhone 13/14 portrait)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Viewport {
+    Desktop,
+    Tablet,
+    Mobile,
+}
+
+impl Viewport {
+    /// (width, height) in CSS pixels.
+    pub fn dims(&self) -> (u32, u32) {
+        match self {
+            Viewport::Desktop => (1440, 900),
+            Viewport::Tablet => (768, 1024),
+            Viewport::Mobile => (375, 812),
+        }
+    }
+
+    /// Filename-friendly slug, also used as the baseline subdirectory
+    /// key. Stable across versions — baselines are keyed on this
+    /// string, renaming it invalidates every saved image.
+    pub fn slug(&self) -> &'static str {
+        match self {
+            Viewport::Desktop => "desktop",
+            Viewport::Tablet => "tablet",
+            Viewport::Mobile => "mobile",
+        }
+    }
+
+    /// Device-pixel ratio for retina / mobile screens. Mobile bumps
+    /// to 2.0 to mirror iPhone behaviour; desktop + tablet stay at 1.0.
+    pub fn device_scale_factor(&self) -> f64 {
+        match self {
+            Viewport::Desktop | Viewport::Tablet => 1.0,
+            Viewport::Mobile => 2.0,
+        }
+    }
+
+    /// Whether Chromium should treat this as a mobile device (touch
+    /// events, meta viewport respected, mobile UA string).
+    pub fn is_mobile(&self) -> bool {
+        matches!(self, Viewport::Mobile)
+    }
+
+    /// User-Agent override. Desktop leaves it alone (None → Chromium's
+    /// native UA), tablet + mobile present as the matching Apple
+    /// device so sites with UA-sniffed mobile shells render in the
+    /// shape we're auditing.
+    pub fn user_agent(&self) -> Option<&'static str> {
+        match self {
+            Viewport::Desktop => None,
+            Viewport::Tablet => Some(
+                "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) \
+                 AppleWebKit/605.1.15 (KHTML, like Gecko) \
+                 Version/17.0 Mobile/15E148 Safari/604.1",
+            ),
+            Viewport::Mobile => Some(
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) \
+                 AppleWebKit/605.1.15 (KHTML, like Gecko) \
+                 Version/17.0 Mobile/15E148 Safari/604.1",
+            ),
+        }
+    }
+
+    /// Translate to chromiumoxide's launch-time viewport struct.
+    pub(crate) fn to_cdp(self) -> CdpViewport {
+        let (w, h) = self.dims();
+        CdpViewport {
+            width: w,
+            height: h,
+            device_scale_factor: Some(self.device_scale_factor()),
+            emulating_mobile: self.is_mobile(),
+            is_landscape: false,
+            has_touch: self.is_mobile(),
+        }
+    }
+}
+
+impl Default for Viewport {
+    fn default() -> Self {
+        Viewport::Desktop
+    }
+}
+
 /// One browser instance. Drop closes Chromium.
 pub struct Browser {
     inner: CdpBrowser,
+    viewport: Viewport,
     _handler: tokio::task::JoinHandle<()>,
 }
 
@@ -30,10 +127,26 @@ pub struct PageCapture {
     pub console_messages: Vec<String>,
     pub http_status: Option<u16>,
     pub elapsed_ms: u64,
+    /// Viewport the capture was taken under — baselines are keyed on
+    /// (module_slug, viewport), so carrying this forward avoids having
+    /// to re-thread the parameter through every call site.
+    #[serde(default)]
+    pub viewport: Viewport,
 }
 
 impl Browser {
+    /// Back-compat — launches a desktop-viewport browser. Phase 1 + 2
+    /// callers (fix.rs auto-fix loop, tests) use this exact signature
+    /// and must keep compiling unchanged.
     pub async fn launch() -> Result<Self> {
+        Self::launch_with_viewport(Viewport::Desktop).await
+    }
+
+    /// Launch a browser pinned to a specific viewport. Every page
+    /// opened on this instance uses the same device metrics + UA, so
+    /// the Phase 3 CLI launches one per viewport in sequence rather
+    /// than toggling at the page level.
+    pub async fn launch_with_viewport(viewport: Viewport) -> Result<Self> {
         // Chromium 147 (snap on claudevm, Arch chromium on gaming PC)
         // refuses several of chromiumoxide's built-in DEFAULT_ARGS —
         // most visibly `--disable-background-networking`, which makes
@@ -45,30 +158,62 @@ impl Browser {
         // its way out and has diverging CDP semantics from headed
         // Chromium, which is what we'll eventually want to match
         // against baselines.
+        let (w, h) = viewport.dims();
+
+        // Chromium binary selection, in priority order:
+        //   1. SYNTAUR_VERIFY_CHROME env var — explicit override
+        //   2. ~/.local/chrome/chrome-linux64/chrome — a pinned
+        //      chrome-for-testing install. chromiumoxide 0.7 has a CDP
+        //      regression against Chromium ≥147 (`page.goto` returns
+        //      `oneshot canceled`); pinning to chrome-for-testing 131
+        //      avoids it while also dodging the snap wrapper entirely.
+        //      Install with:
+        //        curl -s -o /tmp/cft.zip https://storage.googleapis.com/chrome-for-testing-public/131.0.6778.264/linux64/chrome-linux64.zip
+        //        python3 -m zipfile -e /tmp/cft.zip ~/.local/chrome/
+        //        chmod +x ~/.local/chrome/chrome-linux64/{chrome,chrome_crashpad_handler}
+        //   3. /snap/chromium/current/usr/lib/chromium-browser/chrome —
+        //      bypasses the snap Go-wrapper arg-stripping. Works on
+        //      claudevm when chrome-for-testing isn't installed.
+        //   4. None → let chromiumoxide autodetect `chromium` /
+        //      `chromium-browser` on PATH.
+        let home = std::env::var("HOME").unwrap_or_default();
+        let cft_path = PathBuf::from(format!("{home}/.local/chrome/chrome-linux64/chrome"));
+        let snap_inner = PathBuf::from("/snap/chromium/current/usr/lib/chromium-browser/chrome");
+        let chrome_path: Option<PathBuf> = std::env::var("SYNTAUR_VERIFY_CHROME")
+            .ok()
+            .map(PathBuf::from)
+            .filter(|p| p.exists())
+            .or_else(|| if cft_path.exists() { Some(cft_path) } else { None })
+            .or_else(|| if snap_inner.exists() { Some(snap_inner) } else { None });
+
+        // `--headless=new` vs `--headless=old`: chromiumoxide 0.7 + new
+        // headless pipeline has an unresolved bug where Target.createTarget
+        // (invoked from `browser.new_page("about:blank")`) hangs until the
+        // CDP oneshot is dropped → "oneshot canceled" at every capture
+        // attempt. Fall back to legacy headless until chromiumoxide
+        // ships the fix. Fully supported on Chromium 131+ headed too.
+        // Drop `.disable_default_args()` entirely — chromiumoxide 0.7's
+        // default arg set includes things the CDP session depends on
+        // (pipe handling, DBus suppression, crash handler wiring). On
+        // Chromium 131 (chrome-for-testing) all the args the prior
+        // "unknown flag" errors flagged are in fact accepted; we were
+        // only seeing rejections from the snap Go-wrapper. Let
+        // chromiumoxide drive the defaults and just layer our viewport
+        // + UA stability flags on top.
+        let mut cfg = BrowserConfig::builder()
+            .no_sandbox()
+            .args([
+                "--headless",
+                "--force-color-profile=srgb",
+                "--lang=en-US",
+            ])
+            .window_size(w, h)
+            .viewport(viewport.to_cdp());
+        if let Some(p) = chrome_path {
+            cfg = cfg.chrome_executable(p);
+        }
         let (inner, mut handler) = CdpBrowser::launch(
-            BrowserConfig::builder()
-                .no_sandbox()
-                .new_headless_mode()
-                .disable_default_args()
-                .args([
-                    // Essential stability flags for headless/VM/container runs.
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--no-first-run",
-                    "--no-default-browser-check",
-                    // Suppress prompts that would block the CDP session.
-                    "--disable-popup-blocking",
-                    "--disable-prompt-on-repost",
-                    // Keep keyring/password prompts from freezing startup.
-                    "--password-store=basic",
-                    "--use-mock-keychain",
-                    // Deterministic color + locale for screenshot diffs.
-                    "--force-color-profile=srgb",
-                    "--lang=en-US",
-                ])
-                // Consistent viewport — Phase 3 will parameterize.
-                .window_size(1440, 900)
-                .build()
+            cfg.build()
                 .map_err(|e| anyhow::anyhow!("chromium config: {e}"))?,
         )
         .await
@@ -83,16 +228,53 @@ impl Browser {
             }
         });
 
-        Ok(Self { inner, _handler: handle })
+        Ok(Self {
+            inner,
+            viewport,
+            _handler: handle,
+        })
     }
 
-    /// Render `url`, wait for load, capture a PNG to `out_dir` +
-    /// console messages. `page_slug` becomes the PNG filename stem.
+    /// Which viewport this browser was launched with.
+    pub fn viewport(&self) -> Viewport {
+        self.viewport
+    }
+
+    /// Back-compat capture method. Screenshot filename is
+    /// `<page_slug>.png` to keep Phase 1/2 behaviour for callers that
+    /// don't care about viewport. New callers should prefer
+    /// `capture_with_viewport`, which adds the viewport suffix.
     pub async fn capture(
         &self,
         url: &str,
         page_slug: &str,
         out_dir: &Path,
+    ) -> Result<PageCapture> {
+        self.capture_inner(url, page_slug, out_dir, None).await
+    }
+
+    /// Render `url`, wait for load, capture a PNG to `out_dir` +
+    /// console messages. Filename: `<page_slug>_<viewport>.png`.
+    ///
+    /// `page_slug` becomes the first half of the PNG filename stem.
+    /// The viewport suffix is appended automatically so a single run
+    /// directory can hold desktop/tablet/mobile shots side-by-side.
+    pub async fn capture_with_viewport(
+        &self,
+        url: &str,
+        page_slug: &str,
+        out_dir: &Path,
+    ) -> Result<PageCapture> {
+        self.capture_inner(url, page_slug, out_dir, Some(self.viewport))
+            .await
+    }
+
+    async fn capture_inner(
+        &self,
+        url: &str,
+        page_slug: &str,
+        out_dir: &Path,
+        suffix_viewport: Option<Viewport>,
     ) -> Result<PageCapture> {
         std::fs::create_dir_all(out_dir).ok();
         let start = std::time::Instant::now();
@@ -102,6 +284,19 @@ impl Browser {
             .new_page("about:blank")
             .await
             .context("creating new page")?;
+
+        // Per-page UA override for tablet/mobile — the launch-time
+        // viewport handles device metrics + `emulating_mobile`, but
+        // not UA, so sites with UA-sniffed layouts still need this.
+        if let Some(ua) = self.viewport.user_agent() {
+            if let Err(e) = page.set_user_agent(ua).await {
+                log::warn!(
+                    "[browser] failed to set user-agent for {}: {e:#} \
+                     — continuing with Chromium default",
+                    self.viewport.slug()
+                );
+            }
+        }
 
         // Subscribe to console events BEFORE navigation.
         let mut console_events = page
@@ -141,7 +336,11 @@ impl Browser {
             .await
             .context("capturing screenshot")?;
 
-        let screenshot_path = out_dir.join(format!("{}.png", page_slug));
+        let filename = match suffix_viewport {
+            Some(v) => format!("{}_{}.png", page_slug, v.slug()),
+            None => format!("{}.png", page_slug),
+        };
+        let screenshot_path = out_dir.join(filename);
         std::fs::write(&screenshot_path, &png)
             .with_context(|| format!("writing {}", screenshot_path.display()))?;
 
@@ -173,6 +372,7 @@ impl Browser {
             console_messages: console,
             http_status,
             elapsed_ms,
+            viewport: self.viewport,
         })
     }
 }

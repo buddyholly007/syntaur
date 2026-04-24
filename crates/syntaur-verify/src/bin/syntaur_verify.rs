@@ -16,12 +16,15 @@ use chrono::Utc;
 use clap::Parser;
 
 use syntaur_verify_core::{
-    browser::Browser,
+    baseline::BaselineStore,
+    browser::{Browser, Viewport},
     changeset::{deploy_stamp_head, resolve_against},
-    fix::{apply_edits, Budgets, FixAttempt},
+    corpus::Corpus,
+    fix::{apply_edits, archive_accepted_fix, Budgets, FixAttempt},
     module_map::{Module, ModuleMap},
     opus::OpusClient,
     run::{Finding, FindingEdit, FindingKind, Severity, VerifyRun},
+    visual_diff::diff_pngs,
 };
 
 #[derive(Parser, Debug)]
@@ -106,6 +109,43 @@ struct Cli {
     /// Seconds to wait after reload before re-verifying. Default 3.
     #[arg(long, default_value_t = 3)]
     reload_wait_secs: u64,
+
+    // ── Phase 3: baselines + visual diff + regression corpus ────
+    /// Comma-separated list of viewports to sweep per module.
+    /// Accepts: `desktop`, `tablet`, `mobile`. Default: all three.
+    #[arg(long, default_value = "desktop,tablet,mobile")]
+    viewports: String,
+
+    /// Override the baseline root. Default: ~/.syntaur-verify/baselines
+    #[arg(long)]
+    baseline_dir: Option<PathBuf>,
+
+    /// Override the corpus root. Default: ~/.syntaur-verify/corpus
+    #[arg(long)]
+    corpus_dir: Option<PathBuf>,
+
+    /// Percent-pixels threshold above which a visual diff is flagged
+    /// as a regression. Default 1.0 (i.e. >1% of pixels changed).
+    #[arg(long, default_value_t = 1.0)]
+    diff_threshold_pct: f64,
+
+    /// Perceptual-hash Hamming distance threshold (0-64) above which
+    /// a visual diff is flagged as a regression. Default 5.
+    #[arg(long, default_value_t = 5)]
+    phash_threshold: u32,
+
+    /// Replace any existing baselines with the current-run screenshots
+    /// instead of diffing against them. Use after an intentional UX
+    /// change: human-review the new shots, then run with this flag to
+    /// lock them in.
+    #[arg(long)]
+    update_baselines: bool,
+
+    /// Skip the baseline diff step entirely — Phase 1/2 compat mode.
+    /// Useful when iterating on Opus prompts and the baseline noise
+    /// is getting in the way.
+    #[arg(long)]
+    no_diff: bool,
 }
 
 fn main() -> ExitCode {
@@ -161,6 +201,13 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
         rebuild_cmd,
         reload_cmd,
         reload_wait_secs,
+        viewports: viewports_arg,
+        baseline_dir: baseline_dir_arg,
+        corpus_dir: corpus_dir_arg,
+        diff_threshold_pct,
+        phash_threshold,
+        update_baselines,
+        no_diff,
     } = cli;
     // Auto-fix implies Opus vision (can't fix without findings).
     let with_opus = with_opus_flag || auto_fix;
@@ -180,6 +227,35 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
     let module_map_path = module_map_arg
         .unwrap_or_else(|| workspace.join("crates/syntaur-verify/module-map.yaml"));
     let runs_dir = runs_dir_arg.unwrap_or_else(|| home.join(".syntaur-verify/runs"));
+
+    // Phase 3 stores. Both default under ~/.syntaur-verify, but
+    // each is independently overridable so e.g. CI can point at a
+    // shared NFS path for the corpus while keeping per-worker
+    // baselines local.
+    let baseline_store = match baseline_dir_arg {
+        Some(p) => BaselineStore::with_root(p),
+        None => BaselineStore::new()?,
+    };
+    let corpus = match corpus_dir_arg {
+        Some(p) => Corpus::with_root(p),
+        None => Corpus::new()?,
+    };
+    log::info!("[verify] baselines at {}", baseline_store.root().display());
+    log::info!("[verify] corpus at {}", corpus.root().display());
+
+    // Parse --viewports into the typed enum. Invalid tokens are a
+    // hard fail — don't silently fall back to desktop, since someone
+    // typing `--viewports moble` would assume they're sweeping all
+    // three.
+    let viewports = parse_viewports(&viewports_arg)?;
+    log::info!(
+        "[verify] sweeping viewports: {}",
+        viewports
+            .iter()
+            .map(|v| v.slug())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
 
     let map = ModuleMap::load(&module_map_path)?;
 
@@ -253,10 +329,6 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
 
     let mut findings: Vec<Finding> = Vec::new();
 
-    log::info!("[verify] launching headless Chromium");
-    let browser = Browser::launch().await?;
-    log::info!("[verify] Chromium up; target_url={}", target_url);
-
     let opus = if with_opus {
         match OpusClient::from_vault() {
             Ok(c) => {
@@ -274,25 +346,73 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
 
     let mut covered: Vec<String> = Vec::new();
 
-    for module in &modules {
-        let url = format!("{}{}", target_url.trim_end_matches('/'), module.url);
-        log::info!("[verify] {} → {}", module.slug, url);
+    // Phase 3: outer loop is viewport. One browser per viewport —
+    // chromiumoxide sets device metrics at launch, so switching
+    // viewports mid-run would require tearing down + relaunching
+    // anyway. Opus + auto-fix only run on the PRIMARY viewport (the
+    // first in the list, conventionally desktop) to keep costs
+    // bounded; tablet + mobile are visual-diff-only.
+    //
+    // If the user passes `--viewports mobile`, `mobile` becomes the
+    // primary and Opus runs against the mobile shot. That's a
+    // conscious choice — a dedicated mobile-only verify pass is
+    // exactly what you'd want when debugging a mobile-only
+    // regression.
+    let primary_viewport = *viewports.first().expect("parse_viewports rejects empty lists");
 
-        match browser.capture(&url, &module.slug, &run_dir).await {
-            Ok(cap) => {
+    for (vp_idx, viewport) in viewports.iter().copied().enumerate() {
+        let is_primary = vp_idx == 0;
+        log::info!(
+            "[verify] launching headless Chromium ({})",
+            viewport.slug()
+        );
+        let browser = Browser::launch_with_viewport(viewport).await?;
+        log::info!(
+            "[verify] Chromium up; target_url={} viewport={}",
+            target_url,
+            viewport.slug()
+        );
+
+        for module in &modules {
+            let url = format!("{}{}", target_url.trim_end_matches('/'), module.url);
+            log::info!("[verify] {} [{}] → {}", module.slug, viewport.slug(), url);
+
+            let cap = match browser
+                .capture_with_viewport(&url, &module.slug, &run_dir)
+                .await
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    findings.push(Finding {
+                        module_slug: module.slug.clone(),
+                        kind: FindingKind::BootFailure,
+                        severity: Severity::Regression,
+                        title: format!("Failed to render {} [{}]", module.slug, viewport.slug()),
+                        detail: format!("{e:#}"),
+                        artifact: None,
+                        captured_at: Utc::now(),
+                        edits: None,
+                    });
+                    continue;
+                }
+            };
+
+            if is_primary {
                 covered.push(module.slug.clone());
-                log::info!(
-                    "  ↳ {} ({}ms) — screenshot {} — {} console msg(s)",
-                    cap.http_status.map(|s| s.to_string()).unwrap_or("?".into()),
-                    cap.elapsed_ms,
-                    cap.screenshot_path.display(),
-                    cap.console_messages.len()
-                );
+            }
+            log::info!(
+                "  ↳ {} ({}ms) — screenshot {} — {} console msg(s)",
+                cap.http_status.map(|s| s.to_string()).unwrap_or("?".into()),
+                cap.elapsed_ms,
+                cap.screenshot_path.display(),
+                cap.console_messages.len()
+            );
 
-                // Phase 1 minimal findings:
-                //   - any JS-level error in console = regression
-                //   - HTTP non-2xx = regression
-                //   - slow page (>5s) = suggestion (performance)
+            // ── Heuristic findings — primary viewport only ──────
+            // HTTP + console + perf are not meaningfully different
+            // across viewports for the same backend response. Only
+            // flag them once (on primary) to avoid triplicate reports.
+            if is_primary {
                 if let Some(status) = cap.http_status {
                     if !(200..300).contains(&status) {
                         findings.push(Finding {
@@ -308,7 +428,6 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
                     }
                 }
                 for msg in &cap.console_messages {
-                    // "Error:" / "SEVERE:" / "Uncaught"
                     let lower = msg.to_lowercase();
                     if lower.contains("error")
                         || lower.contains("uncaught")
@@ -338,11 +457,28 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
                         edits: None,
                     });
                 }
+            }
 
-                // Phase 2: Opus vision findings. One call per module.
-                // Auto-fix (2b): also attach source context + request
-                // structured edits, then run the apply/build/reload/
-                // re-verify loop.
+            // ── Phase 3: baseline diff ──────────────────────────
+            // Skipped when `--no-diff`. First run of a module/viewport
+            // with no existing baseline: save current as baseline,
+            // emit an Other/Suggestion "baseline captured" finding.
+            if !no_diff {
+                handle_baseline(
+                    &baseline_store,
+                    &module.slug,
+                    viewport,
+                    &cap.screenshot_path,
+                    &run_dir,
+                    diff_threshold_pct,
+                    phash_threshold,
+                    update_baselines,
+                    &mut findings,
+                );
+            }
+
+            // ── Phase 2 + 2b: Opus + auto-fix — primary only ───
+            if is_primary {
                 if let Some(client) = &opus {
                     let changed = current_changeset.as_deref().unwrap_or(&[]);
                     let sources = if auto_fix {
@@ -392,10 +528,34 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
                                 )
                                 .await
                                 {
-                                    Ok(AutoFixOutcome::Clean { iterations, loc, final_findings }) => {
+                                    Ok(AutoFixOutcome::Clean {
+                                        iterations,
+                                        loc,
+                                        final_findings,
+                                        after_png,
+                                        applied_edits,
+                                        trigger,
+                                    }) => {
                                         log::info!(
                                             "  ↳ auto-fix CLEAN after {iterations} iter, {loc} LoC"
                                         );
+                                        // Corpus hook — archive the
+                                        // evidence so Phase 4+ can
+                                        // cross-reference historical
+                                        // fixes at the same site.
+                                        if let Err(e) = archive_accepted_fix(
+                                            &corpus,
+                                            &trigger,
+                                            &cap.screenshot_path,
+                                            &after_png,
+                                            &applied_edits,
+                                            &head_rev,
+                                        ) {
+                                            log::warn!(
+                                                "  ↳ corpus archive failed: {e:#} \
+                                                 (fix still accepted, just not archived)"
+                                            );
+                                        }
                                         opus_findings = final_findings;
                                         opus_findings.push(Finding {
                                             module_slug: module.slug.clone(),
@@ -404,8 +564,9 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
                                             title: format!(
                                                 "auto-fix applied ({iterations} iter, {loc} LoC)"
                                             ),
-                                            detail: "regressions were auto-fixed and re-verified clean"
-                                                .to_string(),
+                                            detail:
+                                                "regressions were auto-fixed and re-verified clean"
+                                                    .to_string(),
                                             artifact: None,
                                             captured_at: Utc::now(),
                                             edits: None,
@@ -422,8 +583,9 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
                                             title: format!(
                                                 "auto-fix reverted ({iterations} iter): {reason}"
                                             ),
-                                            detail: "regressions persist; human review needed"
-                                                .to_string(),
+                                            detail:
+                                                "regressions persist; human review needed"
+                                                    .to_string(),
                                             artifact: None,
                                             captured_at: Utc::now(),
                                             edits: None,
@@ -438,26 +600,19 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
                         }
                         Err(e) => {
                             log::warn!("  ↳ Opus failed for {}: {e:#}", module.slug);
-                            // Don't fail the whole run on an Opus error —
-                            // heuristic findings are still valid.
                         }
                     }
                 }
             }
-            Err(e) => {
-                findings.push(Finding {
-                    module_slug: module.slug.clone(),
-                    kind: FindingKind::BootFailure,
-                    severity: Severity::Regression,
-                    title: format!("Failed to render {}", module.slug),
-                    detail: format!("{e:#}"),
-                    artifact: None,
-                    captured_at: Utc::now(),
-                    edits: None,
-                });
-            }
         }
+
+        // Drop the browser (closes Chromium) before launching the
+        // next viewport. Explicit drop would be a no-op; the `let
+        // browser = ...` above goes out of scope here.
+        drop(browser);
     }
+
+    let _ = primary_viewport; // reserved for future primary-specific reporting
 
     let run = VerifyRun {
         run_id: run_id.clone(),
@@ -596,6 +751,16 @@ enum AutoFixOutcome {
         iterations: usize,
         loc: usize,
         final_findings: Vec<Finding>,
+        /// Post-fix screenshot — archived to the corpus alongside the
+        /// pre-fix shot the outer loop already has in hand.
+        after_png: PathBuf,
+        /// Every edit that was ACCEPTED (not reverted) across all
+        /// iterations — what actually fixed the bug.
+        applied_edits: Vec<FindingEdit>,
+        /// The first regression finding that triggered the auto-fix.
+        /// Used as the corpus entry's `meta.kind` + title so Phase 4
+        /// lookups can find it by category.
+        trigger: Finding,
     },
     Reverted {
         iterations: usize,
@@ -620,6 +785,25 @@ async fn try_autofix(
     max_source_bytes: usize,
     changed: &[String],
 ) -> Result<AutoFixOutcome> {
+    // Capture the first regression that triggered the auto-fix — it
+    // becomes the corpus entry's meta when/if we succeed. Pulled out
+    // here (before iteration) so we preserve the ORIGINAL symptom,
+    // not whatever the re-verify pass happens to report.
+    let trigger: Finding = initial_findings
+        .iter()
+        .find(|f| f.severity == Severity::Regression)
+        .cloned()
+        .unwrap_or_else(|| Finding {
+            module_slug: module_slug.to_string(),
+            kind: FindingKind::Other,
+            severity: Severity::Regression,
+            title: "Unknown regression".into(),
+            detail: "try_autofix called with no regression — should not happen".into(),
+            artifact: None,
+            captured_at: Utc::now(),
+            edits: None,
+        });
+
     // Collect edits from the initial pass. If none, nothing to do.
     let mut pending_edits = collect_edits(initial_findings);
     if pending_edits.is_empty() {
@@ -632,6 +816,10 @@ async fn try_autofix(
     let mut attempts: Vec<FixAttempt> = Vec::new();
     let mut loc_total: usize = 0;
     let mut iter: usize = 0;
+    // Track all edits applied across iterations — what survives into
+    // the corpus on success is the union of edits we actually kept,
+    // not just the last batch.
+    let mut all_applied_edits: Vec<FindingEdit> = Vec::new();
 
     let revert_all = |attempts: &[FixAttempt]| {
         for a in attempts.iter().rev() {
@@ -686,6 +874,9 @@ async fn try_autofix(
         };
         loc_total += attempt.loc_applied;
         attempts.push(attempt);
+        // Remember what we just applied — on success these go into
+        // the corpus; on revert they vanish with the rest.
+        all_applied_edits.extend(pending_edits.iter().cloned());
 
         // Rebuild. If this fails the new code is syntactically or
         // semantically invalid — revert everything and bail.
@@ -719,7 +910,9 @@ async fn try_autofix(
         // the working tree). Iteration suffix so we don't clobber
         // the initial screenshot (useful for post-mortem).
         let reverify_slug = format!("{}-iter{}", module_slug, iter);
-        let cap = browser.capture(url, &reverify_slug, run_dir).await?;
+        let cap = browser
+            .capture_with_viewport(url, &reverify_slug, run_dir)
+            .await?;
         let sources = collect_source_context(workspace, map, module_slug, max_source_bytes);
         let new_findings = client
             .analyze_module_with_source(
@@ -746,6 +939,9 @@ async fn try_autofix(
                 iterations: iter,
                 loc: loc_total,
                 final_findings: new_findings,
+                after_png: cap.screenshot_path.clone(),
+                applied_edits: all_applied_edits,
+                trigger,
             });
         }
 
@@ -791,6 +987,218 @@ fn run_shell(cmd: &str, cwd: &std::path::Path) -> Result<()> {
         anyhow::bail!("`{cmd}` exited with {status}");
     }
     Ok(())
+}
+
+/// Parse `--viewports` into typed enums. Rejects empty lists + unknown
+/// tokens — better a hard error than a silent fallback to desktop.
+fn parse_viewports(s: &str) -> Result<Vec<Viewport>> {
+    let mut out: Vec<Viewport> = Vec::new();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for raw in s.split(',') {
+        let t = raw.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let vp = match t.to_ascii_lowercase().as_str() {
+            "desktop" => Viewport::Desktop,
+            "tablet" => Viewport::Tablet,
+            "mobile" => Viewport::Mobile,
+            other => {
+                anyhow::bail!(
+                    "unknown viewport `{other}` — expected one or more of desktop,tablet,mobile"
+                );
+            }
+        };
+        if seen.insert(vp.slug()) {
+            out.push(vp);
+        }
+    }
+    if out.is_empty() {
+        anyhow::bail!("--viewports produced an empty list — pass at least one of desktop,tablet,mobile");
+    }
+    Ok(out)
+}
+
+/// Baseline save-or-diff step for one (module, viewport) capture.
+/// Pushes Findings into the run accumulator. Errors are logged but
+/// never propagated — a corrupt baseline shouldn't take down the run,
+/// it should just surface as a regression / warning.
+#[allow(clippy::too_many_arguments)]
+fn handle_baseline(
+    store: &BaselineStore,
+    module_slug: &str,
+    viewport: Viewport,
+    current_path: &std::path::Path,
+    run_dir: &std::path::Path,
+    threshold_pct: f64,
+    phash_threshold: u32,
+    update_baselines: bool,
+    findings: &mut Vec<Finding>,
+) {
+    let current = match std::fs::read(current_path) {
+        Ok(b) => b,
+        Err(e) => {
+            log::warn!(
+                "[verify] can't re-read current screenshot {} for diff: {e:#}",
+                current_path.display()
+            );
+            return;
+        }
+    };
+
+    // Force re-baseline mode: overwrite any existing baseline with the
+    // current shot and emit a suggestion so the run report makes the
+    // action visible.
+    if update_baselines {
+        match store.save(module_slug, viewport, &current) {
+            Ok(()) => {
+                log::info!(
+                    "[verify] baseline updated for {} [{}]",
+                    module_slug,
+                    viewport.slug()
+                );
+                findings.push(Finding {
+                    module_slug: module_slug.to_string(),
+                    kind: FindingKind::Other,
+                    severity: Severity::Suggestion,
+                    title: format!("Baseline updated ({})", viewport.slug()),
+                    detail: format!(
+                        "overwrote {} with current capture",
+                        store.path(module_slug, viewport).display()
+                    ),
+                    artifact: Some(current_path.to_path_buf()),
+                    captured_at: Utc::now(),
+                    edits: None,
+                });
+            }
+            Err(e) => {
+                log::warn!(
+                    "[verify] baseline save failed for {} [{}]: {e:#}",
+                    module_slug,
+                    viewport.slug()
+                );
+            }
+        }
+        return;
+    }
+
+    // First run of this (module, viewport): save as baseline + emit
+    // an advisory. NOT a regression — nothing's wrong, we just didn't
+    // have a reference to compare to.
+    if !store.exists(module_slug, viewport) {
+        match store.save(module_slug, viewport, &current) {
+            Ok(()) => {
+                log::info!(
+                    "[verify] baseline captured for {} [{}]",
+                    module_slug,
+                    viewport.slug()
+                );
+                findings.push(Finding {
+                    module_slug: module_slug.to_string(),
+                    kind: FindingKind::Other,
+                    severity: Severity::Suggestion,
+                    title: format!("Baseline captured ({})", viewport.slug()),
+                    detail: format!(
+                        "no prior baseline; saved current capture to {}",
+                        store.path(module_slug, viewport).display()
+                    ),
+                    artifact: Some(current_path.to_path_buf()),
+                    captured_at: Utc::now(),
+                    edits: None,
+                });
+            }
+            Err(e) => {
+                log::warn!(
+                    "[verify] baseline save failed for {} [{}]: {e:#}",
+                    module_slug,
+                    viewport.slug()
+                );
+            }
+        }
+        return;
+    }
+
+    // Baseline exists — run the diff.
+    let baseline = match store.load(module_slug, viewport) {
+        Ok(b) => b,
+        Err(e) => {
+            log::warn!("[verify] {e:#}");
+            return;
+        }
+    };
+    let diff = match diff_pngs(&baseline, &current, /* emit_diff_image = */ true) {
+        Ok(d) => d,
+        Err(e) => {
+            log::warn!(
+                "[verify] visual diff failed for {} [{}]: {e:#}",
+                module_slug,
+                viewport.slug()
+            );
+            return;
+        }
+    };
+
+    // Persist the diff overlay PNG alongside the current shot so the
+    // run report links the user straight to the visual.
+    let diff_path = if diff.diff_image.is_some() {
+        let name = format!("{}_{}_diff.png", module_slug, viewport.slug());
+        let p = run_dir.join(&name);
+        if let Some(bytes) = &diff.diff_image {
+            if let Err(e) = std::fs::write(&p, bytes) {
+                log::warn!("[verify] writing diff overlay {}: {e:#}", p.display());
+            }
+        }
+        Some(p)
+    } else {
+        None
+    };
+
+    let over_pixel = diff.pixel_delta_pct > threshold_pct;
+    let over_phash = diff.phash_distance > phash_threshold;
+
+    if over_pixel || over_phash {
+        findings.push(Finding {
+            module_slug: module_slug.to_string(),
+            kind: FindingKind::VisualDiff,
+            severity: Severity::Regression,
+            title: format!(
+                "Visual diff vs baseline ({}): {:.2}% pixels, phash {}",
+                viewport.slug(),
+                diff.pixel_delta_pct,
+                diff.phash_distance
+            ),
+            detail: format!(
+                "baseline {}x{} vs current {}x{} — \
+                 {:.2}% pixels differ (threshold {:.2}%), \
+                 phash distance {} (threshold {}). \
+                 Review {} and if the change is intentional, \
+                 re-run with --update-baselines to accept it.",
+                diff.baseline_dims.0,
+                diff.baseline_dims.1,
+                diff.current_dims.0,
+                diff.current_dims.1,
+                diff.pixel_delta_pct,
+                threshold_pct,
+                diff.phash_distance,
+                phash_threshold,
+                diff_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "the screenshot".into()),
+            ),
+            artifact: diff_path.clone().or_else(|| Some(current_path.to_path_buf())),
+            captured_at: Utc::now(),
+            edits: None,
+        });
+    } else {
+        log::info!(
+            "[verify] {} [{}] baseline clean ({:.2}% pixels, phash {})",
+            module_slug,
+            viewport.slug(),
+            diff.pixel_delta_pct,
+            diff.phash_distance
+        );
+    }
 }
 
 fn resolve_mac_mini_staging_url() -> Result<String> {

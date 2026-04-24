@@ -24,16 +24,22 @@
 //!   - Module identity is a slug + URL — never a file path — so
 //!     re-routing the gateway doesn't break the catalog.
 
+pub mod baseline;
 pub mod browser;
 pub mod changeset;
+pub mod corpus;
 pub mod fix;
 pub mod module_map;
 pub mod opus;
 pub mod run;
+pub mod visual_diff;
 
-pub use browser::{Browser, PageCapture};
+pub use baseline::BaselineStore;
+pub use browser::{Browser, PageCapture, Viewport};
 pub use changeset::{ChangeSet, resolve_against};
+pub use corpus::{Corpus, CorpusEntry, CorpusMeta};
 pub use fix::{apply_edits, count_loc_delta, AppliedEdit, Budgets, FixAttempt};
 pub use module_map::{Module, ModuleMap};
 pub use opus::OpusClient;
 pub use run::{Finding, FindingEdit, FindingKind, Severity, VerifyRun};
+pub use visual_diff::{diff_pngs, DiffResult};

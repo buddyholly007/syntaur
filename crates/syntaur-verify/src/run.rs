@@ -20,7 +20,7 @@ pub enum Severity {
     Suggestion,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FindingKind {
     /// Expected module URL didn't reach 200 / timed out.

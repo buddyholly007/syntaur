@@ -26,7 +26,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # CDP-based headless Chromium driver. More fidelity than
 # fantoccini/WebDriver — we need console capture + network events +
 # evaluate() for interaction walks. tokio-based.
-chromiumoxide = { version = "0.7", features = ["tokio-runtime"], default-features = false }
+chromiumoxide = { version = "0.9", default-features = false }
 futures = "0.3"
 # Topo manifest lookups so verify knows what URL to hit for each
 # module (staging=Mac Mini, prod=TrueNAS) without hardcoded IPs.
@@ -41,8 +41,13 @@ base64 = "0.22"
 # plaintext-in-code. syntaur-vault is path-dep'd as the agent
 # client library.
 syntaur-vault = { path = "../syntaur-vault" }
+# Phase 3: persistent baselines + visual diff. Pure-Rust PNG
+# decoder/encoder + resize + grayscale — no libpng dep. Default
+# features disabled to keep the binary lean; we only need PNG.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [dev-dependencies]
 # Phase 2b fix.rs apply/revert tests run against a throwaway
-# workspace tree — tempfile keeps them hermetic.
+# workspace tree — tempfile keeps them hermetic. Phase 3 reuses
+# it for baseline + corpus round-trip tests.
 tempfile = "3"
