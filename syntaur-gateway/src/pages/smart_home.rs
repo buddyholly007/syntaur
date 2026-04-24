@@ -104,6 +104,17 @@ pub async fn render() -> Html<String> {
                             span class="sh-muted" { "Loading…" }
                         }
                     }
+                    article class="sh-summary-card" id="sh-card-ble" {
+                        header class="sh-summary-card-head" {
+                            h3 { "BLE presence" }
+                            button type="button" class="sh-btn-ghost" onclick="shOpenBlePanel()" {
+                                "Manage"
+                            }
+                        }
+                        div id="sh-ble-body" class="sh-summary-body" {
+                            span class="sh-muted" { "Loading…" }
+                        }
+                    }
                 }
 
                 // Automation builder modal — hidden until the user opens it.
@@ -192,6 +203,38 @@ pub async fn render() -> Html<String> {
                         footer class="sh-modal-foot" {
                             button type="button" class="sh-btn-ghost" onclick="shCloseAutomationBuilder()" { "Cancel" }
                             button type="button" id="sh-auto-save" class="sh-btn-primary" onclick="shSaveAutomation()" { "Save" }
+                        }
+                    }
+                }
+
+                // BLE-anchor manager modal (Week 7 follow-up).
+                // Each row picks a proxy device + room + optional RSSI@1m
+                // calibration. Save PUTs the whole set to the backend,
+                // which validates every id before writing into
+                // smart_home_devices.state_json->ble_anchor.
+                div id="sh-ble-modal" class="sh-modal hidden" role="dialog" aria-labelledby="sh-ble-modal-title" {
+                    div class="sh-modal-backdrop" onclick="shCloseBlePanel()" {}
+                    div class="sh-modal-panel" {
+                        header class="sh-modal-head" {
+                            h2 id="sh-ble-modal-title" { "BLE presence anchors" }
+                            button type="button" class="sh-btn-icon" onclick="shCloseBlePanel()" title="Close" { "×" }
+                        }
+                        div class="sh-modal-body" {
+                            p class="sh-auto-hint" {
+                                "Each anchor is a BLE proxy (e.g. your ESPHome proxy-kids / proxy-master-bath) \
+                                 plus the room it sits in. Syntaur writes a presence signal whenever a tracked \
+                                 MAC is heard more loudly by one anchor than the others."
+                            }
+                            div id="sh-ble-anchors" class="sh-auto-cards" {}
+                            div class="sh-auto-section-head" {
+                                button type="button" class="sh-btn-ghost" onclick="shAddBleAnchor()" { "+ Add anchor" }
+                                span id="sh-ble-status" class="sh-muted" {}
+                            }
+                            div id="sh-ble-error" class="sh-auto-error hidden" {}
+                        }
+                        footer class="sh-modal-foot" {
+                            button type="button" class="sh-btn-ghost" onclick="shCloseBlePanel()" { "Cancel" }
+                            button type="button" id="sh-ble-save" class="sh-btn-primary" onclick="shSaveBleAnchors()" { "Save" }
                         }
                     }
                 }
@@ -1523,17 +1566,19 @@ function shDismissAllCandidates() {
 // ── Summary strip (diagnostics + energy + scenes) ──────────────────────
 
 async function shLoadSummary() {
-    // Fire all four in parallel; each section fails independently.
-    const [diag, energy, scenes, autos] = await Promise.allSettled([
+    // Fire all five in parallel; each section fails independently.
+    const [diag, energy, scenes, autos, ble] = await Promise.allSettled([
         shFetch('/api/smart-home/diagnostics/summary'),
         shFetch('/api/smart-home/energy/summary'),
         shFetch('/api/smart-home/scenes'),
         shFetch('/api/smart-home/automations'),
+        shFetch('/api/smart-home/ble/anchors'),
     ]);
     shRenderDiag(diag.status === 'fulfilled' ? diag.value : null);
     shRenderEnergy(energy.status === 'fulfilled' ? energy.value : null);
     shRenderScenes(scenes.status === 'fulfilled' ? scenes.value : null);
     shRenderAutomations(autos.status === 'fulfilled' ? autos.value : null);
+    shRenderBleSummary(ble.status === 'fulfilled' ? ble.value : null);
 }
 
 function shRenderDiag(summary) {
@@ -2298,6 +2343,169 @@ function shRelativeTime(ts) {
     if (delta < 3600) return Math.floor(delta / 60) + 'm ago';
     if (delta < 86400) return Math.floor(delta / 3600) + 'h ago';
     return Math.floor(delta / 86400) + 'd ago';
+}
+
+// ── BLE presence ────────────────────────────────────────────────────────
+// Summary card + anchor-config modal. The backend runtime (drivers/
+// ble.rs) owns the ingest loop + tick; this UI only reads the current
+// anchor set and pushes edits back via PUT /api/smart-home/ble/anchors.
+
+// Buffer for the modal — cleared on open, mutated by add/remove/edit.
+const shBleBuilder = { anchors: [] };
+
+function shRenderBleSummary(payload) {
+    const el = document.getElementById('sh-ble-body');
+    if (!el) return;
+    const anchors = (payload && payload.anchors) || [];
+    el.innerHTML = '';
+    const big = document.createElement('div');
+    big.className = 'sh-summary-big';
+    big.textContent = anchors.length + ' anchor' + (anchors.length === 1 ? '' : 's');
+    el.appendChild(big);
+    if (anchors.length === 0) {
+        const sub = document.createElement('div');
+        sub.className = 'sh-summary-sub';
+        sub.textContent = 'No BLE anchors configured. Click Manage to add one per proxy.';
+        el.appendChild(sub);
+    } else {
+        anchors.slice(0, 3).forEach(a => {
+            const row = document.createElement('div');
+            row.className = 'sh-summary-sub';
+            row.textContent = a.anchor_label + ' → room #' + a.room_id
+                + ' (RSSI@1m ' + a.rssi_at_1m + ' dBm)';
+            el.appendChild(row);
+        });
+        if (anchors.length > 3) {
+            const more = document.createElement('div');
+            more.className = 'sh-summary-sub';
+            more.textContent = (anchors.length - 3) + ' more…';
+            el.appendChild(more);
+        }
+    }
+}
+
+async function shOpenBlePanel() {
+    const status = document.getElementById('sh-ble-status');
+    const err = document.getElementById('sh-ble-error');
+    err.classList.add('hidden');
+    err.textContent = '';
+    status.textContent = '';
+    document.getElementById('sh-ble-anchors').innerHTML = '';
+    shBleBuilder.anchors = [];
+    document.getElementById('sh-ble-modal').classList.remove('hidden');
+
+    // Ref data for the dropdowns — devices + rooms. Uses the same
+    // cache the automation builder populates; prime it in case the
+    // user didn't open that modal first.
+    await shLoadAutoRefData();
+
+    try {
+        const payload = await shFetch('/api/smart-home/ble/anchors');
+        (payload.anchors || []).forEach(a => shAddBleAnchor(a));
+    } catch (e) {
+        status.textContent = 'Load failed: ' + e.message;
+    }
+}
+
+function shCloseBlePanel() {
+    document.getElementById('sh-ble-modal').classList.add('hidden');
+}
+
+function shAddBleAnchor(initial) {
+    // The anchor spec the UI works with while the modal is open.
+    // `anchor_device_id` = 0 before the user picks one from the
+    // dropdown; save-time validation catches that case.
+    const spec = {
+        anchor_device_id: (initial && initial.anchor_device_id) || 0,
+        room_id: (initial && initial.room_id) || 0,
+        rssi_at_1m: initial && initial.rssi_at_1m != null ? initial.rssi_at_1m : -50,
+    };
+    shBleBuilder.anchors.push(spec);
+
+    const card = document.createElement('div');
+    card.className = 'sh-auto-card';
+    const kind = document.createElement('span');
+    kind.className = 'sh-auto-card-kind';
+    kind.textContent = 'Anchor';
+    card.appendChild(kind);
+    card.appendChild(shFieldLabel('Device',
+        shDeviceSelect(spec.anchor_device_id, v => spec.anchor_device_id = v)));
+    card.appendChild(shFieldLabel('Room',
+        shRoomSelect(spec.room_id, v => spec.room_id = v)));
+    card.appendChild(shFieldLabel('RSSI@1m (dBm)',
+        shNumberInput(spec.rssi_at_1m, v => spec.rssi_at_1m = parseInt(v || '-50', 10))));
+    const rm = document.createElement('button');
+    rm.type = 'button';
+    rm.className = 'sh-auto-card-remove';
+    rm.textContent = '×';
+    rm.title = 'Remove';
+    rm.onclick = () => {
+        const i = shBleBuilder.anchors.indexOf(spec);
+        if (i >= 0) shBleBuilder.anchors.splice(i, 1);
+        if (card.parentNode) card.parentNode.removeChild(card);
+    };
+    card.appendChild(rm);
+    document.getElementById('sh-ble-anchors').appendChild(card);
+}
+
+async function shSaveBleAnchors() {
+    const err = document.getElementById('sh-ble-error');
+    const status = document.getElementById('sh-ble-status');
+    err.classList.add('hidden');
+    err.textContent = '';
+
+    // Client-side pre-checks: every row needs a device + room; reject
+    // zeros before shipping to the backend so the error path is local
+    // + fast.
+    const problems = [];
+    shBleBuilder.anchors.forEach((a, i) => {
+        if (!a.anchor_device_id) problems.push('Row ' + (i + 1) + ': pick a device');
+        if (!a.room_id) problems.push('Row ' + (i + 1) + ': pick a room');
+    });
+    // Reject duplicate device_ids — each proxy can only anchor one room.
+    const seen = new Set();
+    shBleBuilder.anchors.forEach((a, i) => {
+        if (!a.anchor_device_id) return;
+        if (seen.has(a.anchor_device_id)) {
+            problems.push('Row ' + (i + 1) + ': device is already used by another anchor');
+        }
+        seen.add(a.anchor_device_id);
+    });
+    if (problems.length) {
+        err.classList.remove('hidden');
+        err.textContent = problems.join(' · ');
+        return;
+    }
+
+    const body = {
+        anchors: shBleBuilder.anchors.map(a => ({
+            anchor_device_id: a.anchor_device_id,
+            room_id: a.room_id,
+            rssi_at_1m: a.rssi_at_1m,
+        })),
+    };
+
+    const btn = document.getElementById('sh-ble-save');
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+    status.textContent = '';
+    try {
+        await shFetch('/api/smart-home/ble/anchors', {
+            method: 'PUT',
+            body: JSON.stringify(body),
+        });
+        shCloseBlePanel();
+        // Refresh the summary card + auto-ref data so later builder
+        // opens see any new anchor-room associations.
+        const fresh = await shFetch('/api/smart-home/ble/anchors').catch(() => null);
+        shRenderBleSummary(fresh);
+    } catch (e) {
+        err.classList.remove('hidden');
+        err.textContent = 'Save failed: ' + e.message;
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Save';
+    }
 }
 
 // ── Live updates via SSE event bus ─────────────────────────────────────
