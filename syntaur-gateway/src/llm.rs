@@ -20,6 +20,9 @@ struct GlobalProviderMetrics {
     /// Latency EMA stored as microseconds (avoids float atomics).
     latency_ema_us: std::sync::atomic::AtomicU64,
     total_requests: std::sync::atomic::AtomicU64,
+    /// Most recent rate-limit remaining percent (0-100) parsed from response
+    /// headers. 0 = "never observed" → treated as 100 (full) in the accessor.
+    rate_limit_remaining_pct: AtomicU32,
 }
 
 static PROVIDER_METRICS: OnceLock<std::sync::Mutex<HashMap<String, Arc<GlobalProviderMetrics>>>> =
@@ -35,6 +38,7 @@ fn provider_metrics(name: &str) -> Arc<GlobalProviderMetrics> {
                 in_flight: AtomicU32::new(0),
                 latency_ema_us: std::sync::atomic::AtomicU64::new(0),
                 total_requests: std::sync::atomic::AtomicU64::new(0),
+                rate_limit_remaining_pct: AtomicU32::new(0),
             })
         })
         .clone()
@@ -58,6 +62,124 @@ impl GlobalProviderMetrics {
     fn avg_latency_ms(&self) -> f64 {
         self.latency_ema_us.load(Ordering::Relaxed) as f64 / 1000.0
     }
+
+    fn record_rate_limit_pct(&self, pct: u32) {
+        // Clamp to 1-100 — 0 is sentinel for "never observed".
+        let clamped = pct.clamp(1, 100);
+        self.rate_limit_remaining_pct.store(clamped, Ordering::Relaxed);
+    }
+
+    /// Rate-limit remaining percent (0-100). Returns 100 when no signal has
+    /// been recorded yet so a fresh provider isn't unfairly deprioritized.
+    fn rate_limit_pct(&self) -> u32 {
+        let v = self.rate_limit_remaining_pct.load(Ordering::Relaxed);
+        if v == 0 { 100 } else { v }
+    }
+}
+
+/// Parse OpenAI/OpenRouter/Cerebras-style rate-limit headers and return the
+/// smallest remaining percent across request + token dimensions. Returns
+/// `None` when neither dimension is reported (the provider doesn't surface
+/// limits). Shape follows the widely-used `x-ratelimit-{remaining,limit}-{requests,tokens}`
+/// convention; providers that use different header names just don't get
+/// rate-limit-aware deprioritization and fall back to latency ranking alone.
+fn extract_rate_limit_pct(headers: &reqwest::header::HeaderMap) -> Option<u32> {
+    let parse = |name: &str| -> Option<f64> {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<f64>().ok())
+    };
+
+    let mut pct: f64 = 100.0;
+    let mut saw_any = false;
+
+    // Minute-window request budget
+    for (rem_h, lim_h) in [
+        ("x-ratelimit-remaining-requests", "x-ratelimit-limit-requests"),
+        ("x-ratelimit-remaining-tokens", "x-ratelimit-limit-tokens"),
+    ] {
+        if let (Some(r), Some(l)) = (parse(rem_h), parse(lim_h)) {
+            if l > 0.0 {
+                pct = pct.min(r / l * 100.0);
+                saw_any = true;
+            }
+        }
+    }
+
+    if saw_any {
+        Some(pct.clamp(0.0, 100.0) as u32)
+    } else {
+        None
+    }
+}
+
+/// Pure scoring function for one provider. Smaller = higher priority.
+/// Extracted from `ranked_order` so the scoring logic is unit-testable
+/// without async or shared global state.
+///
+/// Two modes controlled by `position_dominant`:
+///
+/// - **Latency-first (default, `position_dominant=false`):** position acts
+///   as a `POSITION_TIEBREAK_MS`-per-slot tiebreaker. A provider N positions
+///   later must beat the earlier provider by more than `N * 250 ms` of
+///   measured latency to win. This restores real weight to live latency
+///   signals that the old scoring ignored.
+/// - **Position-dominant (legacy, `SYNTAUR_RANKING_MODE=position`):** config
+///   order dominates by 6 orders of magnitude — same behavior as pre-v0.5.2.
+///   Kept as an escape hatch in case a latency pick degrades quality.
+///
+/// Unavailable providers (circuit Open) always lose to any available one,
+/// with preserved config-order retry sequence.
+fn score_provider(
+    position: usize,
+    is_available: bool,
+    avg_latency_ms: f64,
+    total_requests: u64,
+    in_flight: u32,
+    rate_limit_pct: u32,
+    position_dominant: bool,
+) -> f64 {
+    const POSITION_MULT_LEGACY: f64 = 1_000_000.0;
+    const POSITION_TIEBREAK_MS: f64 = 250.0;
+    const DEFAULT_LATENCY_MS: f64 = 500.0;
+    const UNAVAILABLE_BIAS: f64 = 1.0e11;
+
+    if !is_available {
+        return UNAVAILABLE_BIAS + (position as f64) * POSITION_MULT_LEGACY;
+    }
+
+    if position_dominant {
+        let base = if avg_latency_ms > 0.0 { avg_latency_ms } else { DEFAULT_LATENCY_MS };
+        let penalty = (in_flight as f64) * base.max(DEFAULT_LATENCY_MS) * 0.5;
+        return (position as f64) * POSITION_MULT_LEGACY + base + penalty;
+    }
+
+    let effective_lat = if avg_latency_ms > 0.0 && total_requests >= 1 {
+        avg_latency_ms
+    } else {
+        DEFAULT_LATENCY_MS
+    };
+
+    // Rate-limit aware deprioritization: below 20% remaining, add up to 2000ms
+    // of equivalent-latency penalty so a near-exhausted provider loses to a
+    // healthier one before it starts returning 429s.
+    let rl_penalty = if rate_limit_pct < 20 {
+        (20 - rate_limit_pct) as f64 * 100.0
+    } else {
+        0.0
+    };
+
+    let in_flight_penalty = (in_flight as f64) * effective_lat.max(DEFAULT_LATENCY_MS) * 0.5;
+
+    (position as f64) * POSITION_TIEBREAK_MS + effective_lat + rl_penalty + in_flight_penalty
+}
+
+fn position_dominant_mode() -> bool {
+    std::env::var("SYNTAUR_RANKING_MODE")
+        .ok()
+        .as_deref()
+        == Some("position")
 }
 
 /// Snapshot of a provider's current state for introspection.
@@ -373,47 +495,43 @@ impl LlmChain {
 
     /// Score all providers and return indices in best-first order.
     ///
-    /// Config order is the PRIMARY signal — the user put their primary model
-    /// first for quality/cost reasons, and a local "faster" fallback should
-    /// never silently replace it while the primary is healthy. Latency and
-    /// in-flight load only influence ordering when two providers are at the
-    /// same config position (which never happens in practice) or when the
-    /// configured primary is seriously degraded.
+    /// Two ranking modes, switched by `SYNTAUR_RANKING_MODE`:
     ///
-    /// Score layout (smaller = higher priority):
-    /// - Available provider at position `i`:  `i * 1_000_000 + avg_lat_ms + in_flight_penalty`
-    /// - Unavailable provider at position `i`: `1e11 + i * 1_000_000` (always loses to any
-    ///   available provider, but still prefers earlier unavailables over later ones so we
-    ///   retry in the right order once circuits recover).
+    /// - **Latency-first (default):** measured latency is the primary signal;
+    ///   config position is a `250ms`-per-slot tiebreaker. A provider placed
+    ///   N positions later must beat the earlier provider by more than
+    ///   `N × 250ms` of observed latency to win. Restores weight to live
+    ///   data the pre-v0.5.2 scoring was ignoring (see
+    ///   `sessions/2026-04-24-response-time-perf.md` for the diagnosis).
+    /// - **Position-dominant (`SYNTAUR_RANKING_MODE=position`):** legacy
+    ///   behavior where position multiplies by 1M and dominates latency.
+    ///   Keep as an escape hatch if a latency-first pick degrades quality.
     ///
-    /// In realistic ranges (avg_lat ≤ 60_000, in_flight ≤ 4) the position term
-    /// dominates by 2+ orders of magnitude, so a 14.5s remote primary still
-    /// beats a 500ms local fallback — matching the user's configured intent.
+    /// See `score_provider` for the pure scoring function + its tests.
     async fn ranked_order(&self) -> Vec<usize> {
-        const POSITION_MULT: f64 = 1_000_000.0;
-        const UNAVAILABLE_BIAS: f64 = 1.0e11;
-
+        let position_dominant = position_dominant_mode();
         let mut scored: Vec<(usize, f64)> = Vec::with_capacity(self.providers.len());
 
         for (i, provider) in self.providers.iter().enumerate() {
             let circuit = provider.circuit.lock().await;
-            let position_score = (i as f64) * POSITION_MULT;
-            let score;
+            let is_available = circuit.is_available();
+            drop(circuit);
 
-            if !circuit.is_available() {
-                score = UNAVAILABLE_BIAS + position_score;
-            } else {
-                let metrics = provider_metrics(&provider.name);
-                let global_avg = metrics.avg_latency_ms();
-                let circuit_avg = circuit.avg_latency_ms();
-                let avg_lat = if global_avg > 0.0 { global_avg } else { circuit_avg };
-                let base = if avg_lat > 0.0 { avg_lat } else { 500.0 };
+            let metrics = provider_metrics(&provider.name);
+            let avg_lat = metrics.avg_latency_ms();
+            let total = metrics.total_requests.load(Ordering::Relaxed);
+            let active = metrics.in_flight.load(Ordering::Relaxed);
+            let rl_pct = metrics.rate_limit_pct();
 
-                let active = metrics.in_flight.load(Ordering::Relaxed) as f64;
-                let penalty = active * base.max(500.0) * 0.5;
-
-                score = position_score + base + penalty;
-            }
+            let score = score_provider(
+                i,
+                is_available,
+                avg_lat,
+                total,
+                active,
+                rl_pct,
+                position_dominant,
+            );
 
             scored.push((i, score));
         }
@@ -889,6 +1007,10 @@ async fn call_provider(
         return Err(format!("{} returned HTTP {} — {}{}", provider.name, status, body.chars().take(200).collect::<String>(), link_hint));
     }
 
+    if let Some(pct) = extract_rate_limit_pct(resp.headers()) {
+        provider_metrics(&provider.name).record_rate_limit_pct(pct);
+    }
+
     read_sse_response(resp, &provider.name, &link_hint).await
 }
 
@@ -959,5 +1081,150 @@ async fn call_provider_capped(
         return Err(format!("{} returned HTTP {} — {}{}", provider.name, status, body.chars().take(200).collect::<String>(), link_hint));
     }
 
+    if let Some(pct) = extract_rate_limit_pct(resp.headers()) {
+        provider_metrics(&provider.name).record_rate_limit_pct(pct);
+    }
+
     read_sse_response(resp, &provider.name, &link_hint).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::header::{HeaderMap, HeaderValue};
+
+    /// Helper to score a default "healthy, well-measured" provider at position `i`.
+    fn score_at(pos: usize, lat_ms: f64) -> f64 {
+        score_provider(pos, true, lat_ms, 10, 0, 100, false)
+    }
+
+    #[test]
+    fn latency_first_picks_faster_provider_at_later_position() {
+        // Real-world case from the 2026-04-24 baseline:
+        //   position 0 openrouter @ 2857ms  vs  position 4 cerebras @ 555ms.
+        // Under legacy scoring openrouter wins by 6 orders of magnitude; under
+        // latency-first it should lose by ~1300 ms worth of score.
+        let or_score = score_at(0, 2857.0);
+        let cer_score = score_at(4, 555.0);
+        assert!(cer_score < or_score,
+            "cerebras (score={}) should win over openrouter (score={}) in latency-first mode",
+            cer_score, or_score);
+        // Sanity: cerebras margin is 2857 - 555 - 4*250 = 1302 ms.
+        assert!((or_score - cer_score - 1302.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn tiebreaker_prefers_earlier_position_when_latency_equal() {
+        let s0 = score_at(0, 500.0);
+        let s1 = score_at(1, 500.0);
+        assert!(s0 < s1, "equal latency: position 0 wins");
+    }
+
+    #[test]
+    fn earlier_position_still_wins_when_latency_diff_below_tiebreak() {
+        // Position 0 @ 600ms vs position 1 @ 500ms. Diff = 100ms, tiebreak = 250ms.
+        let s0 = score_at(0, 600.0);
+        let s1 = score_at(1, 500.0);
+        assert!(s0 < s1, "100ms latency diff < 250ms tiebreak; position 0 wins");
+    }
+
+    #[test]
+    fn later_position_wins_when_latency_diff_exceeds_tiebreak() {
+        // Position 0 @ 800ms vs position 1 @ 400ms. Diff = 400ms > 250ms.
+        let s0 = score_at(0, 800.0);
+        let s1 = score_at(1, 400.0);
+        assert!(s1 < s0, "400ms latency win > 250ms tiebreak; position 1 wins");
+    }
+
+    #[test]
+    fn unavailable_provider_always_loses_to_available() {
+        let unavailable = score_provider(0, false, 10.0, 100, 0, 100, false);
+        let very_slow_available = score_provider(6, true, 59_000.0, 100, 3, 100, false);
+        assert!(
+            very_slow_available < unavailable,
+            "even a 59s available provider must outrank any unavailable one"
+        );
+    }
+
+    #[test]
+    fn unavailable_providers_preserve_config_order() {
+        let u0 = score_provider(0, false, 0.0, 0, 0, 100, false);
+        let u3 = score_provider(3, false, 0.0, 0, 0, 100, false);
+        assert!(u0 < u3, "unavailable retry order must follow config order");
+    }
+
+    #[test]
+    fn rate_limit_penalty_only_kicks_in_below_20_percent() {
+        let healthy = score_provider(0, true, 500.0, 10, 0, 50, false);
+        let near_limit = score_provider(0, true, 500.0, 10, 0, 15, false);
+        let at_limit = score_provider(0, true, 500.0, 10, 0, 0, false);
+        assert_eq!(healthy, 500.0, "no penalty at 50% remaining");
+        assert_eq!(near_limit, 500.0 + 500.0, "5pp below threshold → +500ms penalty");
+        assert_eq!(at_limit, 500.0 + 2000.0, "0% remaining → +2000ms penalty");
+    }
+
+    #[test]
+    fn untested_provider_gets_default_latency_not_zero() {
+        // n=0 avg=0.0 shouldn't score as a 0ms superstar.
+        let untested = score_provider(0, true, 0.0, 0, 0, 100, false);
+        let tested_fast = score_provider(0, true, 100.0, 5, 0, 100, false);
+        assert_eq!(untested, 500.0, "untested provider uses 500ms default");
+        assert!(tested_fast < untested, "a proven-fast provider should beat an untested one");
+    }
+
+    #[test]
+    fn in_flight_penalty_discourages_piling_onto_busy_provider() {
+        let idle = score_provider(0, true, 500.0, 10, 0, 100, false);
+        let one_in_flight = score_provider(0, true, 500.0, 10, 1, 100, false);
+        assert!(one_in_flight > idle, "in-flight request adds penalty");
+        assert_eq!(one_in_flight - idle, 250.0);
+    }
+
+    #[test]
+    fn position_dominant_mode_reverts_to_legacy_scoring() {
+        let or_score = score_provider(0, true, 2857.0, 10, 0, 100, true);
+        let cer_score = score_provider(4, true, 555.0, 10, 0, 100, true);
+        assert!(or_score < cer_score,
+            "legacy mode: position dominates even when latency says otherwise");
+    }
+
+    #[test]
+    fn rate_limit_headers_parsed_from_openai_style() {
+        let mut h = HeaderMap::new();
+        h.insert("x-ratelimit-remaining-requests", HeaderValue::from_static("25"));
+        h.insert("x-ratelimit-limit-requests", HeaderValue::from_static("100"));
+        assert_eq!(extract_rate_limit_pct(&h), Some(25));
+    }
+
+    #[test]
+    fn rate_limit_takes_min_of_request_and_token_dimensions() {
+        let mut h = HeaderMap::new();
+        h.insert("x-ratelimit-remaining-requests", HeaderValue::from_static("80"));
+        h.insert("x-ratelimit-limit-requests", HeaderValue::from_static("100"));
+        h.insert("x-ratelimit-remaining-tokens", HeaderValue::from_static("1000"));
+        h.insert("x-ratelimit-limit-tokens", HeaderValue::from_static("10000"));
+        assert_eq!(extract_rate_limit_pct(&h), Some(10));
+    }
+
+    #[test]
+    fn rate_limit_returns_none_when_headers_missing() {
+        let h = HeaderMap::new();
+        assert_eq!(extract_rate_limit_pct(&h), None);
+    }
+
+    #[test]
+    fn rate_limit_handles_unparseable_and_zero_limit() {
+        let mut h = HeaderMap::new();
+        h.insert("x-ratelimit-remaining-requests", HeaderValue::from_static("not a number"));
+        h.insert("x-ratelimit-limit-requests", HeaderValue::from_static("0"));
+        assert_eq!(extract_rate_limit_pct(&h), None);
+    }
+
+    #[test]
+    fn rate_limit_clamps_above_100() {
+        let mut h = HeaderMap::new();
+        h.insert("x-ratelimit-remaining-requests", HeaderValue::from_static("200"));
+        h.insert("x-ratelimit-limit-requests", HeaderValue::from_static("100"));
+        assert_eq!(extract_rate_limit_pct(&h), Some(100));
+    }
 }
