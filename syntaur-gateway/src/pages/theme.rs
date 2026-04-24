@@ -382,6 +382,28 @@ html.rb-on .syntaur-topbar .modules-btn .kbd {
 html.rb-on .sd-card-body {
   overflow: auto;
 }
+
+/* Accessibility tuning for rb-on dashboards (Opus-flagged WCAG AA):
+   Secondary text derived from --fg-mute reads at ~3.5:1 contrast
+   against the dark-palette backdrop, below AA's 4.5:1 normal-text
+   requirement. Lift --fg-mute + --fg-faint by 0.04 when rb-on so
+   labels / timestamps / "NEXT" pills in CALENDAR / NOW PLAYING / TO
+   DO stay legible over the ribbon-backdropped tiles. */
+html.rb-on body.tod-midday, html.rb-on body.tod-evening {
+  --fg-mute:  oklch(calc(var(--fg-l) - 0.28) 0.010 var(--accent-h));
+  --fg-faint: oklch(calc(var(--fg-l) - 0.42) 0.010 var(--accent-h));
+}
+
+/* Music-player control buttons — 32x32 was below the 44x44 minimum
+   touch target for mobile accessibility. Bump on mobile viewports
+   specifically so desktop density stays tight. */
+@media (max-width: 768px) {
+  html.rb-on .sd-np-btn {
+    width: 44px;
+    height: 44px;
+    font-size: 16px;
+  }
+}
 "##;
 
 pub const THEME_SCRIPT: &str = r##"

@@ -833,6 +833,17 @@ const SD_FETCH_HELPER: &str = r##"
         || '';
     } catch (_e) { return ''; }
   }
+  // Short-circuit /api/* requests when we have no auth token. Firing
+  // the request causes Chromium to emit "Failed to load resource: 401"
+  // to the browser console even when caller handles it — that's a UA
+  // network-panel log, not suppressible from JS. Widgets see the same
+  // 401 response shape and render their empty / signed-out state, just
+  // without the network round-trip + console noise. Non-API fetches
+  // still go through as-is.
+  const unauthed401 = () => Promise.resolve(new Response(
+    JSON.stringify({ error: 'unauthenticated' }),
+    { status: 401, headers: { 'content-type': 'application/json' } }
+  ));
   window.sdFetch = function(url, opts) {
     opts = opts || {};
     opts.credentials = opts.credentials || 'same-origin';
@@ -840,6 +851,10 @@ const SD_FETCH_HELPER: &str = r##"
     const tk = getToken();
     if (tk && !h.has('authorization')) h.set('Authorization', 'Bearer ' + tk);
     opts.headers = h;
+    // Skip the network hit on unauth /api/* — synthesize a 401.
+    if (!tk && typeof url === 'string' && url.startsWith('/api/')) {
+      return unauthed401();
+    }
     return fetch(url, opts);
   };
   window.sdToken = getToken;
@@ -1302,6 +1317,9 @@ const DASHBOARD_SCRIPT: &str = r##"
   doneBtn.addEventListener('click', () => setMode('view'));
 
   // First-run tooltip — shown once so the user knows where Customize is.
+  // Auto-dismisses after 10s so it doesn't linger and obstruct widgets
+  // (the prior behavior left it covering the right edge of the Chat
+  // widget on mobile forever until the user found the × button).
   try {
     if (!localStorage.getItem('syntaur:dashboard:seen-customize')) {
       const tip = document.createElement('div');
@@ -1312,10 +1330,17 @@ const DASHBOARD_SCRIPT: &str = r##"
       if (right) {
         right.style.position = 'relative';
         right.appendChild(tip);
-        tip.querySelector('.sd-tip-close').addEventListener('click', () => {
-          tip.remove();
+        const dismiss = () => {
+          if (!tip.isConnected) return;
+          tip.style.transition = 'opacity 300ms ease';
+          tip.style.opacity = '0';
+          setTimeout(() => tip.remove(), 320);
           try { localStorage.setItem('syntaur:dashboard:seen-customize', '1'); } catch {}
-        });
+        };
+        tip.querySelector('.sd-tip-close').addEventListener('click', dismiss);
+        // Auto-dismiss after 10s — enough to read, short enough not
+        // to overlay widgets if the user never notices the ×.
+        setTimeout(dismiss, 10000);
       }
     }
   } catch {}
