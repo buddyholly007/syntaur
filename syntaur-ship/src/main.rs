@@ -90,6 +90,13 @@ struct Cli {
     #[arg(long, global = true)]
     skip_verify: bool,
 
+    /// Let the verify stage attempt an Opus-driven auto-fix if it
+    /// catches a regression. Capped at 2 iters + 150 LoC/module. When
+    /// off (default), regressions just abort the pipeline and ask the
+    /// operator to fix manually.
+    #[arg(long, global = true)]
+    auto_fix: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -157,6 +164,7 @@ fn main() -> ExitCode {
         social_only: cli.social_only,
         force_ci_drift: cli.force_ci_drift,
         skip_verify: cli.skip_verify,
+        auto_fix: cli.auto_fix,
     };
 
     let result = match cli.command {

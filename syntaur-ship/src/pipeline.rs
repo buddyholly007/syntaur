@@ -38,6 +38,12 @@ pub struct RunOptions {
     /// the audit is the only automated gate on UX regressions between
     /// Mac Mini smoke and TrueNAS deploy.
     pub skip_verify: bool,
+    /// When Opus catches a regression during verify, let it propose
+    /// edits, rebuild the gateway, reload Mac Mini, and re-verify
+    /// (capped at 2 iters, ≤150 LoC/module per iteration). Off by
+    /// default — opt-in via `--auto-fix` so a pipeline operator is
+    /// always in the loop when unattended code gets written to source.
+    pub auto_fix: bool,
 }
 
 pub struct StageContext<'a> {

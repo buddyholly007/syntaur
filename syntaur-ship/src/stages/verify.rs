@@ -72,6 +72,30 @@ pub fn run(ctx: &StageContext) -> Result<()> {
     // binary detects both and degrades heuristic-only otherwise.
     if opus_available() {
         cmd.arg("--with-opus");
+        // Auto-fix: when Opus finds a regression AND we can afford to
+        // rebuild+reload (not a social-only micro-deploy), let verify
+        // apply the Opus-proposed edits, rebuild the gateway, reload
+        // Mac Mini, and re-verify. Capped at --max-iter 2 and
+        // --max-loc 150 per module so a runaway fix never balloons.
+        // --auto-fix implies --with-opus so it's free here.
+        if ctx.opts.auto_fix {
+            cmd.args([
+                "--auto-fix",
+                "--max-iter",
+                "2",
+                "--max-loc",
+                "150",
+                "--reload-cmd",
+                // Same pattern mac_mini.rs uses to relaunch: ssh + pkill
+                // + setsid nohup. Uses the tunnel we already opened.
+                &format!(
+                    "ssh {} 'pkill -9 -f /tmp/syntaur-gateway; sleep 1; \
+                     cd /tmp && setsid nohup ./syntaur-gateway > /tmp/syntaur-gateway.log 2>&1 < /dev/null &'",
+                    ctx.cfg.mac_mini
+                ),
+            ]);
+            log::info!(">> verify: --auto-fix enabled (max 2 iters, ≤150 LoC/module)");
+        }
     } else {
         log::warn!(
             "[verify] no vault agent + no OPENROUTER_API_KEY — running heuristic-only \
