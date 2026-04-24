@@ -25,6 +25,7 @@ use syntaur_verify_core::{
     module_map::{Module, ModuleMap},
     opus::OpusClient,
     persona::{AuthSource, Persona, PersonaCatalog},
+    persona_tone,
     run::{Finding, FindingEdit, FindingKind, Severity, VerifyRun},
     visual_diff::diff_pngs,
 };
@@ -206,6 +207,28 @@ struct Cli {
     /// token handy" runs still work end-to-end.
     #[arg(long)]
     all_personas: bool,
+
+    // ── Phase 4c: persona-tone audit ──────────────────────────
+    /// Run the persona-tone audit phase. POSTs each persona's prompt
+    /// set to /api/message and scores replies against the persona's
+    /// tone rules in `persona-tone.yaml`. Complements the Phase 4b
+    /// visual sweep — catches register drift (butler ack phrases
+    /// dropped, hype words leaking in, etc.) that screenshots can't.
+    #[arg(long)]
+    persona_tone: bool,
+
+    /// Override the persona-tone matrix path. Default:
+    /// `<workspace>/crates/syntaur-verify/persona-tone.yaml`.
+    #[arg(long)]
+    persona_tone_file: Option<PathBuf>,
+
+    /// Max retry count per prompt when the chat API times out.
+    #[arg(long, default_value_t = 2)]
+    persona_tone_retries: u32,
+
+    /// Seconds to back off between retries.
+    #[arg(long, default_value_t = 5)]
+    persona_tone_retry_backoff: u64,
 }
 
 fn main() -> ExitCode {
@@ -277,6 +300,11 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
         persona: persona_slugs,
         personas_file: personas_file_arg,
         all_personas,
+        // Phase 4c persona-tone fields.
+        persona_tone,
+        persona_tone_file: persona_tone_file_arg,
+        persona_tone_retries,
+        persona_tone_retry_backoff,
     } = cli;
     // Auto-fix implies Opus vision (can't fix without findings).
     let with_opus = with_opus_flag || auto_fix;
@@ -907,6 +935,56 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
             }
             drop(fbrowser);
         }
+    }
+
+    // ── Phase 4c — persona-tone audit ────────────────────────────────
+    // Runs AFTER the visual sweep + flows so the tone findings land in
+    // the same report.json. Per-persona POSTs, rule-scored, one finding
+    // per failing rule.
+    if persona_tone {
+        let tone_path = persona_tone_file_arg
+            .clone()
+            .unwrap_or_else(|| persona_tone::default_matrix_path(&workspace));
+        log::info!("[verify] persona-tone: loading matrix {}", tone_path.display());
+        let matrix = persona_tone::PersonaToneMatrix::load(&tone_path)?;
+        let tone_cfg = persona_tone::ToneRunConfig {
+            retries: persona_tone_retries,
+            retry_backoff: std::time::Duration::from_secs(persona_tone_retry_backoff),
+            timeout: std::time::Duration::from_secs(45),
+        };
+        // Filter: if --persona X was passed, limit the tone sweep to
+        // the same set. Otherwise sweep every slug in the matrix.
+        let tone_filter: Vec<String> = if persona_slugs.is_empty() {
+            Vec::new()
+        } else {
+            persona_slugs.clone()
+        };
+        // Token resolution re-uses the Phase 4b Persona catalog so a
+        // single `personas.yaml` maps slug → env-var → bearer token.
+        let token_catalog_path = personas_file_arg
+            .clone()
+            .unwrap_or_else(|| workspace.join("crates/syntaur-verify/personas.yaml"));
+        let token_catalog = PersonaCatalog::load(&token_catalog_path).ok();
+        let tone_findings = persona_tone::run_tone_audit(
+            &matrix,
+            &tone_filter,
+            &target_url,
+            &tone_cfg,
+            |slug| match token_catalog
+                .as_ref()
+                .and_then(|c| c.get(slug))
+                .map(|p| p.auth_token())
+            {
+                Some(Ok(AuthSource::Env { token, .. })) => Some(token),
+                _ => None,
+            },
+        )
+        .await?;
+        log::info!(
+            "[verify] persona-tone: {} finding(s) from tone audit",
+            tone_findings.len()
+        );
+        findings.extend(tone_findings);
     }
 
     let run = VerifyRun {

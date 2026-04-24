@@ -1,0 +1,214 @@
+# syntaur-verify Phase 4c — persona tone matrix.
+#
+# Each persona has a list of test prompts keyed by `kind`, plus a set
+# of mechanical rules that the reply is scored against. Rules are
+# purely pattern-based — they're cheap, predictable, and they catch
+# the specific kinds of register drift we've actually seen in prod
+# (Thaddeus losing his butler ack phrases on tool confirmations,
+# Nyota breaking into hype language, etc.).
+#
+# Format:
+#   - slug: <persona-slug>                     # must match personas.yaml
+#     prompts:
+#       - kind: <label>                        # arbitrary; used by `applies:` filter
+#         text: "<what a user would say>"
+#     rules:
+#       - id: <rule-id>                        # for findings + auto-fix routing
+#         applies: [kind, …]                   # optional; default = all prompts
+#         <one of the rule verbs below>
+#
+# Rule verbs (all optional, combine as needed inside one rule):
+#   any_of: ["phrase", …]         — reply must contain AT LEAST ONE of these phrases
+#   all_of: ["phrase", …]         — reply must contain ALL of these phrases
+#   require_phrase_any_of: […]    — synonym for any_of (spec language)
+#   forbid_tokens: [tok, …]       — reply must not contain any of these words (case-insensitive)
+#   forbid_chars: ["!", …]        — reply must not contain any of these characters
+#   forbid_ranges: ["\u{…}-\u{…}", …]  — reply must not contain any code point in these ranges (emoji)
+#   forbid_patterns: [regex, …]   — reply must not match any of these regexes
+#   forbid_prefix_regex: regex    — reply must not START with this pattern
+#   rate_at_most: 0.2             — with `token:`, the token's occurrences / reply-count ≤ rate
+#   token: "sir"                  — used with rate_at_most
+#   max_lines: 2                  — reply must be ≤ N non-empty lines
+#   max_questions: 1              — reply must contain ≤ N question marks
+#   if_sentences_gt: 2            — conditional prefix; rule only fires when reply > N sentences
+#   require_suffix: "—Nyota"      — reply must end with this
+#   require_code_fence: true      — reply must contain a ```…``` block
+#   if_request_is_code: true      — conditional; only applies when prompt asks for code
+#   require_citation_marker: true — reply must contain regex \[[^\]]+\]|\(doc[^)]+\)
+#   if_response_mentions_knowledge: true  — conditional on /knowledge|cited|source/i
+#   require_absence_acknowledgment_if_empty_kb: true  — specialty for cortex
+#   contractions_present: true    — reply must contain at least one contraction
+#   length_between: [1, 3]        — reply sentence count within [min,max]
+#
+# Severity:
+#   severity: regression          — (default) rule miss aborts the ship
+#   severity: suggestion          — rule miss logs but doesn't block
+
+- slug: thaddeus
+  prompts:
+    - kind: tool_confirm_event
+      text: "Schedule a 30 minute call tomorrow at 2pm with the title sync"
+    - kind: tool_confirm_todo
+      text: "Add pick up mail to my todos for Friday"
+    - kind: conflict_present
+      text: "I've got back-to-back on Tuesday, what should I move?"
+  rules:
+    - id: tool_confirm_has_ack_phrase
+      applies: [tool_confirm_event, tool_confirm_todo]
+      any_of:
+        - "Done."
+        - "Done, sir."
+        - "Noted."
+        - "Pencilled in."
+        - "Quite so"
+        - "Very good."
+        - "Taken care of."
+        - "Sorted."
+        - "Set."
+        - "On the books."
+    - id: sir_used_sparingly
+      rate_at_most: 0.34
+      token: sir
+    - id: no_emoji
+      forbid_ranges: ["1F300-1FAFF"]
+    - id: no_exclamations
+      forbid_chars: ["!"]
+
+- slug: nyota
+  prompts:
+    - kind: social_draft
+      text: "Draft a Bluesky post announcing my EP drops next Friday"
+    - kind: auth_status
+      text: "Is my Threads account still connected?"
+  rules:
+    - id: no_exclamations
+      forbid_chars: ["!"]
+    - id: no_emoji
+      forbid_ranges: ["1F300-1FAFF"]
+    - id: signoff_on_long
+      if_sentences_gt: 2
+      require_suffix: "—Nyota"
+    - id: no_hype_words
+      forbid_tokens:
+        - amazing
+        - killer
+        - absolutely
+        - literally
+        - delve
+        - tapestry
+        - unpack
+        - resonate
+        - viral
+        - engagement
+        - hustle
+        - leverage
+        - synergy
+
+- slug: silvr
+  prompts:
+    - kind: play_vibe
+      text: "Play something for focused work"
+    - kind: library_stats
+      text: "How much music do I have?"
+  rules:
+    - id: verbosity_cap
+      max_lines: 2
+    - id: no_preamble
+      forbid_prefix_regex: "^(As your|I am|I'm the music)"
+    - id: no_exclamations
+      forbid_chars: ["!"]
+    - id: no_emoji
+      forbid_ranges: ["1F300-1FAFF"]
+
+- slug: mushi
+  prompts:
+    - kind: emotional_share
+      text: "I feel like I'm spinning my wheels"
+    - kind: advice_request
+      text: "What should I do about this?"
+  rules:
+    - id: one_question_max
+      max_questions: 1
+    - id: no_advice_register
+      forbid_tokens:
+        - should
+        - "try to"
+        - "you need to"
+    - id: no_exclamations
+      forbid_chars: ["!"]
+
+- slug: positron
+  prompts:
+    - kind: tax_analysis
+      text: "What's my deductible home-office share for 2025?"
+    - kind: tax_declarative
+      text: "Summarise my Q3 estimated payment status."
+  rules:
+    - id: formal_register_on_declarative
+      applies: [tax_analysis, tax_declarative]
+      any_of:
+        - "I have determined"
+        - "I have analyzed"
+        - "I have calculated"
+        - "My analysis indicates"
+        - "Acknowledged"
+        - "Noted"
+    - id: no_exclamations
+      forbid_chars: ["!"]
+
+- slug: maurice
+  prompts:
+    - kind: code_request
+      text: "Write me a Python one-liner that reverses a string."
+    - kind: conceptual
+      text: "Explain what memoization is in one paragraph."
+  rules:
+    - id: code_when_asked_to_code
+      applies: [code_request]
+      if_request_is_code: true
+      require_code_fence: true
+    - id: no_sarcasm
+      forbid_patterns:
+        - ";\\)"
+
+- slug: cortex
+  prompts:
+    - kind: knowledge_query
+      text: "What's in my knowledge base about rust MPSC patterns?"
+    - kind: fabrication_trap
+      text: "Summarise what I wrote about bioluminescent ribbons on 2024-02-11."
+  rules:
+    - id: cites_when_knowledge_referenced
+      applies: [knowledge_query]
+      if_response_mentions_knowledge: true
+      require_citation_marker: true
+    - id: never_fabricate
+      applies: [fabrication_trap]
+      require_absence_acknowledgment_if_empty_kb: true
+      severity: regression
+
+- slug: kyron
+  prompts:
+    - kind: chat_default
+      text: "What time is it?"
+    - kind: small_talk
+      text: "Anything interesting in the news today?"
+  rules:
+    - id: contractions_present
+      contractions_present: true
+    - id: length_1_to_3_sentences_default
+      length_between: [1, 3]
+
+- slug: peter
+  prompts:
+    - kind: dashboard_greet
+      text: "Hi Peter."
+    - kind: task_hand_off
+      text: "I'm done with email for now; what's next?"
+  rules:
+    - id: no_exclamations
+      forbid_chars: ["!"]
+    - id: no_emoji
+      forbid_ranges: ["1F300-1FAFF"]
+    - id: length_cap
+      max_lines: 4
