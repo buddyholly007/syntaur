@@ -27,23 +27,148 @@ pub async fn render() -> Html<String> {
         title: "Dashboard",
         authed: true,
         extra_style: None,
+        // Paint `syntaur-ambient` from first paint so the body is
+        // already using the theme tokens when the browser paints the
+        // page. Prevents the dark-slate→white flash that used to happen
+        // while theme.rs was still loading.
+        body_class: Some("syntaur-ambient min-h-screen"),
+        head_boot: Some(DASHBOARD_HEAD_BOOT),
     };
     let body = html! {
         (top_bar("Dashboard", None))
         style { (PreEscaped(THEME_STYLE)) }
         style { (PreEscaped(DASHBOARD_STYLE)) }
+        // Auth-fetch helper has to exist before THEME_SCRIPT so
+        // /api/appearance can also authenticate; widgets re-use the
+        // same helper from their inline `<script>` tags at render time.
+        script { (PreEscaped(SD_FETCH_HELPER)) }
+        // Ribbon backdrop — full-bleed SVG with 12 hand-authored
+        // bezier filaments. Replaces the old flat body::before motes
+        // layer. Gated on html.rb-on (set in head-boot) so cards can
+        // switch to translucent without flashing.
+        (PreEscaped(RIBBON_SVG))
         main class="sd-root" id="sd-root" {
             (greeting_strip())
             (sun_indicator())
+            (customize_bar())
             div class="sd-grid" id="sd-grid" data-mode="view" {}
         }
         (drawer())
-        (floating_controls())
         script { (PreEscaped(THEME_SCRIPT)) }
         script { (PreEscaped(widget_templates_js())) }
         script { (PreEscaped(DASHBOARD_SCRIPT)) }
+        script { (PreEscaped(RIBBON_SCRIPT)) }
     };
     Html(shell(page, body).into_string())
+}
+
+// ─── Pre-body-paint boot script ────────────────────────────────────────
+//
+// Runs synchronously in `<head>` before the browser paints the body.
+// Reads the cached appearance pref from localStorage and flips
+// `html.theme-light` on if the user has explicitly chosen light — so
+// the first paint lands in the correct palette instead of flashing
+// from dark to light once theme.rs finishes loading.
+//
+// Dark is the default. We only add `theme-light` if:
+//   - theme_mode === 'light', or
+//   - theme_mode === 'schedule' and the current clock is inside the
+//     user's light window, or
+//   - theme_mode === 'auto' AND the user has set latitude/longitude
+//     AND the current time is between sunrise and sunset.
+const DASHBOARD_HEAD_BOOT: &str = r##"
+(function() {
+  try {
+    var raw = localStorage.getItem('syntaur:appearance');
+    if (!raw) return;
+    var p = JSON.parse(raw);
+    if (!p || !p.theme_mode) return;
+    var now = new Date();
+    var minNow = now.getHours() * 60 + now.getMinutes();
+    var isLight = false;
+    if (p.theme_mode === 'light') {
+      isLight = true;
+    } else if (p.theme_mode === 'schedule') {
+      var rs = p.light_start_min || 420, dk = p.dark_start_min || 1140;
+      isLight = minNow >= rs && minNow < dk;
+    } else if (p.theme_mode === 'auto' && p.latitude != null && p.longitude != null) {
+      // Rough: between 7am and 7pm → light. The full NOAA calc runs
+      // post-paint in theme.rs; this is just for first-paint accuracy.
+      isLight = minNow >= 420 && minNow < 1140;
+    }
+    if (isLight) document.documentElement.classList.add('theme-light');
+    if (p.accent && ({sage:135,indigo:265,ochre:70,gray:260})[p.accent] != null) {
+      document.documentElement.style.setProperty('--accent-h',
+        String(({sage:135,indigo:265,ochre:70,gray:260})[p.accent]));
+    }
+    // Pre-paint time-of-day bucket so the gradient bg lands on first
+    // frame instead of flashing midday dark then fading to morning cream.
+    // theme.rs apply() re-runs this with the full NOAA calc post-paint.
+    var rs = p.light_start_min || 420, dk = p.dark_start_min || 1140;
+    var tod;
+    if (isLight) {
+      tod = 'morning';
+    } else {
+      var preDusk = minNow >= (dk - 120) && minNow < dk;
+      var overnight = minNow < rs || minNow >= dk;
+      tod = (preDusk || overnight) ? 'evening' : 'midday';
+    }
+    // Body doesn't exist yet at head-script time; set on <html> as a
+    // data attribute, and syntaur-ambient.theme-ready in theme.rs will
+    // promote it to body class. Meanwhile add the class pre-emptively
+    // when body parses — use a tiny MutationObserver fallback.
+    document.documentElement.setAttribute('data-tod', tod);
+    var setTod = function() {
+      if (!document.body) return false;
+      document.body.classList.remove('tod-morning','tod-midday','tod-evening');
+      document.body.classList.add('tod-' + tod);
+      return true;
+    };
+    if (!setTod()) {
+      var obs = new MutationObserver(function() { if (setTod()) obs.disconnect(); });
+      obs.observe(document.documentElement, { childList: true });
+    }
+  } catch (e) { /* first-paint best-effort; theme.rs will re-apply */ }
+  // Enable ribbon-backdrop mode pre-paint so card translucency and
+  // motes suppression land on the first frame.
+  document.documentElement.classList.add('rb-on');
+})();
+"##;
+
+fn customize_bar() -> Markup {
+    html! {
+        // In-view Customize control — replaces the unlabeled dual FABs.
+        // Single click flips the grid into edit mode (tiles grow resize
+        // chips, drag to reorder, × to remove), and exposes inline
+        // "+ Add widget", "Reset", and "Done ✓" buttons. Always
+        // discoverable in the top-right of the main grid area.
+        section class="sd-customize" id="sd-customize" {
+            div class="sd-customize-left" {
+                button class="sd-focus-chip" id="sd-focus-chip" data-focus="normal" aria-label="Focus mode" title="Cycle focus: Normal → Focus → Quiet" {
+                    svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" {
+                        circle cx="12" cy="12" r="8" {}
+                        circle cx="12" cy="12" r="3" {}
+                    }
+                    span class="sd-focus-chip-label" { "Normal" }
+                }
+            }
+            div class="sd-customize-right" {
+                // Edit-mode pill cluster — hidden by default, shown when in edit mode.
+                div class="sd-edit-pill" id="sd-edit-pill" hidden {
+                    button class="sd-edit-act" id="sd-add-widget" { "+ Add widget" }
+                    button class="sd-edit-act" id="sd-reset-layout" { "Reset" }
+                    button class="sd-edit-act sd-edit-act-done" id="sd-edit-done" { "Done ✓" }
+                }
+                button class="sd-customize-btn" id="sd-customize-btn" aria-label="Customize dashboard" {
+                    svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" {
+                        path d="M12 20h9" {}
+                        path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5Z" {}
+                    }
+                    span { "Customize" }
+                }
+            }
+        }
+    }
 }
 
 // ─── Greeting + sun-position strip ─────────────────────────────────────
@@ -95,9 +220,10 @@ fn drawer() -> Markup {
                 span class="sd-drawer-title" { "Add widget" }
                 button class="sd-drawer-close" id="sd-drawer-close" aria-label="Close" { "×" }
             }
+            div class="sd-drawer-hint" { "Click or drag onto the dashboard to add." }
             div class="sd-drawer-body" {
                 @for w in &catalog {
-                    button class="sd-drawer-item" data-kind=(w.kind()) {
+                    button class="sd-drawer-item" data-kind=(w.kind()) draggable="true" {
                         div class="sd-drawer-item-title" { (w.title()) }
                         div class="sd-drawer-item-desc" { (w.description()) }
                     }
@@ -107,42 +233,9 @@ fn drawer() -> Markup {
     }
 }
 
-// ─── Floating circles (Edit + Focus) ───────────────────────────────────
-
-fn floating_controls() -> Markup {
-    html! {
-        div class="sd-fab-stack" id="sd-fab" {
-            // Focus circle — expands into Normal / Focus / Quiet options.
-            div class="sd-fab-group" id="sd-focus-group" data-open="false" {
-                button class="sd-fab" id="sd-focus-btn" aria-label="Focus modes" title="Focus" {
-                    svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" {
-                        circle cx="12" cy="12" r="8" {}
-                        circle cx="12" cy="12" r="3" {}
-                    }
-                }
-                div class="sd-fab-menu" role="menu" {
-                    button class="sd-fab-opt" data-focus="normal" { "Normal" }
-                    button class="sd-fab-opt" data-focus="focus"  { "Focus" }
-                    button class="sd-fab-opt" data-focus="quiet"  { "Quiet" }
-                }
-            }
-            // Edit circle — click to toggle edit mode + expand options.
-            div class="sd-fab-group" id="sd-edit-group" data-open="false" {
-                button class="sd-fab sd-fab-primary" id="sd-edit-btn" aria-label="Edit dashboard" title="Edit" {
-                    svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" {
-                        path d="M12 20h9" {}
-                        path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5Z" {}
-                    }
-                }
-                div class="sd-fab-menu sd-fab-menu-wide" role="menu" {
-                    button class="sd-fab-opt" id="sd-add-widget"   { "+ Add widget" }
-                    button class="sd-fab-opt" id="sd-reset-layout" { "Reset layout" }
-                    button class="sd-fab-opt sd-fab-opt-done" id="sd-edit-done" { "Done ✓" }
-                }
-            }
-        }
-    }
-}
+// (The old floating-circle FAB stack was replaced by `customize_bar()`
+// — a single, labeled "Customize" button inline at the top of the grid.
+// Keeps everything discoverable without the two-mystery-circles UX.)
 
 // ─── Widget templates (rendered server-side as hidden <template>s) ─────
 //
@@ -170,7 +263,16 @@ fn widget_templates_js() -> String {
             let html_str = markup.into_string()
                 .replace('\\', "\\\\")
                 .replace('`', "\\`")
-                .replace("${", "\\${");
+                .replace("${", "\\${")
+                // A literal `</script>` anywhere in a widget template —
+                // e.g. the close of its inline helper script — terminates
+                // the OUTER `<script>window.__SYNTAUR_WIDGETS = {…}</script>`
+                // block the moment the browser parses it, even though it's
+                // inside a JS template literal. Breaking the token with
+                // `<\/script>` keeps the JS string intact while the HTML
+                // parser sees a non-closing tag. Ran into this with the
+                // Chat/Todo/Calendar widgets that embed per-instance JS.
+                .replace("</script>", "<\\/script>");
             out.push_str(&format!("      '{}': `{}`,\n", label, html_str));
         }
         out.push_str("    },\n");
@@ -186,11 +288,33 @@ const DASHBOARD_STYLE: &str = r##"
 /* Syntaur ambient dashboard — calm, customizable, adaptive.
    Inherits --bg, --fg, --accent etc. from theme.rs tokens. */
 
+/* Ribbon-backdrop gradient — via a fixed full-viewport pseudo-element
+   so it can't lose to html/body canvas propagation quirks or any
+   author rule. z-index -2 so it sits behind the SVG (z-index -1)
+   and behind content (z-index 0). Vars update with tod-* class on
+   body (they inherit through <body> to its ::before pseudo). */
+html.rb-on body.syntaur-ambient::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse 55% 40% at 80% 10%, var(--bg-vignette), transparent 65%),
+    radial-gradient(ellipse 70% 55% at 15% 95%, var(--bg-vignette2), transparent 65%),
+    linear-gradient(162deg, var(--bg-top) 0%, var(--bg-bot) 100%);
+}
+/* Kill syntaur-ambient's flat var(--bg) so the pseudo-element shows. */
+html.rb-on body.syntaur-ambient {
+  background: transparent !important;
+}
+
 .sd-root {
   max-width: 1400px;
   margin: 0 auto;
   padding: 32px 24px 120px;
   min-height: calc(100vh - 48px);
+  background: transparent;
 }
 body.sd-focus .sd-root { max-width: 760px; padding-top: 48px; }
 
@@ -256,7 +380,12 @@ body.sd-focus .sd-root { max-width: 760px; padding-top: 48px; }
 .sd-grid {
   display: grid;
   grid-template-columns: repeat(8, 1fr);
-  grid-auto-rows: 72px;
+  /* minmax so tiles never go below 72px (aesthetic minimum for the
+     small tiles), but grow to fit content when a widget renders more
+     than the nominal size-s/m/l span expected. Fixes clipped labels
+     in Quick Actions, Calendar, etc. when grid gap + padding eat the
+     budget. Matches the concept's `minmax(88px, auto)` pattern. */
+  grid-auto-rows: minmax(72px, auto);
   gap: 16px;
 }
 @media (max-width: 900px) {
@@ -287,7 +416,14 @@ html.theme-light .sd-grid[data-mode="view"] .sd-tile:hover {
 }
 
 /* Skeleton shimmer — shown while a tile's first data fetch is in flight.
-   Widget JS removes .loading once it renders. */
+   Widget JS removes .loading once it renders.
+   CRITICAL: pointer-events: none. The shimmer is purely decorative and
+   MUST NOT intercept clicks. Without this, widgets with no data-slots
+   (Quick Actions — fully server-rendered) sit with `.loading` for the
+   full 4s fallback timeout, and any anchor underneath the pseudo is
+   click-dead during that window. Bug found by puppeteer audit:
+   elementFromPoint on Quick-Action top-row tiles returned .sd-card-body
+   because this ::after was on top. */
 .sd-tile.loading .sd-card-body::after {
   content: ""; position: absolute; inset: 44px 20px 20px;
   border-radius: 10px;
@@ -300,6 +436,7 @@ html.theme-light .sd-grid[data-mode="view"] .sd-tile:hover {
   background-size: 200% 100%;
   animation: sdShimmer 1.6s ease-in-out infinite;
   opacity: 0.6;
+  pointer-events: none;
 }
 @keyframes sdShimmer {
   0%   { background-position: 200% 0; }
@@ -384,6 +521,156 @@ body.sd-quiet .sd-tile.sd-tile-system { display: none; }
 .sd-sys-value { color: var(--fg); font-size: 16px; font-weight: 500; font-variant-numeric: tabular-nums; }
 .sd-sys-value-big { font-size: 28px; letter-spacing: -0.01em; }
 
+/* Chat widget */
+.sd-chat { display:flex; flex-direction:column; gap:8px; flex:1; min-height:0; }
+.sd-chat-chips { display:flex; gap:6px; flex-wrap:wrap; min-height:28px; }
+.sd-chat-chip {
+  background: transparent; border: 1px solid var(--line);
+  color: var(--fg-dim); padding: 3px 10px; border-radius: 999px;
+  font-size: 12px; cursor: pointer; font-family: inherit;
+  transition: border-color 120ms, color 120ms, background 120ms;
+}
+.sd-chat-chip:hover { color: var(--fg); border-color: var(--accent); }
+.sd-chat-chip.active {
+  color: var(--accent-ink); background: var(--accent); border-color: transparent;
+}
+.sd-chat-log {
+  flex: 1; min-height: 60px; overflow-y: auto;
+  padding: 6px 0; display: flex; flex-direction: column; gap: 8px;
+  scrollbar-width: thin;
+}
+.sd-chat-welcome { font-size: 14px; color: var(--fg); }
+.sd-chat-msg { display: flex; flex-direction: column; gap: 2px; font-size: 14px; }
+.sd-chat-msg-user { align-self: flex-end; max-width: 85%; }
+.sd-chat-msg-agent { align-self: flex-start; max-width: 95%; }
+.sd-chat-who { font-size: 11px; color: var(--fg-mute); text-transform: uppercase; letter-spacing: 0.08em; }
+.sd-chat-body {
+  padding: 8px 12px; border-radius: 12px;
+  background: var(--bg-hover); color: var(--fg);
+  white-space: pre-wrap; word-break: break-word; line-height: 1.4;
+}
+.sd-chat-msg-user .sd-chat-body { background: var(--accent-soft); }
+.sd-chat-typing .sd-chat-body { opacity: 0.6; font-style: italic; }
+.sd-chat-form { display: flex; gap: 6px; align-items: center; }
+.sd-chat-input {
+  flex: 1; padding: 8px 12px; border-radius: 10px;
+  background: var(--bg-hover); border: 1px solid var(--line);
+  color: var(--fg); font-family: inherit; font-size: 14px;
+  outline: none; transition: border-color 150ms;
+}
+.sd-chat-input:focus { border-color: var(--accent); }
+.sd-chat-send {
+  background: var(--accent); color: var(--accent-ink);
+  border: none; width: 32px; height: 32px; border-radius: 50%;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+}
+.sd-chat-send:hover { filter: brightness(1.05); }
+.sd-chat-foot { font-size: 12px; }
+
+/* Todo widget */
+.sd-todo-list { list-style: none; padding: 0; margin: 0; flex: 1; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 2px; scrollbar-width: thin; }
+.sd-todo-item {
+  display: grid; grid-template-columns: 1fr auto; gap: 8px;
+  align-items: center; padding: 4px 0;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 14px;
+}
+.sd-todo-item:last-child { border-bottom: none; }
+.sd-todo-item.done .sd-todo-text { text-decoration: line-through; color: var(--fg-mute); }
+.sd-todo-check { display: flex; gap: 10px; align-items: center; cursor: pointer; min-width: 0; }
+.sd-todo-check input[type="checkbox"] {
+  accent-color: var(--accent); cursor: pointer; flex-shrink: 0;
+}
+.sd-todo-text {
+  color: var(--fg); min-width: 0; overflow-wrap: anywhere;
+}
+.sd-todo-del {
+  background: transparent; border: none; color: var(--fg-mute);
+  cursor: pointer; font-size: 16px; padding: 2px 8px; opacity: 0;
+  transition: opacity 150ms, color 150ms;
+}
+.sd-todo-item:hover .sd-todo-del { opacity: 1; }
+.sd-todo-del:hover { color: var(--danger); }
+.sd-todo-form { display: flex; gap: 6px; margin-top: 8px; }
+.sd-todo-input {
+  flex: 1; padding: 6px 10px; border-radius: 8px;
+  background: var(--bg-hover); border: 1px solid var(--line);
+  color: var(--fg); font-family: inherit; font-size: 13px; outline: none;
+  transition: border-color 150ms;
+}
+.sd-todo-input:focus { border-color: var(--accent); }
+.sd-todo-add {
+  background: var(--accent); color: var(--accent-ink); border: none;
+  width: 28px; height: 28px; border-radius: 50%; cursor: pointer;
+  font-size: 16px; line-height: 1;
+}
+.sd-todo-add:hover { filter: brightness(1.05); }
+
+/* Calendar widget */
+.sd-cal-today-num { font-size: 44px; font-weight: 600; color: var(--fg); letter-spacing: -0.02em; line-height: 1; font-variant-numeric: tabular-nums; }
+.sd-cal-today-cell {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  padding: 0 8px;
+  border-right: 1px solid var(--line-soft);
+}
+.sd-cal-today-dow {
+  font-size: 10px; color: var(--fg-mute); letter-spacing: 0.12em;
+  text-transform: uppercase; font-weight: 600; margin-bottom: 4px;
+}
+.sd-cal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.sd-cal-title { font-weight: 500; color: var(--fg); font-size: 14px; }
+.sd-cal-nav {
+  background: transparent; border: 1px solid var(--line);
+  color: var(--fg-dim); cursor: pointer;
+  width: 24px; height: 24px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px;
+}
+.sd-cal-nav:hover { border-color: var(--accent); color: var(--fg); }
+.sd-cal-dow { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; margin-bottom: 4px; }
+.sd-cal-dow-cell { text-align: center; font-size: 10px; color: var(--fg-mute); letter-spacing: 0.08em; text-transform: uppercase; font-weight: 600; }
+.sd-cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; flex: 1; min-height: 0; }
+.sd-cal-cell {
+  position: relative;
+  aspect-ratio: 1 / 1; min-height: 22px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 6px; color: var(--fg-dim); font-size: 12px;
+  text-decoration: none; cursor: pointer;
+  transition: background 120ms, color 120ms;
+  font-variant-numeric: tabular-nums;
+}
+.sd-cal-cell:hover { background: var(--bg-hover); color: var(--fg); }
+.sd-cal-cell-pad { cursor: default; opacity: 0; pointer-events: none; }
+.sd-cal-today {
+  background: var(--accent); color: var(--accent-ink) !important; font-weight: 600;
+}
+.sd-cal-today:hover { background: var(--accent); filter: brightness(1.05); }
+.sd-cal-has-event::after {
+  content: ""; position: absolute; bottom: 3px; left: 50%;
+  width: 4px; height: 4px; border-radius: 50%;
+  background: var(--accent); transform: translateX(-50%);
+}
+.sd-cal-today.sd-cal-has-event::after { background: var(--accent-ink); }
+
+/* Quick Actions widget */
+.sd-qa-grid { display: grid; gap: 8px; flex: 1; align-content: start; }
+.sd-qa-1 { grid-template-columns: 1fr; grid-template-rows: 1fr; }
+.sd-qa-4 { grid-template-columns: repeat(2, 1fr); grid-template-rows: repeat(2, 1fr); }
+.sd-qa-8 { grid-template-columns: repeat(4, 1fr); grid-template-rows: repeat(2, 1fr); }
+.sd-qa-tile {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 4px; padding: 10px 8px;
+  background: var(--bg-hover); border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  color: var(--fg); text-decoration: none;
+  font-size: 12px; font-weight: 500;
+  transition: background 150ms, border-color 150ms, transform 150ms;
+}
+.sd-qa-tile:hover { background: var(--accent-soft); border-color: var(--accent-line); transform: translateY(-1px); }
+.sd-qa-glyph { font-size: 18px; color: var(--accent); line-height: 1; }
+.sd-qa-label { color: var(--fg); }
+
 /* Now-playing widget */
 .sd-np-row { display: grid; grid-template-columns: 48px 1fr auto; gap: 12px; align-items: center; flex:1; }
 .sd-np-row-l { grid-template-columns: 96px 1fr; align-items: start; }
@@ -407,20 +694,21 @@ body.sd-quiet .sd-tile.sd-tile-system { display: none; }
   cursor: grab;
   border-style: dashed;
   border-color: var(--accent-line);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent) 20%, transparent);
 }
-.sd-grid[data-mode="edit"] .sd-tile::before {
-  content: "";
-  position: absolute; inset: 0;
-  background: var(--accent-soft);
-  pointer-events: none;
-  opacity: 0.4;
-  z-index: 0;
+/* Subtle accent tint on hover only, so content stays legible while
+   editing. The earlier 40% overlay washed out every widget's text. */
+.sd-grid[data-mode="edit"] .sd-tile:hover {
+  background: color-mix(in oklab, var(--accent) 4%, var(--bg-card));
 }
-.sd-grid[data-mode="edit"] .sd-tile > * { position: relative; z-index: 1; }
+/* NOTE: don't use `.sd-tile > * { position: relative }` here — it
+   overrides the absolute positioning on .sd-tile-tools (which has
+   lower selector specificity) and drops the tools to the bottom of
+   the tile in normal flow. Leave children untouched. */
 .sd-tile-tools {
   display: none;
   position: absolute; top: 8px; right: 8px;
-  gap: 4px; z-index: 2;
+  gap: 4px; z-index: 3;
 }
 .sd-grid[data-mode="edit"] .sd-tile-tools { display: flex; }
 .sd-tool-btn {
@@ -446,42 +734,61 @@ body.sd-quiet .sd-tile.sd-tile-system { display: none; }
 }
 .sd-empty-title { color: var(--fg); font-size: 17px; font-weight: 500; }
 
-/* ── Floating circles (bottom-right FAB stack) ──────────────────── */
-.sd-fab-stack {
-  position: fixed; bottom: 24px; right: 24px; z-index: 100;
-  display: flex; flex-direction: column; gap: 16px; align-items: flex-end;
+/* ── Customize bar (replaces floating FAB stack) ────────────────── */
+.sd-customize {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 12px; margin-bottom: 16px;
+  opacity: 0; animation: sdFadeRise 500ms ease-out 180ms forwards;
+  /* Must sit above the drawer (z-index: 90) so the Done button stays
+     clickable when the drawer is open. Previously the drawer overlapped
+     the right-aligned Done/Reset/+ Add widget pill and swallowed clicks. */
+  position: relative; z-index: 95;
 }
-.sd-fab-group { position: relative; display: flex; flex-direction: column; align-items: flex-end; }
-.sd-fab {
-  width: 44px; height: 44px; border-radius: 50%;
+.sd-customize-left, .sd-customize-right { display: flex; gap: 8px; align-items: center; }
+.sd-customize-btn, .sd-focus-chip, .sd-edit-act {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 12px; border-radius: 999px;
   background: var(--bg-elev); border: 1px solid var(--line);
   color: var(--fg-dim); cursor: pointer;
-  display: flex; align-items: center; justify-content: center;
-  box-shadow: var(--shadow-soft);
-  transition: transform 200ms ease-out, border-color 200ms, color 200ms, background 200ms;
-}
-.sd-fab:hover { transform: translateY(-1px); color: var(--fg); border-color: var(--accent); }
-.sd-fab-primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
-.sd-fab-primary:hover { color: var(--accent-ink); border-color: transparent; filter: brightness(1.05); }
-.sd-fab-group[data-open="true"] .sd-fab { border-color: var(--accent); }
-
-.sd-fab-menu {
-  position: absolute; bottom: 56px; right: 0;
-  background: var(--bg-elev); border: 1px solid var(--line);
-  border-radius: 14px; padding: 6px;
-  display: none; flex-direction: column; gap: 2px;
-  min-width: 160px; box-shadow: var(--shadow-soft);
-}
-.sd-fab-menu-wide { min-width: 200px; flex-direction: row; }
-.sd-fab-group[data-open="true"] .sd-fab-menu { display: flex; }
-.sd-fab-opt {
-  background: transparent; border: none; color: var(--fg);
-  padding: 8px 12px; border-radius: 8px; cursor: pointer;
-  text-align: left; font-size: 14px; font-family: inherit;
+  font-size: 13px; font-family: inherit; font-weight: 500;
   white-space: nowrap;
+  transition: border-color 150ms, color 150ms, background 150ms;
 }
-.sd-fab-opt:hover { background: var(--bg-hover); }
-.sd-fab-opt-done { color: var(--accent); font-weight: 500; }
+.sd-customize-btn:hover, .sd-focus-chip:hover, .sd-edit-act:hover {
+  color: var(--fg); border-color: var(--accent);
+}
+.sd-customize-btn.active { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+.sd-focus-chip[data-focus="focus"] { border-color: var(--accent-line); color: var(--fg); }
+.sd-focus-chip[data-focus="quiet"] { border-color: var(--accent-line); color: var(--fg); opacity: 0.7; }
+
+.sd-edit-pill {
+  display: flex; align-items: center; gap: 6px;
+  padding: 2px; background: var(--bg-elev); border: 1px solid var(--accent-line);
+  border-radius: 999px;
+}
+.sd-edit-pill[hidden] { display: none; }
+.sd-edit-act { border: none; background: transparent; padding: 6px 10px; }
+.sd-edit-act:hover { background: var(--bg-hover); }
+.sd-edit-act-done { color: var(--accent); font-weight: 600; }
+
+/* First-run tooltip — shown once via localStorage. */
+.sd-first-run-tip {
+  position: absolute; top: calc(100% + 8px); right: 0;
+  background: var(--bg-card); border: 1px solid var(--accent-line);
+  border-radius: 12px; padding: 10px 14px; z-index: 50;
+  font-size: 13px; color: var(--fg); max-width: 260px;
+  box-shadow: var(--shadow-soft);
+}
+.sd-first-run-tip::before {
+  content: ""; position: absolute; top: -6px; right: 24px;
+  width: 10px; height: 10px; background: var(--bg-card);
+  border-top: 1px solid var(--accent-line); border-left: 1px solid var(--accent-line);
+  transform: rotate(45deg);
+}
+.sd-first-run-tip .sd-tip-close {
+  margin-left: 8px; color: var(--fg-mute); background: transparent;
+  border: none; cursor: pointer; font-size: 14px;
+}
 
 /* ── Drawer (Add widget) ────────────────────────────────────────── */
 .sd-drawer {
@@ -495,14 +802,49 @@ body.sd-quiet .sd-tile.sd-tile-system { display: none; }
 .sd-drawer-head { display: flex; align-items: center; justify-content: space-between; padding: 20px 24px; border-bottom: 1px solid var(--line); }
 .sd-drawer-title { font-weight: 600; color: var(--fg); }
 .sd-drawer-close { background: transparent; border: none; color: var(--fg-mute); cursor: pointer; font-size: 24px; line-height: 1; }
+.sd-drawer-hint { padding: 0 24px 8px; color: var(--fg-mute); font-size: 12px; }
 .sd-drawer-body { padding: 12px; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 8px; }
-.sd-drawer-item { background: var(--bg-card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; text-align: left; cursor: pointer; color: inherit; font-family: inherit; transition: border-color 200ms, background 200ms; }
+.sd-drawer-item { background: var(--bg-card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; text-align: left; cursor: grab; color: inherit; font-family: inherit; transition: border-color 200ms, background 200ms, transform 100ms; }
 .sd-drawer-item:hover { border-color: var(--accent); background: var(--bg-hover); }
+.sd-drawer-item:active { cursor: grabbing; transform: scale(0.98); }
+.sd-drawer-item.dragging { opacity: 0.6; }
 .sd-drawer-item-title { color: var(--fg); font-weight: 500; margin-bottom: 4px; }
 .sd-drawer-item-desc { color: var(--fg-mute); font-size: 13px; line-height: 1.4; }
+
+/* Highlight the grid when a drawer item is being dragged over it. */
+.sd-grid.sd-drop-target {
+  outline: 2px dashed var(--accent); outline-offset: 4px; border-radius: 16px;
+  background: color-mix(in oklab, var(--accent) 6%, transparent);
+}
 "##;
 
 // ─── Client-side grid logic ────────────────────────────────────────────
+
+// Auth-fetch helper shared by the theme script and every widget. Runs
+// before anything else on the dashboard so `window.sdFetch` is
+// available to the full stack, not just the widget inline scripts.
+// Without this, /api/* returns 401 because no Bearer token is sent.
+const SD_FETCH_HELPER: &str = r##"
+(function() {
+  function getToken() {
+    try {
+      return sessionStorage.getItem('syntaur_token')
+        || localStorage.getItem('syntaur_token')
+        || '';
+    } catch (_e) { return ''; }
+  }
+  window.sdFetch = function(url, opts) {
+    opts = opts || {};
+    opts.credentials = opts.credentials || 'same-origin';
+    const h = new Headers(opts.headers || {});
+    const tk = getToken();
+    if (tk && !h.has('authorization')) h.set('Authorization', 'Bearer ' + tk);
+    opts.headers = h;
+    return fetch(url, opts);
+  };
+  window.sdToken = getToken;
+})();
+"##;
 
 const DASHBOARD_SCRIPT: &str = r##"
 (function() {
@@ -520,7 +862,7 @@ const DASHBOARD_SCRIPT: &str = r##"
   }
   async function fetchMe() {
     try {
-      const r = await fetch('/api/me', { credentials:'same-origin' });
+      const r = await window.sdFetch('/api/me', { credentials:'same-origin' });
       if (!r.ok) return null;
       const j = await r.json();
       return j && j.user ? j.user : null;
@@ -668,10 +1010,9 @@ const DASHBOARD_SCRIPT: &str = r##"
 
   const drawer = document.getElementById('sd-drawer');
   const drawerClose = document.getElementById('sd-drawer-close');
-  const editBtn = document.getElementById('sd-edit-btn');
-  const editGroup = document.getElementById('sd-edit-group');
-  const focusBtn = document.getElementById('sd-focus-btn');
-  const focusGroup = document.getElementById('sd-focus-group');
+  const customizeBtn = document.getElementById('sd-customize-btn');
+  const editPill = document.getElementById('sd-edit-pill');
+  const focusChip = document.getElementById('sd-focus-chip');
   const addBtn = document.getElementById('sd-add-widget');
   const resetBtn = document.getElementById('sd-reset-layout');
   const doneBtn = document.getElementById('sd-edit-done');
@@ -681,7 +1022,7 @@ const DASHBOARD_SCRIPT: &str = r##"
   let nextId = 1;
 
   function saveLayout() {
-    fetch('/api/dashboard/layout', {
+    window.sdFetch('/api/dashboard/layout', {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
@@ -691,7 +1032,7 @@ const DASHBOARD_SCRIPT: &str = r##"
 
   async function loadLayout() {
     try {
-      const r = await fetch('/api/dashboard/layout', { credentials: 'same-origin' });
+      const r = await window.sdFetch('/api/dashboard/layout', { credentials: 'same-origin' });
       if (!r.ok) { layout = defaultLayout(); return; }
       const d = await r.json();
       layout = Array.isArray(d.items) && d.items.length ? d.items : defaultLayout();
@@ -700,9 +1041,15 @@ const DASHBOARD_SCRIPT: &str = r##"
   }
 
   function defaultLayout() {
+    // First-run layout for a brand-new user. Mirrors the server-side
+    // default in dashboard_api.rs::default_layout(); keep them in sync.
     return [
-      { id: 1, kind: 'today', size: 'M' },
-      { id: 2, kind: 'now_playing', size: 'M' },
+      { id: 1, kind: 'chat',         size: 'L' },
+      { id: 2, kind: 'todo',         size: 'M' },
+      { id: 3, kind: 'calendar',     size: 'M' },
+      { id: 4, kind: 'today',        size: 'M' },
+      { id: 5, kind: 'quick_actions',size: 'M' },
+      { id: 6, kind: 'now_playing',  size: 'M' },
     ];
   }
 
@@ -712,15 +1059,21 @@ const DASHBOARD_SCRIPT: &str = r##"
       grid.innerHTML = `
         <div class="sd-empty">
           <div class="sd-empty-title">Your dashboard is empty</div>
-          <div class="sd-mute">Click the pencil in the bottom-right to add widgets.</div>
+          <div class="sd-mute">Click <b>Customize</b> above to add widgets.</div>
+          <button class="sd-customize-btn" id="sd-empty-add" style="margin-top:8px">+ Add your first widget</button>
         </div>`;
+      const emptyBtn = document.getElementById('sd-empty-add');
+      if (emptyBtn) emptyBtn.addEventListener('click', () => {
+        setMode('edit');
+        drawer.classList.add('open');
+        drawer.setAttribute('aria-hidden', 'false');
+      });
       return;
     }
     layout.forEach((item, idx) => {
       const def = window.__SYNTAUR_WIDGETS[item.kind];
       if (!def) return;
       const tile = document.createElement('div');
-      tile.className = `sd-tile size-${item.size.toLowerCase()} loading`;
       tile.style.setProperty('--sd-idx', String(idx));
       tile.dataset.id = item.id;
       tile.dataset.idx = idx;
@@ -729,6 +1082,13 @@ const DASHBOARD_SCRIPT: &str = r##"
       tile.id = `sd-tile-${item.id}`;
       const tplHtml = (def.templates[item.size] || def.templates.M || '').replace(/__SD_ID__/g, `sd-tile-${item.id}`);
       tile.innerHTML = tplHtml;
+      // Only show skeleton shimmer for widgets that actually fetch data
+      // (have at least one `data-slot` populated by their inline script).
+      // Static widgets like Quick Actions would otherwise sit with
+      // `.loading` until the 4s fallback timer, blocking clicks
+      // under the shimmer ::after pseudo-element.
+      const needsSkeleton = tile.querySelector('[data-slot]') !== null;
+      tile.className = `sd-tile size-${item.size.toLowerCase()}${needsSkeleton ? ' loading' : ''}`;
       // Error banner — hidden until a widget sets tile.classList.add('errored').
       const err = document.createElement('div');
       err.className = 'sd-error-banner';
@@ -741,7 +1101,7 @@ const DASHBOARD_SCRIPT: &str = r##"
         <button class="sd-tool-btn" data-act="remove" title="Remove">×</button>`;
       tile.appendChild(tools);
       grid.appendChild(tile);
-      wireSkeleton(tile);
+      if (needsSkeleton) wireSkeleton(tile);
       // Re-execute <script> blocks from the template (innerHTML skips them).
       tile.querySelectorAll('script').forEach(s => {
         const newScript = document.createElement('script');
@@ -821,43 +1181,117 @@ const DASHBOARD_SCRIPT: &str = r##"
   }
 
   // ─── Mode toggles ───────────────────────────────────────────────
-  function setMode(m) { mode = m; grid.dataset.mode = m; renderGrid(); }
-
-  function toggleGroup(group, other) {
-    const open = group.dataset.open !== 'true';
-    group.dataset.open = open ? 'true' : 'false';
-    if (other) other.dataset.open = 'false';
+  function setMode(m) {
+    mode = m;
+    grid.dataset.mode = m;
+    if (editPill) editPill.hidden = (m !== 'edit');
+    if (customizeBtn) customizeBtn.classList.toggle('active', m === 'edit');
+    if (customizeBtn) customizeBtn.querySelector('span').textContent = (m === 'edit') ? 'Editing' : 'Customize';
+    renderGrid();
   }
 
-  editBtn.addEventListener('click', () => {
-    toggleGroup(editGroup, focusGroup);
-    if (editGroup.dataset.open === 'true' && mode !== 'edit') setMode('edit');
-  });
-  focusBtn.addEventListener('click', () => toggleGroup(focusGroup, editGroup));
-
-  focusGroup.querySelectorAll('[data-focus]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const f = btn.dataset.focus;
-      document.body.classList.toggle('sd-focus', f === 'focus');
-      document.body.classList.toggle('sd-quiet', f === 'quiet');
-      focusGroup.dataset.open = 'false';
-    });
+  customizeBtn.addEventListener('click', () => {
+    setMode(mode === 'edit' ? 'view' : 'edit');
+    // Dismiss any first-run tip after the user clicks through once.
+    try { localStorage.setItem('syntaur:dashboard:seen-customize', '1'); } catch {}
+    const tip = document.getElementById('sd-first-run-tip');
+    if (tip) tip.remove();
   });
 
-  addBtn.addEventListener('click', () => { drawer.classList.add('open'); drawer.setAttribute('aria-hidden','false'); editGroup.dataset.open = 'false'; });
-  drawerClose.addEventListener('click', () => { drawer.classList.remove('open'); drawer.setAttribute('aria-hidden','true'); });
+  // Focus chip cycles: Normal → Focus → Quiet → Normal.
+  const FOCUS_CYCLE = ['normal', 'focus', 'quiet'];
+  const FOCUS_LABEL = { normal: 'Normal', focus: 'Focus', quiet: 'Quiet' };
+  focusChip.addEventListener('click', () => {
+    const cur = focusChip.dataset.focus || 'normal';
+    const next = FOCUS_CYCLE[(FOCUS_CYCLE.indexOf(cur) + 1) % FOCUS_CYCLE.length];
+    focusChip.dataset.focus = next;
+    const label = focusChip.querySelector('.sd-focus-chip-label');
+    if (label) label.textContent = FOCUS_LABEL[next];
+    document.body.classList.toggle('sd-focus', next === 'focus');
+    document.body.classList.toggle('sd-quiet', next === 'quiet');
+    try { localStorage.setItem('syntaur:dashboard:focus', next); } catch {}
+  });
+  // Restore focus mode from last session.
+  try {
+    const savedFocus = localStorage.getItem('syntaur:dashboard:focus');
+    if (savedFocus && FOCUS_CYCLE.indexOf(savedFocus) >= 0 && savedFocus !== 'normal') {
+      focusChip.dataset.focus = savedFocus;
+      const lbl = focusChip.querySelector('.sd-focus-chip-label');
+      if (lbl) lbl.textContent = FOCUS_LABEL[savedFocus];
+      document.body.classList.toggle('sd-focus', savedFocus === 'focus');
+      document.body.classList.toggle('sd-quiet', savedFocus === 'quiet');
+    }
+  } catch {}
+
+  addBtn.addEventListener('click', () => {
+    drawer.classList.add('open');
+    drawer.setAttribute('aria-hidden', 'false');
+  });
+  drawerClose.addEventListener('click', () => {
+    drawer.classList.remove('open');
+    drawer.setAttribute('aria-hidden', 'true');
+  });
+  // Add-widget helper — shared by click, dblclick, and drop.
+  function addWidget(kind) {
+    const def = window.__SYNTAUR_WIDGETS[kind];
+    if (!def) { console.warn('[dashboard] unknown widget kind:', kind); return; }
+    const [dw, dh] = def.defaultSize;
+    const size = Object.keys(SIZE_CELLS).find(s => SIZE_CELLS[s][0] === dw && SIZE_CELLS[s][1] === dh) || 'M';
+    layout.push({ id: nextId++, kind, size });
+    drawer.classList.remove('open');
+    drawer.setAttribute('aria-hidden', 'true');
+    renderGrid(); saveLayout();
+  }
+
+  // Debounce add-widget calls — a double-click fires BOTH `click` and
+  // `dblclick`, which otherwise added the same widget twice. 400ms is
+  // long enough to absorb a normal dblclick cadence (~200-300ms) but
+  // short enough that intentional repeated clicks still register.
+  let lastAdd = 0;
+  function addWidgetDebounced(kind) {
+    const now = Date.now();
+    if (now - lastAdd < 400) return;
+    lastAdd = now;
+    addWidget(kind);
+  }
+
   drawer.querySelectorAll('.sd-drawer-item').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const kind = btn.dataset.kind;
-      const def = window.__SYNTAUR_WIDGETS[kind];
-      if (!def) return;
-      const [dw, dh] = def.defaultSize;
-      const size = Object.keys(SIZE_CELLS).find(s => SIZE_CELLS[s][0] === dw && SIZE_CELLS[s][1] === dh) || 'M';
-      layout.push({ id: nextId++, kind, size });
-      drawer.classList.remove('open');
-      drawer.setAttribute('aria-hidden','true');
-      renderGrid(); saveLayout();
+    // Click and double-click both add — Sean tried both and either should
+    // work. Both go through the debouncer so a dblclick = 1 add, not 2.
+    btn.addEventListener('click', () => addWidgetDebounced(btn.dataset.kind));
+    btn.addEventListener('dblclick', () => addWidgetDebounced(btn.dataset.kind));
+    // Drag-from-drawer to grid (the third path). The grid itself accepts
+    // the drop via the handlers installed below; dataTransfer carries the
+    // widget kind so the grid drop handler can call addWidget without
+    // needing a closure over the source element.
+    btn.addEventListener('dragstart', ev => {
+      ev.dataTransfer.setData('application/x-syntaur-widget', btn.dataset.kind);
+      ev.dataTransfer.effectAllowed = 'copy';
+      btn.classList.add('dragging');
     });
+    btn.addEventListener('dragend', () => btn.classList.remove('dragging'));
+  });
+
+  // Grid accepts a widget drop from the drawer regardless of view/edit mode —
+  // dropping is itself an "add" action, so we auto-flip into view.
+  grid.addEventListener('dragover', ev => {
+    if (ev.dataTransfer && Array.from(ev.dataTransfer.types || []).includes('application/x-syntaur-widget')) {
+      ev.preventDefault();
+      ev.dataTransfer.dropEffect = 'copy';
+      grid.classList.add('sd-drop-target');
+    }
+  });
+  grid.addEventListener('dragleave', ev => {
+    // Only clear when leaving the grid entirely (firing dragleave between
+    // children fires this handler too; relatedTarget tells us).
+    if (!ev.relatedTarget || !grid.contains(ev.relatedTarget)) grid.classList.remove('sd-drop-target');
+  });
+  grid.addEventListener('drop', ev => {
+    const kind = ev.dataTransfer && ev.dataTransfer.getData('application/x-syntaur-widget');
+    if (!kind) return;
+    ev.preventDefault();
+    grid.classList.remove('sd-drop-target');
+    addWidget(kind);
   });
   resetBtn.addEventListener('click', () => {
     if (!confirm('Reset dashboard layout to defaults?')) return;
@@ -865,15 +1299,26 @@ const DASHBOARD_SCRIPT: &str = r##"
     nextId = layout.length + 1;
     renderGrid(); saveLayout();
   });
-  doneBtn.addEventListener('click', () => { setMode('view'); editGroup.dataset.open = 'false'; });
+  doneBtn.addEventListener('click', () => setMode('view'));
 
-  // Outside-click closes any open group.
-  document.addEventListener('click', ev => {
-    if (!ev.target.closest('#sd-fab')) {
-      editGroup.dataset.open = 'false';
-      focusGroup.dataset.open = 'false';
+  // First-run tooltip — shown once so the user knows where Customize is.
+  try {
+    if (!localStorage.getItem('syntaur:dashboard:seen-customize')) {
+      const tip = document.createElement('div');
+      tip.className = 'sd-first-run-tip';
+      tip.id = 'sd-first-run-tip';
+      tip.innerHTML = 'Click <b>Customize</b> to add or rearrange widgets. <button class="sd-tip-close" aria-label="Dismiss">×</button>';
+      const right = document.querySelector('.sd-customize-right');
+      if (right) {
+        right.style.position = 'relative';
+        right.appendChild(tip);
+        tip.querySelector('.sd-tip-close').addEventListener('click', () => {
+          tip.remove();
+          try { localStorage.setItem('syntaur:dashboard:seen-customize', '1'); } catch {}
+        });
+      }
     }
-  });
+  } catch {}
 
   // ── Bootstrapping ────────────────────────────────────────────
   initGreeting();
@@ -884,5 +1329,178 @@ const DASHBOARD_SCRIPT: &str = r##"
   setInterval(renderSun, 60 * 1000);
 
   loadLayout().then(renderGrid);
+})();
+"##;
+
+
+// ─── Ribbon backdrop (inline SVG, zero JS for the visual) ────────────
+//
+// 12 hand-authored bezier filaments, each a <g class="rb"> with three
+// stacked paths (halo wide+soft, mid, sharp bright core). Paths are
+// routed to leave the top-left reading zone clear for the greeting.
+// Strokes use currentColor so palette swaps (morning/midday/evening)
+// flow through theme.rs CSS vars without JS.
+//
+// Breathing: pure CSS opacity keyframe reading --rb-base / --rb-peak
+// (declared @property-ed in theme.rs so .ignite can interpolate them
+// smoothly). Bloom is the 18px halo stroke at 0.15 opacity — no
+// filter, no mix-blend-mode — to match the concept at
+// ~/dashboard-concept/index.html.
+//
+// Hue cycle a/b/c/d/e/a/b/d/c/e/b/a matches the concept.
+//
+// viewBox is 1600x900 with xMidYMid slice so the paths drape the full
+// viewport at any aspect ratio.
+const RIBBON_SVG: &str = r##"
+<svg class="sd-rb" aria-hidden="true" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid slice">
+  <g class="rb" style="color: var(--rib-a); --rb-dur: 13s; --rb-delay: -2s;">
+    <path class="halo" d="M -50 210 C 180 240, 400 220, 700 180 S 1180 60, 1400 300 S 1680 500, 1700 420"/>
+    <path class="mid"  d="M -50 210 C 180 240, 400 220, 700 180 S 1180 60, 1400 300 S 1680 500, 1700 420"/>
+    <path class="core" d="M -50 210 C 180 240, 400 220, 700 180 S 1180 60, 1400 300 S 1680 500, 1700 420"/>
+  </g>
+  <g class="rb" style="color: var(--rib-b); --rb-dur: 17s; --rb-delay: -5s;">
+    <path class="halo" d="M -50 250 C 280 320, 500 140, 760 260 S 1100 420, 1360 280 S 1620 180, 1700 240"/>
+    <path class="mid"  d="M -50 250 C 280 320, 500 140, 760 260 S 1100 420, 1360 280 S 1620 180, 1700 240"/>
+    <path class="core" d="M -50 250 C 280 320, 500 140, 760 260 S 1100 420, 1360 280 S 1620 180, 1700 240"/>
+  </g>
+  <g class="rb" style="color: var(--rib-c); --rb-dur: 19s; --rb-delay: -9s;">
+    <path class="halo" d="M -80 520 C 180 380, 440 620, 720 500 S 1060 340, 1320 500 S 1620 620, 1720 540"/>
+    <path class="mid"  d="M -80 520 C 180 380, 440 620, 720 500 S 1060 340, 1320 500 S 1620 620, 1720 540"/>
+    <path class="core" d="M -80 520 C 180 380, 440 620, 720 500 S 1060 340, 1320 500 S 1620 620, 1720 540"/>
+  </g>
+  <g class="rb" style="color: var(--rib-d); --rb-dur: 15s; --rb-delay: -3s;">
+    <path class="halo" d="M -60 720 C 240 820, 460 560, 760 700 S 1140 860, 1400 680 S 1680 580, 1720 640"/>
+    <path class="mid"  d="M -60 720 C 240 820, 460 560, 760 700 S 1140 860, 1400 680 S 1680 580, 1720 640"/>
+    <path class="core" d="M -60 720 C 240 820, 460 560, 760 700 S 1140 860, 1400 680 S 1680 580, 1720 640"/>
+  </g>
+  <g class="rb" style="color: var(--rib-e); --rb-dur: 21s; --rb-delay: -11s;">
+    <path class="halo" d="M -60 25 C 260 8, 520 12, 760 40 S 1140 280, 1420 160 S 1660 80, 1700 140"/>
+    <path class="mid"  d="M -60 25 C 260 8, 520 12, 760 40 S 1140 280, 1420 160 S 1660 80, 1700 140"/>
+    <path class="core" d="M -60 25 C 260 8, 520 12, 760 40 S 1140 280, 1420 160 S 1660 80, 1700 140"/>
+  </g>
+  <g class="rb" style="color: var(--rib-a); --rb-dur: 23s; --rb-delay: -14s;">
+    <path class="halo" d="M -80 640 C 200 700, 420 500, 700 620 S 1040 780, 1300 620 S 1620 520, 1720 600"/>
+    <path class="mid"  d="M -80 640 C 200 700, 420 500, 700 620 S 1040 780, 1300 620 S 1620 520, 1720 600"/>
+    <path class="core" d="M -80 640 C 200 700, 420 500, 700 620 S 1040 780, 1300 620 S 1620 520, 1720 600"/>
+  </g>
+  <g class="rb" style="color: var(--rib-b); --rb-dur: 16s; --rb-delay: -7s;">
+    <path class="halo" d="M -60 380 C 260 460, 520 260, 780 400 S 1140 540, 1420 380 S 1660 300, 1720 360"/>
+    <path class="mid"  d="M -60 380 C 260 460, 520 260, 780 400 S 1140 540, 1420 380 S 1660 300, 1720 360"/>
+    <path class="core" d="M -60 380 C 260 460, 520 260, 780 400 S 1140 540, 1420 380 S 1660 300, 1720 360"/>
+  </g>
+  <g class="rb" style="color: var(--rib-d); --rb-dur: 25s; --rb-delay: -16s;">
+    <path class="halo" d="M -80 300 C 220 200, 480 440, 740 320 S 1080 160, 1360 320 S 1620 460, 1720 400"/>
+    <path class="mid"  d="M -80 300 C 220 200, 480 440, 740 320 S 1080 160, 1360 320 S 1620 460, 1720 400"/>
+    <path class="core" d="M -80 300 C 220 200, 480 440, 740 320 S 1080 160, 1360 320 S 1620 460, 1720 400"/>
+  </g>
+  <g class="rb" style="color: var(--rib-c); --rb-dur: 14s; --rb-delay: -8s;">
+    <path class="halo" d="M -60 800 C 240 720, 460 860, 760 760 S 1140 660, 1400 800 S 1680 880, 1720 820"/>
+    <path class="mid"  d="M -60 800 C 240 720, 460 860, 760 760 S 1140 660, 1400 800 S 1680 880, 1720 820"/>
+    <path class="core" d="M -60 800 C 240 720, 460 860, 760 760 S 1140 660, 1400 800 S 1680 880, 1720 820"/>
+  </g>
+  <g class="rb" style="color: var(--rib-e); --rb-dur: 18s; --rb-delay: -4s;">
+    <path class="halo" d="M -60 8 C 280 20, 540 14, 780 28 S 1140 220, 1420 80 S 1660 40, 1700 60"/>
+    <path class="mid"  d="M -60 8 C 280 20, 540 14, 780 28 S 1140 220, 1420 80 S 1660 40, 1700 60"/>
+    <path class="core" d="M -60 8 C 280 20, 540 14, 780 28 S 1140 220, 1420 80 S 1660 40, 1700 60"/>
+  </g>
+  <g class="rb" style="color: var(--rib-b); --rb-dur: 12s; --rb-delay: -1s;">
+    <path class="halo" d="M -60 440 C 220 360, 460 580, 720 460 S 1080 280, 1360 460 S 1640 580, 1720 500"/>
+    <path class="mid"  d="M -60 440 C 220 360, 460 580, 720 460 S 1080 280, 1360 460 S 1640 580, 1720 500"/>
+    <path class="core" d="M -60 440 C 220 360, 460 580, 720 460 S 1080 280, 1360 460 S 1640 580, 1720 500"/>
+  </g>
+  <g class="rb" style="color: var(--rib-a); --rb-dur: 20s; --rb-delay: -13s;">
+    <path class="halo" d="M -80 580 C 200 520, 480 680, 740 580 S 1080 420, 1340 580 S 1640 700, 1720 640"/>
+    <path class="mid"  d="M -80 580 C 200 520, 480 680, 740 580 S 1080 420, 1340 580 S 1640 700, 1720 640"/>
+    <path class="core" d="M -80 580 C 200 520, 480 680, 740 580 S 1080 420, 1340 580 S 1640 700, 1720 640"/>
+  </g>
+</svg>
+"##;
+
+// Ribbon-backdrop JS:
+//   1. Rotate --sd-hover-hue through the ribbon palette per tile so
+//      adjacent cards glow in different colors on hover.
+//   2. Ignite: add .ignite to a few random ribbons for ~6s, drifting
+//      the breathing band higher. CSS @property on --rb-base/--rb-peak
+//      does the 3s ease (theme.rs). Fires every 20-40s on a random
+//      ribbon, and half the ribbons on each hour boundary. Exposes
+//      window.sdIgnite(n) so widgets (activity, new message) can
+//      trigger it manually.
+//   3. Pause breathing when tab hidden.
+const RIBBON_SCRIPT: &str = r##"
+(function() {
+  const HUES = ['var(--rib-a)','var(--rib-b)','var(--rib-c)','var(--rib-d)','var(--rib-e)'];
+  let idx = 0;
+  function paint(tile) {
+    if (!tile || tile.dataset.rbHued === '1') return;
+    tile.style.setProperty('--sd-hover-hue', HUES[idx % HUES.length]);
+    idx++;
+    tile.dataset.rbHued = '1';
+  }
+  document.querySelectorAll('.sd-tile').forEach(paint);
+  const grid = document.getElementById('sd-grid');
+  if (grid) {
+    new MutationObserver((muts) => {
+      for (const m of muts) for (const n of m.addedNodes) {
+        if (n.nodeType === 1 && n.classList && n.classList.contains('sd-tile')) paint(n);
+      }
+    }).observe(grid, { childList: true });
+  }
+  // On hover, advance the hue cursor so repeat hovers feel alive.
+  let hoverCursor = 0;
+  document.querySelectorAll('.sd-tile').forEach((tile) => {
+    tile.addEventListener('mouseenter', () => {
+      hoverCursor = (hoverCursor + 1) % HUES.length;
+      tile.style.setProperty('--sd-hover-hue', HUES[hoverCursor]);
+    });
+  });
+
+  // ── Ignite / surge ───────────────────────────────────────────────
+  function ribbons() { return document.querySelectorAll('.sd-rb .rb'); }
+  function ignite(count) {
+    const rbs = Array.from(ribbons());
+    if (!rbs.length) return;
+    // Fisher-Yates shuffle so consecutive fires pick different ribbons.
+    for (let i = rbs.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [rbs[i], rbs[j]] = [rbs[j], rbs[i]];
+    }
+    rbs.slice(0, Math.max(1, count | 0)).forEach((rb, i) => {
+      // Stagger multi-ribbon ignites so the surge has some rhythm.
+      setTimeout(() => {
+        rb.classList.add('ignite');
+        setTimeout(() => rb.classList.remove('ignite'), 6000);
+      }, i * 600);
+    });
+  }
+  window.sdIgnite = ignite;
+
+  // Simulated activity pulse: every 20-40s, ignite 1 ribbon. Skipped
+  // while the tab is hidden so background tabs stay idle.
+  function scheduleActivity() {
+    const next = 20000 + Math.random() * 20000;
+    setTimeout(() => {
+      if (!document.hidden) ignite(1);
+      scheduleActivity();
+    }, next);
+  }
+  scheduleActivity();
+
+  // Hour boundary: ignite half the ribbons to mark the tick-over.
+  function scheduleHour() {
+    const now = new Date();
+    const next = new Date(now);
+    next.setHours(now.getHours() + 1, 0, 1, 0);
+    setTimeout(() => {
+      const n = Math.max(2, Math.ceil(ribbons().length / 2));
+      if (!document.hidden) ignite(n);
+      scheduleHour();
+    }, next - now);
+  }
+  scheduleHour();
+
+  // Pause breathing when tab hidden — zero GPU when not looking.
+  document.addEventListener('visibilitychange', () => {
+    document.body.classList.toggle('rb-paused', document.hidden);
+  });
 })();
 "##;
