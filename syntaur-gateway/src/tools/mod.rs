@@ -901,6 +901,11 @@ impl ToolRegistry {
         for tool in self.extensions.values() {
             defs.push(tool.schema());
         }
+        if schema_compression_enabled() {
+            for d in defs.iter_mut() {
+                compress_tool_schema(d);
+            }
+        }
         defs
     }
 
@@ -913,6 +918,142 @@ impl ToolRegistry {
         // Every family migrated to built_in_tools.rs in v5 Item 1
         // (Stages 3a–3e). Schemas now live next to their trait impls.
         Vec::new()
+    }
+}
+
+// ── LLM schema compression ──────────────────────────────────────────────────
+//
+// Tool schemas in source are written for human readers — multi-line raw
+// strings, embedded examples, "Use this when X, Y, or Z" preludes, etc.
+// Sent verbatim to the LLM they easily push the prompt past the free-tier
+// TPM ceilings (Cerebras 60K/min, OpenRouter free 262K context).
+//
+// `compress_tool_schema` is a single chokepoint applied in `tool_definitions`
+// that:
+//   1. Collapses internal whitespace runs to single spaces (Rust raw strings
+//      embed lots of `\n    ` from source-formatting indentation)
+//   2. Truncates the top-level `function.description` to the first sentence
+//      or `MAX_LLM_DESC_LEN` chars at a word boundary
+//   3. Recursively does the same for any nested `description` field inside
+//      `function.parameters` (per-parameter docs are the second-largest size
+//      contributor after top-level descriptions)
+//
+// Set env `SYNTAUR_TOOL_SCHEMA_COMPRESS=0` to disable (escape hatch).
+
+const MAX_LLM_DESC_LEN: usize = 100;
+const MAX_LLM_PARAM_DESC_LEN: usize = 80;
+
+fn schema_compression_enabled() -> bool {
+    std::env::var("SYNTAUR_TOOL_SCHEMA_COMPRESS")
+        .ok()
+        .as_deref()
+        != Some("0")
+}
+
+/// Collapse runs of whitespace (incl. newlines + tabs) to single spaces, trim.
+/// Rust raw-string descriptions in the source are heavily indented for
+/// readability — every `\n    ` is wasted tokens to the LLM tokenizer.
+fn normalize_whitespace(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_space = true; // leading whitespace counts as space → trims
+    for c in s.chars() {
+        if c.is_whitespace() {
+            if !prev_space {
+                out.push(' ');
+                prev_space = true;
+            }
+        } else {
+            out.push(c);
+            prev_space = false;
+        }
+    }
+    if out.ends_with(' ') {
+        out.pop();
+    }
+    out
+}
+
+/// Compress a description string for LLM consumption.
+/// Strategy: prefer first-sentence (text up to first `. `), fall back to
+/// hard truncation at word boundary if first sentence already exceeds budget.
+pub(crate) fn compress_for_llm(desc: &str, max_len: usize) -> String {
+    let normalized = normalize_whitespace(desc);
+    if normalized.len() <= max_len {
+        return normalized;
+    }
+
+    // Prefer first sentence ("X. Y." → "X.") if it fits the budget.
+    if let Some(end) = find_sentence_end(&normalized) {
+        let first = &normalized[..end];
+        if first.len() <= max_len {
+            return first.to_string();
+        }
+    }
+
+    // Hard cap at word boundary, ellipsize.
+    let cut = max_len.min(normalized.len());
+    let truncated = &normalized[..cut];
+    let word_cut = truncated.rfind(' ').unwrap_or(truncated.len());
+    let mut out = normalized[..word_cut].trim_end().to_string();
+    out.push('…');
+    out
+}
+
+/// Find end-of-first-sentence. Returns byte offset of '.' if followed by
+/// whitespace or end-of-string. Skips abbreviations only loosely (e.g. "e.g.")
+/// by requiring whitespace after.
+fn find_sentence_end(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'.' {
+            let next = bytes.get(i + 1).copied();
+            if next.is_none() || next == Some(b' ') || next == Some(b'\n') {
+                return Some(i + 1); // include the '.'
+            }
+        }
+    }
+    None
+}
+
+/// Recursively compress every nested `"description"` string inside a parameter
+/// schema Value. Walks objects + arrays. Each `description` field is treated
+/// the same as a top-level desc but with the smaller `MAX_LLM_PARAM_DESC_LEN`
+/// budget — parameter docs should be terse.
+pub(crate) fn compress_param_descriptions(value: &mut serde_json::Value) {
+    use serde_json::Value;
+    match value {
+        Value::Object(map) => {
+            if let Some(desc) = map.get_mut("description") {
+                if let Some(s) = desc.as_str() {
+                    *desc = Value::String(compress_for_llm(s, MAX_LLM_PARAM_DESC_LEN));
+                }
+            }
+            for (_k, v) in map.iter_mut() {
+                compress_param_descriptions(v);
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr.iter_mut() {
+                compress_param_descriptions(v);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Apply LLM-targeted compression to a single OpenAI-shape tool schema.
+/// Mutates `function.description` and recurses into `function.parameters`.
+pub(crate) fn compress_tool_schema(schema: &mut serde_json::Value) {
+    use serde_json::Value;
+    if let Some(func) = schema.get_mut("function") {
+        if let Some(desc) = func.get_mut("description") {
+            if let Some(s) = desc.as_str() {
+                *desc = Value::String(compress_for_llm(s, MAX_LLM_DESC_LEN));
+            }
+        }
+        if let Some(params) = func.get_mut("parameters") {
+            compress_param_descriptions(params);
+        }
     }
 }
 
@@ -1068,5 +1209,194 @@ pub(super) async fn office_cli_exec(tool_name: &str, args: &serde_json::Value) -
         } else {
             Err(String::from_utf8_lossy(&output.stderr).to_string())
         }
+    }
+}
+
+#[cfg(test)]
+mod schema_compression_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn whitespace_runs_collapse_to_single_space() {
+        assert_eq!(normalize_whitespace("a  b\n\tc"), "a b c");
+        assert_eq!(normalize_whitespace("  leading"), "leading");
+        assert_eq!(normalize_whitespace("trailing  "), "trailing");
+        assert_eq!(normalize_whitespace(""), "");
+    }
+
+    #[test]
+    fn short_descriptions_pass_through_after_normalization() {
+        let s = "Search the\n   index.";
+        // Normalized to "Search the index." which is ≤100 chars → returns as-is.
+        assert_eq!(compress_for_llm(s, MAX_LLM_DESC_LEN), "Search the index.");
+    }
+
+    #[test]
+    fn first_sentence_used_when_full_text_exceeds_budget() {
+        let s = "Run code in a sandbox. This is paragraph two with more verbose context that pushes the total length way past the budget.";
+        let out = compress_for_llm(s, MAX_LLM_DESC_LEN);
+        assert_eq!(out, "Run code in a sandbox.");
+    }
+
+    #[test]
+    fn long_first_sentence_falls_back_to_word_boundary_truncation() {
+        // 110-char first sentence, 100 char budget. Should cut at word boundary, append ellipsis.
+        let s = "This is a really long first sentence that goes on and on without any period until past the end of the budget.";
+        let out = compress_for_llm(s, MAX_LLM_DESC_LEN);
+        assert!(out.ends_with('…'));
+        assert!(out.len() <= MAX_LLM_DESC_LEN + 3); // allow room for "…" multibyte
+        // Cut at word boundary — no partial words
+        assert!(!out.trim_end_matches('…').ends_with(|c: char| c.is_alphanumeric() == false && c != '…' && c != '.'));
+    }
+
+    #[test]
+    fn parameter_descriptions_compressed_recursively_when_over_budget() {
+        // Input descriptions deliberately well over the 80-char param budget
+        // so we can assert the compressor reaches them through nested objects.
+        let mut params = json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Free-text search query.\n   Will be tokenized internally; supports unicode but stripped to ASCII for the FTS5 index path. Use lowercase for best results across legacy entries."
+                },
+                "filters": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "description": "Filter kind to apply when narrowing results. Use 'doc' for indexed documents, 'mem' for memory entries, 'all' for both."
+                        }
+                    }
+                }
+            },
+            "required": ["query"]
+        });
+
+        compress_param_descriptions(&mut params);
+
+        // Both first-sentence-fits cases.
+        let q_desc = params["properties"]["query"]["description"].as_str().unwrap();
+        assert_eq!(q_desc, "Free-text search query.");
+
+        let nested = params["properties"]["filters"]["properties"]["kind"]["description"]
+            .as_str().unwrap();
+        assert_eq!(nested, "Filter kind to apply when narrowing results.");
+    }
+
+    #[test]
+    fn parameter_descriptions_under_budget_pass_through_unchanged() {
+        // Critical correctness case: per-parameter descriptions often carry
+        // *enum semantics* like "Use 'doc' or 'mem'" that are short enough
+        // to fit and MUST NOT be truncated to "Filter kind." (which would
+        // strip the actual usage info).
+        let mut params = json!({
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "description": "Filter kind: 'doc', 'mem', or 'all'."
+                }
+            }
+        });
+        compress_param_descriptions(&mut params);
+        // Original (under 80-char budget) preserved — only whitespace normalized.
+        assert_eq!(
+            params["properties"]["kind"]["description"].as_str().unwrap(),
+            "Filter kind: 'doc', 'mem', or 'all'."
+        );
+    }
+
+    #[test]
+    fn full_schema_compression_preserves_structure_and_required_fields() {
+        let mut schema = json!({
+            "type": "function",
+            "function": {
+                "name": "internal_search",
+                "description": "Search the local knowledge index.\n    Each agent has its own knowledge base plus access to shared documents.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Free-text search query.\n     Tokenized internally with extra prose that pushes well past the 80-char parameter budget so the first-sentence rule kicks in cleanly."
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }
+        });
+
+        compress_tool_schema(&mut schema);
+
+        // Name preserved
+        assert_eq!(schema["function"]["name"], "internal_search");
+        // Description compressed (first sentence only, whitespace normalized)
+        assert_eq!(
+            schema["function"]["description"].as_str().unwrap(),
+            "Search the local knowledge index."
+        );
+        // Parameter description: full text was over budget, first sentence fits.
+        assert_eq!(
+            schema["function"]["parameters"]["properties"]["query"]["description"].as_str().unwrap(),
+            "Free-text search query."
+        );
+        // Required array preserved as-is (compressor ignores non-description fields)
+        assert_eq!(schema["function"]["parameters"]["required"], json!(["query"]));
+        // type field preserved
+        assert_eq!(schema["function"]["parameters"]["type"], "object");
+    }
+
+    #[test]
+    fn compression_is_idempotent() {
+        // Running the compressor twice on the same schema should produce the same result.
+        let mut schema = json!({
+            "type": "function",
+            "function": {
+                "name": "x",
+                "description": "Long description that gets cut off.   Filler   filler filler.",
+                "parameters": { "type": "object", "properties": {}}
+            }
+        });
+        compress_tool_schema(&mut schema);
+        let after_first = schema.clone();
+        compress_tool_schema(&mut schema);
+        assert_eq!(after_first, schema);
+    }
+
+    #[test]
+    fn schema_without_description_does_not_panic() {
+        let mut schema = json!({
+            "type": "function",
+            "function": {
+                "name": "x",
+                "parameters": { "type": "object" }
+            }
+        });
+        compress_tool_schema(&mut schema);
+        assert_eq!(schema["function"]["name"], "x");
+    }
+
+    #[test]
+    fn empty_or_only_whitespace_description_handled() {
+        assert_eq!(compress_for_llm("", MAX_LLM_DESC_LEN), "");
+        assert_eq!(compress_for_llm("   \n\t  ", MAX_LLM_DESC_LEN), "");
+    }
+
+    #[test]
+    fn realistic_size_reduction_on_internal_search_style_input() {
+        // Approximate real internal_search description.
+        let real_desc = "Search the local knowledge index. Each agent has its own \
+            knowledge base plus access to shared documents. The main agent can \
+            search across all agents' knowledge. Returns ranked snippets with \
+            citations. Use this BEFORE asking the user about something they may \
+            have already written down.";
+        let original_len = real_desc.len();
+        let compressed = compress_for_llm(real_desc, MAX_LLM_DESC_LEN);
+        // Should be at most ~37 chars (just first sentence).
+        assert!(compressed.len() < 50, "got: {} chars: {:?}", compressed.len(), compressed);
+        // Significant reduction (>80%).
+        assert!(compressed.len() * 5 < original_len);
     }
 }

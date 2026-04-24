@@ -1995,6 +1995,14 @@ async fn handle_api_message(
     tool_registry.apply_module_filter(&state.disabled_tools);
     tool_registry.apply_agent_allowlist(agent_tool_allowlist(&agent_id));
     let tools = tool_registry.tool_definitions();
+    // One-line size telemetry per turn so the prompt-size impact of any
+    // tool-catalog change shows up in `docker logs syntaur` immediately.
+    // Cheap (one serialize) — only the byte length surfaces, no schema dump.
+    if !tools.is_empty() {
+        let n = tools.len();
+        let bytes = serde_json::to_string(&tools).map(|s| s.len()).unwrap_or(0);
+        log::info!("[tools] {}: {} tools, {} bytes serialized (~{} tokens)", agent_id, n, bytes, bytes / 4);
+    }
     // 15 rounds is enough for every realistic task and caps worst-case
     // tool-call-loop latency at ~60-90s instead of ~3-5 min. Models that
     // can't converge in 15 rounds are flailing — see round-budget warning
@@ -2528,6 +2536,11 @@ async fn handle_message_start(
         tr.apply_agent_allowlist(agent_tool_allowlist(&agent_for_task));
         let tool_registry = std::sync::Arc::new(tr);
     let tools = tool_registry.tool_definitions();
+        if !tools.is_empty() {
+            let n = tools.len();
+            let bytes = serde_json::to_string(&tools).map(|s| s.len()).unwrap_or(0);
+            log::info!("[tools] {}: {} tools, {} bytes serialized (~{} tokens)", agent_for_task, n, bytes, bytes / 4);
+        }
         // See handle_api_message for rationale — 15 rounds caps flailing turns,
         // with a Cortex-specific tighter cap to keep Nemotron from spinning
         // search_everything queries on absent-from-KB topics past the client
