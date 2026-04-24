@@ -15,6 +15,8 @@ pub async fn render() -> Html<String> {
         title: "Agents",
         authed: true,
         extra_style: Some(EXTRA_STYLE),
+        body_class: None,
+        head_boot: None,
     };
     let body = html! {
         (top_bar_standard("Agents"))

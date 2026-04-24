@@ -12,6 +12,8 @@ pub async fn render() -> Html<String> {
         title: "Music",
         authed: false,
         extra_style: Some(EXTRA_STYLE),
+        body_class: None,
+        head_boot: None,
     };
     // Bridge-live status is JS-driven; start absent. A small inline script
     // at the end of the page updates it when the local Media Bridge pings in.

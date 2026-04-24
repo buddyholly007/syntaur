@@ -10,6 +10,8 @@ pub async fn render() -> Html<String> {
         title: "Profile",
         authed: true,
         extra_style: None,
+        body_class: None,
+        head_boot: None,
     };
     let body = html! {
         (top_bar_standard("Profile"))

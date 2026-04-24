@@ -11,6 +11,8 @@ pub async fn render() -> Html<String> {
         title: "Voice Module Setup",
         authed: false,
         extra_style: None,
+        body_class: None,
+        head_boot: None,
     };
     Html(shell(page, body()).into_string())
 }

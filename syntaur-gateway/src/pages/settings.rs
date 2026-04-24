@@ -34,6 +34,8 @@ pub async fn render() -> Html<String> {
         title: "Settings",
         authed: true,
         extra_style: Some(EXTRA_STYLE),
+        body_class: None,
+        head_boot: None,
     };
     // Substitute the server-rendered palette index into the JS template.
     let resolved_js = NEW_JS.replace("%%SS_INDEX%%", &palette_index_json());

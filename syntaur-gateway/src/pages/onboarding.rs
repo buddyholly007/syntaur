@@ -10,6 +10,8 @@ pub async fn render() -> Html<String> {
         title: "Welcome to Syntaur",
         authed: true,
         extra_style: None,
+        body_class: None,
+        head_boot: None,
     };
     let body = html! {
         div class="min-h-screen flex items-center justify-center px-4 py-8" {

@@ -29,10 +29,13 @@ pub struct UserAppearance {
 
 impl Default for UserAppearance {
     fn default() -> Self {
+        // Dark is the calm-neutral default. Light mode is opt-in via
+        // Settings → Appearance; `auto` only flips to light when the
+        // user has set a latitude/longitude (see theme.rs::compute).
         Self {
             accent: "sage".into(),
-            theme_mode: "auto".into(),
-            hue_shift: 1,
+            theme_mode: "dark".into(),
+            hue_shift: 0,
             latitude: None,
             longitude: None,
             light_start_min: 420,
@@ -231,13 +234,18 @@ pub async fn handle_post_layout(
 }
 
 fn default_layout() -> Vec<DashboardLayoutItem> {
+    // First-run widgets: the handful a new user will touch within 30
+    // seconds of landing — Peter chat (Dashboard persona, hands off),
+    // todo, calendar, today's events, quick module launchers, and the
+    // now-playing strip. Keep in sync with `defaultLayout()` in
+    // pages/dashboard.rs DASHBOARD_SCRIPT.
     vec![
-        DashboardLayoutItem { id: 1, kind: "today".into(),          size: "M".into(), config: serde_json::Value::Null },
-        DashboardLayoutItem { id: 2, kind: "now_playing".into(),    size: "M".into(), config: serde_json::Value::Null },
-        DashboardLayoutItem { id: 3, kind: "approvals".into(),      size: "S".into(), config: serde_json::Value::Null },
-        DashboardLayoutItem { id: 4, kind: "system_status".into(),  size: "S".into(), config: serde_json::Value::Null },
-        DashboardLayoutItem { id: 5, kind: "latest_journal".into(), size: "M".into(), config: serde_json::Value::Null },
-        DashboardLayoutItem { id: 6, kind: "recent_research".into(),size: "M".into(), config: serde_json::Value::Null },
+        DashboardLayoutItem { id: 1, kind: "chat".into(),          size: "L".into(), config: serde_json::Value::Null },
+        DashboardLayoutItem { id: 2, kind: "todo".into(),          size: "M".into(), config: serde_json::Value::Null },
+        DashboardLayoutItem { id: 3, kind: "calendar".into(),      size: "M".into(), config: serde_json::Value::Null },
+        DashboardLayoutItem { id: 4, kind: "today".into(),         size: "M".into(), config: serde_json::Value::Null },
+        DashboardLayoutItem { id: 5, kind: "quick_actions".into(), size: "M".into(), config: serde_json::Value::Null },
+        DashboardLayoutItem { id: 6, kind: "now_playing".into(),   size: "M".into(), config: serde_json::Value::Null },
     ]
 }
 

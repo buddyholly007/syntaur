@@ -12,6 +12,8 @@ pub async fn render() -> Html<String> {
         title: "Setup",
         authed: false,
         extra_style: Some(EXTRA_STYLE),
+        body_class: None,
+        head_boot: None,
     };
     let body = html! { (PreEscaped(BODY_HTML)) };
     Html(shell(page, body).into_string())

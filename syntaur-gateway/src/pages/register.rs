@@ -10,6 +10,8 @@ pub async fn render() -> Html<String> {
         title: "Create Account",
         authed: false,
         extra_style: None,
+        body_class: None,
+        head_boot: None,
     };
     let body = html! {
         div class="min-h-screen flex items-center justify-center bg-gray-950 px-4" {

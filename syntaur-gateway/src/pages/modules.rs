@@ -11,6 +11,8 @@ pub async fn render() -> Html<String> {
         title: "Modules",
         authed: true,
         extra_style: None,
+        body_class: None,
+        head_boot: None,
     };
     let body = html! {
         (top_bar_standard("Modules"))

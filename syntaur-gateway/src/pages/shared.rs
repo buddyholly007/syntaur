@@ -17,6 +17,15 @@ pub struct Page {
     pub authed: bool,
     /// Optional page-specific `<style>` block (after the shared styles).
     pub extra_style: Option<&'static str>,
+    /// Override the default body class. Dashboard uses this to paint
+    /// `syntaur-ambient` from first paint (no dark→light flash once
+    /// theme.rs runs post-paint).
+    pub body_class: Option<&'static str>,
+    /// Extra `<script>` emitted at the top of `<head>`. Runs
+    /// synchronously before any body markup paints — ideal for
+    /// reading localStorage pref + applying `html.theme-light` so
+    /// the first paint is already in the right palette.
+    pub head_boot: Option<&'static str>,
 }
 
 /// One of four standard module-status shapes shown in the top bar right
@@ -74,8 +83,11 @@ pub fn shell(page: Page, body_content: Markup) -> Markup {
                 @if let Some(extra) = page.extra_style {
                     style { (PreEscaped(extra)) }
                 }
+                @if let Some(boot) = page.head_boot {
+                    script { (PreEscaped(boot)) }
+                }
             }
-            body class="bg-gray-950 text-gray-100 min-h-screen" {
+            body class=(page.body_class.unwrap_or("bg-gray-950 text-gray-100 min-h-screen")) {
                 (body_content)
                 @if page.authed {
                     (PreEscaped(GLOBAL_MINI_PLAYER_HTML))

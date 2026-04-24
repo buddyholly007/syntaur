@@ -57,8 +57,15 @@ pub trait DashboardWidget: Send + Sync {
 
 pub fn registry() -> Vec<Box<dyn DashboardWidget>> {
     vec![
+        // Top tier — default layout members. Order drives the "Add widget"
+        // drawer too; most-useful-first so Peter-chat sits at the top.
+        Box::new(ChatWidget),
+        Box::new(TodoWidget),
+        Box::new(CalendarWidget),
         Box::new(TodayWidget),
+        Box::new(QuickActionsWidget),
         Box::new(NowPlayingWidget),
+        // Secondary — useful additions but not in the first-run layout.
         Box::new(ApprovalsWidget),
         Box::new(LatestJournalWidget),
         Box::new(RecentResearchWidget),
@@ -100,19 +107,19 @@ impl DashboardWidget for TodayWidget {
         let body = match size {
             WidgetSize::S => html! {
                 div class="sd-s-stack" id=(format!("{id}-content")) {
-                    div class="sd-big-num" data-slot="count" { "—" }
+                    div class="sd-big-num" data-slot="count" { "0" }
                     div class="sd-mute" { "events today" }
                 }
             },
             WidgetSize::M => html! {
                 div class="sd-m-row" id=(format!("{id}-content")) {
                     div class="sd-m-left" {
-                        div class="sd-big-num" data-slot="count" { "—" }
+                        div class="sd-big-num" data-slot="count" { "0" }
                         div class="sd-mute" { "today" }
                     }
                     div class="sd-m-right" {
                         div class="sd-label" { "Next" }
-                        div class="sd-next-title" data-slot="next-title" { "—" }
+                        div class="sd-next-title" data-slot="next-title" { "Nothing scheduled" }
                         div class="sd-next-time" data-slot="next-time" { "" }
                     }
                 }
@@ -152,7 +159,7 @@ impl DashboardWidget for TodayWidget {
 (function() {{
   const root = document.getElementById('{id}');
   if (!root) return;
-  fetch('/api/scheduler/today', {{ credentials:'same-origin' }})
+  window.sdFetch('/api/scheduler/today', {{ credentials:'same-origin' }})
     .then(r => r.ok ? r.json() : null)
     .then(d => {{
       if (!d) return;
@@ -272,7 +279,7 @@ impl DashboardWidget for NowPlayingWidget {
   const root = document.getElementById('{id}');
   if (!root) return;
   function refresh() {{
-    fetch('/api/music/now_playing', {{ credentials:'same-origin' }})
+    window.sdFetch('/api/music/now_playing', {{ credentials:'same-origin' }})
       .then(r => r.ok ? r.json() : null)
       .then(d => {{
         if (!d) return;
@@ -296,10 +303,10 @@ impl DashboardWidget for NowPlayingWidget {
     ev.stopPropagation();
     const act = btn.getAttribute('data-act');
     const action = act === 'toggle' ? 'play_pause' : act;
-    fetch('/api/music/control', {{
+    window.sdFetch('/api/music/control', {{
       method:'POST', credentials:'same-origin',
       headers: {{ 'Content-Type': 'application/json' }},
-      body: JSON.stringify({{ action, token: '' }})
+      body: JSON.stringify({{ action, token: (window.sdToken && window.sdToken()) || '' }})
     }}).then(refresh).catch(() => {{}});
   }}));
   const timer = setInterval(refresh, 5000);
@@ -364,7 +371,7 @@ impl DashboardWidget for ApprovalsWidget {
   const root = document.getElementById('{id}');
   if (!root) return;
   function refresh() {{
-    fetch('/api/approvals?status=pending', {{ credentials:'same-origin' }})
+    window.sdFetch('/api/approvals?status=pending', {{ credentials:'same-origin' }})
       .then(r => r.ok ? r.json() : null)
       .then(d => {{
         if (!d) return;
@@ -439,7 +446,7 @@ impl DashboardWidget for LatestJournalWidget {
 (function() {{
   const root = document.getElementById('{id}');
   if (!root) return;
-  fetch('/api/journal/moments?limit=10', {{ credentials:'same-origin' }})
+  window.sdFetch('/api/journal/moments?limit=10', {{ credentials:'same-origin' }})
     .then(r => r.ok ? r.json() : null)
     .then(d => {{
       if (!d) return;
@@ -510,7 +517,7 @@ impl DashboardWidget for RecentResearchWidget {
 (function() {{
   const root = document.getElementById('{id}');
   if (!root) return;
-  fetch('/api/research/recent', {{ credentials:'same-origin' }})
+  window.sdFetch('/api/research/recent', {{ credentials:'same-origin' }})
     .then(r => r.ok ? r.json() : null)
     .then(d => {{
       if (!d) return;
@@ -611,7 +618,7 @@ impl DashboardWidget for SystemStatusWidget {
     return Math.floor(s/86400) + 'd';
   }}
   function refresh() {{
-    fetch('/api/dashboard/system', {{ credentials:'same-origin' }})
+    window.sdFetch('/api/dashboard/system', {{ credentials:'same-origin' }})
       .then(r => r.ok ? r.json() : null)
       .then(d => {{
         if (!d) return;
@@ -627,6 +634,470 @@ impl DashboardWidget for SystemStatusWidget {
 }})();
 "#))) }
         }
+    }
+}
+
+// ─── Chat (Peter dashboard persona + handoff) ──────────────────────────
+
+pub struct ChatWidget;
+
+impl DashboardWidget for ChatWidget {
+    fn kind(&self) -> &'static str { "chat" }
+    fn title(&self) -> &'static str { "Chat" }
+    fn description(&self) -> &'static str { "Talk to Peter on the dashboard. Switch to any other agent at any time." }
+    fn min_size(&self) -> (u8, u8) { (4, 2) }
+    fn max_size(&self) -> (u8, u8) { (8, 4) }
+    fn default_size(&self) -> (u8, u8) { (4, 4) }
+
+    fn render(&self, size: WidgetSize, ctx: &WidgetContext) -> Markup {
+        let id = &ctx.instance_id;
+        let show_chips = matches!(size, WidgetSize::L | WidgetSize::Xl);
+        let show_history = matches!(size, WidgetSize::M | WidgetSize::L | WidgetSize::Xl);
+        let body = html! {
+            div class="sd-chat" data-slot="chat-root" {
+                @if show_chips {
+                    div class="sd-chat-chips" data-slot="chips" {
+                        span class="sd-mute" { "Loading agents…" }
+                    }
+                }
+                @if show_history {
+                    div class="sd-chat-log" data-slot="log" {
+                        div class="sd-chat-welcome" {
+                            strong data-slot="agent-name" { "Peter" }
+                            span class="sd-mute" { " — hi. What's on your mind?" }
+                        }
+                    }
+                }
+                form class="sd-chat-form" data-slot="form" autocomplete="off" {
+                    input type="text" class="sd-chat-input" data-slot="input"
+                        placeholder="Ask Peter anything…" maxlength="2000" {}
+                    button type="submit" class="sd-chat-send" data-slot="send" aria-label="Send" {
+                        svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" {
+                            path d="M5 12h14" {}
+                            path d="M12 5l7 7-7 7" {}
+                        }
+                    }
+                }
+                div class="sd-chat-foot" {
+                    a href="/chat" class="sd-action" { "Open full chat →" }
+                }
+            }
+        };
+        let markup = card("Chat", body);
+        html! {
+            (markup)
+            script { (PreEscaped(&format!(r#"
+(function() {{
+  const root = document.getElementById('{id}');
+  if (!root) return;
+  const chips = root.querySelector('[data-slot=chips]');
+  const log = root.querySelector('[data-slot=log]');
+  const form = root.querySelector('[data-slot=form]');
+  const input = root.querySelector('[data-slot=input]');
+  const agentNameEl = root.querySelector('[data-slot=agent-name]');
+  // Peter is the default dashboard persona. Other main-thread agents can
+  // take over by clicking a chip; handoff is conversational (the user
+  // asks Peter to bring someone in, or flips directly).
+  let currentAgent = 'main';
+  let currentName = 'Peter';
+  function setAgent(id, name) {{
+    currentAgent = id; currentName = name;
+    if (agentNameEl) agentNameEl.textContent = name;
+    if (input) input.placeholder = `Ask ${{name}} anything…`;
+    if (chips) chips.querySelectorAll('.sd-chat-chip').forEach(c =>
+      c.classList.toggle('active', c.dataset.agent === id));
+  }}
+  function renderChips(agents) {{
+    if (!chips) return;
+    chips.innerHTML = '';
+    // Always show Peter (main) first. Then any `is_main_thread`
+    // user-agents (Felix, Crimson Lantern, Woodworks, Kyron …).
+    const dash = [{{ agent_id:'main', display_name:'Peter' }}]
+      .concat((agents || []).filter(a => a.is_main_thread && a.agent_id !== 'main'));
+    dash.forEach(a => {{
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'sd-chat-chip' + (a.agent_id === currentAgent ? ' active' : '');
+      b.dataset.agent = a.agent_id;
+      b.textContent = a.display_name || a.agent_id;
+      b.addEventListener('click', () => setAgent(a.agent_id, b.textContent));
+      chips.appendChild(b);
+    }});
+  }}
+  window.sdFetch('/api/me/agents', {{ credentials:'same-origin' }})
+    .then(r => r.ok ? r.json() : null)
+    .then(d => renderChips((d && d.agents) || []))
+    .catch(() => renderChips([]));
+  function appendMsg(kind, text) {{
+    if (!log) return;
+    const wel = log.querySelector('.sd-chat-welcome');
+    if (wel) wel.remove();
+    const row = document.createElement('div');
+    row.className = 'sd-chat-msg sd-chat-msg-' + kind;
+    row.innerHTML = `<span class="sd-chat-who">${{kind === 'user' ? 'You' : currentName}}</span>` +
+      `<span class="sd-chat-body"></span>`;
+    row.querySelector('.sd-chat-body').textContent = text;
+    log.appendChild(row);
+    log.scrollTop = log.scrollHeight;
+    return row;
+  }}
+  form.addEventListener('submit', async ev => {{
+    ev.preventDefault();
+    const text = (input.value || '').trim();
+    if (!text) return;
+    appendMsg('user', text);
+    input.value = ''; input.disabled = true;
+    const typing = appendMsg('agent', '…');
+    if (typing) typing.classList.add('sd-chat-typing');
+    try {{
+      // /api/message expects `token` in the JSON body (not just the
+       // Authorization header). sdFetch adds the header regardless;
+       // the body field is what the handler actually uses.
+      const tk = (window.sdToken && window.sdToken()) || '';
+      const r = await window.sdFetch('/api/message', {{
+        method: 'POST', credentials: 'same-origin',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ token: tk, agent: currentAgent, message: text }})
+      }});
+      const d = r.ok ? await r.json() : null;
+      // /api/message returns (response, rounds, conversation_id) on
+      // success or (error) on failure. The older handler returned
+      // (message) / (text); keep those as compat fallbacks.
+      const reply = (d && (d.response || d.message || d.text)) ||
+        (d && d.error ? `(${{d.error}})` : "(no response)");
+      if (typing) {{
+        typing.classList.remove('sd-chat-typing');
+        typing.querySelector('.sd-chat-body').textContent = reply;
+      }}
+    }} catch (e) {{
+      if (typing) typing.querySelector('.sd-chat-body').textContent = "(network error)";
+    }} finally {{
+      input.disabled = false; input.focus();
+    }}
+  }});
+}})();
+"#))) }
+        }
+    }
+}
+
+// ─── Todo (dashboard Thaddeus tasks) ───────────────────────────────────
+
+pub struct TodoWidget;
+
+impl DashboardWidget for TodoWidget {
+    fn kind(&self) -> &'static str { "todo" }
+    fn title(&self) -> &'static str { "To do" }
+    fn description(&self) -> &'static str { "Quick personal checklist. Check off, add, reorder." }
+    fn min_size(&self) -> (u8, u8) { (2, 2) }
+    fn max_size(&self) -> (u8, u8) { (4, 4) }
+    fn default_size(&self) -> (u8, u8) { (4, 2) }
+
+    fn render(&self, size: WidgetSize, ctx: &WidgetContext) -> Markup {
+        let id = &ctx.instance_id;
+        let show_list = !matches!(size, WidgetSize::S);
+        let show_input = !matches!(size, WidgetSize::S);
+        let body = html! {
+            @if let WidgetSize::S = size {
+                div class="sd-s-stack" {
+                    div class="sd-big-num" data-slot="open-count" { "—" }
+                    div class="sd-mute" { "open" }
+                }
+            }
+            @if show_list {
+                ul class="sd-todo-list" data-slot="list" {
+                    li class="sd-list-empty" data-slot="empty" { "Nothing on the list — add your first below." }
+                }
+            }
+            @if show_input {
+                form class="sd-todo-form" data-slot="form" autocomplete="off" {
+                    input type="text" class="sd-todo-input" data-slot="input"
+                        placeholder="Add a todo…" maxlength="500" {}
+                    button type="submit" class="sd-todo-add" aria-label="Add" { "+" }
+                }
+            }
+        };
+        let markup = card("To do", body);
+        html! {
+            (markup)
+            script { (PreEscaped(&format!(r#"
+(function() {{
+  const root = document.getElementById('{id}');
+  if (!root) return;
+  const listEl = root.querySelector('[data-slot=list]');
+  const formEl = root.querySelector('[data-slot=form]');
+  const inputEl = root.querySelector('[data-slot=input]');
+  const countEl = root.querySelector('[data-slot=open-count]');
+  function render(todos) {{
+    const open = todos.filter(t => !t.done);
+    if (countEl) countEl.textContent = String(open.length);
+    if (!listEl) return;
+    if (!todos.length) {{
+      listEl.innerHTML = '<li class="sd-list-empty">Nothing on the list — add your first below.</li>';
+      return;
+    }}
+    listEl.innerHTML = '';
+    todos.forEach(t => {{
+      const li = document.createElement('li');
+      li.className = 'sd-todo-item' + (t.done ? ' done' : '');
+      li.dataset.id = t.id;
+      li.innerHTML = `
+        <label class="sd-todo-check">
+          <input type="checkbox" ${{t.done ? 'checked' : ''}}>
+          <span class="sd-todo-text"></span>
+        </label>
+        <button class="sd-todo-del" aria-label="Delete" title="Delete">×</button>`;
+      li.querySelector('.sd-todo-text').textContent = t.text;
+      li.querySelector('input').addEventListener('change', ev => toggle(t.id, ev.target.checked));
+      li.querySelector('.sd-todo-del').addEventListener('click', () => remove(t.id));
+      listEl.appendChild(li);
+    }});
+  }}
+  function refresh() {{
+    window.sdFetch('/api/todos', {{ credentials:'same-origin' }})
+      .then(r => r.ok ? r.json() : null)
+      .then(d => render((d && d.todos) || []))
+      .catch(() => {{}});
+  }}
+  // /api/todos uses a body-token auth convention (TodoCreateRequest /
+   // TodoUpdateRequest / TodoDeleteRequest all expect `token` in the
+   // JSON payload). sdFetch adds the Authorization header too, but the
+   // handler reads from the body — so include both.
+  function tk() {{ return (window.sdToken && window.sdToken()) || ''; }}
+  function toggle(id, done) {{
+    window.sdFetch('/api/todos/' + id, {{
+      method:'PUT', credentials:'same-origin',
+      headers: {{ 'Content-Type':'application/json' }},
+      body: JSON.stringify({{ token: tk(), done }})
+    }}).then(refresh).catch(() => {{}});
+  }}
+  function remove(id) {{
+    window.sdFetch('/api/todos/' + id, {{
+      method:'DELETE', credentials:'same-origin',
+      headers: {{ 'Content-Type':'application/json' }},
+      body: JSON.stringify({{ token: tk() }})
+    }}).then(refresh).catch(() => {{}});
+  }}
+  if (formEl) formEl.addEventListener('submit', ev => {{
+    ev.preventDefault();
+    const text = (inputEl.value || '').trim();
+    if (!text) return;
+    inputEl.value = '';
+    window.sdFetch('/api/todos', {{
+      method:'POST', credentials:'same-origin',
+      headers: {{ 'Content-Type':'application/json' }},
+      body: JSON.stringify({{ token: tk(), text }})
+    }}).then(refresh).catch(() => {{}});
+  }});
+  refresh();
+}})();
+"#))) }
+        }
+    }
+}
+
+// ─── Calendar (mini month) ─────────────────────────────────────────────
+
+pub struct CalendarWidget;
+
+impl DashboardWidget for CalendarWidget {
+    fn kind(&self) -> &'static str { "calendar" }
+    fn title(&self) -> &'static str { "Calendar" }
+    fn description(&self) -> &'static str { "Mini month view. Click a date to open the Scheduler on that day." }
+    fn min_size(&self) -> (u8, u8) { (2, 2) }
+    fn max_size(&self) -> (u8, u8) { (4, 4) }
+    fn default_size(&self) -> (u8, u8) { (4, 2) }
+
+    fn render(&self, size: WidgetSize, ctx: &WidgetContext) -> Markup {
+        let id = &ctx.instance_id;
+        // Full month grid only fits at L (4×4 = ~320px) or XL. At M the
+        // widget is ~144px tall — a month grid + foot would overflow and
+        // the foot link rendered mid-widget (confirmed via screenshot).
+        // M now shows a compact today + next event view instead.
+        let full_grid = matches!(size, WidgetSize::L | WidgetSize::Xl);
+        let body = html! {
+            @if let WidgetSize::S = size {
+                div class="sd-s-stack" {
+                    div class="sd-cal-today-num" data-slot="today-num" { "—" }
+                    div class="sd-mute" data-slot="today-month" { "" }
+                    div class="sd-mute" data-slot="today-events" { "No events" }
+                }
+            }
+            @if let WidgetSize::M = size {
+                div class="sd-m-row" {
+                    div class="sd-cal-today-cell" {
+                        div class="sd-cal-today-dow" data-slot="today-dow" { "—" }
+                        div class="sd-cal-today-num" data-slot="today-num" { "—" }
+                        div class="sd-mute" data-slot="today-month" { "" }
+                    }
+                    div class="sd-m-right" {
+                        div class="sd-label" { "Today" }
+                        div class="sd-next-title" data-slot="today-events" { "No events" }
+                        div class="sd-label" style="margin-top:10px" { "Next" }
+                        div class="sd-next-title" data-slot="next-title" { "—" }
+                        div class="sd-next-time" data-slot="next-time" { "" }
+                    }
+                }
+                div class="sd-card-foot" {
+                    a href="/scheduler" class="sd-action" { "Open scheduler →" }
+                }
+            }
+            @if full_grid {
+                div class="sd-cal-header" {
+                    button class="sd-cal-nav" data-slot="prev" aria-label="Previous month" { "‹" }
+                    div class="sd-cal-title" data-slot="month-title" { "—" }
+                    button class="sd-cal-nav" data-slot="next" aria-label="Next month" { "›" }
+                }
+                div class="sd-cal-dow" {
+                    @for d in &["S","M","T","W","T","F","S"] {
+                        div class="sd-cal-dow-cell" { (*d) }
+                    }
+                }
+                div class="sd-cal-grid" data-slot="grid" {}
+                div class="sd-card-foot" {
+                    a href="/scheduler" class="sd-action" { "Open scheduler →" }
+                }
+            }
+        };
+        let markup = card("Calendar", body);
+        html! {
+            (markup)
+            script { (PreEscaped(&format!(r#"
+(function() {{
+  const root = document.getElementById('{id}');
+  if (!root) return;
+  let viewDate = new Date();
+  viewDate.setDate(1);
+  function fmtDate(d) {{ return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); }}
+  let events = [];
+  function firstOfMonth(d) {{ return new Date(d.getFullYear(), d.getMonth(), 1); }}
+  function lastOfMonth(d) {{ return new Date(d.getFullYear(), d.getMonth()+1, 0); }}
+  function renderSmall() {{
+    const today = new Date();
+    const tEl = root.querySelector('[data-slot=today-num]');
+    const mEl = root.querySelector('[data-slot=today-month]');
+    const eEl = root.querySelector('[data-slot=today-events]');
+    const dowEl = root.querySelector('[data-slot=today-dow]');
+    const ntEl = root.querySelector('[data-slot=next-title]');
+    const nmEl = root.querySelector('[data-slot=next-time]');
+    if (tEl) tEl.textContent = String(today.getDate());
+    if (mEl) mEl.textContent = today.toLocaleString(undefined, {{ month:'long' }});
+    if (dowEl) dowEl.textContent = today.toLocaleString(undefined, {{ weekday:'short' }}).toUpperCase();
+    const todayStr = fmtDate(today);
+    const todays = events.filter(e => (e.date || '') === todayStr);
+    if (eEl) eEl.textContent = todays.length ? `${{todays.length}} event${{todays.length===1?'':'s'}} today` : 'Nothing scheduled today';
+    // Find next upcoming event (today or later, first one by start_time).
+    const upcoming = events
+      .filter(e => (e.date || '') >= todayStr)
+      .sort((a, b) => (a.start_time || '').localeCompare(b.start_time || ''))[0];
+    if (ntEl) ntEl.textContent = upcoming ? (upcoming.title || 'Untitled') : 'Nothing coming up';
+    if (nmEl) nmEl.textContent = upcoming ? (upcoming.start_time || '').slice(0, 10) : '';
+  }}
+  function renderGrid() {{
+    const grid = root.querySelector('[data-slot=grid]');
+    const title = root.querySelector('[data-slot=month-title]');
+    if (!grid) return;  // S and M sizes: no grid — handled by renderSmall alone.
+    if (title) title.textContent = viewDate.toLocaleString(undefined, {{ month:'long', year:'numeric' }});
+    grid.innerHTML = '';
+    const first = firstOfMonth(viewDate);
+    const last = lastOfMonth(viewDate);
+    const startDow = first.getDay();
+    const daysInMonth = last.getDate();
+    const today = new Date(); today.setHours(0,0,0,0);
+    // Lead padding (previous month tail).
+    for (let i = 0; i < startDow; i++) {{
+      const cell = document.createElement('div');
+      cell.className = 'sd-cal-cell sd-cal-cell-pad';
+      grid.appendChild(cell);
+    }}
+    const eventDates = new Set(events.map(e => (e.date || '').slice(0,10)));
+    for (let day = 1; day <= daysInMonth; day++) {{
+      const d = new Date(viewDate.getFullYear(), viewDate.getMonth(), day);
+      const cell = document.createElement('a');
+      cell.href = '/scheduler?date=' + fmtDate(d);
+      cell.className = 'sd-cal-cell';
+      if (d.getTime() === today.getTime()) cell.classList.add('sd-cal-today');
+      if (eventDates.has(fmtDate(d))) cell.classList.add('sd-cal-has-event');
+      cell.innerHTML = `<span>${{day}}</span>`;
+      grid.appendChild(cell);
+    }}
+  }}
+  function loadEvents() {{
+    const start = firstOfMonth(viewDate), end = lastOfMonth(viewDate);
+    window.sdFetch(`/api/calendar?start=${{fmtDate(start)}}&end=${{fmtDate(end)}}`, {{ credentials:'same-origin' }})
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {{
+        const raw = Array.isArray(d && d.events) ? d.events : [];
+        // Normalize: /api/calendar returns ISO-ish start_time strings
+        // ("YYYY-MM-DDTHH:MM:SS"); we only need the date prefix for
+        // the grid's event-dot lookup.
+        events = raw.map(e => (Object.assign({{}}, e, {{
+          date: (e.start_time || '').slice(0, 10)
+        }})));
+        renderSmall();
+        renderGrid();
+      }})
+      .catch(() => {{ renderSmall(); renderGrid(); }});
+  }}
+  const prev = root.querySelector('[data-slot=prev]');
+  const next = root.querySelector('[data-slot=next]');
+  if (prev) prev.addEventListener('click', () => {{ viewDate = new Date(viewDate.getFullYear(), viewDate.getMonth()-1, 1); loadEvents(); }});
+  if (next) next.addEventListener('click', () => {{ viewDate = new Date(viewDate.getFullYear(), viewDate.getMonth()+1, 1); loadEvents(); }});
+  loadEvents();
+}})();
+"#))) }
+        }
+    }
+}
+
+// ─── Quick Actions (module launcher grid) ──────────────────────────────
+
+pub struct QuickActionsWidget;
+
+impl DashboardWidget for QuickActionsWidget {
+    fn kind(&self) -> &'static str { "quick_actions" }
+    fn title(&self) -> &'static str { "Quick actions" }
+    fn description(&self) -> &'static str { "Jump straight into the modules you use most." }
+    fn min_size(&self) -> (u8, u8) { (2, 2) }
+    fn max_size(&self) -> (u8, u8) { (8, 4) }
+    fn default_size(&self) -> (u8, u8) { (4, 2) }
+
+    fn render(&self, size: WidgetSize, ctx: &WidgetContext) -> Markup {
+        let _id = &ctx.instance_id;
+        // Each action: (href, label, glyph). Keep the set small + high-signal.
+        // Users can expand this via Customize → Widget config in a later pass.
+        let actions: &[(&str, &str, &str)] = &[
+            ("/scheduler",  "Scheduler",  "📅"),
+            ("/journal",    "Journal",    "✿"),
+            ("/music",      "Music",      "♫"),
+            ("/knowledge",  "Knowledge",  "❦"),
+            ("/tax",        "Tax",        "▲"),
+            ("/smart-home", "Smart home", "⌂"),
+            ("/coders",     "Coders",     "›_"),
+            ("/social",     "Social",     "◑"),
+        ];
+        let count = match size {
+            WidgetSize::S  => 1,
+            WidgetSize::M  => 4,
+            WidgetSize::L  => 8,
+            WidgetSize::Xl => 8,
+        };
+        let grid_class = match size {
+            WidgetSize::S => "sd-qa-grid sd-qa-1",
+            WidgetSize::M => "sd-qa-grid sd-qa-4",
+            WidgetSize::L | WidgetSize::Xl => "sd-qa-grid sd-qa-8",
+        };
+        let body = html! {
+            div class=(grid_class) {
+                @for (href, label, glyph) in actions.iter().take(count) {
+                    a class="sd-qa-tile" href=(*href) {
+                        span class="sd-qa-glyph" { (*glyph) }
+                        span class="sd-qa-label" { (*label) }
+                    }
+                }
+            }
+        };
+        card("Quick actions", body)
     }
 }
 
