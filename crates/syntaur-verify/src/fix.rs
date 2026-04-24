@@ -298,6 +298,9 @@ pub fn archive_accepted_fix(
         detail: trigger.detail.clone(),
         captured_at: Utc::now(),
         head_rev: head_rev.to_string(),
+        // Phase 4b — carry the persona tag forward so future cross-
+        // reference lookups can filter "fixes seen under peter only".
+        persona: trigger.persona.clone(),
     };
     corpus.archive(&before, &after, edits, meta)
 }

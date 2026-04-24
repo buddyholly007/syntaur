@@ -17,7 +17,7 @@ tokio = { workspace = true }
 serde = { workspace = true }
 serde_yaml = "0.9"
 serde_json = { workspace = true }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
@@ -45,6 +45,10 @@ syntaur-vault = { path = "../syntaur-vault" }
 # decoder/encoder + resize + grayscale — no libpng dep. Default
 # features disabled to keep the binary lean; we only need PNG.
 image = { version = "0.25", default-features = false, features = ["png"] }
+# Phase 4: `assert_url_matches` flow step. regex is already pulled in
+# transitively by reqwest + chromiumoxide; listing it directly here so
+# the flow module can use it without relying on a transitive lockfile.
+regex = "1"
 
 [dev-dependencies]
 # Phase 2b fix.rs apply/revert tests run against a throwaway

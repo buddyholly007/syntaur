@@ -1,0 +1,74 @@
+# Syntaur persona catalog — Phase 4b verify coverage.
+#
+# One entry per locked persona. `syntaur-verify --all-personas` loops
+# each one through the per-module screenshot sweep with that persona's
+# session active (so Findings tag the persona and baselines are keyed
+# `(module, persona, viewport)`).
+#
+# Session bootstrap rules:
+#   * `auth_token_env` is the only wired-up path today. Set the env
+#     var to a long-lived read-only API token issued from
+#     `/settings/api-tokens` on the PERSONA'S OWN user account, then
+#     run verify. Missing / empty env var → that persona is SKIPPED
+#     with a warn (the rest of the run continues).
+#   * `login_flow` is reserved for Phase 4c. A persona declared only
+#     with `login_flow` will be SKIPPED with a "flow-based login
+#     not yet supported" warn today.
+#   * `primer_flow` (Phase 4c) — optional pre-screenshot flow that
+#     seeds fixtures. Ignored today; safe to leave in the catalog.
+#
+# Slugs are STABLE — baselines are stored under
+# `~/.syntaur-verify/baselines/<module>/<slug>/<viewport>.png`, and
+# renaming a slug invalidates every saved baseline for that persona.
+
+- slug: peter
+  display_name: Peter
+  # Peter is Sean's cross-module main assistant; dashboard is the
+  # default view for his signed-in session.
+  default_module: dashboard
+  auth_token_env: SYNTAUR_VERIFY_PERSONA_PETER_TOKEN
+
+- slug: kyron
+  display_name: Kyron
+  # Kyron is the public-default main assistant for non-Sean installs.
+  # Same dashboard POV, different personality dials — visual
+  # differences are subtle (avatar + tone-aware copy).
+  default_module: dashboard
+  auth_token_env: SYNTAUR_VERIFY_PERSONA_KYRON_TOKEN
+
+- slug: silvr
+  display_name: Silvr
+  default_module: music
+  auth_token_env: SYNTAUR_VERIFY_PERSONA_SILVR_TOKEN
+
+- slug: thaddeus
+  display_name: Thaddeus
+  default_module: scheduler
+  auth_token_env: SYNTAUR_VERIFY_PERSONA_THADDEUS_TOKEN
+
+- slug: mushi
+  display_name: Mushi
+  default_module: journal
+  auth_token_env: SYNTAUR_VERIFY_PERSONA_MUSHI_TOKEN
+
+- slug: cortex
+  display_name: Cortex
+  # Research + knowledge-base persona.
+  default_module: research
+  auth_token_env: SYNTAUR_VERIFY_PERSONA_CORTEX_TOKEN
+
+- slug: positron
+  display_name: Positron
+  default_module: tax
+  auth_token_env: SYNTAUR_VERIFY_PERSONA_POSITRON_TOKEN
+
+- slug: maurice
+  display_name: Maurice
+  default_module: coders
+  auth_token_env: SYNTAUR_VERIFY_PERSONA_MAURICE_TOKEN
+
+- slug: nyota
+  display_name: Nyota
+  # Crimson Lantern / social persona.
+  default_module: social
+  auth_token_env: SYNTAUR_VERIFY_PERSONA_NYOTA_TOKEN

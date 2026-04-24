@@ -65,6 +65,14 @@ pub struct Finding {
     /// Empty/None for heuristic-only findings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edits: Option<Vec<FindingEdit>>,
+    /// Phase 4b — persona slug whose session was active when the
+    /// finding was captured. `None` for anonymous / default-session
+    /// runs, which is the only shape pre-Phase-4b reports had, so
+    /// `#[serde(default)]` keeps old `report.json` blobs parseable.
+    /// `skip_serializing_if = "Option::is_none"` keeps new runs that
+    /// don't use personas looking identical to old runs on disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

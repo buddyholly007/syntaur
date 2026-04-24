@@ -21,8 +21,10 @@ use syntaur_verify_core::{
     changeset::{deploy_stamp_head, resolve_against},
     corpus::Corpus,
     fix::{apply_edits, archive_accepted_fix, Budgets, FixAttempt},
+    flow::{run_flow, FlowFile},
     module_map::{Module, ModuleMap},
     opus::OpusClient,
+    persona::{AuthSource, Persona, PersonaCatalog},
     run::{Finding, FindingEdit, FindingKind, Severity, VerifyRun},
     visual_diff::diff_pngs,
 };
@@ -60,6 +62,17 @@ struct Cli {
     /// Runs directory (run artifacts + screenshots). Default: ~/.syntaur-verify/runs
     #[arg(long)]
     runs_dir: Option<PathBuf>,
+
+    /// Bearer token to inject into every verify-driven request so the
+    /// dashboard + widgets render their signed-in state (not the
+    /// anonymous 401 empty-state). Accepts either the raw value or
+    /// `env:NAME` to read from the environment.
+    ///
+    /// Setup: issue a long-lived verify-only API token via
+    /// `/settings/api-tokens` (scope: read-only, no mutation) and
+    /// export it to `SYNTAUR_VERIFY_AUTH_TOKEN` for headless runs.
+    #[arg(long, env = "SYNTAUR_VERIFY_AUTH_TOKEN")]
+    auth_token: Option<String>,
 
     /// Also run Claude Opus (via OpenRouter) over each screenshot for
     /// visual regression + UX improvement findings. Requires the
@@ -146,6 +159,53 @@ struct Cli {
     /// is getting in the way.
     #[arg(long)]
     no_diff: bool,
+
+    // ── Phase 4: user-flow YAML interpreter ────────────────────
+    /// Run a single flow YAML file. Repeatable — pass `--flow X --flow Y`
+    /// to run multiple. Flows run IN ADDITION to the per-module
+    /// screenshot sweep and are scoped to the flow's `module:` field.
+    #[arg(long = "flow", value_name = "PATH")]
+    flow: Vec<PathBuf>,
+
+    /// Directory to glob `*.yaml` flows from. Flows from `--flow` and
+    /// `--flows-dir` are both executed (de-duplicated by path). Default
+    /// is `<workspace>/crates/syntaur-verify/flows/`; pass a directory
+    /// that exists to enable auto-discovery.
+    #[arg(long)]
+    flows_dir: Option<PathBuf>,
+
+    /// Override the viewport list used for flows only. Same syntax as
+    /// `--viewports`. Default: the first viewport in `--viewports`
+    /// (typically `desktop`) — flows are interactive and rarely need
+    /// a full cross-device sweep.
+    #[arg(long)]
+    flow_viewports: Option<String>,
+
+    // ── Phase 4b: persona POV coverage ────────────────────────
+    /// Verify under a specific persona's session. Repeatable —
+    /// pass `--persona peter --persona silvr` to loop both through
+    /// the screenshot sweep. Findings tag the persona slug in
+    /// `detail` + in the new `persona` field on each Finding so the
+    /// report reads as `[dashboard · peter · tablet] Visual diff…`.
+    ///
+    /// Session bootstrap is per `personas.yaml` — today only the
+    /// `auth_token_env` form is wired up. Missing env vars →
+    /// persona SKIPPED with a warn; the run continues with the rest.
+    #[arg(long = "persona", value_name = "SLUG")]
+    persona: Vec<String>,
+
+    /// Override the persona catalog path. Default:
+    /// `<workspace>/crates/syntaur-verify/personas.yaml`.
+    #[arg(long)]
+    personas_file: Option<PathBuf>,
+
+    /// Sweep every persona declared in the catalog. Mutually inclusive
+    /// with `--persona X` (union). Personas whose bootstrap can't be
+    /// resolved (missing env var, flow-only path) are SKIPPED with a
+    /// warn — this is the ops-friendly default so "only have one
+    /// token handy" runs still work end-to-end.
+    #[arg(long)]
+    all_personas: bool,
 }
 
 fn main() -> ExitCode {
@@ -208,6 +268,15 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
         phash_threshold,
         update_baselines,
         no_diff,
+        auth_token,
+        // Phase 4 flow runner fields.
+        flow: flow_arg,
+        flows_dir: flows_dir_arg,
+        flow_viewports: flow_viewports_arg,
+        // Phase 4b persona fields.
+        persona: persona_slugs,
+        personas_file: personas_file_arg,
+        all_personas,
     } = cli;
     // Auto-fix implies Opus vision (can't fix without findings).
     let with_opus = with_opus_flag || auto_fix;
@@ -346,39 +415,128 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
 
     let mut covered: Vec<String> = Vec::new();
 
-    // Phase 3: outer loop is viewport. One browser per viewport —
-    // chromiumoxide sets device metrics at launch, so switching
-    // viewports mid-run would require tearing down + relaunching
-    // anyway. Opus + auto-fix only run on the PRIMARY viewport (the
-    // first in the list, conventionally desktop) to keep costs
-    // bounded; tablet + mobile are visual-diff-only.
+    // ── Phase 4b: build the list of POVs to sweep ───────────────
+    // Each POV is one (optional persona, auth token) pair. The
+    // "anonymous" POV (persona = None, token from `--auth-token` /
+    // SYNTAUR_VERIFY_AUTH_TOKEN) is what runs when neither
+    // `--persona` nor `--all-personas` is passed — i.e. unchanged
+    // pre-4b behaviour. When persona flags are set, EACH resolved
+    // persona adds one more POV and the anonymous one is dropped
+    // (the caller has chosen to verify under specific identities).
     //
-    // If the user passes `--viewports mobile`, `mobile` becomes the
-    // primary and Opus runs against the mobile shot. That's a
-    // conscious choice — a dedicated mobile-only verify pass is
-    // exactly what you'd want when debugging a mobile-only
-    // regression.
+    // Personas whose bootstrap can't be resolved (env var missing,
+    // flow-based login punted) become warn + SKIP, not hard errors.
+    // The run continues with whatever did resolve — matches the
+    // ops-friendly "only have one token handy" posture.
+    let povs = resolve_povs(
+        &workspace,
+        personas_file_arg.as_deref(),
+        &persona_slugs,
+        all_personas,
+        auth_token.clone(),
+    )?;
+    if povs.is_empty() {
+        findings.push(Finding {
+            module_slug: "(run)".to_string(),
+            kind: FindingKind::Other,
+            severity: Severity::Suggestion,
+            title: "No persona POVs usable — run skipped".into(),
+            detail: "All requested personas lacked a resolvable session \
+                (auth_token_env unset/empty or only login_flow set, which is \
+                deferred to Phase 4c). Set the relevant SYNTAUR_VERIFY_PERSONA_* \
+                env vars and rerun."
+                .into(),
+            artifact: None,
+            captured_at: Utc::now(),
+            edits: None,
+            persona: None,
+        });
+        let run = VerifyRun {
+            run_id: run_id.clone(),
+            started_at: parse_run_id_ts(&run_id),
+            finished_at: Some(Utc::now()),
+            against_rev: against_rev_s,
+            head_rev,
+            changed_paths: Vec::new(),
+            modules_covered: Vec::new(),
+            findings,
+            run_dir: run_dir.clone(),
+        };
+        let report_path = run_dir.join("report.json");
+        std::fs::write(&report_path, serde_json::to_vec_pretty(&run)?)
+            .with_context(|| format!("writing {}", report_path.display()))?;
+        return Ok(run);
+    }
+    let multi_pov = povs.len() > 1;
+    log::info!(
+        "[verify] sweeping {} POV(s): {}",
+        povs.len(),
+        povs.iter()
+            .map(|p| p.slug.as_deref().unwrap_or("anonymous"))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+
+    // Phase 3: inner loop is viewport. One browser per (POV,
+    // viewport) — chromiumoxide sets device metrics at launch AND
+    // auth is injected at launch via `with_auth_token`, so switching
+    // either dimension mid-run would require a relaunch regardless.
+    //
+    // Opus + auto-fix run on the PRIMARY viewport only (first in the
+    // list, conventionally desktop) to keep costs bounded; tablet +
+    // mobile are visual-diff-only. Auto-fix is additionally disabled
+    // whenever we're running multi-POV — rewriting source from a
+    // per-persona regression risks tuning the code to one identity
+    // at the expense of the others. When exactly one POV runs
+    // (anonymous OR a single `--persona`), auto-fix keeps its
+    // Phase 2b behaviour untouched.
     let primary_viewport = *viewports.first().expect("parse_viewports rejects empty lists");
+
+    for pov in &povs {
+        let pov_label = pov.slug.as_deref().unwrap_or("anonymous");
+        let pov_token = pov.token.clone();
+        let auto_fix_for_pov = auto_fix && !multi_pov;
+        log::info!("[verify] ── POV: {} ──", pov_label);
 
     for (vp_idx, viewport) in viewports.iter().copied().enumerate() {
         let is_primary = vp_idx == 0;
         log::info!(
-            "[verify] launching headless Chromium ({})",
-            viewport.slug()
+            "[verify] launching headless Chromium ({}) for POV {}",
+            viewport.slug(),
+            pov_label
         );
-        let browser = Browser::launch_with_viewport(viewport).await?;
+        let browser = Browser::launch_with_viewport(viewport)
+            .await?
+            .with_auth_token(pov_token.clone());
         log::info!(
-            "[verify] Chromium up; target_url={} viewport={}",
+            "[verify] Chromium up; target_url={} viewport={} pov={}",
             target_url,
-            viewport.slug()
+            viewport.slug(),
+            pov_label
         );
+
+        // Screenshot filename stem — includes the POV so a
+        // multi-POV run doesn't clobber sibling shots in the same
+        // run dir. `anonymous` stays plain (no suffix) to keep
+        // single-POV runs byte-compatible with pre-4b artifact paths.
+        let pov_suffix: String = match &pov.slug {
+            Some(s) => format!("_{}", s),
+            None => String::new(),
+        };
 
         for module in &modules {
             let url = format!("{}{}", target_url.trim_end_matches('/'), module.url);
-            log::info!("[verify] {} [{}] → {}", module.slug, viewport.slug(), url);
+            log::info!(
+                "[verify] {} [{} · {}] → {}",
+                module.slug,
+                pov_label,
+                viewport.slug(),
+                url
+            );
 
+            let capture_slug = format!("{}{}", module.slug, pov_suffix);
             let cap = match browser
-                .capture_with_viewport(&url, &module.slug, &run_dir)
+                .capture_with_viewport(&url, &capture_slug, &run_dir)
                 .await
             {
                 Ok(c) => c,
@@ -387,17 +545,29 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
                         module_slug: module.slug.clone(),
                         kind: FindingKind::BootFailure,
                         severity: Severity::Regression,
-                        title: format!("Failed to render {} [{}]", module.slug, viewport.slug()),
+                        title: format!(
+                            "Failed to render {} [{} · {}]",
+                            module.slug,
+                            pov_label,
+                            viewport.slug()
+                        ),
                         detail: format!("{e:#}"),
                         artifact: None,
                         captured_at: Utc::now(),
                         edits: None,
+                        persona: pov.slug.clone(),
                     });
                     continue;
                 }
             };
 
-            if is_primary {
+            // Only count coverage once per module, not once per
+            // (POV × viewport × module). Anchor it to the first POV
+            // + primary viewport so the number lines up with
+            // single-POV runs.
+            let is_first_pov =
+                std::ptr::eq(pov as *const _, &povs[0] as *const _);
+            if is_primary && is_first_pov {
                 covered.push(module.slug.clone());
             }
             log::info!(
@@ -419,42 +589,81 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
                             module_slug: module.slug.clone(),
                             kind: FindingKind::BootFailure,
                             severity: Severity::Regression,
-                            title: format!("HTTP {} on {}", status, url),
+                            title: format!(
+                                "HTTP {} on {} [{}]",
+                                status, url, pov_label
+                            ),
                             detail: format!("expected 2xx, got {}", status),
                             artifact: Some(cap.screenshot_path.clone()),
                             captured_at: Utc::now(),
                             edits: None,
+                            persona: pov.slug.clone(),
                         });
                     }
                 }
+                // Console-error heuristic. Two nuances:
+                //   1) 401 "Failed to load resource" lines are 99% the
+                //      widget-fetch-without-auth noise syntaur-ship
+                //      hits (ship has no --auth-token by default). We
+                //      demote to Suggestion when the operator hasn't
+                //      passed an auth token — they're not actionable
+                //      without auth infrastructure. With an auth token,
+                //      same line IS a regression (widget broke).
+                //   2) Generic lower-case contains("error") is noisy —
+                //      anything with the word "error" in a normal log
+                //      line (e.g. "errorsCount: 0") would flip this. We
+                //      require a standalone ": Error" / "Uncaught" /
+                //      "SEVERE" token to be more surgical.
+                // Auth-present check now uses the POV's token, so
+                // anonymous POVs still get the 401-demotion behaviour
+                // while persona POVs (which always carry a token) do
+                // NOT — a 401 under an authenticated persona IS a
+                // regression.
+                let unauth = pov_token.is_none();
                 for msg in &cap.console_messages {
-                    let lower = msg.to_lowercase();
-                    if lower.contains("error")
-                        || lower.contains("uncaught")
-                        || lower.starts_with("severe")
-                    {
-                        findings.push(Finding {
-                            module_slug: module.slug.clone(),
-                            kind: FindingKind::ConsoleError,
-                            severity: Severity::Regression,
-                            title: "Console error during page load".into(),
-                            detail: msg.clone(),
-                            artifact: Some(cap.screenshot_path.clone()),
-                            captured_at: Utc::now(),
-                            edits: None,
-                        });
+                    let is_error = msg.contains(": Error")
+                        || msg.contains("Uncaught")
+                        || msg.starts_with("SEVERE")
+                        || msg.to_lowercase().contains("syntaxerror")
+                        || msg.to_lowercase().contains("referenceerror");
+                    if !is_error {
+                        continue;
                     }
+                    let is_unauth_401 = unauth
+                        && msg.contains("status of 401")
+                        && msg.contains("Failed to load resource");
+                    let severity = if is_unauth_401 {
+                        Severity::Suggestion
+                    } else {
+                        Severity::Regression
+                    };
+                    findings.push(Finding {
+                        module_slug: module.slug.clone(),
+                        kind: FindingKind::ConsoleError,
+                        severity,
+                        title: if is_unauth_401 {
+                            "Console 401 during unauth render (expected; pass --auth-token to audit signed-in state)".into()
+                        } else {
+                            format!("Console error during page load [{}]", pov_label)
+                        },
+                        detail: msg.clone(),
+                        artifact: Some(cap.screenshot_path.clone()),
+                        captured_at: Utc::now(),
+                        edits: None,
+                        persona: pov.slug.clone(),
+                    });
                 }
                 if cap.elapsed_ms > 5000 {
                     findings.push(Finding {
                         module_slug: module.slug.clone(),
                         kind: FindingKind::Improvement,
                         severity: Severity::Suggestion,
-                        title: "Slow page render".into(),
+                        title: format!("Slow page render [{}]", pov_label),
                         detail: format!("{}ms to render (target <5s)", cap.elapsed_ms),
                         artifact: Some(cap.screenshot_path.clone()),
                         captured_at: Utc::now(),
                         edits: None,
+                        persona: pov.slug.clone(),
                     });
                 }
             }
@@ -463,10 +672,15 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
             // Skipped when `--no-diff`. First run of a module/viewport
             // with no existing baseline: save current as baseline,
             // emit an Other/Suggestion "baseline captured" finding.
+            // Phase 4b: baseline path is now keyed on the POV too —
+            // the store call takes `pov.slug.as_deref()` so each
+            // persona gets its own reference image.
             if !no_diff {
                 handle_baseline(
                     &baseline_store,
                     &module.slug,
+                    pov.slug.as_deref(),
+                    pov_label,
                     viewport,
                     &cap.screenshot_path,
                     &run_dir,
@@ -481,7 +695,7 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
             if is_primary {
                 if let Some(client) = &opus {
                     let changed = current_changeset.as_deref().unwrap_or(&[]);
-                    let sources = if auto_fix {
+                    let sources = if auto_fix_for_pov {
                         collect_source_context(&workspace, &map, &module.slug, max_source_bytes)
                     } else {
                         Vec::new()
@@ -494,18 +708,27 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
                             &cap.screenshot_path,
                             changed,
                             &sources,
-                            /* request_edits = */ auto_fix,
+                            /* request_edits = */ auto_fix_for_pov,
                         )
                         .await;
 
                     match opus_result {
                         Ok(mut opus_findings) => {
                             log::info!(
-                                "  ↳ Opus returned {} finding(s) for {}",
+                                "  ↳ Opus returned {} finding(s) for {} [{}]",
                                 opus_findings.len(),
-                                module.slug
+                                module.slug,
+                                pov_label
                             );
-                            if auto_fix
+                            // Phase 4b — stamp the persona on every
+                            // finding Opus returns so the report lines
+                            // read `[module · persona · viewport]`.
+                            for f in opus_findings.iter_mut() {
+                                if f.persona.is_none() {
+                                    f.persona = pov.slug.clone();
+                                }
+                            }
+                            if auto_fix_for_pov
                                 && opus_findings
                                     .iter()
                                     .any(|f| f.severity == Severity::Regression)
@@ -557,6 +780,13 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
                                             );
                                         }
                                         opus_findings = final_findings;
+                                        // Post-fix findings come back
+                                        // untagged; re-stamp persona.
+                                        for f in opus_findings.iter_mut() {
+                                            if f.persona.is_none() {
+                                                f.persona = pov.slug.clone();
+                                            }
+                                        }
                                         opus_findings.push(Finding {
                                             module_slug: module.slug.clone(),
                                             kind: FindingKind::Other,
@@ -570,6 +800,7 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
                                             artifact: None,
                                             captured_at: Utc::now(),
                                             edits: None,
+                                            persona: pov.slug.clone(),
                                         });
                                     }
                                     Ok(AutoFixOutcome::Reverted { iterations, reason }) => {
@@ -589,6 +820,7 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
                                             artifact: None,
                                             captured_at: Utc::now(),
                                             edits: None,
+                                            persona: pov.slug.clone(),
                                         });
                                     }
                                     Err(e) => {
@@ -611,8 +843,71 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
         // browser = ...` above goes out of scope here.
         drop(browser);
     }
+    } // end for pov in &povs
 
     let _ = primary_viewport; // reserved for future primary-specific reporting
+
+    // ── Phase 4: user-flow interpreter ──────────────────────────
+    // Flows run AFTER the per-module screenshot sweep so their
+    // findings slot into the same report.json. Viewport selection is
+    // independent of the module viewports list (see --flow-viewports).
+    let flow_files = discover_flows(&workspace, &flow_arg, flows_dir_arg.as_deref())?;
+    if !flow_files.is_empty() {
+        let flow_viewports = match &flow_viewports_arg {
+            Some(s) => parse_viewports(s)?,
+            None => vec![*viewports.first().expect("viewports non-empty")],
+        };
+        log::info!(
+            "[verify] running {} flow(s) across viewports: {}",
+            flow_files.len(),
+            flow_viewports
+                .iter()
+                .map(|v| v.slug())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        for flow_viewport in flow_viewports {
+            let fbrowser = Browser::launch_with_viewport(flow_viewport)
+                .await?
+                .with_auth_token(auth_token.clone());
+            for ff in &flow_files {
+                match run_flow(&fbrowser, ff, &target_url, &run_dir).await {
+                    Ok(outcome) => {
+                        log::info!(
+                            "[verify] flow {} on {} produced {} finding(s)",
+                            ff.name,
+                            flow_viewport.slug(),
+                            outcome.findings.len()
+                        );
+                        findings.extend(outcome.findings);
+                    }
+                    Err(e) => {
+                        // Fatal flow-level error — couldn't even open
+                        // the page. Emit one regression so the run
+                        // isn't silently clean.
+                        log::warn!("[verify] flow {} crashed: {e:#}", ff.name);
+                        findings.push(Finding {
+                            module_slug: ff.module.clone(),
+                            kind: FindingKind::BootFailure,
+                            severity: Severity::Regression,
+                            title: format!("Flow `{}` failed to start", ff.name),
+                            detail: format!("{e:#}"),
+                            artifact: None,
+                            captured_at: Utc::now(),
+                            edits: None,
+                            // Flows are persona-agnostic today
+                            // (Phase 4b): they use the CLI's
+                            // `--auth-token`, not a persona's. Leave
+                            // untagged so the report groups them
+                            // separately from persona findings.
+                            persona: None,
+                        });
+                    }
+                }
+            }
+            drop(fbrowser);
+        }
+    }
 
     let run = VerifyRun {
         run_id: run_id.clone(),
@@ -802,6 +1097,7 @@ async fn try_autofix(
             artifact: None,
             captured_at: Utc::now(),
             edits: None,
+            persona: None,
         });
 
     // Collect edits from the initial pass. If none, nothing to do.
@@ -1019,14 +1315,22 @@ fn parse_viewports(s: &str) -> Result<Vec<Viewport>> {
     Ok(out)
 }
 
-/// Baseline save-or-diff step for one (module, viewport) capture.
+/// Baseline save-or-diff step for one (module, persona?, viewport) capture.
 /// Pushes Findings into the run accumulator. Errors are logged but
 /// never propagated — a corrupt baseline shouldn't take down the run,
 /// it should just surface as a regression / warning.
+///
+/// Phase 4b adds the `persona` + `pov_label` args:
+///   * `persona` is the baseline-path segment (`None` == anonymous).
+///   * `pov_label` is the human-readable tag for log + Finding text
+///     (`"anonymous"` / `"peter"` / …) so a regression reads as
+///     `[module · persona · viewport]`.
 #[allow(clippy::too_many_arguments)]
 fn handle_baseline(
     store: &BaselineStore,
     module_slug: &str,
+    persona: Option<&str>,
+    pov_label: &str,
     viewport: Viewport,
     current_path: &std::path::Path,
     run_dir: &std::path::Path,
@@ -1050,31 +1354,38 @@ fn handle_baseline(
     // current shot and emit a suggestion so the run report makes the
     // action visible.
     if update_baselines {
-        match store.save(module_slug, viewport, &current) {
+        match store.save_for(module_slug, persona, viewport, &current) {
             Ok(()) => {
                 log::info!(
-                    "[verify] baseline updated for {} [{}]",
+                    "[verify] baseline updated for {} [{} · {}]",
                     module_slug,
+                    pov_label,
                     viewport.slug()
                 );
                 findings.push(Finding {
                     module_slug: module_slug.to_string(),
                     kind: FindingKind::Other,
                     severity: Severity::Suggestion,
-                    title: format!("Baseline updated ({})", viewport.slug()),
+                    title: format!(
+                        "Baseline updated ({} · {})",
+                        pov_label,
+                        viewport.slug()
+                    ),
                     detail: format!(
                         "overwrote {} with current capture",
-                        store.path(module_slug, viewport).display()
+                        store.path_for(module_slug, persona, viewport).display()
                     ),
                     artifact: Some(current_path.to_path_buf()),
                     captured_at: Utc::now(),
                     edits: None,
+                    persona: persona.map(|s| s.to_string()),
                 });
             }
             Err(e) => {
                 log::warn!(
-                    "[verify] baseline save failed for {} [{}]: {e:#}",
+                    "[verify] baseline save failed for {} [{} · {}]: {e:#}",
                     module_slug,
+                    pov_label,
                     viewport.slug()
                 );
             }
@@ -1082,35 +1393,42 @@ fn handle_baseline(
         return;
     }
 
-    // First run of this (module, viewport): save as baseline + emit
-    // an advisory. NOT a regression — nothing's wrong, we just didn't
-    // have a reference to compare to.
-    if !store.exists(module_slug, viewport) {
-        match store.save(module_slug, viewport, &current) {
+    // First run of this (module, persona, viewport): save as baseline +
+    // emit an advisory. NOT a regression — nothing's wrong, we just
+    // didn't have a reference to compare to.
+    if !store.exists_for(module_slug, persona, viewport) {
+        match store.save_for(module_slug, persona, viewport, &current) {
             Ok(()) => {
                 log::info!(
-                    "[verify] baseline captured for {} [{}]",
+                    "[verify] baseline captured for {} [{} · {}]",
                     module_slug,
+                    pov_label,
                     viewport.slug()
                 );
                 findings.push(Finding {
                     module_slug: module_slug.to_string(),
                     kind: FindingKind::Other,
                     severity: Severity::Suggestion,
-                    title: format!("Baseline captured ({})", viewport.slug()),
+                    title: format!(
+                        "Baseline captured ({} · {})",
+                        pov_label,
+                        viewport.slug()
+                    ),
                     detail: format!(
                         "no prior baseline; saved current capture to {}",
-                        store.path(module_slug, viewport).display()
+                        store.path_for(module_slug, persona, viewport).display()
                     ),
                     artifact: Some(current_path.to_path_buf()),
                     captured_at: Utc::now(),
                     edits: None,
+                    persona: persona.map(|s| s.to_string()),
                 });
             }
             Err(e) => {
                 log::warn!(
-                    "[verify] baseline save failed for {} [{}]: {e:#}",
+                    "[verify] baseline save failed for {} [{} · {}]: {e:#}",
                     module_slug,
+                    pov_label,
                     viewport.slug()
                 );
             }
@@ -1119,7 +1437,7 @@ fn handle_baseline(
     }
 
     // Baseline exists — run the diff.
-    let baseline = match store.load(module_slug, viewport) {
+    let baseline = match store.load_for(module_slug, persona, viewport) {
         Ok(b) => b,
         Err(e) => {
             log::warn!("[verify] {e:#}");
@@ -1130,8 +1448,9 @@ fn handle_baseline(
         Ok(d) => d,
         Err(e) => {
             log::warn!(
-                "[verify] visual diff failed for {} [{}]: {e:#}",
+                "[verify] visual diff failed for {} [{} · {}]: {e:#}",
                 module_slug,
+                pov_label,
                 viewport.slug()
             );
             return;
@@ -1141,7 +1460,10 @@ fn handle_baseline(
     // Persist the diff overlay PNG alongside the current shot so the
     // run report links the user straight to the visual.
     let diff_path = if diff.diff_image.is_some() {
-        let name = format!("{}_{}_diff.png", module_slug, viewport.slug());
+        // Include persona in the filename so multi-POV runs don't
+        // stomp each other's diff overlays in the same run dir.
+        let pov_in_name = persona.map(|s| format!("_{}", s)).unwrap_or_default();
+        let name = format!("{}{}_{}_diff.png", module_slug, pov_in_name, viewport.slug());
         let p = run_dir.join(&name);
         if let Some(bytes) = &diff.diff_image {
             if let Err(e) = std::fs::write(&p, bytes) {
@@ -1162,7 +1484,8 @@ fn handle_baseline(
             kind: FindingKind::VisualDiff,
             severity: Severity::Regression,
             title: format!(
-                "Visual diff vs baseline ({}): {:.2}% pixels, phash {}",
+                "Visual diff vs baseline ({} · {}): {:.2}% pixels, phash {}",
+                pov_label,
                 viewport.slug(),
                 diff.pixel_delta_pct,
                 diff.phash_distance
@@ -1189,16 +1512,198 @@ fn handle_baseline(
             artifact: diff_path.clone().or_else(|| Some(current_path.to_path_buf())),
             captured_at: Utc::now(),
             edits: None,
+            persona: persona.map(|s| s.to_string()),
         });
     } else {
         log::info!(
-            "[verify] {} [{}] baseline clean ({:.2}% pixels, phash {})",
+            "[verify] {} [{} · {}] baseline clean ({:.2}% pixels, phash {})",
             module_slug,
+            pov_label,
             viewport.slug(),
             diff.pixel_delta_pct,
             diff.phash_distance
         );
     }
+}
+
+/// Collect flow files from explicit `--flow` paths plus `--flows-dir`
+/// glob. De-duplicates by canonical path so `--flow a.yaml --flows-dir .`
+/// doesn't run the same flow twice. Unreadable files surface as an
+/// error — better than silently skipping them, because flows are
+/// load-bearing regression coverage.
+fn discover_flows(
+    workspace: &std::path::Path,
+    explicit: &[PathBuf],
+    flows_dir_override: Option<&std::path::Path>,
+) -> Result<Vec<FlowFile>> {
+    use std::collections::BTreeSet;
+    let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut flows: Vec<FlowFile> = Vec::new();
+
+    for p in explicit {
+        let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+        if seen.insert(canon.clone()) {
+            let ff = FlowFile::load(&canon)
+                .with_context(|| format!("loading --flow {}", p.display()))?;
+            flows.push(ff);
+        }
+    }
+
+    // Flow auto-discovery is STRICTLY OPT-IN via --flows-dir. The prior
+    // "auto-sweep <workspace>/crates/syntaur-verify/flows/" default bit
+    // us on the first ship-time run: the auto-discovered flow required
+    // an authenticated session to hit the todo endpoint, and
+    // syntaur-ship runs verify without --auth-token, so the flow
+    // always failed and blocked every deploy. Callers that want flows
+    // now have to opt in explicitly (either --flow PATH or
+    // --flows-dir DIR).
+    let _ = workspace; // silence unused arg (kept in signature for future opt-in default)
+    let dir = flows_dir_override.map(PathBuf::from);
+    if let Some(dir) = dir {
+        if !dir.is_dir() {
+            anyhow::bail!(
+                "--flows-dir {} doesn't exist or isn't a directory",
+                dir.display()
+            );
+        }
+        // Non-recursive scan is fine for v1 — callers who want
+        // nested organisation can pass multiple --flow paths.
+        // TODO(phase-5): recursive glob if Sean ends up with enough
+        // flows to want subfolders.
+        for entry in std::fs::read_dir(&dir)
+            .with_context(|| format!("reading --flows-dir {}", dir.display()))?
+        {
+            let entry = entry.ok();
+            let Some(entry) = entry else { continue };
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("yaml") {
+                continue;
+            }
+            let canon = std::fs::canonicalize(&path).unwrap_or(path.clone());
+            if seen.insert(canon.clone()) {
+                match FlowFile::load(&canon) {
+                    Ok(ff) => flows.push(ff),
+                    Err(e) => {
+                        log::warn!("[verify] skipping flow {}: {e:#}", path.display());
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(flows)
+}
+
+/// One point-of-view for the run: an optional persona slug plus the
+/// bearer token that should be injected into its browser sessions.
+///
+/// `slug == None` marks the anonymous POV — the default when no
+/// `--persona` / `--all-personas` flag is passed. Its token comes
+/// from the CLI's top-level `--auth-token` / `SYNTAUR_VERIFY_AUTH_TOKEN`
+/// (may also be `None`, i.e. truly unauthenticated).
+#[derive(Debug, Clone)]
+struct Pov {
+    slug: Option<String>,
+    token: Option<String>,
+}
+
+/// Resolve the set of POVs to sweep this run.
+///
+/// Precedence:
+///   * Neither `--persona` nor `--all-personas` set → one anonymous
+///     POV carrying `auth_token` (pre-4b behaviour, byte-compatible).
+///   * Either flag set → the anonymous POV is DROPPED and each
+///     resolved persona becomes its own POV. A persona whose
+///     `auth_token_env` is unset/empty (or is `login_flow`-only, which
+///     is deferred) is WARNED + SKIPPED. Rest of the run continues.
+///
+/// Returns `Err` only for:
+///   * catalog file unreadable / malformed
+///   * `--persona X` where `X` isn't in the catalog (hard error —
+///     user asked for something specific, we owe them a clear
+///     "catalog knows these slugs: …" message rather than silent skip)
+fn resolve_povs(
+    workspace: &std::path::Path,
+    personas_file: Option<&std::path::Path>,
+    requested: &[String],
+    all_personas: bool,
+    anon_auth_token: Option<String>,
+) -> Result<Vec<Pov>> {
+    if requested.is_empty() && !all_personas {
+        return Ok(vec![Pov {
+            slug: None,
+            token: anon_auth_token,
+        }]);
+    }
+
+    let catalog_path = personas_file
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace.join("crates/syntaur-verify/personas.yaml"));
+    let catalog = PersonaCatalog::load(&catalog_path).with_context(|| {
+        format!(
+            "loading persona catalog {} — pass --personas-file to override",
+            catalog_path.display()
+        )
+    })?;
+
+    // Assemble the catalog-ordered slug list we actually want to cover.
+    let slugs: Vec<String> = if all_personas {
+        // --persona X + --all-personas is union (additive), but since
+        // --all-personas subsumes everything, the requested list is a
+        // no-op when --all-personas is set. We still accept it so the
+        // CLI doesn't penalise a redundant but harmless combination.
+        catalog.slugs()
+    } else {
+        requested.to_vec()
+    };
+
+    // `catalog.select` validates every requested slug exists + returns
+    // the `&Persona` handles in catalog order. When `--all-personas`,
+    // we feed it the full catalog so the same code path runs.
+    let personas: Vec<&Persona> = catalog.select(&slugs)?;
+
+    let mut out: Vec<Pov> = Vec::new();
+    for p in personas {
+        match p.auth_token()? {
+            AuthSource::Env { var: _, token } => {
+                log::info!(
+                    "[verify] persona {} ({}) → resolved via env",
+                    p.slug(),
+                    p.display_name()
+                );
+                out.push(Pov {
+                    slug: Some(p.slug().to_string()),
+                    token: Some(token),
+                });
+            }
+            AuthSource::EnvMissing { var } => {
+                log::warn!(
+                    "[verify] persona {} SKIPPED — env var {} is unset or empty. \
+                     Set it to a read-only API token for that user and rerun.",
+                    p.slug(),
+                    var
+                );
+            }
+            AuthSource::FlowPunted { flow } => {
+                log::warn!(
+                    "[verify] persona {} SKIPPED — catalog declares login_flow \
+                     {} but flow-based login is deferred to Phase 4c. \
+                     Add an auth_token_env entry to include this persona today.",
+                    p.slug(),
+                    flow.display()
+                );
+            }
+            AuthSource::NoneConfigured => {
+                log::warn!(
+                    "[verify] persona {} SKIPPED — no auth_token_env (or login_flow) \
+                     declared in the catalog.",
+                    p.slug()
+                );
+            }
+        }
+    }
+
+    Ok(out)
 }
 
 fn resolve_mac_mini_staging_url() -> Result<String> {

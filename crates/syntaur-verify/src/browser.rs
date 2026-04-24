@@ -15,6 +15,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
 use chromiumoxide::handler::viewport::Viewport as CdpViewport;
+use chromiumoxide::page::Page as CdpPage;
 use chromiumoxide::{Browser as CdpBrowser, BrowserConfig};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -116,6 +117,12 @@ impl Default for Viewport {
 pub struct Browser {
     inner: CdpBrowser,
     viewport: Viewport,
+    /// Optional `Authorization: Bearer <token>` injected into every
+    /// outgoing request (via CDP Network.setExtraHTTPHeaders) plus a
+    /// `syntaur_token` sessionStorage seed (via
+    /// Page.addScriptToEvaluateOnNewDocument) so widget `sdFetch()`
+    /// calls also carry the bearer. Set via `with_auth_token`.
+    auth_token: Option<String>,
     _handler: tokio::task::JoinHandle<()>,
 }
 
@@ -231,13 +238,95 @@ impl Browser {
         Ok(Self {
             inner,
             viewport,
+            auth_token: None,
             _handler: handle,
         })
+    }
+
+    /// Attach a bearer token. Every subsequent `capture_*` call will
+    /// inject `Authorization: Bearer <token>` via CDP + seed the
+    /// `syntaur_token` sessionStorage key (so `sdFetch` widget calls
+    /// carry the header too). Pass `None` to clear.
+    pub fn with_auth_token(mut self, token: Option<String>) -> Self {
+        self.auth_token = token;
+        self
     }
 
     /// Which viewport this browser was launched with.
     pub fn viewport(&self) -> Viewport {
         self.viewport
+    }
+
+    /// Open a new page, apply the viewport's UA if any, and navigate
+    /// to `url`. Returned page is owned by the caller — drop or
+    /// `.close()` it when done.
+    ///
+    /// Phase 4 flow runner uses this to drive multi-step interactions
+    /// (click/type/press) against a single page instance without
+    /// re-launching Chromium per step.
+    pub async fn new_page(&self, url: &str) -> Result<CdpPage> {
+        let page = self
+            .inner
+            .new_page("about:blank")
+            .await
+            .context("creating new page")?;
+        if let Some(ua) = self.viewport.user_agent() {
+            if let Err(e) = page.set_user_agent(ua).await {
+                log::warn!(
+                    "[browser] failed to set user-agent for {}: {e:#} \
+                     — continuing with Chromium default",
+                    self.viewport.slug()
+                );
+            }
+        }
+
+        // Apply auth token if present — mirrors the capture_inner
+        // pathway so flow steps hit the same authenticated surfaces
+        // module captures do. Factored out here (not duplicated)
+        // because capture_inner is the authoritative impl; we re-use
+        // its two-prong (header + sessionStorage) approach inline.
+        if let Some(token) = &self.auth_token {
+            use chromiumoxide::cdp::browser_protocol::network::SetExtraHttpHeadersParams;
+            use chromiumoxide::cdp::browser_protocol::page::AddScriptToEvaluateOnNewDocumentParams;
+            let mut headers = std::collections::HashMap::new();
+            headers.insert(
+                "Authorization".to_string(),
+                serde_json::Value::String(format!("Bearer {token}")),
+            );
+            if let Ok(hdrs_json) = serde_json::to_value(headers) {
+                if let Err(e) = page
+                    .execute(SetExtraHttpHeadersParams {
+                        headers: chromiumoxide::cdp::browser_protocol::network::Headers::new(
+                            hdrs_json,
+                        ),
+                    })
+                    .await
+                {
+                    log::warn!("[browser] new_page: failed to set auth header: {e:#}");
+                }
+            }
+            let seed = format!(
+                "try {{ sessionStorage.setItem('syntaur_token', {}); }} catch (e) {{}}",
+                serde_json::to_string(token).unwrap_or_else(|_| "\"\"".into())
+            );
+            if let Err(e) = page
+                .execute(AddScriptToEvaluateOnNewDocumentParams {
+                    source: seed,
+                    world_name: None,
+                    include_command_line_api: None,
+                    run_immediately: None,
+                })
+                .await
+            {
+                log::warn!("[browser] new_page: failed to seed sessionStorage token: {e:#}");
+            }
+        }
+
+        page.goto(url).await.context("page.goto")?;
+        page.wait_for_navigation()
+            .await
+            .context("waiting for navigation")?;
+        Ok(page)
     }
 
     /// Back-compat capture method. Screenshot filename is
@@ -295,6 +384,53 @@ impl Browser {
                      — continuing with Chromium default",
                     self.viewport.slug()
                 );
+            }
+        }
+
+        // Auth injection — two paths needed:
+        //   1. extraHTTPHeaders so the main doc fetch + any widget
+        //      XHR/fetch without our sdFetch wrapper carry the bearer
+        //   2. sessionStorage seed on every new document so Syntaur's
+        //      `sdFetch` widget helper reads `syntaur_token` and adds
+        //      the Authorization header on its own fetch calls
+        if let Some(token) = &self.auth_token {
+            use chromiumoxide::cdp::browser_protocol::network::SetExtraHttpHeadersParams;
+            use chromiumoxide::cdp::browser_protocol::page::AddScriptToEvaluateOnNewDocumentParams;
+
+            let mut headers = std::collections::HashMap::new();
+            headers.insert(
+                "Authorization".to_string(),
+                serde_json::Value::String(format!("Bearer {token}")),
+            );
+            let hdrs_json = serde_json::to_value(headers)
+                .context("serializing auth header map")?;
+            if let Err(e) = page
+                .execute(SetExtraHttpHeadersParams {
+                    headers: chromiumoxide::cdp::browser_protocol::network::Headers::new(
+                        hdrs_json,
+                    ),
+                })
+                .await
+            {
+                log::warn!("[browser] failed to set Authorization header: {e:#}");
+            }
+            // Seed sessionStorage for sdFetch. `addScriptToEvaluateOnNewDocument`
+            // runs before any page JS on every new document (including
+            // iframes), so the key is there by the time widget init fires.
+            let seed = format!(
+                "try {{ sessionStorage.setItem('syntaur_token', {}); }} catch (e) {{}}",
+                serde_json::to_string(token).unwrap_or_else(|_| "\"\"".into())
+            );
+            if let Err(e) = page
+                .execute(AddScriptToEvaluateOnNewDocumentParams {
+                    source: seed,
+                    world_name: None,
+                    include_command_line_api: None,
+                    run_immediately: None,
+                })
+                .await
+            {
+                log::warn!("[browser] failed to seed sessionStorage token: {e:#}");
             }
         }
 

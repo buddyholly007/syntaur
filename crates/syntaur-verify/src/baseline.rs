@@ -54,20 +54,62 @@ impl BaselineStore {
 
     /// Where the baseline for `(module, viewport)` lives. The file may
     /// or may not exist — use `exists` to check.
+    ///
+    /// Back-compat: persona-less overload. Equivalent to
+    /// `path_for(module, None, vp)`.
     pub fn path(&self, module: &str, vp: Viewport) -> PathBuf {
-        self.root.join(module).join(format!("{}.png", vp.slug()))
+        self.path_for(module, None, vp)
+    }
+
+    /// Phase 4b — full-keyed path including optional persona slug.
+    ///
+    /// Layout:
+    ///   * `None`         → `<root>/<module>/<viewport>.png` (unchanged)
+    ///   * `Some("peter")` → `<root>/<module>/<persona>/<viewport>.png`
+    ///
+    /// The persona dimension is an *extra directory level*, not a
+    /// filename suffix, for two reasons:
+    ///   1. It lets `rm -rf <root>/<module>/peter` drop one persona's
+    ///      baselines without touching anonymous + other-persona shots.
+    ///   2. Old layouts are preserved exactly — no rewrite of
+    ///      already-locked baselines just to add a persona axis.
+    pub fn path_for(&self, module: &str, persona: Option<&str>, vp: Viewport) -> PathBuf {
+        match persona {
+            None => self.root.join(module).join(format!("{}.png", vp.slug())),
+            Some(p) => self
+                .root
+                .join(module)
+                .join(p)
+                .join(format!("{}.png", vp.slug())),
+        }
     }
 
     /// True iff a baseline file is on disk for this key.
     pub fn exists(&self, module: &str, vp: Viewport) -> bool {
-        self.path(module, vp).is_file()
+        self.exists_for(module, None, vp)
+    }
+
+    /// Persona-aware existence check. Mirrors `path_for`.
+    pub fn exists_for(&self, module: &str, persona: Option<&str>, vp: Viewport) -> bool {
+        self.path_for(module, persona, vp).is_file()
     }
 
     /// Persist `png` as the baseline for `(module, viewport)`,
     /// overwriting any prior baseline. Writes to `<target>.tmp` then
     /// renames, so a crash mid-write can't leave half a PNG behind.
     pub fn save(&self, module: &str, vp: Viewport, png: &[u8]) -> Result<()> {
-        let final_path = self.path(module, vp);
+        self.save_for(module, None, vp, png)
+    }
+
+    /// Persona-aware save. Mirrors `save`.
+    pub fn save_for(
+        &self,
+        module: &str,
+        persona: Option<&str>,
+        vp: Viewport,
+        png: &[u8],
+    ) -> Result<()> {
+        let final_path = self.path_for(module, persona, vp);
         let parent = final_path
             .parent()
             .ok_or_else(|| anyhow::anyhow!("baseline path has no parent: {}", final_path.display()))?;
@@ -97,7 +139,17 @@ impl BaselineStore {
     /// Load the baseline PNG bytes. Error messages follow the plain-
     /// language policy — tell the user what to run next.
     pub fn load(&self, module: &str, vp: Viewport) -> Result<Vec<u8>> {
-        let path = self.path(module, vp);
+        self.load_for(module, None, vp)
+    }
+
+    /// Persona-aware load. Mirrors `load`.
+    pub fn load_for(
+        &self,
+        module: &str,
+        persona: Option<&str>,
+        vp: Viewport,
+    ) -> Result<Vec<u8>> {
+        let path = self.path_for(module, persona, vp);
         std::fs::read(&path).with_context(|| {
             format!(
                 "Failed to load baseline {} — run with --update-baselines to regenerate",
@@ -152,5 +204,67 @@ mod tests {
             store.path("m", Viewport::Desktop),
             store.path("m", Viewport::Mobile)
         );
+    }
+
+    #[test]
+    fn persona_slug_is_a_separate_path_segment() {
+        // Phase 4b — baselines are keyed on (module, persona?, viewport).
+        // The persona slug must be its own directory level, not a filename
+        // suffix, so old-layout baselines don't collide with new ones.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = BaselineStore::with_root(dir.path().to_path_buf());
+
+        let none = store.path_for("dashboard", None, Viewport::Desktop);
+        let peter = store.path_for("dashboard", Some("peter"), Viewport::Desktop);
+
+        assert_ne!(none, peter, "persona must disambiguate the baseline path");
+        // The persona slug must actually appear as a path component —
+        // not just be concatenated into the filename.
+        assert!(
+            peter
+                .components()
+                .any(|c| c.as_os_str() == std::ffi::OsStr::new("peter")),
+            "expected a `peter/` path segment in {}",
+            peter.display()
+        );
+        // Old path layout is preserved verbatim for None.
+        assert!(
+            none.ends_with("dashboard/desktop.png"),
+            "anonymous baseline path regressed: {}",
+            none.display()
+        );
+        assert!(
+            peter.ends_with("dashboard/peter/desktop.png"),
+            "persona baseline path wrong: {}",
+            peter.display()
+        );
+    }
+
+    #[test]
+    fn persona_save_load_round_trip_is_isolated_from_anonymous() {
+        // Writing a persona-scoped baseline must NOT overwrite the
+        // anonymous baseline at the same (module, viewport), and vice
+        // versa — each lives in its own slot.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = BaselineStore::with_root(dir.path().to_path_buf());
+
+        store
+            .save("dashboard", Viewport::Desktop, b"anon-bytes")
+            .expect("save anon");
+        store
+            .save_for(
+                "dashboard",
+                Some("peter"),
+                Viewport::Desktop,
+                b"peter-bytes",
+            )
+            .expect("save peter");
+
+        let anon = store.load("dashboard", Viewport::Desktop).expect("load anon");
+        let peter = store
+            .load_for("dashboard", Some("peter"), Viewport::Desktop)
+            .expect("load peter");
+        assert_eq!(anon, b"anon-bytes");
+        assert_eq!(peter, b"peter-bytes");
     }
 }

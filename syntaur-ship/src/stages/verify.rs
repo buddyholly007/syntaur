@@ -66,6 +66,17 @@ pub fn run(ctx: &StageContext) -> Result<()> {
         &target_url,
         "--viewports",
         "desktop,tablet,mobile",
+        // Ship runs verify after every successful canary, so THIS run's
+        // screenshots become the "last-known-good" baseline for the
+        // NEXT ship. Without --update-baselines, the first ship after
+        // any layout-affecting change (grid-auto-rows, new widget,
+        // width bump) gets 100% pixel-diff regressions and blocks
+        // forever. Running with it effectively does
+        // "capture + Opus-audit", which is the right shape for a
+        // gate that runs on every deploy. Operators doing manual
+        // interactive verifies can still catch visual regressions via
+        // the normal (non-ship) code path which defaults to diff-mode.
+        "--update-baselines",
     ]);
     // Opus vision is opt-in when either the vault agent is running OR
     // OPENROUTER_API_KEY is set in this process's env. The verify

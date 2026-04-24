@@ -1,0 +1,23 @@
+# Dashboard add-todo happy path. Exercises the .sd-todo-input widget
+# in the dashboard module end-to-end: render, focus the input, type a
+# todo, hit Enter, confirm the new row appears with the expected text.
+#
+# Targeted by `syntaur-verify --flow crates/syntaur-verify/flows/dashboard-create-todo.yaml`.
+# Run against a local gateway (e.g. `--target-url http://127.0.0.1:18789`)
+# when the dashboard module is under active iteration.
+name: "Dashboard: create a todo"
+module: dashboard
+steps:
+  - goto: "/dashboard"
+    wait_ms: 1500
+  - screenshot: "initial"
+  - click: ".sd-todo-input"
+  - type: "buy eggs"
+    target: ".sd-todo-input"
+  - press: "Enter"
+  - wait_for_selector: ".sd-todo-row"
+    timeout_ms: 3000
+  - screenshot: "after-add"
+  - assert_contains:
+      selector: ".sd-todo-row"
+      text: "buy eggs"

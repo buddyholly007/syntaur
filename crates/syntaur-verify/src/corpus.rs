@@ -35,6 +35,12 @@ pub struct CorpusMeta {
     pub detail: String,
     pub captured_at: DateTime<Utc>,
     pub head_rev: String,
+    /// Phase 4b — persona whose session was active when the triggering
+    /// regression was captured. `None` for anonymous / default-session
+    /// archives, which is the shape every pre-4b entry has, so
+    /// `#[serde(default)]` keeps old meta.json blobs parseable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -197,6 +203,7 @@ mod tests {
             detail: "Mobile viewport showed desktop sidebar".into(),
             captured_at: Utc::now(),
             head_rev: "deadbeef".into(),
+            persona: None,
         }
     }
 

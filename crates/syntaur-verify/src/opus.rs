@@ -294,6 +294,11 @@ Be practical about improvements — only surface things with clear user value.{e
                     artifact: Some(screenshot_path.to_path_buf()),
                     captured_at: now,
                     edits,
+                    // Phase 4b — Opus returns a persona-agnostic
+                    // finding; the CLI stamps the active POV's slug
+                    // after it returns so the persona-tagging policy
+                    // lives in one place.
+                    persona: None,
                 }
             })
             .collect();
