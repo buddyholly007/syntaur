@@ -133,7 +133,7 @@ pub async fn render() -> Html<String> {
 
 const PAGE_JS: &str = r##"
 const token = sessionStorage.getItem('syntaur_token') || '';
-if (!token) { window.location.href = '/'; }
+// Client-side token-gate removed 2026-04-24 (module-reset bug fix).
 // Phase 1.1: every fetch carries Authorization: Bearer <token>; no ?token= in URLs.
 const AUTH_H = () => ({ 'Authorization': 'Bearer ' + token });
 const JSON_AUTH_H = () => ({ 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token });

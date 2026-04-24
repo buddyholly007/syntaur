@@ -131,7 +131,7 @@ pub async fn render() -> Html<String> {
 
 const PAGE_JS: &str = r##"
 const token = sessionStorage.getItem('syntaur_token') || '';
-if (!token) { window.location.href = '/'; }
+// Client-side token-gate removed 2026-04-24 (module-reset bug fix).
 const esc = (s) => String(s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function authFetch(url, opts = {}) {
   opts.headers = opts.headers || {};

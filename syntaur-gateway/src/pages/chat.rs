@@ -156,7 +156,11 @@ const BODY_HTML: &str = r##"<!-- Agent strip (chips + new-chat) — lives inside
 
 <script>
 const token = sessionStorage.getItem('syntaur_token') || '';
-if (!token) { window.location.href = '/'; }
+// Server cookie-auth already authenticated this page render; the
+// prior `if (!token) window.location.href = '/'` guard here bounced
+// every user whose sessionStorage was empty back to the dashboard,
+// causing the 2026-04-24 module-reset bug. 401 handlers below
+// remain, so genuinely bad sessions still get caught.
 // Phase 1.1 helpers — Authorization: Bearer on every /api fetch.
 const AUTH_H = () => ({ 'Authorization': 'Bearer ' + token });
 const JSON_AUTH_H = () => ({ 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token });

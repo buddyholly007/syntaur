@@ -70,7 +70,10 @@ fn page_body() -> Markup {
 
 const PAGE_JS: &str = r#"
 const token = sessionStorage.getItem('syntaur_token') || '';
-if (!token) { window.location.href = '/'; }
+// Client-side token-gate removed 2026-04-24 — it bounced cookie-
+// authenticated users back to `/` whenever storage was empty,
+// causing the module-reset bug. 401 handler below covers the
+// actual-bad-session case.
 let pendingChanges = false;
 
 async function loadModules() {

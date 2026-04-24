@@ -109,7 +109,7 @@ input:focus, button:focus { outline: 2px solid #10b981; outline-offset: 1px; }
 
 const PAGE_JS: &str = r##"
 const token = sessionStorage.getItem('syntaur_token') || '';
-if (!token) { window.location.href = '/'; }
+// Client-side token-gate removed 2026-04-24 (module-reset bug fix).
 const AUTH_H = () => ({ 'Authorization': 'Bearer ' + token });
 const JSON_AUTH_H = () => ({ 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token });
 

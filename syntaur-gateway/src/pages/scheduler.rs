@@ -1629,7 +1629,12 @@ const PAGE_JS: &str = r##"
   const TOKEN = (function() {
     try { return localStorage.getItem('syntaur_token') || sessionStorage.getItem('syntaur_token') || ''; } catch(e) { return ''; }
   })();
-  if (!TOKEN) { location.href = '/'; return; }
+  // NOTE: a prior `if (!TOKEN) { location.href = '/'; return; }` guard
+  // was removed 2026-04-24 — it bounced every user whose browser
+  // storage was empty back to the dashboard even though the server
+  // had already authenticated them via the session cookie that let
+  // this HTML be served. The API calls below handle 401 themselves;
+  // that's the correct place to respond to a real auth failure.
 
   // ── State ───────────────────────────────────────────────────────────
   const S = {

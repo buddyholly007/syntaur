@@ -1013,7 +1013,7 @@ const EXTRA_STYLE: &str = r##"
 
 const PAGE_JS: &str = r#"
 const token = sessionStorage.getItem('syntaur_token') || '';
-if (!token) { window.location.href = '/'; }
+// Client-side token-gate removed 2026-04-24 (module-reset bug fix).
 
 const q = (sel) => document.querySelector(sel);
 const el = (html) => { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstChild; };
