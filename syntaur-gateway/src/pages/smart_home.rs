@@ -1699,6 +1699,12 @@ function shRenderAutomations(payload) {
         toggle.checked = !!a.enabled;
         toggle.title = a.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable';
         toggle.onchange = () => shToggleAutomation(a.id, toggle.checked, tile);
+        const edit = document.createElement('button');
+        edit.type = 'button';
+        edit.className = 'sh-auto-btn-del';
+        edit.textContent = '✎';
+        edit.title = 'Edit automation';
+        edit.onclick = () => shOpenAutomationBuilder(a);
         const del = document.createElement('button');
         del.type = 'button';
         del.className = 'sh-auto-btn-del';
@@ -1706,6 +1712,7 @@ function shRenderAutomations(payload) {
         del.title = 'Delete automation';
         del.onclick = () => shDeleteAutomation(a.id, a.name);
         actions.appendChild(toggle);
+        actions.appendChild(edit);
         actions.appendChild(del);
         tile.appendChild(body);
         tile.appendChild(actions);
@@ -1748,21 +1755,63 @@ async function shDeleteAutomation(id, name) {
     }
 }
 
-// Builder modal state — cleared on each open.
-const shAutoBuilder = { triggers: [], conditions: [], actions: [] };
+// Builder modal state. `editingId` is the automation id when the modal
+// was opened via Edit (PUT flow); null when opening via + New (POST).
+// Ref data (devices/rooms/scenes) is lazily loaded on first open and
+// cached in memory so typical "open builder → click add-trigger" is
+// instant. Refreshed every time the modal opens to catch new devices
+// the user may have scanned in between edits.
+const shAutoBuilder = {
+    triggers: [],
+    conditions: [],
+    actions: [],
+    editingId: null,
+};
+const shAutoRefData = { devices: [], rooms: [], scenes: [] };
 
-function shOpenAutomationBuilder() {
+async function shLoadAutoRefData() {
+    try {
+        const [devs, rooms, scenes] = await Promise.all([
+            shFetch('/api/smart-home/devices').catch(() => ({ devices: [] })),
+            shFetch('/api/smart-home/rooms').catch(() => ({ rooms: [] })),
+            shFetch('/api/smart-home/scenes').catch(() => ({ scenes: [] })),
+        ]);
+        shAutoRefData.devices = devs.devices || [];
+        shAutoRefData.rooms = rooms.rooms || [];
+        shAutoRefData.scenes = scenes.scenes || [];
+    } catch (e) {
+        console.warn('[smart-home] ref data load failed', e);
+    }
+}
+
+async function shOpenAutomationBuilder(existing) {
     shAutoBuilder.triggers = [];
     shAutoBuilder.conditions = [];
     shAutoBuilder.actions = [];
-    document.getElementById('sh-auto-name').value = '';
+    shAutoBuilder.editingId = (existing && existing.id) || null;
+    document.getElementById('sh-auto-name').value = (existing && existing.name) || '';
     document.getElementById('sh-auto-triggers').innerHTML = '';
     document.getElementById('sh-auto-conditions').innerHTML = '';
     document.getElementById('sh-auto-actions').innerHTML = '';
+    document.getElementById('sh-auto-modal-title').textContent =
+        existing ? 'Edit automation' : 'New automation';
+    document.getElementById('sh-auto-save').textContent = existing ? 'Save changes' : 'Save';
     const err = document.getElementById('sh-auto-error');
     err.classList.add('hidden');
     err.textContent = '';
     document.getElementById('sh-auto-modal').classList.remove('hidden');
+
+    // Fetch ref data in parallel with opening the modal — the modal is
+    // usable for name + time-only triggers even if the network call is
+    // slow, and the dropdowns get populated when it lands.
+    await shLoadAutoRefData();
+
+    if (existing && existing.spec) {
+        const s = existing.spec;
+        (s.triggers || []).forEach(t => shAddTrigger(t.kind, t));
+        (s.conditions || []).forEach(c => shAddCondition(c.kind, c));
+        (s.actions || []).forEach(a => shAddAction(a.kind, a));
+    }
     setTimeout(() => document.getElementById('sh-auto-name').focus(), 0);
 }
 
@@ -1770,63 +1819,90 @@ function shCloseAutomationBuilder() {
     document.getElementById('sh-auto-modal').classList.add('hidden');
 }
 
-function shAddTrigger(kind) {
+function shAddTrigger(kind, initial) {
     if (!kind) return;
-    const id = shAutoBuilder.triggers.length;
     let card;
     if (kind === 'time') {
-        const spec = { kind: 'time', at: '18:30', offset_min: 0 };
+        const spec = { kind: 'time', at: (initial && initial.at) || '18:30',
+                       offset_min: (initial && initial.offset_min) || 0 };
         shAutoBuilder.triggers.push(spec);
         card = shMakeCard('Time', [
             shFieldLabel('At', shTimeInput(spec.at, v => spec.at = v)),
             shFieldLabel('Offset (min)', shNumberInput(spec.offset_min, v => spec.offset_min = parseInt(v || '0', 10))),
         ], () => shRemoveItem('triggers', spec, card));
     } else if (kind === 'device_state') {
-        const spec = { kind: 'device_state', device_id: 0, equals: 'true' };
+        const spec = {
+            kind: 'device_state',
+            device_id: (initial && initial.device_id) || 0,
+            equals: shStringifyForField(initial ? initial.equals : 'true'),
+        };
         shAutoBuilder.triggers.push(spec);
         card = shMakeCard('Device state', [
-            shFieldLabel('Device id', shNumberInput(spec.device_id, v => spec.device_id = parseInt(v || '0', 10))),
+            shFieldLabel('Device', shDeviceSelect(spec.device_id, v => spec.device_id = v)),
             shFieldLabel('Equals (JSON)', shTextInput(spec.equals, v => spec.equals = v)),
         ], () => shRemoveItem('triggers', spec, card));
     } else if (kind === 'presence') {
-        const spec = { kind: 'presence', room_id: 0, person: 'any', state: 'entered' };
+        const spec = {
+            kind: 'presence',
+            room_id: (initial && initial.room_id) || 0,
+            person: (initial && initial.person) || 'any',
+            state: (initial && initial.state) || 'entered',
+        };
         shAutoBuilder.triggers.push(spec);
         card = shMakeCard('Presence', [
-            shFieldLabel('Room id', shNumberInput(spec.room_id, v => spec.room_id = parseInt(v || '0', 10))),
+            shFieldLabel('Room', shRoomSelect(spec.room_id, v => spec.room_id = v)),
             shFieldLabel('Person', shTextInput(spec.person, v => spec.person = v)),
             shFieldLabel('State', shSelectInput(['entered', 'left'], spec.state, v => spec.state = v)),
         ], () => shRemoveItem('triggers', spec, card));
     } else if (kind === 'sensor') {
-        const spec = { kind: 'sensor', device_id: 0, above: null, below: null };
+        const spec = {
+            kind: 'sensor',
+            device_id: (initial && initial.device_id) || 0,
+            above: initial && initial.above != null ? initial.above : null,
+            below: initial && initial.below != null ? initial.below : null,
+        };
         shAutoBuilder.triggers.push(spec);
         card = shMakeCard('Sensor', [
-            shFieldLabel('Device id', shNumberInput(spec.device_id, v => spec.device_id = parseInt(v || '0', 10))),
-            shFieldLabel('Above', shNumberInput('', v => spec.above = v === '' ? null : parseFloat(v))),
-            shFieldLabel('Below', shNumberInput('', v => spec.below = v === '' ? null : parseFloat(v))),
+            shFieldLabel('Device', shDeviceSelect(spec.device_id, v => spec.device_id = v)),
+            shFieldLabel('Above', shNumberInput(spec.above == null ? '' : spec.above,
+                                                 v => spec.above = v === '' ? null : parseFloat(v))),
+            shFieldLabel('Below', shNumberInput(spec.below == null ? '' : spec.below,
+                                                 v => spec.below = v === '' ? null : parseFloat(v))),
         ], () => shRemoveItem('triggers', spec, card));
     }
     if (card) document.getElementById('sh-auto-triggers').appendChild(card);
 }
 
-function shAddCondition(kind) {
+function shAddCondition(kind, initial) {
     if (!kind) return;
     let card;
     if (kind === 'device_state') {
-        const spec = { kind: 'device_state', device_id: 0, equals: 'true' };
+        const spec = {
+            kind: 'device_state',
+            device_id: (initial && initial.device_id) || 0,
+            equals: shStringifyForField(initial ? initial.equals : 'true'),
+        };
         shAutoBuilder.conditions.push(spec);
         card = shMakeCard('Device is', [
-            shFieldLabel('Device id', shNumberInput(spec.device_id, v => spec.device_id = parseInt(v || '0', 10))),
+            shFieldLabel('Device', shDeviceSelect(spec.device_id, v => spec.device_id = v)),
             shFieldLabel('Equals (JSON)', shTextInput(spec.equals, v => spec.equals = v)),
         ], () => shRemoveItem('conditions', spec, card));
     } else if (kind === 'time_range') {
-        const spec = { kind: 'time_range', start: '22:00', end: '06:00' };
+        const spec = {
+            kind: 'time_range',
+            start: (initial && initial.start) || '22:00',
+            end: (initial && initial.end) || '06:00',
+        };
         shAutoBuilder.conditions.push(spec);
         card = shMakeCard('Time between', [
             shFieldLabel('Start', shTimeInput(spec.start, v => spec.start = v)),
             shFieldLabel('End', shTimeInput(spec.end, v => spec.end = v)),
         ], () => shRemoveItem('conditions', spec, card));
     } else if (kind === 'anyone_home') {
-        const spec = { kind: 'anyone_home', expect: true };
+        const spec = {
+            kind: 'anyone_home',
+            expect: initial ? !!initial.expect : true,
+        };
         shAutoBuilder.conditions.push(spec);
         card = shMakeCard('Home?', [
             shFieldLabel('Expect', shSelectInput(['true', 'false'], String(spec.expect), v => spec.expect = v === 'true')),
@@ -1835,38 +1911,93 @@ function shAddCondition(kind) {
     if (card) document.getElementById('sh-auto-conditions').appendChild(card);
 }
 
-function shAddAction(kind) {
+function shAddAction(kind, initial) {
     if (!kind) return;
     let card;
     if (kind === 'set_device') {
-        const spec = { kind: 'set_device', device_id: 0, state: { on: true } };
-        spec.__stateStr = '{"on": true}';
+        const spec = {
+            kind: 'set_device',
+            device_id: (initial && initial.device_id) || 0,
+        };
+        spec.__stateStr = shStringifyForField(initial ? initial.state : { on: true });
         shAutoBuilder.actions.push(spec);
         card = shMakeCard('Set device', [
-            shFieldLabel('Device id', shNumberInput(spec.device_id, v => spec.device_id = parseInt(v || '0', 10))),
+            shFieldLabel('Device', shDeviceSelect(spec.device_id, v => spec.device_id = v)),
             shFieldLabel('State (JSON)', shTextInput(spec.__stateStr, v => spec.__stateStr = v)),
         ], () => shRemoveItem('actions', spec, card));
     } else if (kind === 'scene') {
-        const spec = { kind: 'scene', scene_id: 0 };
+        const spec = { kind: 'scene', scene_id: (initial && initial.scene_id) || 0 };
         shAutoBuilder.actions.push(spec);
         card = shMakeCard('Scene', [
-            shFieldLabel('Scene id', shNumberInput(spec.scene_id, v => spec.scene_id = parseInt(v || '0', 10))),
+            shFieldLabel('Scene', shSceneSelect(spec.scene_id, v => spec.scene_id = v)),
         ], () => shRemoveItem('actions', spec, card));
     } else if (kind === 'notify') {
-        const spec = { kind: 'notify', target: 'telegram', text: '' };
+        const spec = {
+            kind: 'notify',
+            target: (initial && initial.target) || 'telegram',
+            text: (initial && initial.text) || '',
+        };
         shAutoBuilder.actions.push(spec);
         card = shMakeCard('Notify', [
             shFieldLabel('Target', shTextInput(spec.target, v => spec.target = v)),
             shFieldLabel('Text', shTextInput(spec.text, v => spec.text = v)),
         ], () => shRemoveItem('actions', spec, card));
     } else if (kind === 'delay') {
-        const spec = { kind: 'delay', seconds: 10 };
+        const spec = { kind: 'delay', seconds: (initial && initial.seconds) || 10 };
         shAutoBuilder.actions.push(spec);
         card = shMakeCard('Delay', [
             shFieldLabel('Seconds', shNumberInput(spec.seconds, v => spec.seconds = Math.max(0, parseInt(v || '0', 10)))),
         ], () => shRemoveItem('actions', spec, card));
     }
     if (card) document.getElementById('sh-auto-actions').appendChild(card);
+}
+
+function shStringifyForField(v) {
+    if (v === undefined || v === null) return '';
+    if (typeof v === 'string') return v;
+    try { return JSON.stringify(v); } catch (_) { return String(v); }
+}
+
+// Dropdown factories. All three share one underlying builder — the
+// only difference is which ref-data list to pull from and the empty-
+// state placeholder copy. Unknown ids (e.g. deleted device referenced
+// by an existing automation) are preserved as a synthetic "id: N
+// (missing)" option so the user can see + replace them without the
+// form silently losing the value on save.
+function shDeviceSelect(initial, onChange) {
+    return shEntitySelect(shAutoRefData.devices, initial, onChange, 'Select a device…', 'id', 'name');
+}
+function shRoomSelect(initial, onChange) {
+    return shEntitySelect(shAutoRefData.rooms, initial, onChange, 'Select a room…', 'id', 'name');
+}
+function shSceneSelect(initial, onChange) {
+    return shEntitySelect(shAutoRefData.scenes, initial, onChange, 'Select a scene…', 'id', 'name');
+}
+
+function shEntitySelect(items, initial, onChange, placeholder, idKey, nameKey) {
+    const el = document.createElement('select');
+    const blank = document.createElement('option');
+    blank.value = '0';
+    blank.textContent = placeholder;
+    el.appendChild(blank);
+    let foundMatch = false;
+    (items || []).forEach(it => {
+        const id = it[idKey];
+        const o = document.createElement('option');
+        o.value = String(id);
+        o.textContent = (it[nameKey] || '(unnamed)') + ' — #' + id;
+        if (Number(id) === Number(initial)) { o.selected = true; foundMatch = true; }
+        el.appendChild(o);
+    });
+    if (!foundMatch && initial && Number(initial) !== 0) {
+        const o = document.createElement('option');
+        o.value = String(initial);
+        o.textContent = '#' + initial + ' (missing)';
+        o.selected = true;
+        el.appendChild(o);
+    }
+    el.onchange = () => onChange(parseInt(el.value || '0', 10));
+    return el;
 }
 
 function shRemoveItem(bucket, spec, card) {
@@ -1995,20 +2126,30 @@ async function shSaveAutomation() {
     };
 
     const btn = document.getElementById('sh-auto-save');
+    const editingId = shAutoBuilder.editingId;
+    const savingLabel = editingId ? 'Saving changes…' : 'Saving…';
+    const restoredLabel = editingId ? 'Save changes' : 'Save';
     btn.disabled = true;
-    btn.textContent = 'Saving…';
+    btn.textContent = savingLabel;
     try {
-        await shFetch('/api/smart-home/automations', {
-            method: 'POST',
-            body: JSON.stringify(body),
-        });
+        if (editingId) {
+            await shFetch('/api/smart-home/automations/' + editingId, {
+                method: 'PUT',
+                body: JSON.stringify(body),
+            });
+        } else {
+            await shFetch('/api/smart-home/automations', {
+                method: 'POST',
+                body: JSON.stringify(body),
+            });
+        }
         shCloseAutomationBuilder();
         shLoadAutomations();
     } catch (e) {
         shShowAutoError('Save failed: ' + e.message);
     } finally {
         btn.disabled = false;
-        btn.textContent = 'Save';
+        btn.textContent = restoredLabel;
     }
 }
 

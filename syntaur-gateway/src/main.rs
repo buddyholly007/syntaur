@@ -6813,7 +6813,8 @@ async fn main() {
         )
         .route(
             "/api/smart-home/automations/{id}",
-            axum::routing::delete(smart_home::api::handle_delete_automation),
+            axum::routing::delete(smart_home::api::handle_delete_automation)
+                .put(smart_home::api::handle_update_automation),
         )
         .route(
             "/api/smart-home/automations/{id}/toggle",

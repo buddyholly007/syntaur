@@ -768,6 +768,77 @@ pub async fn handle_toggle_automation(
     Ok(Json(json!({ "updated": n, "enabled": body.enabled })))
 }
 
+/// PUT /api/smart-home/automations/{id} — edit-in-place. Updates name,
+/// description, and spec together; the toggle endpoint still handles
+/// enable/disable solo so the common-case tile click doesn't need a
+/// full body. Same validation as create — no empty name, ≥1 trigger,
+/// ≥1 action, source whitelist.
+pub async fn handle_update_automation(
+    State(state): State<std::sync::Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(body): Json<AutomationCreateBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let user_id = current_user_id(&state);
+    let db = state.db_path.clone();
+
+    if body.name.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "name must not be empty" })),
+        ));
+    }
+    if body.spec.triggers.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "at least one trigger is required" })),
+        ));
+    }
+    if body.spec.actions.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "at least one action is required" })),
+        ));
+    }
+
+    let source = match body.source.trim() {
+        "" => "visual".to_string(),
+        s @ ("visual" | "nl" | "imported") => s.to_string(),
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!("source must be visual|nl|imported, got `{other}`"),
+                })),
+            ));
+        }
+    };
+    let spec_json = serde_json::to_string(&body.spec)
+        .map_err(|e| err_500(format!("serialize spec: {e}")))?;
+    let name = body.name;
+    let description = body.description;
+
+    let n = tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
+        let conn = rusqlite::Connection::open(&db)?;
+        let now = chrono::Utc::now().timestamp();
+        conn.execute(
+            "UPDATE smart_home_automations
+                SET name = ?, description = ?, source = ?, spec_json = ?, updated_at = ?
+              WHERE user_id = ? AND id = ?",
+            rusqlite::params![name, description, source, spec_json, now, user_id, id],
+        )
+    })
+    .await
+    .map_err(|e| err_500(format!("join error: {e}")))?
+    .map_err(|e| err_500(format!("db error: {e}")))?;
+    if n == 0 {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "automation not found" })),
+        ));
+    }
+    Ok(Json(json!({ "updated": n })))
+}
+
 // ── scenes ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize)]
