@@ -1999,7 +1999,16 @@ async fn handle_api_message(
     // tool-call-loop latency at ~60-90s instead of ~3-5 min. Models that
     // can't converge in 15 rounds are flailing — see round-budget warning
     // below for the escalating bail-out nudges.
-    let max_rounds = 15;
+    //
+    // Per-agent override: Cortex on the Nemotron free-tier chain ignores
+    // bounded-search prompt rules and spins search_everything queries on
+    // absent-from-KB questions. Cap tighter (6 rounds ≈ 90s worst case)
+    // so the client doesn't hit its own timeout before the server bails.
+    // Observed on 2026-04-24 matrix run against prod.
+    let max_rounds: usize = match agent_id.as_str() {
+        "cortex" | "research" | "module_research" => 6,
+        _ => 15,
+    };
     // Per-turn file-read budget. `search_everything` already gives the model
     // substantial content snippets; follow-up file reads are for pulling one
     // specific file's full text, not for reconstructing a timeline across
@@ -2519,8 +2528,14 @@ async fn handle_message_start(
         tr.apply_agent_allowlist(agent_tool_allowlist(&agent_for_task));
         let tool_registry = std::sync::Arc::new(tr);
     let tools = tool_registry.tool_definitions();
-        // See handle_api_message for rationale — 15 rounds caps flailing turns.
-        let max_rounds = 15;
+        // See handle_api_message for rationale — 15 rounds caps flailing turns,
+        // with a Cortex-specific tighter cap to keep Nemotron from spinning
+        // search_everything queries on absent-from-KB topics past the client
+        // timeout. Mirror the branch in handle_api_message.
+        let max_rounds: usize = match agent_for_task.as_str() {
+            "cortex" | "research" | "module_research" => 6,
+            _ => 15,
+        };
         // Per-turn file-read budget — see handle_api_message.
         let max_reads_per_turn: usize = 3;
         let mut read_count: usize = 0;
