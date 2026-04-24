@@ -12,6 +12,8 @@ pub async fn render() -> Html<String> {
         title: "Your Personal AI Platform",
         authed: false,
         extra_style: Some(".glow { box-shadow: 0 0 60px rgba(14,165,233,0.15); }"),
+        body_class: None,
+        head_boot: None,
     };
     Html(shell(page, body()).into_string())
 }
@@ -58,9 +60,23 @@ fn nav() -> Markup {
 fn hero() -> Markup {
     html! {
         section class="max-w-5xl mx-auto px-4 pt-24 pb-16 text-center" {
+            // VERSION-BADGE markers are matched verbatim by
+            // syntaur-ship's post-deploy audit (stages/version_audit.rs
+            // ::landing_badge) — the probe string-slices on these exact
+            // comment bytes. Before the maud migration the same shape
+            // lived in landing/index.html and scripts/sync-version.sh
+            // patched it; now CARGO_PKG_VERSION inherits from the
+            // workspace version and stays in sync automatically.
+            (PreEscaped(concat!(
+                "<!-- VERSION-BADGE -->v",
+                env!("CARGO_PKG_VERSION"),
+                "<!-- /VERSION-BADGE -->"
+            )))
             div class="inline-flex items-center gap-2 bg-gray-800/50 border border-gray-700 rounded-full px-4 py-1.5 text-sm text-gray-400 mb-6" {
                 span class="w-2 h-2 rounded-full bg-green-400" {}
-                "Free & open source — runs on your hardware"
+                "v"
+                (env!("CARGO_PKG_VERSION"))
+                " · Free & open source — runs on your hardware"
             }
             h1 class="text-5xl sm:text-6xl font-extrabold leading-tight mb-6" {
                 "Your personal" br;

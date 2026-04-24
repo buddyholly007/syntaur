@@ -16,8 +16,9 @@
 //! This stage runs at the END of the pipeline, after prod is confirmed
 //! healthy. Failure is non-fatal — prod is already live.
 
-use anyhow::Result;
-use std::process::Command;
+use anyhow::{Context, Result};
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 use crate::pipeline::StageContext;
 
@@ -78,9 +79,13 @@ $fi = Get-Item $dst
     // drive pywinrm from there. Mac Mini already has pywinrm installed
     // per projects/win11_test_vm.md.
     //
-    // Python's triple-quote raw string r'''...''' is preserved verbatim
-    // by Rust — we pass the PowerShell script body as Python string and
-    // let pywinrm transport it to the VM.
+    // CRITICAL — don't use `ssh … python3 -c "$CODE"`. That joins all
+    // ssh args with spaces before handing to the remote shell, which
+    // mangles newlines + triple-quoted strings. Instead we invoke
+    // `python3 -` remotely and pipe the whole script in on stdin, so
+    // no shell quoting rules apply. The earlier `-c` path silently
+    // broke with `SyntaxError: invalid syntax` after the maud migration
+    // shifted the raw-string layout — pipe-via-stdin fixes the class.
     let python_code = String::new()
         + "import winrm\n"
         + &format!(
@@ -92,9 +97,20 @@ $fi = Get-Item $dst
         + "r = s.run_ps(ps)\n"
         + "print(r.std_out.decode('cp1252', errors='replace'))\n";
 
-    let output = Command::new("ssh")
-        .args(["sean@192.168.1.58", "python3", "-c", &python_code])
-        .output()?;
+    let mut child = Command::new("ssh")
+        .args(["sean@192.168.1.58", "python3", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("spawn ssh → mac-mini python3")?;
+    child
+        .stdin
+        .as_mut()
+        .ok_or_else(|| anyhow::anyhow!("stdin handle missing"))?
+        .write_all(python_code.as_bytes())
+        .context("write python to ssh stdin")?;
+    let output = child.wait_with_output().context("wait on ssh child")?;
     if !output.status.success() {
         log::warn!(
             "[win11] refresh failed: {}",

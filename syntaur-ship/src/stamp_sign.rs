@@ -19,20 +19,28 @@
 //! Verification path:
 //!     cosign verify-blob \
 //!         --key openclaw-workspace/syntaur-ship/cosign.pub \
-//!         --signature deploy-stamp.json.sig \
+//!         --bundle deploy-stamp.json.cosign.bundle \
 //!         deploy-stamp.json
+//!
+//! Format note (2026-04-24): cosign 2.x deprecated `--output-signature`
+//! in favour of `--bundle`, which writes a single Sigstore-bundle file
+//! containing signature + cert + rekor entry. `verify-blob --bundle`
+//! is the mirror read path. We migrated both sides in this commit; the
+//! old `.sig` files from prior releases stay verifiable with older
+//! cosign binaries but new stamps only get `.cosign.bundle`. Keep both
+//! legible in the deploy journal via the fallback path below.
 
 use anyhow::{Context, Result};
 use std::path::Path;
 use std::process::Command;
 
 /// Sign the deploy-stamp.json at `stamp_path` using the local cosign
-/// key. Writes signature to `<stamp_path>.sig`. Non-fatal on failure
-/// (deploy already succeeded; signature is an audit extra).
+/// key. Writes a Sigstore-format `<stamp>.cosign.bundle`. Non-fatal on
+/// failure (deploy already succeeded; signature is an audit extra).
 pub fn sign_stamp(state_dir: &Path) -> Result<()> {
     let stamp = state_dir.join("deploy-stamp.json");
     let key = state_dir.join("cosign.key");
-    let sig = state_dir.join("deploy-stamp.json.sig");
+    let bundle = state_dir.join("deploy-stamp.json.cosign.bundle");
 
     if !key.exists() {
         log::debug!(
@@ -56,8 +64,8 @@ pub fn sign_stamp(state_dir: &Path) -> Result<()> {
             "--yes",
             "--key",
             key.to_str().unwrap(),
-            "--output-signature",
-            sig.to_str().unwrap(),
+            "--bundle",
+            bundle.to_str().unwrap(),
             stamp.to_str().unwrap(),
         ])
         .env("COSIGN_PASSWORD", "")
@@ -68,7 +76,7 @@ pub fn sign_stamp(state_dir: &Path) -> Result<()> {
             log::info!(
                 "[cosign] ✓ signed {} → {}",
                 stamp.file_name().unwrap().to_string_lossy(),
-                sig.file_name().unwrap().to_string_lossy()
+                bundle.file_name().unwrap().to_string_lossy()
             );
         }
         Ok(o) => {
@@ -87,25 +95,40 @@ pub fn sign_stamp(state_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Verify a deploy stamp against its signature using the public key.
+/// Verify a deploy stamp using the public key. Prefers the new
+/// `.cosign.bundle` format; falls back to legacy `.sig` for stamps
+/// produced by syntaur-ship versions before the 2026-04-24 migration.
 /// Subcommand `syntaur-ship verify-stamp` calls this.
 pub fn verify_stamp(stamp_path: &Path, pubkey_path: &Path) -> Result<()> {
-    let sig = stamp_path.with_extension(
-        format!("{}.sig", stamp_path.extension().and_then(|s| s.to_str()).unwrap_or(""))
-    );
-    if !sig.exists() {
-        anyhow::bail!("no signature at {}", sig.display());
-    }
+    let ext = stamp_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let bundle = stamp_path.with_extension(format!("{ext}.cosign.bundle"));
+    let legacy_sig = stamp_path.with_extension(format!("{ext}.sig"));
+
     if !pubkey_path.exists() {
         anyhow::bail!("public key missing: {}", pubkey_path.display());
     }
+
+    let (flag, sig_path) = if bundle.exists() {
+        ("--bundle", bundle)
+    } else if legacy_sig.exists() {
+        ("--signature", legacy_sig)
+    } else {
+        anyhow::bail!(
+            "no signature at {} or {}",
+            bundle.display(),
+            legacy_sig.display()
+        );
+    };
     let status = Command::new("cosign")
         .args([
             "verify-blob",
             "--key",
             pubkey_path.to_str().unwrap(),
-            "--signature",
-            sig.to_str().unwrap(),
+            flag,
+            sig_path.to_str().unwrap(),
             stamp_path.to_str().unwrap(),
         ])
         .status()
