@@ -2359,6 +2359,59 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE user_appearance ADD COLUMN ambient_mode INTEGER NOT NULL DEFAULT 0;
     "#,
+
+    // v66: compressed agent memory (Hermes-style middle tier).
+    //
+    // The existing two layers are:
+    //   1. runtime    — live conversation turns in `messages`
+    //   2. permanent  — curated memories in `agent_memories`
+    //
+    // Missing middle tier: rolling per-turn-pair summaries that retain the
+    // substance of a chat without the token weight of raw transcripts. Fed
+    // by `agents::compressed_memory` helpers. Search is via FTS5.
+    //
+    // Runtime integration is off by default (env flag
+    // `SYNTAUR_COMPRESSED_MEMORY=1`) until we have tuned latency + quality.
+    // Schema landing now so users can opt in without a migration step.
+    r#"
+    CREATE TABLE IF NOT EXISTS agent_memory_compressed (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        agent_id         TEXT NOT NULL,
+        conversation_id  INTEGER,
+        summary          TEXT NOT NULL,
+        original_start   INTEGER,
+        original_end     INTEGER,
+        turn_count       INTEGER NOT NULL DEFAULT 0,
+        model            TEXT,
+        created_at       INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_amc_user_agent_time
+        ON agent_memory_compressed(user_id, agent_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_amc_conversation
+        ON agent_memory_compressed(conversation_id, created_at);
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS agent_memory_compressed_fts USING fts5(
+        summary,
+        content='agent_memory_compressed',
+        content_rowid='id'
+    );
+
+    CREATE TRIGGER IF NOT EXISTS amc_ai AFTER INSERT ON agent_memory_compressed BEGIN
+        INSERT INTO agent_memory_compressed_fts(rowid, summary)
+            VALUES (new.id, new.summary);
+    END;
+    CREATE TRIGGER IF NOT EXISTS amc_ad AFTER DELETE ON agent_memory_compressed BEGIN
+        INSERT INTO agent_memory_compressed_fts(agent_memory_compressed_fts, rowid, summary)
+            VALUES('delete', old.id, old.summary);
+    END;
+    CREATE TRIGGER IF NOT EXISTS amc_au AFTER UPDATE ON agent_memory_compressed BEGIN
+        INSERT INTO agent_memory_compressed_fts(agent_memory_compressed_fts, rowid, summary)
+            VALUES('delete', old.id, old.summary);
+        INSERT INTO agent_memory_compressed_fts(rowid, summary)
+            VALUES (new.id, new.summary);
+    END;
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

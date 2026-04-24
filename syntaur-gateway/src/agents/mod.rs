@@ -8,6 +8,7 @@
 //! The full design rationale (inspirations, tone dials, memory sharing,
 //! escalation rules) lives in vault/projects/syntaur_personas.md.
 
+pub mod compressed_memory;
 pub mod defaults;
 pub mod escalation;
 pub mod handoff;

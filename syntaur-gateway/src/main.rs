@@ -11402,8 +11402,85 @@ fn agent_tool_allowlist(agent_id: &str) -> Option<&'static [&'static str]> {
             // Cross-agent utilities
             "memory_recall", "memory_save", "handoff",
         ]),
-        // Every other agent (including "main", "kyron", "peter", and
-        // the not-yet-scoped specialists) gets the full tool surface.
+        // Tax specialist — receipts, expenses, returns, brackets, property,
+        // plus memory + handoff. Kept tight: tax DB tools + scan_receipt
+        // cover the workflow. If it ever needs to read an arbitrary PDF,
+        // that's a request back through main.
+        "positron" | "tax" | "module_tax" => Some(&[
+            // Tax tools (built_in_tools)
+            "log_expense", "expense_summary", "get_income", "estimate_tax",
+            "scan_receipt", "update_tax_brackets", "tax_prep_wizard",
+            "fetch_tax_brackets", "get_property_profile", "deduction_autofill",
+            "update_tax_profile",
+            // Cross-agent utilities
+            "memory_recall", "memory_save", "memory_list", "memory_update", "handoff",
+        ]),
+        // Research analyst — knowledge base search + web + read-only files.
+        // NO journal, NO shell. Aliased `file_*` names chosen over generic
+        // "read"/"write"/"edit" because the LLM picks the clearer name.
+        "cortex" | "research" | "module_research" => Some(&[
+            // Search across workspace + memory
+            "internal_search", "search_everything", "find_tool",
+            // Web
+            "web_search", "web_fetch", "json_query",
+            // Files for reading research + generating reports
+            "file_read", "list_files", "file_write",
+            "office_view", "office_get", "office_create",
+            // Cross-agent utilities
+            "memory_recall", "memory_save", "memory_list", "memory_update", "handoff",
+        ]),
+        // Coders specialist — shell, file edit, version control, reading
+        // the web for docs. Destructive commands still gate per-command at
+        // the tool layer; this allowlist simply names what's reachable.
+        "maurice" | "coders" | "module_coders" => Some(&[
+            // Execution (primary + back-compat aliases)
+            "exec", "shell", "run",
+            // File system (aliased names preferred; primaries "read"/"write"/"edit"
+            // are too generic for the LLM to pick reliably)
+            "file_read", "file_write", "file_edit", "list_files",
+            // Code execution sandbox (bwrap) for quick experiments
+            "code_execute",
+            // Search across workspace + web
+            "internal_search", "search_everything", "find_tool",
+            "web_search", "web_fetch", "json_query",
+            // Cross-agent utilities
+            "memory_recall", "memory_save", "memory_list", "memory_update", "handoff",
+        ]),
+        // Social media — platform auth + post tools + browser for composing.
+        // NO shell, NO tax/calendar/music tools.
+        "nyota" | "social" | "module_social" => Some(&[
+            // Platform auth + posting
+            "meta_oauth", "meta_refresh_token", "threads_post",
+            "youtube_token_refresh", "youtube_reauth",
+            "create_instagram_account", "create_facebook_account",
+            "create_email_account",
+            // Browser (composing, previewing, manual post flows)
+            "browser_open", "browser_close", "browser_open_and_fill",
+            "browser_fill", "browser_fill_form", "browser_click",
+            "browser_read", "browser_read_brief", "browser_screenshot",
+            "browser_find_inputs", "browser_select", "browser_set_dropdown",
+            // Office (content planning docs)
+            "office_create", "office_view", "office_get",
+            // Email (replying to DMs / engagement that lands in inbox)
+            "email_read", "email_send",
+            // Files (reading brand-voice docs, saved drafts)
+            "file_read", "list_files",
+            // Web for research
+            "web_search", "web_fetch", "json_query",
+            // Cross-agent utilities
+            "memory_recall", "memory_save", "memory_list", "memory_update", "handoff",
+        ]),
+        // Journal — deliberately the tightest allowlist. Journal-only tools
+        // + its own memory + handoff (for user-consented task extraction to
+        // Thaddeus). Absolute privacy rules in Mushi's prompt are enforced
+        // here as a tool-level second line of defense.
+        "mushi" | "journal" | "module_journal" => Some(&[
+            "search_journal", "journal_summary", "list_recordings",
+            "memory_recall", "memory_save", "memory_list", "memory_update", "memory_forget",
+            "handoff",
+        ]),
+        // Every other agent (including "main", "kyron", "peter") gets the
+        // full tool surface.
         _ => None,
     }
 }
