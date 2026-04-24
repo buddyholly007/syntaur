@@ -21,6 +21,12 @@ struct DefaultAgent {
     public_role: &'static str,
     configurable_humor_dial: bool,
     default_humor_value: Option<i64>,
+    /// When false, the shared `MEMORY_PROTOCOL` block is NOT appended at
+    /// seed time. Mushi (journal) sets this to false because her prompt
+    /// is explicit about absolute privacy — the generic protocol tells
+    /// her to proactively save user preferences and patterns, which is
+    /// exactly the behavior we want her to never exhibit.
+    include_memory_protocol: bool,
 }
 
 // ── Shared memory protocol ──────────────────────────────────────────────────
@@ -63,9 +69,14 @@ a noticeable gap. Use your loaded memories to identify the topic.
 FORGET when: user says "forget that", or you discover a saved fact is wrong."#;
 
 /// Compose the final prompt stored in the DB: persona template, a blank line,
-/// then the shared memory protocol. Cheap to re-run on every seed() call.
-fn compose_prompt(template: &str) -> String {
-    format!("{}\n\n{}", template, MEMORY_PROTOCOL)
+/// then the shared memory protocol — unless `include_protocol` is false, in
+/// which case only the template is stored. Cheap to re-run on every seed() call.
+fn compose_prompt(template: &str, include_protocol: bool) -> String {
+    if include_protocol {
+        format!("{}\n\n{}", template, MEMORY_PROTOCOL)
+    } else {
+        template.to_string()
+    }
 }
 
 // ── System prompt templates ──────────────────────────────────────────────────
@@ -604,6 +615,7 @@ const PETER: DefaultAgent = DefaultAgent {
     public_role: "Your assistant across the house. Knows what's going on in every module, handles day-to-day requests, pulls in a specialist when a topic deserves real depth.",
     configurable_humor_dial: false,
     default_humor_value: Some(4),
+    include_memory_protocol: true,
 };
 
 const KYRON: DefaultAgent = DefaultAgent {
@@ -617,6 +629,7 @@ const KYRON: DefaultAgent = DefaultAgent {
     public_role: "Your assistant across everything Syntaur does. Knows what's going on in every module, handles day-to-day requests, pulls in a specialist when a topic deserves real depth.",
     configurable_humor_dial: true,
     default_humor_value: Some(3),
+    include_memory_protocol: true,
 };
 
 const POSITRON: DefaultAgent = DefaultAgent {
@@ -630,6 +643,7 @@ const POSITRON: DefaultAgent = DefaultAgent {
     public_role: "Handles your tax records, receipts, deductions, and filings. Asks questions when things are unclear. Precise about numbers.",
     configurable_humor_dial: false,
     default_humor_value: Some(1),
+    include_memory_protocol: true,
 };
 
 const CORTEX: DefaultAgent = DefaultAgent {
@@ -643,6 +657,7 @@ const CORTEX: DefaultAgent = DefaultAgent {
     public_role: "Helps you think through questions using your documents, notes, and research. Finds connections you didn't know were there.",
     configurable_humor_dial: false,
     default_humor_value: Some(5),
+    include_memory_protocol: true,
 };
 
 const SILVR: DefaultAgent = DefaultAgent {
@@ -656,6 +671,7 @@ const SILVR: DefaultAgent = DefaultAgent {
     public_role: "Runs your music. Playlists, playback, reads the vibe.",
     configurable_humor_dial: false,
     default_humor_value: Some(5),
+    include_memory_protocol: true,
 };
 
 const THADDEUS: DefaultAgent = DefaultAgent {
@@ -669,6 +685,7 @@ const THADDEUS: DefaultAgent = DefaultAgent {
     public_role: "Keeps your calendar, todos, and commitments running. Knows what's coming next, and what should come next.",
     configurable_humor_dial: false,
     default_humor_value: Some(5),
+    include_memory_protocol: true,
 };
 
 const MAURICE: DefaultAgent = DefaultAgent {
@@ -682,6 +699,7 @@ const MAURICE: DefaultAgent = DefaultAgent {
     public_role: "Pair programmer for your terminal hosts and code. Patient, literal, genuinely excited about the problem.",
     configurable_humor_dial: false,
     default_humor_value: Some(3),
+    include_memory_protocol: true,
 };
 
 const NYOTA: DefaultAgent = DefaultAgent {
@@ -695,6 +713,7 @@ const NYOTA: DefaultAgent = DefaultAgent {
     public_role: "Your social-media editor. Drafts posts, reviews replies, runs engagement, keeps platform connections healthy. Craftsmanship over clicks.",
     configurable_humor_dial: false,
     default_humor_value: Some(4),
+    include_memory_protocol: true,
 };
 
 const MUSHI: DefaultAgent = DefaultAgent {
@@ -708,6 +727,12 @@ const MUSHI: DefaultAgent = DefaultAgent {
     public_role: "A quiet space for your journal. Listens. Reflects. Never fixes, never shares.",
     configurable_humor_dial: false,
     default_humor_value: Some(3),
+    // Journal gets no generic memory protocol. Mushi's prompt defines the
+    // single user-initiated task-extraction exception; everything else stays
+    // in the journal module. The generic protocol would tell Mushi to save
+    // user preferences and patterns into `agent_memories` where Kyron/Peter
+    // can read them — a direct violation of the privacy guarantee.
+    include_memory_protocol: false,
 };
 
 const ALL_DEFAULTS: &[&DefaultAgent] = &[
@@ -747,7 +772,7 @@ pub fn seed(conn: &Connection) -> rusqlite::Result<()> {
                 a.module_name,
                 a.default_display_name,
                 a.easter_egg_inspiration,
-                compose_prompt(a.system_prompt_template),
+                compose_prompt(a.system_prompt_template, a.include_memory_protocol),
                 a.tone_dials_json,
                 a.memory_scope_json,
                 a.public_role,
@@ -813,43 +838,158 @@ pub fn rename_agent(
 }
 
 
+/// Sanitize an identifier for use as a filesystem path segment.
+///
+/// Keeps alphanumerics + `-` + `_`; everything else collapses to `_`.
+/// Rejects empty results, leading dots (hidden files), and anything that
+/// looks like a parent-dir traversal. Used on both `agent_id` and memory
+/// `key` before they're joined into `{vault}/agent-memories/{agent}/{key}.md`
+/// so a malicious/buggy row like `agent_id = "../../.ssh"` can't escape
+/// the export root.
+fn sanitize_path_segment(raw: &str) -> Option<String> {
+    if raw.is_empty() || raw == "." || raw == ".." || raw.starts_with('.') {
+        return None;
+    }
+    let cleaned: String = raw.chars().map(|c| {
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }
+    }).collect();
+    // After sanitization the segment must still be non-empty and not a
+    // single dot-only pattern.
+    if cleaned.is_empty() || cleaned.chars().all(|c| c == '_') {
+        return None;
+    }
+    Some(cleaned)
+}
+
+/// Escape a comma-separated tag string for safe inclusion in a YAML inline
+/// flow list. Splits on comma, drops YAML-significant characters within
+/// each tag, and re-joins with `, `. Preserves list structure (so two
+/// tags don't collapse into one) while blocking injection via `]`, `:`,
+/// newlines, or unbalanced quotes.
+fn sanitize_tags_yaml(raw: &str) -> String {
+    raw.split(',')
+        .map(|tag| {
+            tag.chars()
+                .filter_map(|c| match c {
+                    ']' | '[' | ':' | '\n' | '\r' | '"' | '\'' | ',' => Some(' '),
+                    c if c.is_control() => None,
+                    c => Some(c),
+                })
+                .collect::<String>()
+                .trim()
+                .to_string()
+        })
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Escape a string for inclusion as a YAML scalar value on one line.
+///
+/// Replaces newlines + the literal `---` document separator + the null
+/// byte with spaces, then wraps the result in double quotes while
+/// escaping internal quotes and backslashes. Prevents a memory title or
+/// description like `Memory\n---\nadmin: true` from breaking the YAML
+/// frontmatter or injecting forged fields.
+fn yaml_escape_scalar(raw: &str) -> String {
+    let one_line = raw
+        .replace('\u{0000}', " ")
+        .replace("\r\n", " ")
+        .replace('\n', " ")
+        .replace('\r', " ")
+        .replace("---", "- - -");
+    let escaped = one_line.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{}\"", escaped)
+}
+
 /// Export agent memories to vault-compatible markdown files.
-/// Creates vault/agent-memories/{agent_id}/{key}.md with Obsidian frontmatter.
-/// Mushi (journal) memories are NEVER exported.
-pub fn export_to_vault(conn: &rusqlite::Connection, vault_path: &str) -> Result<usize, String> {
-    let mut stmt = conn.prepare(
-        "SELECT agent_id, memory_type, key, title, description, tags, content, \
-                confidence, importance, access_count, created_at, updated_at \
-         FROM agent_memories WHERE agent_id != 'journal' ORDER BY agent_id, key"
-    ).map_err(|e| e.to_string())?;
+///
+/// Creates `{vault}/agent-memories/{agent_id}/{key}.md` with Obsidian
+/// frontmatter. Mushi (journal) memories are NEVER exported.
+///
+/// Safety:
+///  - If `user_id` is `Some`, export is scoped to that user; if `None`,
+///    all users are exported (admin backup scenario). Callers serving a
+///    normal user request MUST pass `Some(principal.user_id())`.
+///  - `agent_id` and `key` are sanitized to alphanumerics + `-/_` before
+///    filesystem use — a row with `agent_id = "../.ssh"` can't escape
+///    the export root.
+///  - Rows are streamed one-at-a-time through `query_map`; no `.collect()`
+///    buffering the full result set in memory.
+pub fn export_to_vault(
+    conn: &rusqlite::Connection,
+    vault_path: &str,
+    user_id: Option<i64>,
+) -> Result<usize, String> {
+    let (sql, params): (&str, Vec<Box<dyn rusqlite::ToSql>>) = match user_id {
+        Some(uid) => (
+            "SELECT agent_id, memory_type, key, title, description, tags, content, \
+                    confidence, importance, access_count, created_at, updated_at \
+             FROM agent_memories \
+             WHERE agent_id != 'journal' AND user_id = ?1 \
+             ORDER BY agent_id, key",
+            vec![Box::new(uid)],
+        ),
+        None => (
+            "SELECT agent_id, memory_type, key, title, description, tags, content, \
+                    confidence, importance, access_count, created_at, updated_at \
+             FROM agent_memories WHERE agent_id != 'journal' ORDER BY agent_id, key",
+            vec![],
+        ),
+    };
 
-    let memories: Vec<(String, String, String, String, String, Option<String>, String, f64, i64, i64, i64, i64)> =
-        stmt.query_map([], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?,
-                r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?,
-                r.get(9)?, r.get(10)?, r.get(11)?))
-        }).map_err(|e| e.to_string())?
-        .filter_map(Result::ok).collect();
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
 
-    let mut count = 0;
-    for (agent, mtype, key, title, desc, tags, content, conf, imp, access, created, updated) in &memories {
-        let dir = format!("{}/agent-memories/{}", vault_path, agent);
-        std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {}", dir, e))?;
+    let mut count: usize = 0;
+    let mut created_dirs: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-        let safe_key = key.chars().map(|c| if c == '/' || c == '\\' { '_' } else { c }).collect::<String>();
+    let mut rows = stmt.query(refs.as_slice()).map_err(|e| e.to_string())?;
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let agent: String = row.get(0).map_err(|e| e.to_string())?;
+        let mtype: String = row.get(1).map_err(|e| e.to_string())?;
+        let key: String = row.get(2).map_err(|e| e.to_string())?;
+        let title: String = row.get(3).map_err(|e| e.to_string())?;
+        let desc: String = row.get::<_, Option<String>>(4).map_err(|e| e.to_string())?.unwrap_or_default();
+        let tags: Option<String> = row.get(5).map_err(|e| e.to_string())?;
+        let content: String = row.get(6).map_err(|e| e.to_string())?;
+        let conf: f64 = row.get(7).map_err(|e| e.to_string())?;
+        let imp: i64 = row.get(8).map_err(|e| e.to_string())?;
+        let access: i64 = row.get(9).map_err(|e| e.to_string())?;
+        let created: i64 = row.get(10).map_err(|e| e.to_string())?;
+        let updated: i64 = row.get(11).map_err(|e| e.to_string())?;
+
+        let Some(safe_agent) = sanitize_path_segment(&agent) else {
+            log::warn!("[memory-export] skipping row with unsafe agent_id: {:?}", agent);
+            continue;
+        };
+        let Some(safe_key) = sanitize_path_segment(&key) else {
+            log::warn!("[memory-export] skipping row with unsafe key: {:?}", key);
+            continue;
+        };
+
+        let dir = format!("{}/agent-memories/{}", vault_path, safe_agent);
+        if !created_dirs.contains(&dir) {
+            std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {}", dir, e))?;
+            created_dirs.insert(dir.clone());
+        }
         let path = format!("{}/{}.md", dir, safe_key);
 
-        let created_date = chrono::DateTime::from_timestamp(*created, 0)
+        let created_date = chrono::DateTime::from_timestamp(created, 0)
             .map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default();
-        let updated_date = chrono::DateTime::from_timestamp(*updated, 0)
+        let updated_date = chrono::DateTime::from_timestamp(updated, 0)
             .map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default();
+
+        let tags_yaml = sanitize_tags_yaml(tags.as_deref().unwrap_or(""));
 
         let file_content = format!(
             "---\nname: {}\ndescription: {}\ntype: {}\nagent: {}\ntags: [{}]\n\
 confidence: {}\nimportance: {}\naccess_count: {}\ncreated: {}\nupdated: {}\n---\n\n{}",
-            title, desc, mtype, agent,
-            tags.as_deref().unwrap_or(""),
+            yaml_escape_scalar(&title),
+            yaml_escape_scalar(&desc),
+            yaml_escape_scalar(&mtype),
+            safe_agent,
+            tags_yaml,
             conf, imp, access, created_date, updated_date, content
         );
 

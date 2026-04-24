@@ -2415,6 +2415,13 @@ const MIGRATIONS: &[&str] = &[
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+    // Enforce foreign keys on this connection. SQLite defaults to OFF;
+    // our CASCADE / SET NULL rules are no-ops without this pragma. The
+    // gateway's primary connection in `index::mod::Indexer::open` also
+    // sets this; repeating it here covers test-path in-memory Connections
+    // and any future callers that open their own connection.
+    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+
     // Ensure schema_version table exists so we can record migrations.
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);"
@@ -2433,11 +2440,21 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         if version <= current {
             continue;
         }
-        conn.execute_batch(sql)?;
-        conn.execute(
+        // Per-migration transaction so a partial failure (e.g. the second
+        // of three ALTER TABLEs in one migration string fails on a
+        // pre-existing column) rolls back cleanly. Without this, the
+        // next boot would fail with "duplicate column name" errors on
+        // the halves that already landed.
+        //
+        // `unchecked_transaction()` doesn't require `&mut Connection`,
+        // which keeps the public signature stable for callers.
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(sql)?;
+        tx.execute(
             "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
             rusqlite::params![version, chrono::Utc::now().timestamp()],
         )?;
+        tx.commit()?;
     }
     Ok(())
 }

@@ -2022,6 +2022,18 @@ async fn handle_api_message(
                         lcm.store_message(&agent_id, cid, "assistant", &text);
                     }
                 }
+                // Compressed memory middle tier — fire-and-forget. No-op when
+                // SYNTAUR_COMPRESSED_MEMORY=1 isn't set. Hot path returns
+                // immediately regardless. See projects/compressed_memory.md.
+                crate::agents::compressed_memory::spawn_compress_turn_pair(
+                    std::sync::Arc::new(state.config.clone()),
+                    state.client.clone(),
+                    state.db_path.clone(),
+                    principal.user_id(),
+                    agent_id.clone(),
+                    req.message.clone(),
+                    text.clone(),
+                );
                 // Escalation check: classify user message + track + offer if threshold met
                 let escalation_offer = if agent_id == "main" {
                     let conv_key = req.conversation_id.as_deref().unwrap_or("ephemeral");
@@ -2545,6 +2557,18 @@ async fn handle_message_start(
                             lcm.store_message(&agent_for_task, cid, "assistant", &text);
                         }
                     }
+                    // Compressed memory — fire-and-forget. Mirrors the
+                    // call in handle_api_message; off by default behind
+                    // SYNTAUR_COMPRESSED_MEMORY=1.
+                    crate::agents::compressed_memory::spawn_compress_turn_pair(
+                        std::sync::Arc::new(state_clone.config.clone()),
+                        state_clone.client.clone(),
+                        state_clone.db_path.clone(),
+                        principal_user_id,
+                        agent_for_task.clone(),
+                        message.clone(),
+                        text.clone(),
+                    );
                     let _ = tx.send(AgentTurnEvent::Complete {
                         turn_id: turn_id_for_task.clone(),
                         response: text,
@@ -4562,9 +4586,44 @@ async fn handle_data_location_change(
         return Ok(Json(serde_json::json!({"ok": false, "error": "Path must be absolute"})));
     }
 
-    // Create the new directory
+    // Validate: reject traversal segments even before canonicalization.
+    // "/home/sean/syntaur/../../etc" has `is_absolute() == true` but is
+    // an attempt to escape the intended user data root.
+    if new_dir.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return Ok(Json(serde_json::json!({"ok": false, "error": "Path must not contain .. segments"})));
+    }
+
+    // Create the directory FIRST so canonicalize() resolves real
+    // inode paths — without this, a user could pass
+    // `/home/sean/link/data` where `link` is a symlink to `/etc` and
+    // our forbidden-root check would see the non-canonical input and
+    // wave it through. Creating first, then canonicalizing, closes
+    // that bypass.
     if let Err(e) = std::fs::create_dir_all(&new_dir) {
         return Ok(Json(serde_json::json!({"ok": false, "error": format!("Cannot create directory: {e}")})));
+    }
+
+    // Validate: block system directories and any parent-of-system path.
+    let canonical = new_dir.canonicalize().unwrap_or_else(|_| new_dir.clone());
+    const FORBIDDEN_ROOTS: &[&str] = &[
+        "/etc", "/root", "/boot", "/proc", "/sys", "/dev", "/usr",
+        "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/var/log", "/var/lib",
+        "/run", "/srv",
+    ];
+    let canonical_str = canonical.to_string_lossy();
+    for forbidden in FORBIDDEN_ROOTS {
+        if canonical_str == *forbidden
+            || canonical_str.starts_with(&format!("{}/", forbidden))
+        {
+            log::warn!(
+                "[data-location] user {} tried to set data dir under {} (canonical={}, input={})",
+                user_id, forbidden, canonical_str, req.path
+            );
+            return Ok(Json(serde_json::json!({
+                "ok": false,
+                "error": "Path targets a protected system directory"
+            })));
+        }
     }
 
     // Determine old data location
@@ -10600,9 +10659,14 @@ async fn handle_api_memory_export(
     let db = state.db_path.clone();
     let vault = std::env::var("HOME").unwrap_or_else(|_| "/home/sean".to_string()) + "/vault";
     let vault_clone = vault.clone();
+    // Admin-triggered export is scoped to the caller's own memories by
+    // default — multi-user deployments must not leak cross-user content
+    // through an "export all" button. A separate explicit admin backup
+    // endpoint can pass `None` when we add one.
+    let uid = principal.user_id();
     let result = tokio::task::spawn_blocking(move || {
         let conn = rusqlite::Connection::open(&db).ok()?;
-        crate::agents::defaults::export_to_vault(&conn, &vault_clone).ok()
+        crate::agents::defaults::export_to_vault(&conn, &vault_clone, Some(uid)).ok()
     }).await.ok().flatten();
     match result {
         Some(n) => Ok(Json(serde_json::json!({"exported": n, "path": vault + "/agent-memories/"}))),
