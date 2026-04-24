@@ -23,6 +23,13 @@ struct GlobalProviderMetrics {
     /// Most recent rate-limit remaining percent (0-100) parsed from response
     /// headers. 0 = "never observed" → treated as 100 (full) in the accessor.
     rate_limit_remaining_pct: AtomicU32,
+    /// Unix epoch seconds of the most recent "hard failure" (4xx/5xx/timeout).
+    /// Used as a fast 60s cooldown that skips a provider in ranking without
+    /// involving the circuit breaker. Catches structurally-incompatible
+    /// providers (groq's 128-tool cap, cerebras-8b's 8k context limit) that
+    /// fail on every call but don't accumulate 3 consecutive failures in the
+    /// breaker because occasional successes reset its counter.
+    last_hard_failure_at: std::sync::atomic::AtomicU64,
 }
 
 static PROVIDER_METRICS: OnceLock<std::sync::Mutex<HashMap<String, Arc<GlobalProviderMetrics>>>> =
@@ -39,9 +46,24 @@ fn provider_metrics(name: &str) -> Arc<GlobalProviderMetrics> {
                 latency_ema_us: std::sync::atomic::AtomicU64::new(0),
                 total_requests: std::sync::atomic::AtomicU64::new(0),
                 rate_limit_remaining_pct: AtomicU32::new(0),
+                last_hard_failure_at: std::sync::atomic::AtomicU64::new(0),
             })
         })
         .clone()
+}
+
+/// Seconds of "don't even try" cooldown after a hard failure (4xx/5xx/timeout).
+/// Kept short so a transient failure doesn't punish a provider for long, but
+/// long enough to skip the next probe if the same request shape is tried again
+/// in quick succession.
+const HARD_FAILURE_COOLDOWN_SECS: u64 = 60;
+
+/// Get current unix timestamp in seconds. Extracted so tests can inject time.
+fn now_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 impl GlobalProviderMetrics {
@@ -74,6 +96,14 @@ impl GlobalProviderMetrics {
     fn rate_limit_pct(&self) -> u32 {
         let v = self.rate_limit_remaining_pct.load(Ordering::Relaxed);
         if v == 0 { 100 } else { v }
+    }
+
+    fn record_hard_failure(&self) {
+        self.last_hard_failure_at.store(now_epoch_secs(), Ordering::Relaxed);
+    }
+
+    fn last_hard_failure_at(&self) -> u64 {
+        self.last_hard_failure_at.load(Ordering::Relaxed)
     }
 }
 
@@ -129,8 +159,12 @@ fn extract_rate_limit_pct(headers: &reqwest::header::HeaderMap) -> Option<u32> {
 ///   order dominates by 6 orders of magnitude — same behavior as pre-v0.5.2.
 ///   Kept as an escape hatch in case a latency pick degrades quality.
 ///
-/// Unavailable providers (circuit Open) always lose to any available one,
-/// with preserved config-order retry sequence.
+/// `seconds_since_hard_failure = 0` means "no hard failure recorded yet";
+/// any non-zero value below `HARD_FAILURE_COOLDOWN_SECS` flags the provider
+/// as in cooldown — treated like unavailable so ranking skips it.
+///
+/// Unavailable providers (circuit Open or in hard-failure cooldown) always
+/// lose to any available one, with preserved config-order retry sequence.
 fn score_provider(
     position: usize,
     is_available: bool,
@@ -138,6 +172,7 @@ fn score_provider(
     total_requests: u64,
     in_flight: u32,
     rate_limit_pct: u32,
+    seconds_since_hard_failure: u64,
     position_dominant: bool,
 ) -> f64 {
     const POSITION_MULT_LEGACY: f64 = 1_000_000.0;
@@ -145,7 +180,10 @@ fn score_provider(
     const DEFAULT_LATENCY_MS: f64 = 500.0;
     const UNAVAILABLE_BIAS: f64 = 1.0e11;
 
-    if !is_available {
+    let in_hard_cooldown = seconds_since_hard_failure > 0
+        && seconds_since_hard_failure < HARD_FAILURE_COOLDOWN_SECS;
+
+    if !is_available || in_hard_cooldown {
         return UNAVAILABLE_BIAS + (position as f64) * POSITION_MULT_LEGACY;
     }
 
@@ -180,6 +218,27 @@ fn position_dominant_mode() -> bool {
         .ok()
         .as_deref()
         == Some("position")
+}
+
+/// True when an error string from `call_provider` / `call_provider_capped`
+/// indicates a "hard" failure that should put the provider in the 60s
+/// skip-in-ranking cooldown. Covers rate limits, auth/billing errors,
+/// bad-request responses (tool count over limit, context too long), and 5xx.
+/// Timeouts are handled separately via the `was_timeout` flag.
+fn is_structural_error(err: &str) -> bool {
+    err.contains("HTTP 400")
+        || err.contains("HTTP 402")
+        || err.contains("HTTP 403")
+        || err.contains("HTTP 408")
+        || err.contains("HTTP 413")
+        || err.contains("HTTP 422")
+        || err.contains("HTTP 429")
+        || err.contains("rate limited")
+        || err.contains("server error")
+        || err.contains("stream error")
+        || err.contains("empty response")
+        || err.contains("request failed")
+        || err.contains("Can't reach")
 }
 
 /// Snapshot of a provider's current state for introspection.
@@ -510,6 +569,7 @@ impl LlmChain {
     /// See `score_provider` for the pure scoring function + its tests.
     async fn ranked_order(&self) -> Vec<usize> {
         let position_dominant = position_dominant_mode();
+        let now = now_epoch_secs();
         let mut scored: Vec<(usize, f64)> = Vec::with_capacity(self.providers.len());
 
         for (i, provider) in self.providers.iter().enumerate() {
@@ -522,6 +582,8 @@ impl LlmChain {
             let total = metrics.total_requests.load(Ordering::Relaxed);
             let active = metrics.in_flight.load(Ordering::Relaxed);
             let rl_pct = metrics.rate_limit_pct();
+            let last_fail = metrics.last_hard_failure_at();
+            let secs_since_fail = if last_fail == 0 { 0 } else { now.saturating_sub(last_fail) };
 
             let score = score_provider(
                 i,
@@ -530,6 +592,7 @@ impl LlmChain {
                 total,
                 active,
                 rl_pct,
+                secs_since_fail,
                 position_dominant,
             );
 
@@ -618,9 +681,13 @@ impl LlmChain {
                 Err(e) => {
                     let latency = start.elapsed().as_millis() as u64;
                     let was_timeout = e.contains("timeout") || e.contains("timed out");
+                    let is_hard_failure = was_timeout || is_structural_error(&e);
                     {
                         let mut circuit = provider.circuit.lock().await;
                         circuit.record_failure(was_timeout);
+                    }
+                    if is_hard_failure {
+                        metrics.record_hard_failure();
                     }
 
                     if attempt < total - 1 {
@@ -705,9 +772,13 @@ impl LlmChain {
                 Err(e) => {
                     let latency = start.elapsed().as_millis() as u64;
                     let was_timeout = e.contains("timeout") || e.contains("timed out");
+                    let is_hard_failure = was_timeout || is_structural_error(&e);
                     {
                         let mut circuit = provider.circuit.lock().await;
                         circuit.record_failure(was_timeout);
+                    }
+                    if is_hard_failure {
+                        metrics.record_hard_failure();
                     }
                     if attempt < total - 1 {
                         warn!(
@@ -1093,9 +1164,9 @@ mod tests {
     use super::*;
     use reqwest::header::{HeaderMap, HeaderValue};
 
-    /// Helper to score a default "healthy, well-measured" provider at position `i`.
+    /// Helper to score a default "healthy, well-measured, never-failed" provider at position `i`.
     fn score_at(pos: usize, lat_ms: f64) -> f64 {
-        score_provider(pos, true, lat_ms, 10, 0, 100, false)
+        score_provider(pos, true, lat_ms, 10, 0, 100, 0, false)
     }
 
     #[test]
@@ -1138,8 +1209,8 @@ mod tests {
 
     #[test]
     fn unavailable_provider_always_loses_to_available() {
-        let unavailable = score_provider(0, false, 10.0, 100, 0, 100, false);
-        let very_slow_available = score_provider(6, true, 59_000.0, 100, 3, 100, false);
+        let unavailable = score_provider(0, false, 10.0, 100, 0, 100, 0, false);
+        let very_slow_available = score_provider(6, true, 59_000.0, 100, 3, 100, 0, false);
         assert!(
             very_slow_available < unavailable,
             "even a 59s available provider must outrank any unavailable one"
@@ -1148,16 +1219,16 @@ mod tests {
 
     #[test]
     fn unavailable_providers_preserve_config_order() {
-        let u0 = score_provider(0, false, 0.0, 0, 0, 100, false);
-        let u3 = score_provider(3, false, 0.0, 0, 0, 100, false);
+        let u0 = score_provider(0, false, 0.0, 0, 0, 100, 0, false);
+        let u3 = score_provider(3, false, 0.0, 0, 0, 100, 0, false);
         assert!(u0 < u3, "unavailable retry order must follow config order");
     }
 
     #[test]
     fn rate_limit_penalty_only_kicks_in_below_20_percent() {
-        let healthy = score_provider(0, true, 500.0, 10, 0, 50, false);
-        let near_limit = score_provider(0, true, 500.0, 10, 0, 15, false);
-        let at_limit = score_provider(0, true, 500.0, 10, 0, 0, false);
+        let healthy = score_provider(0, true, 500.0, 10, 0, 50, 0, false);
+        let near_limit = score_provider(0, true, 500.0, 10, 0, 15, 0, false);
+        let at_limit = score_provider(0, true, 500.0, 10, 0, 0, 0, false);
         assert_eq!(healthy, 500.0, "no penalty at 50% remaining");
         assert_eq!(near_limit, 500.0 + 500.0, "5pp below threshold → +500ms penalty");
         assert_eq!(at_limit, 500.0 + 2000.0, "0% remaining → +2000ms penalty");
@@ -1166,24 +1237,24 @@ mod tests {
     #[test]
     fn untested_provider_gets_default_latency_not_zero() {
         // n=0 avg=0.0 shouldn't score as a 0ms superstar.
-        let untested = score_provider(0, true, 0.0, 0, 0, 100, false);
-        let tested_fast = score_provider(0, true, 100.0, 5, 0, 100, false);
+        let untested = score_provider(0, true, 0.0, 0, 0, 100, 0, false);
+        let tested_fast = score_provider(0, true, 100.0, 5, 0, 100, 0, false);
         assert_eq!(untested, 500.0, "untested provider uses 500ms default");
         assert!(tested_fast < untested, "a proven-fast provider should beat an untested one");
     }
 
     #[test]
     fn in_flight_penalty_discourages_piling_onto_busy_provider() {
-        let idle = score_provider(0, true, 500.0, 10, 0, 100, false);
-        let one_in_flight = score_provider(0, true, 500.0, 10, 1, 100, false);
+        let idle = score_provider(0, true, 500.0, 10, 0, 100, 0, false);
+        let one_in_flight = score_provider(0, true, 500.0, 10, 1, 100, 0, false);
         assert!(one_in_flight > idle, "in-flight request adds penalty");
         assert_eq!(one_in_flight - idle, 250.0);
     }
 
     #[test]
     fn position_dominant_mode_reverts_to_legacy_scoring() {
-        let or_score = score_provider(0, true, 2857.0, 10, 0, 100, true);
-        let cer_score = score_provider(4, true, 555.0, 10, 0, 100, true);
+        let or_score = score_provider(0, true, 2857.0, 10, 0, 100, 0, true);
+        let cer_score = score_provider(4, true, 555.0, 10, 0, 100, 0, true);
         assert!(or_score < cer_score,
             "legacy mode: position dominates even when latency says otherwise");
     }
@@ -1226,5 +1297,81 @@ mod tests {
         h.insert("x-ratelimit-remaining-requests", HeaderValue::from_static("200"));
         h.insert("x-ratelimit-limit-requests", HeaderValue::from_static("100"));
         assert_eq!(extract_rate_limit_pct(&h), Some(100));
+    }
+
+    // ── Hard-failure cooldown ────────────────────────────────────────────
+
+    #[test]
+    fn provider_in_hard_cooldown_loses_to_slower_healthy_one() {
+        // Fast provider at position 4 with recent 400/429, vs. slow provider
+        // at position 0 with no recent failures. The cooldown should win.
+        //   secs_since_fail=10 → still in 60s cooldown → treat as unavailable.
+        let in_cooldown_fast = score_provider(4, true, 100.0, 10, 0, 100, 10, false);
+        let slow_but_healthy = score_provider(0, true, 5000.0, 10, 0, 100, 0, false);
+        assert!(
+            slow_but_healthy < in_cooldown_fast,
+            "cooldown treats 4xx'd provider as unavailable; slow-but-healthy wins"
+        );
+    }
+
+    #[test]
+    fn hard_cooldown_expires_after_60s() {
+        // 61s after the hard failure → back to normal ranking.
+        let post_cooldown = score_provider(4, true, 100.0, 10, 0, 100, 61, false);
+        let slow = score_provider(0, true, 5000.0, 10, 0, 100, 0, false);
+        assert!(post_cooldown < slow, "after 60s cooldown, latency-first takes over again");
+    }
+
+    #[test]
+    fn cooldown_respects_unavailable_bias_ordering() {
+        // Unavailable + in-cooldown both bubble up to the unavailable tier.
+        // Within that tier they preserve config-order.
+        let cooldown_pos0 = score_provider(0, true, 100.0, 10, 0, 100, 5, false);
+        let cooldown_pos3 = score_provider(3, true, 100.0, 10, 0, 100, 5, false);
+        assert!(cooldown_pos0 < cooldown_pos3,
+            "in-cooldown providers still prefer earlier config positions");
+    }
+
+    #[test]
+    fn zero_seconds_since_failure_means_never_failed_not_just_failed() {
+        // secs_since_fail=0 is the sentinel for "no hard failure recorded".
+        // A provider with secs=0 must be treated as healthy, not in cooldown.
+        let never_failed = score_provider(0, true, 500.0, 10, 0, 100, 0, false);
+        let healthy_reference = score_provider(0, true, 500.0, 10, 0, 100, 999, false);
+        assert_eq!(never_failed, healthy_reference,
+            "secs=0 is 'never failed' sentinel, same score as a long-ago failure");
+    }
+
+    // ── Structural error classifier ──────────────────────────────────────
+
+    #[test]
+    fn is_structural_error_catches_http_400_series() {
+        assert!(is_structural_error("groq returned HTTP 400 — 'tools' : maximum 128"));
+        assert!(is_structural_error("cerebras returned HTTP 402 — billing"));
+        assert!(is_structural_error("provider returned HTTP 413 — too large"));
+        assert!(is_structural_error("provider returned HTTP 422 — unprocessable"));
+        assert!(is_structural_error("provider returned HTTP 429 — too many requests"));
+    }
+
+    #[test]
+    fn is_structural_error_catches_rate_limit_and_server_errors() {
+        assert!(is_structural_error("cerebras is rate limited (HTTP 429)"));
+        assert!(is_structural_error("openrouter returned server error (502)"));
+        assert!(is_structural_error("stream error: read ECONNRESET"));
+        assert!(is_structural_error("openrouter returned an empty response"));
+    }
+
+    #[test]
+    fn is_structural_error_catches_connection_failures() {
+        assert!(is_structural_error("Can't reach lmstudio — check the server"));
+        assert!(is_structural_error("openrouter request failed: dns resolution"));
+    }
+
+    #[test]
+    fn is_structural_error_does_not_flag_success_strings() {
+        // Paranoid check: common success-path phrases must NOT trigger a cooldown.
+        assert!(!is_structural_error("text 4 chars"));
+        assert!(!is_structural_error("2 tool calls"));
+        assert!(!is_structural_error(""));
     }
 }
