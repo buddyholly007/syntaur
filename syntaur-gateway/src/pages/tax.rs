@@ -101,9 +101,6 @@ pub async fn render() -> Html<String> {
                     button onclick="showSection('filing')" id="sec-btn-filing" class="sec-tab" {
                         "Filing"
                     }
-                    button onclick="showSection('ledger')" id="sec-btn-ledger" class="sec-tab" {
-                        "Ledger"
-                    }
                 }
             }
             // Sub-tab chip row (context-sensitive — populated by showSection())
@@ -3046,28 +3043,6 @@ pub async fn render() -> Html<String> {
                         }
                     }
                 }
-                // Ledger tabs (migrated from rust-ledger 2026-04-22)
-                div id="tab-ledger-overview" class="hidden" {
-                    div id="ledger-overview-body" {
-                        div class="text-sm text-gray-400" {
-                            "Loading…"
-                        }
-                    }
-                }
-                div id="tab-ledger-accounts" class="hidden" {
-                    div id="ledger-accounts-body" {
-                        div class="text-sm text-gray-400" {
-                            "Loading…"
-                        }
-                    }
-                }
-                div id="tab-ledger-transactions" class="hidden" {
-                    div id="ledger-transactions-body" {
-                        div class="text-sm text-gray-400" {
-                            "Loading…"
-                        }
-                    }
-                }
             }
             // end left panel
             // RIGHT: Positronic Matrix (AI chat, Positron persona)
@@ -3655,7 +3630,7 @@ function authFetch(url, opts = {}) {
 }
 
 function showTab(name) {
-  ['overview', 'expenses', 'receipts', 'documents', 'property', 'connections', 'credits', 'quarterly', 'investments', 'depreciation', 'state', 'entities', 'insights', 'deductions', 'wizard', 'ledger-overview', 'ledger-accounts', 'ledger-transactions'].forEach(t => {
+  ['overview', 'expenses', 'receipts', 'documents', 'property', 'connections', 'credits', 'quarterly', 'investments', 'depreciation', 'state', 'entities', 'insights', 'deductions', 'wizard'].forEach(t => {
     const el = document.getElementById('tab-' + t);
     if (el) el.classList.toggle('hidden', t !== name);
     const btn = document.getElementById('tab-btn-' + t);
@@ -3679,102 +3654,6 @@ function showTab(name) {
   if (name === 'insights') loadInsightsTab();
   if (name === 'deductions') loadDeductionsTab();
   if (name === 'wizard') loadWizard();
-  if (name === 'ledger-overview') loadLedgerOverview();
-  if (name === 'ledger-accounts') loadLedgerAccounts();
-  if (name === 'ledger-transactions') loadLedgerTransactions();
-}
-
-// ===== Ledger sub-feature (migrated from rust-ledger 2026-04-22) =====
-let __ledgerEntityId = null;
-
-async function loadLedgerOverview() {
-  const root = document.getElementById('ledger-overview-body');
-  if (!root) return;
-  root.innerHTML = '<div class="text-sm text-gray-400">Loading…</div>';
-  try {
-    const r = await authFetch('/api/ledger/entities');
-    if (r.status === 503) {
-      root.innerHTML = '<div class="card text-sm text-gray-300">Ledger DB not yet bind-mounted. Migration pending.</div>';
-      return;
-    }
-    const d = await r.json();
-    const ents = d.entities || [];
-    if (ents.length === 0) {
-      root.innerHTML = '<div class="card text-sm">No entities. Use the standalone rust-ledger CLI to bootstrap.</div>';
-      return;
-    }
-    if (__ledgerEntityId == null && ents.length > 0) __ledgerEntityId = ents[0].id;
-    let html = '<div class="card mb-3"><div class="text-xs text-gray-400 mb-1">Active entity</div><div class="flex gap-2">';
-    for (const e of ents) {
-      const cls = (e.id === __ledgerEntityId) ? 'btn-primary' : 'btn-secondary';
-      html += `<button class="${cls}" onclick="__ledgerEntityId=${e.id};loadLedgerOverview();loadLedgerAccounts();loadLedgerTransactions()">${e.name}</button>`;
-    }
-    html += '</div></div>';
-    // YTD expense summary for this entity
-    const yr = new Date().getUTCFullYear();
-    const sumR = await authFetch(`/api/ledger/reports/expense_summary?entity_id=${__ledgerEntityId}&from=${yr}-01-01&to=${yr}-12-31`);
-    const sumD = await sumR.json();
-    const totalDollars = ((sumD.total_cents || 0) / 100).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
-    html += `<div class="card"><div class="text-xs text-gray-400 mb-1">${yr} YTD expenses</div><div class="text-2xl font-semibold mb-3">${totalDollars}</div>`;
-    if (sumD.rows && sumD.rows.length) {
-      html += '<table class="text-sm w-full"><thead><tr><th class="text-left py-1">Account</th><th class="text-right py-1">Total</th></tr></thead><tbody>';
-      for (const row of sumD.rows.slice(0, 20)) {
-        const dollars = (row.total_cents / 100).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
-        html += `<tr><td class="py-1">${row.account_name}</td><td class="text-right py-1">${dollars}</td></tr>`;
-      }
-      html += '</tbody></table>';
-    }
-    html += '</div>';
-    root.innerHTML = html;
-  } catch (e) {
-    root.innerHTML = `<div class="card text-sm text-red-400">Failed to load ledger: ${e.message || e}</div>`;
-  }
-}
-
-async function loadLedgerAccounts() {
-  const root = document.getElementById('ledger-accounts-body');
-  if (!root) return;
-  root.innerHTML = '<div class="text-sm text-gray-400">Loading…</div>';
-  try {
-    const url = '/api/ledger/accounts' + (__ledgerEntityId ? `?entity_id=${__ledgerEntityId}` : '');
-    const r = await authFetch(url);
-    if (r.status === 503) { root.innerHTML = '<div class="card text-sm">Ledger DB not bind-mounted yet.</div>'; return; }
-    const d = await r.json();
-    const accs = d.accounts || [];
-    if (accs.length === 0) { root.innerHTML = '<div class="card text-sm text-gray-400">No accounts.</div>'; return; }
-    let html = `<div class="card"><div class="text-xs text-gray-400 mb-2">${accs.length} accounts</div>`;
-    html += '<table class="text-sm w-full"><thead><tr><th class="text-left py-1">Name</th><th class="text-left py-1">Type</th><th class="text-left py-1">Institution</th></tr></thead><tbody>';
-    for (const a of accs) {
-      html += `<tr><td class="py-1">${a.name}</td><td class="py-1 text-gray-400">${a.account_type}</td><td class="py-1 text-gray-500">${a.institution || ''}</td></tr>`;
-    }
-    html += '</tbody></table></div>';
-    root.innerHTML = html;
-  } catch (e) {
-    root.innerHTML = `<div class="card text-sm text-red-400">Failed: ${e.message || e}</div>`;
-  }
-}
-
-async function loadLedgerTransactions() {
-  const root = document.getElementById('ledger-transactions-body');
-  if (!root) return;
-  root.innerHTML = '<div class="text-sm text-gray-400">Loading…</div>';
-  try {
-    const url = '/api/ledger/transactions?limit=200' + (__ledgerEntityId ? `&entity_id=${__ledgerEntityId}` : '');
-    const r = await authFetch(url);
-    if (r.status === 503) { root.innerHTML = '<div class="card text-sm">Ledger DB not bind-mounted yet.</div>'; return; }
-    const d = await r.json();
-    const txs = d.transactions || [];
-    if (txs.length === 0) { root.innerHTML = '<div class="card text-sm text-gray-400">No transactions.</div>'; return; }
-    let html = `<div class="card"><div class="text-xs text-gray-400 mb-2">${txs.length} most-recent transactions</div>`;
-    html += '<table class="text-sm w-full"><thead><tr><th class="text-left py-1">Date</th><th class="text-left py-1">Payee</th><th class="text-left py-1">Memo</th></tr></thead><tbody>';
-    for (const t of txs) {
-      html += `<tr><td class="py-1 text-gray-400">${t.txn_date}</td><td class="py-1">${t.payee || ''}</td><td class="py-1 text-gray-500">${(t.memo || '').slice(0, 60)}</td></tr>`;
-    }
-    html += '</tbody></table></div>';
-    root.innerHTML = html;
-  } catch (e) {
-    root.innerHTML = `<div class="card text-sm text-red-400">Failed: ${e.message || e}</div>`;
-  }
 }
 
 // ===== Section / sub-tab model =====
@@ -3787,7 +3666,6 @@ const TAX_SECTIONS = {
   deductions:  { label: 'Deductions',  tabs: [['deductions', 'Summary'], ['expenses', 'Expenses'], ['property', 'Property'], ['depreciation', 'Depreciation'], ['credits', 'Credits']] },
   dashboard:   { label: 'Dashboard',   tabs: [['overview', 'Year overview']] },
   filing:      { label: 'Filing',      tabs: [['wizard', 'Wizard'], ['quarterly', 'Quarterly'], ['state', 'State'], ['entities', 'Entities'], ['insights', 'Insights'], ['connections', 'Bank & brokerage']] },
-  ledger:      { label: 'Ledger',      tabs: [['ledger-overview', 'Overview'], ['ledger-accounts', 'Accounts'], ['ledger-transactions', 'Transactions']] },
 };
 
 let currentSection = 'investments';
@@ -6671,6 +6549,11 @@ loadOverview();         // populates summary data used by the KPI strip + dashbo
 loadCategories();
 loadTaxConversation();
 loadKpiStrip();         // fills the always-visible KPI tiles
+// positronMsgCount hoisted to top-of-module so updatePositronLog() can
+// read it in the top-level initial-log call below without throwing
+// ReferenceError: Cannot access 'positronMsgCount' before initialization.
+// See the corresponding comment near the function body.
+let positronMsgCount = 0;
 updateDeadlinePill();   // shows next IRS deadline if within 60 days
 showSection('investments'); // default landing — Sean's most-frequent use
 setInterval(loadKpiStrip, 90000); // refresh portfolio every 90s
@@ -6798,8 +6681,12 @@ function initPositronicBrain() {
   requestAnimationFrame(tick);
 }
 
-// Session log counter — aesthetic increment, resets daily
-let positronMsgCount = 0;
+// Session log counter — this block used to declare `let positronMsgCount`
+// here AND call updatePositronLog() earlier at top-level. With `let`
+// TDZ semantics, the early call read positronMsgCount before this line
+// ran and threw ReferenceError: Cannot access 'positronMsgCount' before
+// initialization. Declaration hoisted above the early call; function
+// body + setInterval stay here.
 function updatePositronLog() {
   const idx = document.getElementById('positron-log-index');
   if (!idx) return;

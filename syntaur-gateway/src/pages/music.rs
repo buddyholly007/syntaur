@@ -1222,6 +1222,14 @@ let lastNowPlaying = null;
 let speakersData = [];
 let djLastPrompt = '';
 let djLastTracks = [];
+// Active-local-playback flag — hoisted here (originally defined further
+// down with the local-playback machinery) because loadNowPlaying() reads
+// it at top-level via refreshAll() before the original declaration line
+// would execute. `let` hoisting still applies but the TDZ throws when the
+// early read happens. Declaring here initializes it to false before the
+// first call. Downstream sets still work because the variable is
+// module-scope.
+let localPlaybackActive = false;
 const djLikes = new Set();   // track ids the user liked
 const djDislikes = new Set(); // track ids the user disliked
 const queueTracks = [];
@@ -2451,11 +2459,10 @@ async function loadLocalTracks() {
 //   • swallows AbortError (expected when src changes mid-load).
 let lastLocalPlayAt = 0;
 let localPlayGeneration = 0;
-// Active-local-playback flag — when true, loadNowPlaying() leaves the
-// Now Playing card alone so the cloud poll doesn't overwrite local
-// state. Cleared on 'ended' / 'error' / when the user kicks off a
-// cloud playback.
-let localPlaybackActive = false;
+// Active-local-playback flag declared at script-top for TDZ safety
+// (see the early `let localPlaybackActive = false;` above). Must remain
+// module-scope so loadNowPlaying + playLocalTrack + the 'ended'/'error'
+// handlers all see the same value.
 // Web Audio graph — built lazily on the first successful play() so we
 // don't ask for an AudioContext before a user gesture. The real
 // equalizer in the Now Playing card reads frequency data from the
