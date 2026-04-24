@@ -11482,16 +11482,27 @@ fn agent_tool_allowlist(agent_id: &str) -> Option<&'static [&'static str]> {
         // Research analyst — knowledge base search + web + read-only files.
         // NO journal, NO shell. Aliased `file_*` names chosen over generic
         // "read"/"write"/"edit" because the LLM picks the clearer name.
+        //
+        // Narrowed 2026-04-24 per tools/mod.rs: search_everything unifies
+        // memory + indexer in one call specifically so models stop cycling
+        // memory_recall → internal_search → memory_list. Nemotron was
+        // doing exactly that cycle on Cortex — 7+ tool calls iterating
+        // phrasings on an absent "memory systems" doc, blowing the turn
+        // budget. Keeping ONLY search_everything on the read side forces
+        // the model to accept a single empty result instead of fan-out.
+        // memory_save + memory_list stay so Cortex can persist findings
+        // and browse its own notes; memory_recall + internal_search are
+        // deliberately dropped.
         "cortex" | "research" | "module_research" => Some(&[
-            // Search across workspace + memory
-            "internal_search", "search_everything", "find_tool",
+            // Search (single read tool — no fan-out)
+            "search_everything", "find_tool",
             // Web
             "web_search", "web_fetch", "json_query",
             // Files for reading research + generating reports
             "file_read", "list_files", "file_write",
             "office_view", "office_get", "office_create",
-            // Cross-agent utilities
-            "memory_recall", "memory_save", "memory_list", "memory_update", "handoff",
+            // Memory: save + browse only; no recall (covered by search_everything)
+            "memory_save", "memory_list", "handoff",
         ]),
         // Coders specialist — shell, file edit, version control, reading
         // the web for docs. Destructive commands still gate per-command at
