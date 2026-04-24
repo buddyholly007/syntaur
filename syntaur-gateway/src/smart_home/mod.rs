@@ -101,12 +101,23 @@ pub async fn init(db_path: std::path::PathBuf) -> Result<(), String> {
     // with a ~2s warm-up so the supervisor's sessions have a chance
     // to connect before the first config publish lands.
     let _ha_discovery = std::sync::Arc::new(
-        drivers::mqtt::publisher::HADiscoveryPublisher::new(mqtt_supervisor, db_path),
+        drivers::mqtt::publisher::HADiscoveryPublisher::new(mqtt_supervisor, db_path.clone()),
     )
     .spawn();
 
+    // Week 7 BLE driver — subscribes to the event bus, filters MQTT
+    // events coming from anchor devices the user has configured, and
+    // writes `smart_home_presence_signals` rows on a 15s tick. Single-
+    // user v1: anchors + presence writes are scoped to user_id=1
+    // (admin). Per-tenant anchors ride on the same pattern
+    // MqttSupervisor uses (credential-row-per-user) and wire in when
+    // the "Add BLE anchor" settings page lands.
+    let ble = std::sync::Arc::new(drivers::ble::BleDriver::new(1, db_path));
+    let _ble_handle = ble.clone().spawn();
+    drivers::ble::install(ble);
+
     log::info!(
-        "[smart_home] module initialized — event bus + automation + diagnostics + energy + mqtt engines spawned"
+        "[smart_home] module initialized — event bus + automation + diagnostics + energy + mqtt + ble engines spawned"
     );
     Ok(())
 }

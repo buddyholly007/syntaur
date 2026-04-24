@@ -17,6 +17,8 @@ pub async fn render() -> Html<String> {
         title: "Smart Home and Network",
         authed: true,
         extra_style: Some(EXTRA_STYLE),
+        body_class: None,
+        head_boot: None,
     };
     let body = html! {
         (top_bar("Smart Home and Network", None))
@@ -89,6 +91,87 @@ pub async fn render() -> Html<String> {
                         }
                         div id="sh-scenes-body" class="sh-summary-body" {
                             span class="sh-muted" { "Loading…" }
+                        }
+                    }
+                    article class="sh-summary-card" id="sh-card-automations" {
+                        header class="sh-summary-card-head" {
+                            h3 { "Automations" }
+                            button type="button" class="sh-btn-ghost" onclick="shOpenAutomationBuilder()" {
+                                "+ New"
+                            }
+                        }
+                        div id="sh-automations-body" class="sh-summary-body" {
+                            span class="sh-muted" { "Loading…" }
+                        }
+                    }
+                }
+
+                // Automation builder modal — hidden until the user opens it.
+                // Form-based (not drag-drop); v1.x will layer the visual
+                // canvas on top of this same save surface.
+                div id="sh-auto-modal" class="sh-modal hidden" role="dialog" aria-labelledby="sh-auto-modal-title" {
+                    div class="sh-modal-backdrop" onclick="shCloseAutomationBuilder()" {}
+                    div class="sh-modal-panel" {
+                        header class="sh-modal-head" {
+                            h2 id="sh-auto-modal-title" { "New automation" }
+                            button type="button" class="sh-btn-icon" onclick="shCloseAutomationBuilder()" title="Close" { "×" }
+                        }
+                        div class="sh-modal-body" {
+                            label class="sh-field" {
+                                span class="sh-field-label" { "Name" }
+                                input id="sh-auto-name" type="text" class="sh-input" placeholder="Bedroom dim at sunset" {}
+                            }
+
+                            section class="sh-auto-section" {
+                                header class="sh-auto-section-head" {
+                                    h3 { "Triggers" }
+                                    select id="sh-auto-add-trigger" class="sh-input sh-input-inline" onchange="shAddTrigger(this.value); this.value='';" {
+                                        option value="" { "+ Add trigger…" }
+                                        option value="time" { "Time of day" }
+                                        option value="device_state" { "Device state change" }
+                                        option value="presence" { "Presence (room)" }
+                                        option value="sensor" { "Sensor threshold" }
+                                    }
+                                }
+                                div id="sh-auto-triggers" class="sh-auto-cards" {}
+                                p class="sh-auto-hint" { "At least one trigger required. Multiple triggers fire on any match (OR)." }
+                            }
+
+                            section class="sh-auto-section" {
+                                header class="sh-auto-section-head" {
+                                    h3 { "Conditions" }
+                                    span class="sh-muted" { "optional" }
+                                    select id="sh-auto-add-condition" class="sh-input sh-input-inline" onchange="shAddCondition(this.value); this.value='';" {
+                                        option value="" { "+ Add condition…" }
+                                        option value="device_state" { "Device is in state" }
+                                        option value="time_range" { "Time of day between" }
+                                        option value="anyone_home" { "Someone home" }
+                                    }
+                                }
+                                div id="sh-auto-conditions" class="sh-auto-cards" {}
+                                p class="sh-auto-hint" { "All conditions must pass (AND)." }
+                            }
+
+                            section class="sh-auto-section" {
+                                header class="sh-auto-section-head" {
+                                    h3 { "Actions" }
+                                    select id="sh-auto-add-action" class="sh-input sh-input-inline" onchange="shAddAction(this.value); this.value='';" {
+                                        option value="" { "+ Add action…" }
+                                        option value="set_device" { "Set device state" }
+                                        option value="scene" { "Activate scene" }
+                                        option value="notify" { "Send notification" }
+                                        option value="delay" { "Wait" }
+                                    }
+                                }
+                                div id="sh-auto-actions" class="sh-auto-cards" {}
+                                p class="sh-auto-hint" { "Actions run in order." }
+                            }
+
+                            div id="sh-auto-error" class="sh-auto-error hidden" {}
+                        }
+                        footer class="sh-modal-foot" {
+                            button type="button" class="sh-btn-ghost" onclick="shCloseAutomationBuilder()" { "Cancel" }
+                            button type="button" id="sh-auto-save" class="sh-btn-primary" onclick="shSaveAutomation()" { "Save" }
                         }
                     }
                 }
@@ -392,6 +475,128 @@ const EXTRA_STYLE: &str = r#"
 }
 .sh-scene-chip:hover { background: var(--sh-panel); border-color: var(--sh-accent); }
 .sh-scene-chip:disabled { opacity: 0.6; cursor: wait; }
+
+/* ── Automation tiles + builder modal ──────────────────────────────── */
+.sh-auto-tile {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 10px; margin: 0 0 6px 0;
+    border: 1px solid var(--sh-border); border-radius: 8px;
+    background: var(--sh-panel-2);
+}
+.sh-auto-tile.sh-auto-disabled { opacity: 0.5; }
+.sh-auto-tile-body { flex: 1 1 auto; min-width: 0; }
+.sh-auto-tile-name {
+    color: var(--sh-text); font-weight: 600; font-size: 13px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sh-auto-tile-summary { color: var(--sh-muted); font-size: 11px; margin-top: 2px; }
+.sh-auto-tile-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.sh-auto-toggle {
+    appearance: none; width: 30px; height: 16px; border-radius: 999px;
+    background: var(--sh-panel); border: 1px solid var(--sh-border);
+    position: relative; cursor: pointer; transition: background 0.15s;
+}
+.sh-auto-toggle::after {
+    content: ''; position: absolute; top: 1px; left: 1px;
+    width: 12px; height: 12px; border-radius: 50%;
+    background: var(--sh-muted); transition: left 0.15s, background 0.15s;
+}
+.sh-auto-toggle:checked { background: var(--sh-accent); border-color: var(--sh-accent); }
+.sh-auto-toggle:checked::after { left: 15px; background: white; }
+.sh-auto-btn-del {
+    background: transparent; color: var(--sh-muted); border: none;
+    font-size: 14px; cursor: pointer; padding: 2px 6px;
+}
+.sh-auto-btn-del:hover { color: #ff6b6b; }
+
+/* Modal shell */
+.sh-modal {
+    position: fixed; inset: 0; z-index: 200;
+    display: flex; align-items: center; justify-content: center;
+}
+.sh-modal.hidden { display: none; }
+.sh-modal-backdrop {
+    position: absolute; inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+}
+.sh-modal-panel {
+    position: relative;
+    width: min(640px, 92vw); max-height: 88vh;
+    background: var(--sh-panel); color: var(--sh-text);
+    border: 1px solid var(--sh-border); border-radius: 12px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+    display: flex; flex-direction: column;
+}
+.sh-modal-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 16px; border-bottom: 1px solid var(--sh-border);
+}
+.sh-modal-head h2 { margin: 0; font-size: 16px; }
+.sh-modal-body {
+    padding: 14px 16px; overflow-y: auto; flex: 1 1 auto;
+}
+.sh-modal-foot {
+    display: flex; justify-content: flex-end; gap: 8px;
+    padding: 12px 16px; border-top: 1px solid var(--sh-border);
+}
+
+/* Builder form pieces */
+.sh-field { display: block; margin-bottom: 14px; }
+.sh-field-label {
+    display: block; font-size: 12px; color: var(--sh-muted);
+    text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px;
+}
+.sh-input {
+    display: block; width: 100%; box-sizing: border-box;
+    background: var(--sh-bg); color: var(--sh-text);
+    border: 1px solid var(--sh-border); border-radius: 6px;
+    padding: 7px 10px; font: inherit;
+}
+.sh-input-inline { width: auto; padding: 5px 8px; font-size: 12px; }
+.sh-input:focus { outline: none; border-color: var(--sh-accent); }
+
+.sh-auto-section { margin: 16px 0 0 0; padding-top: 12px; border-top: 1px solid var(--sh-border); }
+.sh-auto-section-head {
+    display: flex; align-items: center; gap: 10px; margin-bottom: 8px;
+}
+.sh-auto-section-head h3 {
+    font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--sh-text); margin: 0;
+}
+.sh-auto-section-head .sh-muted { font-size: 11px; }
+.sh-auto-section-head select { margin-left: auto; }
+.sh-auto-cards { display: flex; flex-direction: column; gap: 6px; }
+.sh-auto-hint { color: var(--sh-muted); font-size: 11px; margin: 6px 0 0; }
+
+.sh-auto-card {
+    padding: 8px 10px; border: 1px solid var(--sh-border); border-radius: 8px;
+    background: var(--sh-panel-2); display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.sh-auto-card-kind {
+    font-size: 11px; color: var(--sh-accent);
+    text-transform: uppercase; letter-spacing: 0.05em;
+    padding: 2px 6px; background: rgba(42, 163, 255, 0.1); border-radius: 4px;
+    white-space: nowrap;
+}
+.sh-auto-card input[type="text"], .sh-auto-card input[type="number"],
+.sh-auto-card input[type="time"], .sh-auto-card select {
+    background: var(--sh-bg); color: var(--sh-text);
+    border: 1px solid var(--sh-border); border-radius: 4px;
+    padding: 3px 6px; font: inherit; font-size: 12px;
+    min-width: 80px;
+}
+.sh-auto-card-remove {
+    margin-left: auto; background: transparent; color: var(--sh-muted);
+    border: none; cursor: pointer; font-size: 14px;
+}
+.sh-auto-card-remove:hover { color: #ff6b6b; }
+.sh-auto-error {
+    margin-top: 12px; padding: 8px 10px;
+    background: rgba(255, 107, 107, 0.08); color: #ff6b6b;
+    border: 1px solid rgba(255, 107, 107, 0.25); border-radius: 6px;
+    font-size: 12px;
+}
+.sh-auto-error.hidden { display: none; }
 .sh-scan-candidates {
     margin: 0 0 18px 0; padding: 14px 16px;
     border: 1px solid var(--sh-accent); border-radius: 12px;
@@ -1276,15 +1481,17 @@ function shDismissAllCandidates() {
 // ── Summary strip (diagnostics + energy + scenes) ──────────────────────
 
 async function shLoadSummary() {
-    // Fire all three in parallel; each section fails independently.
-    const [diag, energy, scenes] = await Promise.allSettled([
+    // Fire all four in parallel; each section fails independently.
+    const [diag, energy, scenes, autos] = await Promise.allSettled([
         shFetch('/api/smart-home/diagnostics/summary'),
         shFetch('/api/smart-home/energy/summary'),
         shFetch('/api/smart-home/scenes'),
+        shFetch('/api/smart-home/automations'),
     ]);
     shRenderDiag(diag.status === 'fulfilled' ? diag.value : null);
     shRenderEnergy(energy.status === 'fulfilled' ? energy.value : null);
     shRenderScenes(scenes.status === 'fulfilled' ? scenes.value : null);
+    shRenderAutomations(autos.status === 'fulfilled' ? autos.value : null);
 }
 
 function shRenderDiag(summary) {
@@ -1445,6 +1652,384 @@ async function shLoadScenes() {
     }
 }
 
+// ── Automation builder ─────────────────────────────────────────────────
+// List + form-based builder. Saves to /api/smart-home/automations; the
+// long-running AutomationEngine picks up new rows on its next minute
+// tick without restart. v1 is form-based — visual drag-drop canvas is
+// v1.x and will POST to the same endpoint shape.
+
+async function shLoadAutomations() {
+    try {
+        const payload = await shFetch('/api/smart-home/automations');
+        shRenderAutomations(payload);
+    } catch (e) {
+        const el = document.getElementById('sh-automations-body');
+        if (el) el.innerHTML = '<span class="sh-muted">Automations unavailable.</span>';
+        console.warn('[smart-home] automations load failed', e);
+    }
+}
+
+function shRenderAutomations(payload) {
+    const el = document.getElementById('sh-automations-body');
+    if (!el) return;
+    const rows = (payload && payload.automations) || [];
+    if (rows.length === 0) {
+        el.innerHTML = '<span class="sh-muted">No automations yet. Click + New to add one.</span>';
+        return;
+    }
+    el.innerHTML = '';
+    rows.forEach(a => {
+        const tile = document.createElement('div');
+        tile.className = 'sh-auto-tile' + (a.enabled ? '' : ' sh-auto-disabled');
+        const body = document.createElement('div');
+        body.className = 'sh-auto-tile-body';
+        const name = document.createElement('div');
+        name.className = 'sh-auto-tile-name';
+        name.textContent = a.name;
+        const summary = document.createElement('div');
+        summary.className = 'sh-auto-tile-summary';
+        summary.textContent = shSummarizeSpec(a.spec);
+        body.appendChild(name);
+        body.appendChild(summary);
+        const actions = document.createElement('div');
+        actions.className = 'sh-auto-tile-actions';
+        const toggle = document.createElement('input');
+        toggle.type = 'checkbox';
+        toggle.className = 'sh-auto-toggle';
+        toggle.checked = !!a.enabled;
+        toggle.title = a.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable';
+        toggle.onchange = () => shToggleAutomation(a.id, toggle.checked, tile);
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'sh-auto-btn-del';
+        del.textContent = '×';
+        del.title = 'Delete automation';
+        del.onclick = () => shDeleteAutomation(a.id, a.name);
+        actions.appendChild(toggle);
+        actions.appendChild(del);
+        tile.appendChild(body);
+        tile.appendChild(actions);
+        el.appendChild(tile);
+    });
+}
+
+function shSummarizeSpec(spec) {
+    if (!spec || typeof spec !== 'object') return '';
+    const triggers = (spec.triggers || []).length;
+    const conditions = (spec.conditions || []).length;
+    const actions = (spec.actions || []).length;
+    const parts = [];
+    parts.push(triggers === 1 ? '1 trigger' : triggers + ' triggers');
+    if (conditions > 0) parts.push(conditions === 1 ? '1 condition' : conditions + ' conditions');
+    parts.push(actions === 1 ? '1 action' : actions + ' actions');
+    return parts.join(' · ');
+}
+
+async function shToggleAutomation(id, enabled, tile) {
+    try {
+        await shFetch('/api/smart-home/automations/' + id + '/toggle', {
+            method: 'POST',
+            body: JSON.stringify({ enabled }),
+        });
+        if (tile) tile.classList.toggle('sh-auto-disabled', !enabled);
+    } catch (e) {
+        alert('Toggle failed: ' + e.message);
+        shLoadAutomations();  // refresh to known state
+    }
+}
+
+async function shDeleteAutomation(id, name) {
+    if (!confirm('Delete automation "' + name + '"? This cannot be undone.')) return;
+    try {
+        await shFetch('/api/smart-home/automations/' + id, { method: 'DELETE' });
+        shLoadAutomations();
+    } catch (e) {
+        alert('Delete failed: ' + e.message);
+    }
+}
+
+// Builder modal state — cleared on each open.
+const shAutoBuilder = { triggers: [], conditions: [], actions: [] };
+
+function shOpenAutomationBuilder() {
+    shAutoBuilder.triggers = [];
+    shAutoBuilder.conditions = [];
+    shAutoBuilder.actions = [];
+    document.getElementById('sh-auto-name').value = '';
+    document.getElementById('sh-auto-triggers').innerHTML = '';
+    document.getElementById('sh-auto-conditions').innerHTML = '';
+    document.getElementById('sh-auto-actions').innerHTML = '';
+    const err = document.getElementById('sh-auto-error');
+    err.classList.add('hidden');
+    err.textContent = '';
+    document.getElementById('sh-auto-modal').classList.remove('hidden');
+    setTimeout(() => document.getElementById('sh-auto-name').focus(), 0);
+}
+
+function shCloseAutomationBuilder() {
+    document.getElementById('sh-auto-modal').classList.add('hidden');
+}
+
+function shAddTrigger(kind) {
+    if (!kind) return;
+    const id = shAutoBuilder.triggers.length;
+    let card;
+    if (kind === 'time') {
+        const spec = { kind: 'time', at: '18:30', offset_min: 0 };
+        shAutoBuilder.triggers.push(spec);
+        card = shMakeCard('Time', [
+            shFieldLabel('At', shTimeInput(spec.at, v => spec.at = v)),
+            shFieldLabel('Offset (min)', shNumberInput(spec.offset_min, v => spec.offset_min = parseInt(v || '0', 10))),
+        ], () => shRemoveItem('triggers', spec, card));
+    } else if (kind === 'device_state') {
+        const spec = { kind: 'device_state', device_id: 0, equals: 'true' };
+        shAutoBuilder.triggers.push(spec);
+        card = shMakeCard('Device state', [
+            shFieldLabel('Device id', shNumberInput(spec.device_id, v => spec.device_id = parseInt(v || '0', 10))),
+            shFieldLabel('Equals (JSON)', shTextInput(spec.equals, v => spec.equals = v)),
+        ], () => shRemoveItem('triggers', spec, card));
+    } else if (kind === 'presence') {
+        const spec = { kind: 'presence', room_id: 0, person: 'any', state: 'entered' };
+        shAutoBuilder.triggers.push(spec);
+        card = shMakeCard('Presence', [
+            shFieldLabel('Room id', shNumberInput(spec.room_id, v => spec.room_id = parseInt(v || '0', 10))),
+            shFieldLabel('Person', shTextInput(spec.person, v => spec.person = v)),
+            shFieldLabel('State', shSelectInput(['entered', 'left'], spec.state, v => spec.state = v)),
+        ], () => shRemoveItem('triggers', spec, card));
+    } else if (kind === 'sensor') {
+        const spec = { kind: 'sensor', device_id: 0, above: null, below: null };
+        shAutoBuilder.triggers.push(spec);
+        card = shMakeCard('Sensor', [
+            shFieldLabel('Device id', shNumberInput(spec.device_id, v => spec.device_id = parseInt(v || '0', 10))),
+            shFieldLabel('Above', shNumberInput('', v => spec.above = v === '' ? null : parseFloat(v))),
+            shFieldLabel('Below', shNumberInput('', v => spec.below = v === '' ? null : parseFloat(v))),
+        ], () => shRemoveItem('triggers', spec, card));
+    }
+    if (card) document.getElementById('sh-auto-triggers').appendChild(card);
+}
+
+function shAddCondition(kind) {
+    if (!kind) return;
+    let card;
+    if (kind === 'device_state') {
+        const spec = { kind: 'device_state', device_id: 0, equals: 'true' };
+        shAutoBuilder.conditions.push(spec);
+        card = shMakeCard('Device is', [
+            shFieldLabel('Device id', shNumberInput(spec.device_id, v => spec.device_id = parseInt(v || '0', 10))),
+            shFieldLabel('Equals (JSON)', shTextInput(spec.equals, v => spec.equals = v)),
+        ], () => shRemoveItem('conditions', spec, card));
+    } else if (kind === 'time_range') {
+        const spec = { kind: 'time_range', start: '22:00', end: '06:00' };
+        shAutoBuilder.conditions.push(spec);
+        card = shMakeCard('Time between', [
+            shFieldLabel('Start', shTimeInput(spec.start, v => spec.start = v)),
+            shFieldLabel('End', shTimeInput(spec.end, v => spec.end = v)),
+        ], () => shRemoveItem('conditions', spec, card));
+    } else if (kind === 'anyone_home') {
+        const spec = { kind: 'anyone_home', expect: true };
+        shAutoBuilder.conditions.push(spec);
+        card = shMakeCard('Home?', [
+            shFieldLabel('Expect', shSelectInput(['true', 'false'], String(spec.expect), v => spec.expect = v === 'true')),
+        ], () => shRemoveItem('conditions', spec, card));
+    }
+    if (card) document.getElementById('sh-auto-conditions').appendChild(card);
+}
+
+function shAddAction(kind) {
+    if (!kind) return;
+    let card;
+    if (kind === 'set_device') {
+        const spec = { kind: 'set_device', device_id: 0, state: { on: true } };
+        spec.__stateStr = '{"on": true}';
+        shAutoBuilder.actions.push(spec);
+        card = shMakeCard('Set device', [
+            shFieldLabel('Device id', shNumberInput(spec.device_id, v => spec.device_id = parseInt(v || '0', 10))),
+            shFieldLabel('State (JSON)', shTextInput(spec.__stateStr, v => spec.__stateStr = v)),
+        ], () => shRemoveItem('actions', spec, card));
+    } else if (kind === 'scene') {
+        const spec = { kind: 'scene', scene_id: 0 };
+        shAutoBuilder.actions.push(spec);
+        card = shMakeCard('Scene', [
+            shFieldLabel('Scene id', shNumberInput(spec.scene_id, v => spec.scene_id = parseInt(v || '0', 10))),
+        ], () => shRemoveItem('actions', spec, card));
+    } else if (kind === 'notify') {
+        const spec = { kind: 'notify', target: 'telegram', text: '' };
+        shAutoBuilder.actions.push(spec);
+        card = shMakeCard('Notify', [
+            shFieldLabel('Target', shTextInput(spec.target, v => spec.target = v)),
+            shFieldLabel('Text', shTextInput(spec.text, v => spec.text = v)),
+        ], () => shRemoveItem('actions', spec, card));
+    } else if (kind === 'delay') {
+        const spec = { kind: 'delay', seconds: 10 };
+        shAutoBuilder.actions.push(spec);
+        card = shMakeCard('Delay', [
+            shFieldLabel('Seconds', shNumberInput(spec.seconds, v => spec.seconds = Math.max(0, parseInt(v || '0', 10)))),
+        ], () => shRemoveItem('actions', spec, card));
+    }
+    if (card) document.getElementById('sh-auto-actions').appendChild(card);
+}
+
+function shRemoveItem(bucket, spec, card) {
+    const arr = shAutoBuilder[bucket];
+    const i = arr.indexOf(spec);
+    if (i >= 0) arr.splice(i, 1);
+    if (card && card.parentNode) card.parentNode.removeChild(card);
+}
+
+function shMakeCard(kindLabel, fields, onRemove) {
+    const card = document.createElement('div');
+    card.className = 'sh-auto-card';
+    const kind = document.createElement('span');
+    kind.className = 'sh-auto-card-kind';
+    kind.textContent = kindLabel;
+    card.appendChild(kind);
+    fields.forEach(f => card.appendChild(f));
+    const rm = document.createElement('button');
+    rm.type = 'button';
+    rm.className = 'sh-auto-card-remove';
+    rm.textContent = '×';
+    rm.title = 'Remove';
+    rm.onclick = onRemove;
+    card.appendChild(rm);
+    return card;
+}
+
+function shFieldLabel(text, input) {
+    const wrap = document.createElement('label');
+    wrap.style.display = 'inline-flex';
+    wrap.style.alignItems = 'center';
+    wrap.style.gap = '4px';
+    const lbl = document.createElement('span');
+    lbl.style.fontSize = '11px';
+    lbl.style.color = 'var(--sh-muted)';
+    lbl.textContent = text;
+    wrap.appendChild(lbl);
+    wrap.appendChild(input);
+    return wrap;
+}
+
+function shTextInput(initial, onChange) {
+    const el = document.createElement('input');
+    el.type = 'text';
+    el.value = initial == null ? '' : String(initial);
+    el.oninput = () => onChange(el.value);
+    return el;
+}
+
+function shNumberInput(initial, onChange) {
+    const el = document.createElement('input');
+    el.type = 'number';
+    el.value = initial == null || initial === '' ? '' : String(initial);
+    el.oninput = () => onChange(el.value);
+    return el;
+}
+
+function shTimeInput(initial, onChange) {
+    const el = document.createElement('input');
+    el.type = 'time';
+    el.value = initial || '18:00';
+    el.oninput = () => onChange(el.value);
+    return el;
+}
+
+function shSelectInput(options, initial, onChange) {
+    const el = document.createElement('select');
+    options.forEach(opt => {
+        const o = document.createElement('option');
+        o.value = opt;
+        o.textContent = opt;
+        if (opt === initial) o.selected = true;
+        el.appendChild(o);
+    });
+    el.onchange = () => onChange(el.value);
+    return el;
+}
+
+async function shSaveAutomation() {
+    const err = document.getElementById('sh-auto-error');
+    err.classList.add('hidden');
+    const name = document.getElementById('sh-auto-name').value.trim();
+    if (!name) {
+        shShowAutoError('Name is required.');
+        return;
+    }
+    if (shAutoBuilder.triggers.length === 0) {
+        shShowAutoError('At least one trigger is required.');
+        return;
+    }
+    if (shAutoBuilder.actions.length === 0) {
+        shShowAutoError('At least one action is required.');
+        return;
+    }
+
+    // Materialize triggers (no post-processing needed — shape matches backend).
+    const triggers = shAutoBuilder.triggers.map(t => {
+        if (t.kind === 'device_state') {
+            return { ...t, equals: shParseJsonValue(t.equals) };
+        }
+        return { ...t };
+    });
+    const conditions = shAutoBuilder.conditions.map(c => {
+        if (c.kind === 'device_state') {
+            return { ...c, equals: shParseJsonValue(c.equals) };
+        }
+        return { ...c };
+    });
+    const actions = shAutoBuilder.actions.map(a => {
+        if (a.kind === 'set_device') {
+            const state = shParseJsonValue(a.__stateStr);
+            if (state === undefined) {
+                shShowAutoError('Action "Set device" has invalid JSON state.');
+                throw new Error('bad state json');
+            }
+            const out = { kind: a.kind, device_id: a.device_id, state };
+            return out;
+        }
+        return { ...a };
+    });
+
+    const body = {
+        name,
+        source: 'visual',
+        spec: { triggers, conditions, actions },
+    };
+
+    const btn = document.getElementById('sh-auto-save');
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+    try {
+        await shFetch('/api/smart-home/automations', {
+            method: 'POST',
+            body: JSON.stringify(body),
+        });
+        shCloseAutomationBuilder();
+        shLoadAutomations();
+    } catch (e) {
+        shShowAutoError('Save failed: ' + e.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Save';
+    }
+}
+
+function shShowAutoError(msg) {
+    const err = document.getElementById('sh-auto-error');
+    err.textContent = msg;
+    err.classList.remove('hidden');
+}
+
+function shParseJsonValue(s) {
+    const t = String(s || '').trim();
+    if (t === '') return undefined;
+    // Accept bare true/false/numbers/strings as well as JSON literals.
+    try { return JSON.parse(t); } catch (_) {}
+    if (t === 'true') return true;
+    if (t === 'false') return false;
+    const n = Number(t);
+    if (!Number.isNaN(n)) return n;
+    return t;
+}
+
 function shRelativeTime(ts) {
     if (!ts) return 'never';
     const nowSec = Math.floor(Date.now() / 1000);
@@ -1488,8 +2073,10 @@ function shStartEventStream() {
         console.debug('[smart-home] event stream live');
     });
     es.addEventListener('automation-fired', () => {
-        // Automations may have flipped device state; refresh the grid.
+        // Automations may have flipped device state; refresh the grid
+        // and refresh the automation tiles so last-run status updates.
         shScheduleRefresh('devices');
+        shLoadAutomations();
     });
     es.addEventListener('network-transition', () => shScheduleRefresh('diag'));
     es.addEventListener('energy-sample', () => shScheduleRefresh('energy'));

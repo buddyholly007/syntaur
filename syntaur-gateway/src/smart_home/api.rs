@@ -559,10 +559,62 @@ pub async fn handle_refresh_state(
     Ok(Json(json!({ "device": updated })))
 }
 
-// ── automation (stub) ───────────────────────────────────────────────────
+// ── automation (CRUD — plan Week 6/10 milestone) ────────────────────────
+//
+// Stores the canonical AST in `smart_home_automations.spec_json` so the
+// long-running engine (`smart_home::automation::AutomationEngine::spawn`)
+// can pick up enable/disable toggles and schema edits on its next tick
+// without restarting. The NL-compile path (`/automation/compile`) still
+// returns 501 — the LLM round-trip lands in its own milestone and is
+// orthogonal to the visual builder.
 
-pub async fn handle_list_automations() -> Json<serde_json::Value> {
-    Json(json!({ "automations": [] }))
+pub async fn handle_list_automations(
+    State(state): State<std::sync::Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let user_id = current_user_id(&state);
+    let db = state.db_path.clone();
+    let rows = tokio::task::spawn_blocking(move || -> rusqlite::Result<serde_json::Value> {
+        let conn = rusqlite::Connection::open(&db)?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, description, source, spec_json, enabled,
+                    last_run_at, last_run_status, last_run_error, created_at
+               FROM smart_home_automations
+              WHERE user_id = ?
+              ORDER BY id DESC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![user_id], |r| {
+            let id: i64 = r.get(0)?;
+            let name: String = r.get(1)?;
+            let description: Option<String> = r.get(2)?;
+            let source: String = r.get(3)?;
+            let spec_json: String = r.get(4)?;
+            let enabled: i64 = r.get(5)?;
+            let last_run_at: Option<i64> = r.get(6)?;
+            let last_run_status: Option<String> = r.get(7)?;
+            let last_run_error: Option<String> = r.get(8)?;
+            let created_at: i64 = r.get(9)?;
+            let spec: serde_json::Value =
+                serde_json::from_str(&spec_json).unwrap_or_else(|_| serde_json::json!({}));
+            Ok(json!({
+                "id": id,
+                "name": name,
+                "description": description,
+                "source": source,
+                "spec": spec,
+                "enabled": enabled == 1,
+                "last_run_at": last_run_at,
+                "last_run_status": last_run_status,
+                "last_run_error": last_run_error,
+                "created_at": created_at,
+            }))
+        })?;
+        let all: Vec<serde_json::Value> = rows.filter_map(Result::ok).collect();
+        Ok(serde_json::Value::Array(all))
+    })
+    .await
+    .map_err(|e| err_500(format!("join error: {e}")))?
+    .map_err(|e| err_500(format!("db error: {e}")))?;
+    Ok(Json(json!({ "automations": rows })))
 }
 
 pub async fn handle_compile_automation(
@@ -579,19 +631,141 @@ pub async fn handle_compile_automation(
 #[derive(Debug, Deserialize)]
 pub struct AutomationCreateBody {
     pub name: String,
+    /// `visual` (builder), `nl` (NL-compile output), `imported`.
+    /// Defaults to `visual` when empty.
+    #[serde(default)]
     pub source: String,
+    #[serde(default)]
+    pub description: Option<String>,
     pub spec: AutomationSpec,
 }
 
 pub async fn handle_create_automation(
-    Json(_body): Json<AutomationCreateBody>,
-) -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({
-            "error": "automation persistence not yet wired (week 10 milestone)"
-        })),
-    )
+    State(state): State<std::sync::Arc<AppState>>,
+    Json(body): Json<AutomationCreateBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let user_id = current_user_id(&state);
+    let db = state.db_path.clone();
+
+    if body.name.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "name must not be empty" })),
+        ));
+    }
+    // Block rules the engine can never act on — it's better to surface
+    // "invalid automation" at create time than to let it silently never
+    // fire. At least one trigger + one action is the minimum shape.
+    if body.spec.triggers.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "at least one trigger is required" })),
+        ));
+    }
+    if body.spec.actions.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "at least one action is required" })),
+        ));
+    }
+
+    let source = match body.source.trim() {
+        "" => "visual".to_string(),
+        s @ ("visual" | "nl" | "imported") => s.to_string(),
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!("source must be visual|nl|imported, got `{other}`"),
+                })),
+            ));
+        }
+    };
+    let spec_json = serde_json::to_string(&body.spec)
+        .map_err(|e| err_500(format!("serialize spec: {e}")))?;
+    let name = body.name;
+    let description = body.description;
+
+    let id = tokio::task::spawn_blocking(move || -> rusqlite::Result<i64> {
+        let conn = rusqlite::Connection::open(&db)?;
+        let now = chrono::Utc::now().timestamp();
+        conn.execute(
+            "INSERT INTO smart_home_automations
+                (user_id, name, description, source, nl_prompt, spec_json,
+                 enabled, created_at, updated_at)
+             VALUES (?, ?, ?, ?, NULL, ?, 1, ?, ?)",
+            rusqlite::params![
+                user_id, name, description, source, spec_json, now, now
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    })
+    .await
+    .map_err(|e| err_500(format!("join error: {e}")))?
+    .map_err(|e| err_500(format!("db error: {e}")))?;
+    Ok(Json(json!({ "id": id })))
+}
+
+pub async fn handle_delete_automation(
+    State(state): State<std::sync::Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let user_id = current_user_id(&state);
+    let db = state.db_path.clone();
+    let n = tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
+        let conn = rusqlite::Connection::open(&db)?;
+        conn.execute(
+            "DELETE FROM smart_home_automations WHERE user_id = ? AND id = ?",
+            rusqlite::params![user_id, id],
+        )
+    })
+    .await
+    .map_err(|e| err_500(format!("join error: {e}")))?
+    .map_err(|e| err_500(format!("db error: {e}")))?;
+    if n == 0 {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "automation not found" })),
+        ));
+    }
+    Ok(Json(json!({ "deleted": n })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AutomationToggleBody {
+    pub enabled: bool,
+}
+
+/// POST /api/smart-home/automations/{id}/toggle — flip the enabled bit.
+/// Cheaper than a full UPDATE with the whole body, and the common case
+/// (user toggling a tile from the builder list) doesn't need a PUT.
+pub async fn handle_toggle_automation(
+    State(state): State<std::sync::Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(body): Json<AutomationToggleBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let user_id = current_user_id(&state);
+    let db = state.db_path.clone();
+    let enabled_int: i64 = if body.enabled { 1 } else { 0 };
+    let n = tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
+        let conn = rusqlite::Connection::open(&db)?;
+        let now = chrono::Utc::now().timestamp();
+        conn.execute(
+            "UPDATE smart_home_automations SET enabled = ?, updated_at = ?
+             WHERE user_id = ? AND id = ?",
+            rusqlite::params![enabled_int, now, user_id, id],
+        )
+    })
+    .await
+    .map_err(|e| err_500(format!("join error: {e}")))?
+    .map_err(|e| err_500(format!("db error: {e}")))?;
+    if n == 0 {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "automation not found" })),
+        ));
+    }
+    Ok(Json(json!({ "updated": n, "enabled": body.enabled })))
 }
 
 // ── scenes ──────────────────────────────────────────────────────────────
