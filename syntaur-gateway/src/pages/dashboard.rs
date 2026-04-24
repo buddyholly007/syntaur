@@ -771,7 +771,11 @@ body.sd-quiet .sd-tile.sd-tile-system { display: none; }
 .sd-edit-act:hover { background: var(--bg-hover); }
 .sd-edit-act-done { color: var(--accent); font-weight: 600; }
 
-/* First-run tooltip — shown once via localStorage. */
+/* First-run tooltip — shown once via localStorage + auto-dismissed
+   after 10s. On narrow viewports the prior `position: absolute;
+   right: 0` anchor put it RIGHT over the Chat widget (verify caught
+   it on tablet + mobile screenshots). Fixed-position full-width
+   banner below the topbar on ≤768px so it takes its own space. */
 .sd-first-run-tip {
   position: absolute; top: calc(100% + 8px); right: 0;
   background: var(--bg-card); border: 1px solid var(--accent-line);
@@ -788,6 +792,13 @@ body.sd-quiet .sd-tile.sd-tile-system { display: none; }
 .sd-first-run-tip .sd-tip-close {
   margin-left: 8px; color: var(--fg-mute); background: transparent;
   border: none; cursor: pointer; font-size: 14px;
+}
+@media (max-width: 768px) {
+  .sd-first-run-tip {
+    position: fixed; top: 56px; left: 12px; right: 12px;
+    max-width: none;
+  }
+  .sd-first-run-tip::before { display: none; }
 }
 
 /* ── Drawer (Add widget) ────────────────────────────────────────── */

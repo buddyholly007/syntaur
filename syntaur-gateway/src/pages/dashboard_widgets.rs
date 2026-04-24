@@ -1066,15 +1066,19 @@ impl DashboardWidget for QuickActionsWidget {
         let _id = &ctx.instance_id;
         // Each action: (href, label, glyph). Keep the set small + high-signal.
         // Users can expand this via Customize → Widget config in a later pass.
+        // Icons were previously decorative glyphs (✿ ❦ ▲ ⌂ ›_ ◑) which
+        // Opus flagged as "unclear visual indicators" during a verify
+        // run. Replaced with widely-recognized emoji that read as the
+        // thing they are.
         let actions: &[(&str, &str, &str)] = &[
             ("/scheduler",  "Scheduler",  "📅"),
-            ("/journal",    "Journal",    "✿"),
-            ("/music",      "Music",      "♫"),
-            ("/knowledge",  "Knowledge",  "❦"),
-            ("/tax",        "Tax",        "▲"),
-            ("/smart-home", "Smart home", "⌂"),
-            ("/coders",     "Coders",     "›_"),
-            ("/social",     "Social",     "◑"),
+            ("/journal",    "Journal",    "📔"),
+            ("/music",      "Music",      "🎵"),
+            ("/knowledge",  "Knowledge",  "📚"),
+            ("/tax",        "Tax",        "💰"),
+            ("/smart-home", "Smart home", "🏠"),
+            ("/coders",     "Coders",     "💻"),
+            ("/social",     "Social",     "💬"),
         ];
         let count = match size {
             WidgetSize::S  => 1,
