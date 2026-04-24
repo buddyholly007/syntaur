@@ -117,6 +117,26 @@ pub async fn render() -> Html<String> {
                             button type="button" class="sh-btn-icon" onclick="shCloseAutomationBuilder()" title="Close" { "×" }
                         }
                         div class="sh-modal-body" {
+                            // Natural-language compile section (Week 7).
+                            // Posts to /automation/compile; returns
+                            // summary+spec+warnings; populates the form
+                            // below. User always gets to review before
+                            // saving — never auto-persists from NL.
+                            section class="sh-auto-section sh-auto-nl" {
+                                header class="sh-auto-section-head" {
+                                    h3 { "Describe in English" }
+                                    span class="sh-muted" { "Claude Opus compiles it" }
+                                }
+                                textarea id="sh-auto-nl-prompt" class="sh-input sh-input-area"
+                                    rows="2"
+                                    placeholder="turn on the porch light at sunset" {}
+                                div class="sh-auto-nl-foot" {
+                                    button type="button" id="sh-auto-nl-btn" class="sh-btn-ghost"
+                                        onclick="shCompileAutomation()" { "Compile →" }
+                                    span id="sh-auto-nl-status" class="sh-muted" {}
+                                }
+                                div id="sh-auto-nl-warnings" class="sh-auto-warnings hidden" {}
+                            }
                             label class="sh-field" {
                                 span class="sh-field-label" { "Name" }
                                 input id="sh-auto-name" type="text" class="sh-input" placeholder="Bedroom dim at sunset" {}
@@ -597,6 +617,28 @@ const EXTRA_STYLE: &str = r#"
     font-size: 12px;
 }
 .sh-auto-error.hidden { display: none; }
+
+/* Natural-language compile section inside the builder modal */
+.sh-auto-nl { padding-top: 0; border-top: none; margin-top: 0; }
+.sh-input-area {
+    width: 100%; box-sizing: border-box; resize: vertical; min-height: 48px;
+    background: var(--sh-bg); color: var(--sh-text);
+    border: 1px solid var(--sh-border); border-radius: 6px;
+    padding: 8px 10px; font: inherit;
+}
+.sh-auto-nl-foot {
+    display: flex; align-items: center; gap: 10px; margin-top: 6px;
+}
+.sh-auto-nl-foot .sh-muted { font-size: 11px; }
+.sh-auto-warnings {
+    margin-top: 10px; padding: 8px 10px;
+    background: rgba(255, 193, 7, 0.08); color: #ffca3a;
+    border: 1px solid rgba(255, 193, 7, 0.25); border-radius: 6px;
+    font-size: 11px;
+}
+.sh-auto-warnings.hidden { display: none; }
+.sh-auto-warnings ul { margin: 4px 0 0 0; padding-left: 16px; }
+
 .sh-scan-candidates {
     margin: 0 0 18px 0; padding: 14px 16px;
     border: 1px solid var(--sh-accent); border-radius: 12px;
@@ -1766,6 +1808,7 @@ const shAutoBuilder = {
     conditions: [],
     actions: [],
     editingId: null,
+    sourceMode: 'visual',  // 'visual' | 'nl' | 'imported' — flipped by shCompileAutomation
 };
 const shAutoRefData = { devices: [], rooms: [], scenes: [] };
 
@@ -1789,10 +1832,16 @@ async function shOpenAutomationBuilder(existing) {
     shAutoBuilder.conditions = [];
     shAutoBuilder.actions = [];
     shAutoBuilder.editingId = (existing && existing.id) || null;
+    shAutoBuilder.sourceMode = (existing && existing.source) || 'visual';
     document.getElementById('sh-auto-name').value = (existing && existing.name) || '';
     document.getElementById('sh-auto-triggers').innerHTML = '';
     document.getElementById('sh-auto-conditions').innerHTML = '';
     document.getElementById('sh-auto-actions').innerHTML = '';
+    document.getElementById('sh-auto-nl-prompt').value = '';
+    document.getElementById('sh-auto-nl-status').textContent = '';
+    const nlWarn = document.getElementById('sh-auto-nl-warnings');
+    nlWarn.classList.add('hidden');
+    nlWarn.innerHTML = '';
     document.getElementById('sh-auto-modal-title').textContent =
         existing ? 'Edit automation' : 'New automation';
     document.getElementById('sh-auto-save').textContent = existing ? 'Save changes' : 'Save';
@@ -1817,6 +1866,72 @@ async function shOpenAutomationBuilder(existing) {
 
 function shCloseAutomationBuilder() {
     document.getElementById('sh-auto-modal').classList.add('hidden');
+}
+
+async function shCompileAutomation() {
+    const prompt = document.getElementById('sh-auto-nl-prompt').value.trim();
+    const status = document.getElementById('sh-auto-nl-status');
+    const warnBox = document.getElementById('sh-auto-nl-warnings');
+    warnBox.classList.add('hidden');
+    warnBox.innerHTML = '';
+    if (!prompt) {
+        status.textContent = 'Type a description first';
+        return;
+    }
+    const btn = document.getElementById('sh-auto-nl-btn');
+    btn.disabled = true;
+    btn.textContent = 'Compiling…';
+    status.textContent = '';
+    try {
+        const preview = await shFetch('/api/smart-home/automation/compile', {
+            method: 'POST',
+            body: JSON.stringify({ prompt }),
+        });
+        const spec = (preview && preview.spec) || {};
+        const summary = (preview && preview.summary) || '';
+        const warnings = (preview && preview.warnings) || [];
+
+        // Wipe current spec + repopulate from compiled result.
+        shAutoBuilder.triggers = [];
+        shAutoBuilder.conditions = [];
+        shAutoBuilder.actions = [];
+        shAutoBuilder.sourceMode = 'nl';
+        document.getElementById('sh-auto-triggers').innerHTML = '';
+        document.getElementById('sh-auto-conditions').innerHTML = '';
+        document.getElementById('sh-auto-actions').innerHTML = '';
+        // Make sure dropdowns have fresh inventory data in case it
+        // drifted while the user was typing.
+        await shLoadAutoRefData();
+        (spec.triggers || []).forEach(t => shAddTrigger(t.kind, t));
+        (spec.conditions || []).forEach(c => shAddCondition(c.kind, c));
+        (spec.actions || []).forEach(a => shAddAction(a.kind, a));
+
+        // Populate name if empty — use the first ~50 chars of summary.
+        const nameEl = document.getElementById('sh-auto-name');
+        if (!nameEl.value.trim() && summary) {
+            nameEl.value = summary.length > 50 ? summary.slice(0, 50) : summary;
+        }
+        status.textContent = summary || 'Compiled';
+        if (warnings.length) {
+            warnBox.classList.remove('hidden');
+            const ul = document.createElement('ul');
+            warnings.forEach(w => {
+                const li = document.createElement('li');
+                li.textContent = w;
+                ul.appendChild(li);
+            });
+            const lead = document.createElement('div');
+            lead.textContent = warnings.length + ' warning(s) — review before saving:';
+            warnBox.appendChild(lead);
+            warnBox.appendChild(ul);
+        }
+    } catch (e) {
+        status.textContent = '';
+        shShowAutoError('Compile failed: ' + e.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Compile →';
+    }
 }
 
 function shAddTrigger(kind, initial) {
@@ -2121,7 +2236,11 @@ async function shSaveAutomation() {
 
     const body = {
         name,
-        source: 'visual',
+        // `source` marks where the spec came from — NL-compiled specs
+        // get 'nl', hand-built stays 'visual', DB import stays 'imported'.
+        // The automation-runs surface groups by source for "how much
+        // of your config came from the LLM" analytics.
+        source: shAutoBuilder.sourceMode || 'visual',
         spec: { triggers, conditions, actions },
     };
 

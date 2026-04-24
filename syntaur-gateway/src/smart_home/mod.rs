@@ -113,6 +113,14 @@ pub async fn init(db_path: std::path::PathBuf) -> Result<(), String> {
     // MqttSupervisor uses (credential-row-per-user) and wire in when
     // the "Add BLE anchor" settings page lands.
     let ble = std::sync::Arc::new(drivers::ble::BleDriver::new(1, db_path));
+    // Hydrate the anchor set from smart_home_devices.state_json->ble_anchor
+    // before the ingest loop starts subscribing. If the DB has no
+    // anchor rows (fresh install), this is a no-op — users seed anchors
+    // via `PUT /api/smart-home/ble/anchors`, which also writes them
+    // back to the DB so subsequent restarts recover the config.
+    if let Err(e) = ble.hydrate_from_db().await {
+        log::warn!("[smart_home] ble anchor hydrate failed (non-fatal): {e}");
+    }
     let _ble_handle = ble.clone().spawn();
     drivers::ble::install(ble);
 

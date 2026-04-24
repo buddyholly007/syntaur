@@ -617,15 +617,23 @@ pub async fn handle_list_automations(
     Ok(Json(json!({ "automations": rows })))
 }
 
+/// POST /api/smart-home/automation/compile — natural-language → AST.
+/// Returns a preview (summary + spec + warnings) that the UI renders
+/// in the builder; explicit POST /automations is still required to
+/// persist.
 pub async fn handle_compile_automation(
-    Json(_body): Json<super::nl_automation::CompileRequest>,
-) -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({
-            "error": "nl_automation::compile not yet implemented (week 7 milestone)"
-        })),
-    )
+    State(state): State<std::sync::Arc<AppState>>,
+    Json(body): Json<super::nl_automation::CompileRequest>,
+) -> Result<Json<super::nl_automation::CompilePreview>, (StatusCode, Json<serde_json::Value>)> {
+    let user_id = current_user_id(&state);
+    let db = state.db_path.clone();
+    match super::nl_automation::compile(user_id, db, body).await {
+        Ok(preview) => Ok(Json(preview)),
+        Err(e) => Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e })),
+        )),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1229,4 +1237,150 @@ pub async fn handle_diagnostics_sweep(
         "sweep": report,
         "summary": summary,
     })))
+}
+
+// ── BLE anchor config (Week 7 follow-up) ────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct BleAnchorBody {
+    pub anchor_device_id: i64,
+    pub room_id: i64,
+    #[serde(default = "default_rssi_at_1m")]
+    pub rssi_at_1m: i16,
+}
+
+fn default_rssi_at_1m() -> i16 {
+    -50
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BleAnchorsReplaceBody {
+    pub anchors: Vec<BleAnchorBody>,
+}
+
+/// GET /api/smart-home/ble/anchors — list current anchor config.
+/// Populated from runtime map that `ble::BleDriver::hydrate_from_db`
+/// loaded at startup, or that a previous PUT supplied.
+pub async fn handle_list_ble_anchors(
+    State(state): State<std::sync::Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let Some(driver) = super::drivers::ble::installed() else {
+        return Ok(Json(json!({
+            "anchors": [],
+            "note": "BLE driver not installed in this build",
+        })));
+    };
+    let _ = current_user_id(&state);
+    let snapshot = driver.anchors_snapshot().await;
+    let mut rows: Vec<serde_json::Value> = snapshot
+        .into_values()
+        .map(|a| {
+            json!({
+                "anchor_device_id": a.anchor_device_id,
+                "anchor_label": a.anchor_label,
+                "room_id": a.room_id,
+                "rssi_at_1m": a.rssi_at_1m,
+            })
+        })
+        .collect();
+    rows.sort_by_key(|v| v["anchor_device_id"].as_i64().unwrap_or(0));
+    Ok(Json(json!({ "anchors": rows })))
+}
+
+/// PUT /api/smart-home/ble/anchors — replace the anchor set. Writes
+/// through to `smart_home_devices.state_json->ble_anchor` per row so
+/// the config survives gateway restart. Strips `ble_anchor` from any
+/// device that WAS an anchor but isn't in the new set.
+pub async fn handle_put_ble_anchors(
+    State(state): State<std::sync::Arc<AppState>>,
+    Json(body): Json<BleAnchorsReplaceBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let Some(driver) = super::drivers::ble::installed() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "BLE driver not installed in this build" })),
+        ));
+    };
+    let user_id = current_user_id(&state);
+    let db = state.db_path.clone();
+
+    // Validate every referenced device + room exists before writing —
+    // reject the whole body if any id is dangling so the caller never
+    // gets a half-applied update.
+    let validation = {
+        let body_anchors = body.anchors.iter()
+            .map(|a| (a.anchor_device_id, a.room_id))
+            .collect::<Vec<_>>();
+        tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<String>> {
+            let conn = rusqlite::Connection::open(&db)?;
+            let mut errors = Vec::new();
+            for (dev_id, room_id) in body_anchors {
+                let dev_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM smart_home_devices WHERE user_id = ? AND id = ?",
+                    rusqlite::params![user_id, dev_id],
+                    |r| r.get(0),
+                ).unwrap_or(0);
+                if dev_count == 0 {
+                    errors.push(format!("anchor_device_id={dev_id} not found"));
+                }
+                let room_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM smart_home_rooms WHERE user_id = ? AND id = ?",
+                    rusqlite::params![user_id, room_id],
+                    |r| r.get(0),
+                ).unwrap_or(0);
+                if room_count == 0 {
+                    errors.push(format!("room_id={room_id} not found"));
+                }
+            }
+            Ok(errors)
+        })
+        .await
+        .map_err(|e| err_500(format!("join error: {e}")))?
+        .map_err(|e| err_500(format!("db error: {e}")))?
+    };
+    if !validation.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid references", "details": validation })),
+        ));
+    }
+
+    // Build the new map. anchor_label is pulled fresh from the device
+    // row — the caller doesn't supply it (prevents stale labels).
+    let mut new_anchors: std::collections::HashMap<i64, super::drivers::ble::AnchorConfig> =
+        std::collections::HashMap::new();
+    for a in body.anchors {
+        // Label lookup: query the device name. If the query fails we
+        // still accept the anchor with a placeholder label — the
+        // driver doesn't need the label for correctness, only for logs.
+        let db = state.db_path.clone();
+        let dev_id = a.anchor_device_id;
+        let label = tokio::task::spawn_blocking(move || -> rusqlite::Result<String> {
+            let conn = rusqlite::Connection::open(&db)?;
+            conn.query_row(
+                "SELECT name FROM smart_home_devices WHERE user_id = ? AND id = ?",
+                rusqlite::params![user_id, dev_id],
+                |r| r.get(0),
+            )
+        })
+        .await
+        .map_err(|e| err_500(format!("join error: {e}")))?
+        .unwrap_or_else(|_| format!("device-{dev_id}"));
+
+        new_anchors.insert(
+            a.anchor_device_id,
+            super::drivers::ble::AnchorConfig {
+                anchor_device_id: a.anchor_device_id,
+                anchor_label: label,
+                room_id: a.room_id,
+                rssi_at_1m: a.rssi_at_1m,
+            },
+        );
+    }
+
+    let written = driver
+        .persist_anchors(new_anchors)
+        .await
+        .map_err(|e| err_500(format!("persist: {e}")))?;
+    Ok(Json(json!({ "written": written })))
 }

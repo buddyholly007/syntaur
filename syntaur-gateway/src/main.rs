@@ -6825,6 +6825,11 @@ async fn main() {
             post(smart_home::api::handle_compile_automation),
         )
         .route(
+            "/api/smart-home/ble/anchors",
+            get(smart_home::api::handle_list_ble_anchors)
+                .put(smart_home::api::handle_put_ble_anchors),
+        )
+        .route(
             "/api/smart-home/diagnostics/summary",
             get(smart_home::api::handle_diagnostics_summary),
         )

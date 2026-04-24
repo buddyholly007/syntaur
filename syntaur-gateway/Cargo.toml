@@ -121,6 +121,11 @@ rust-kasa = { path = "../crates/rust-kasa" }
 rust-nexia = { path = "../crates/rust-nexia" }
 syntaur-matter = { path = "../crates/syntaur-matter" }
 syntaur-matter-ble = { path = "../crates/syntaur-matter-ble" }
+# Week 7: nl_automation.rs talks to the local syntaur-vault agent for
+# the `openrouter` key; anyhow powers the vault-error bubble-up path
+# (matches syntaur-verify's OpusClient::from_vault pattern).
+anyhow = { workspace = true }
+syntaur-vault = { path = "../crates/syntaur-vault" }
 
 [dev-dependencies]
 # Used by #[cfg(test)] modules (crypto, schema migrations, etc.).

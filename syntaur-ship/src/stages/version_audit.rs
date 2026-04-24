@@ -98,13 +98,20 @@ fn proxied_curl(url: &str) -> Option<String> {
 
 fn landing_badge(cfg: &crate::config::Config) -> Result<String> {
     // Go through the jump host — same reason as health_version.
-    let root = cfg.health_url.replace("/health", "/");
-    let body = proxied_curl(&root)
-        .ok_or_else(|| anyhow::anyhow!("jump-proxied curl of {root} failed"))?;
+    //
+    // Hit `/landing` explicitly, not `/`: the root route serves the
+    // authed dashboard (`pages::dashboard::render`), which does NOT
+    // emit VERSION-BADGE markers. `pages::landing::render` — the
+    // public marketing page — embeds
+    // `<!-- VERSION-BADGE -->v{CARGO_PKG_VERSION}<!-- /VERSION-BADGE -->`
+    // at compile time, so hitting /landing is what we want.
+    let landing = cfg.health_url.replace("/health", "/landing");
+    let body = proxied_curl(&landing)
+        .ok_or_else(|| anyhow::anyhow!("jump-proxied curl of {landing} failed"))?;
     let marker = "<!-- VERSION-BADGE -->v";
     let end = "<!-- /VERSION-BADGE -->";
     let Some(i) = body.find(marker) else {
-        anyhow::bail!("VERSION-BADGE marker not in prod / response");
+        anyhow::bail!("VERSION-BADGE marker not in /landing response");
     };
     let after = &body[i + marker.len()..];
     let Some(j) = after.find(end) else {

@@ -290,6 +290,170 @@ impl BleDriver {
         self.anchors.lock().await.len()
     }
 
+    /// Snapshot the current anchor config — GET /api/smart-home/ble/anchors
+    /// hands this straight to the client.
+    pub async fn anchors_snapshot(&self) -> HashMap<i64, AnchorConfig> {
+        self.anchors.lock().await.clone()
+    }
+
+    /// Hydrate the anchor config from SQLite on startup. Reads any
+    /// `smart_home_devices` row whose `state_json` contains a
+    /// `ble_anchor` key. The JSON shape is `{ "ble_anchor": { "room_id":
+    /// N, "rssi_at_1m": -50 } }` — a flat object we merge into the
+    /// device's runtime state.
+    ///
+    /// Called once from `smart_home::init` after the DB is ready, so
+    /// restarts recover the anchor set without user intervention.
+    pub async fn hydrate_from_db(&self) -> Result<usize, String> {
+        let db = self.db_path.clone();
+        let user_id = self.user_id;
+        let anchors = tokio::task::spawn_blocking(
+            move || -> rusqlite::Result<HashMap<i64, AnchorConfig>> {
+                let conn = Connection::open(&db)?;
+                let mut stmt = conn.prepare(
+                    "SELECT id, name, state_json FROM smart_home_devices
+                      WHERE user_id = ? AND state_json IS NOT NULL",
+                )?;
+                let rows = stmt.query_map(rusqlite::params![user_id], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    ))
+                })?;
+                let mut out = HashMap::new();
+                for row in rows.filter_map(Result::ok) {
+                    let (id, name, state_json) = row;
+                    let Ok(v) = serde_json::from_str::<Value>(&state_json) else {
+                        continue;
+                    };
+                    let Some(a) = v.get("ble_anchor") else { continue };
+                    let Some(room_id) = a.get("room_id").and_then(|r| r.as_i64()) else {
+                        continue;
+                    };
+                    let rssi_at_1m = a
+                        .get("rssi_at_1m")
+                        .and_then(|r| r.as_i64())
+                        .map(|r| r.clamp(i16::MIN as i64, i16::MAX as i64) as i16)
+                        .unwrap_or(-50);
+                    out.insert(
+                        id,
+                        AnchorConfig {
+                            anchor_device_id: id,
+                            anchor_label: name,
+                            room_id,
+                            rssi_at_1m,
+                        },
+                    );
+                }
+                Ok(out)
+            },
+        )
+        .await
+        .map_err(|e| format!("join: {e}"))?
+        .map_err(|e| format!("db: {e}"))?;
+        let n = anchors.len();
+        self.set_anchors(anchors).await;
+        log::info!("[smart_home::ble] hydrated {} anchor(s) from DB", n);
+        Ok(n)
+    }
+
+    /// Persist a replacement anchor set and refresh runtime. Writes
+    /// `state_json->ble_anchor` into each target device row. Any anchor
+    /// device that USED to be configured but isn't in `new_anchors`
+    /// gets its `ble_anchor` key stripped — equivalent to "un-anchor".
+    /// Atomic per row via rusqlite transaction.
+    pub async fn persist_anchors(
+        &self,
+        new_anchors: HashMap<i64, AnchorConfig>,
+    ) -> Result<usize, String> {
+        let previous = self.anchors_snapshot().await;
+        let db = self.db_path.clone();
+        let user_id = self.user_id;
+        let to_write = new_anchors.clone();
+        let previous_ids: Vec<i64> = previous.keys().copied().collect();
+
+        let (written, cleared) = tokio::task::spawn_blocking(
+            move || -> rusqlite::Result<(usize, usize)> {
+                let mut conn = Connection::open(&db)?;
+                let tx = conn.transaction()?;
+                // Write new/updated anchors.
+                for (device_id, cfg) in &to_write {
+                    let existing: Option<String> = tx
+                        .query_row(
+                            "SELECT state_json FROM smart_home_devices WHERE user_id = ? AND id = ?",
+                            rusqlite::params![user_id, device_id],
+                            |row| row.get(0),
+                        )
+                        .ok();
+                    let mut existing_val: Value = existing
+                        .as_deref()
+                        .and_then(|s| serde_json::from_str(s).ok())
+                        .unwrap_or_else(|| serde_json::json!({}));
+                    let obj = existing_val
+                        .as_object_mut()
+                        .expect("object");
+                    obj.insert(
+                        "ble_anchor".to_string(),
+                        serde_json::json!({
+                            "room_id": cfg.room_id,
+                            "rssi_at_1m": cfg.rssi_at_1m,
+                        }),
+                    );
+                    tx.execute(
+                        "UPDATE smart_home_devices SET state_json = ?
+                          WHERE user_id = ? AND id = ?",
+                        rusqlite::params![
+                            existing_val.to_string(),
+                            user_id,
+                            device_id
+                        ],
+                    )?;
+                }
+                // Strip ble_anchor from devices that used to be anchors but aren't any more.
+                let mut cleared_count = 0usize;
+                for id in &previous_ids {
+                    if to_write.contains_key(id) {
+                        continue;
+                    }
+                    let existing: Option<String> = tx
+                        .query_row(
+                            "SELECT state_json FROM smart_home_devices WHERE user_id = ? AND id = ?",
+                            rusqlite::params![user_id, id],
+                            |row| row.get(0),
+                        )
+                        .ok();
+                    let Some(raw) = existing else { continue };
+                    let Ok(mut v) = serde_json::from_str::<Value>(&raw) else {
+                        continue;
+                    };
+                    if let Some(obj) = v.as_object_mut() {
+                        if obj.remove("ble_anchor").is_some() {
+                            tx.execute(
+                                "UPDATE smart_home_devices SET state_json = ?
+                                  WHERE user_id = ? AND id = ?",
+                                rusqlite::params![v.to_string(), user_id, id],
+                            )?;
+                            cleared_count += 1;
+                        }
+                    }
+                }
+                tx.commit()?;
+                Ok((to_write.len(), cleared_count))
+            },
+        )
+        .await
+        .map_err(|e| format!("join: {e}"))?
+        .map_err(|e| format!("db: {e}"))?;
+
+        self.set_anchors(new_anchors).await;
+        log::info!(
+            "[smart_home::ble] persisted {} anchor(s); cleared {} stale",
+            written, cleared
+        );
+        Ok(written)
+    }
+
     /// Spawn both loops. The returned handle completes only when both
     /// inner tasks exit (typically never — this is a supervised driver).
     pub fn spawn(self: Arc<Self>) -> JoinHandle<()> {
