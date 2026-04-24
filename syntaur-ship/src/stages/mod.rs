@@ -8,6 +8,7 @@ pub mod mac_mini;
 pub mod preflight;
 pub mod snapshot;
 pub mod truenas;
+pub mod verify;
 pub mod version_audit;
 pub mod version_sweep;
 pub mod viewer;

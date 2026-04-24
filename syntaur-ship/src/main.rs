@@ -83,6 +83,13 @@ struct Cli {
     #[arg(long, global = true)]
     force_ci_drift: bool,
 
+    /// Skip the syntaur-verify visual audit (Phase 6). The audit is
+    /// the only automated gate catching UX regressions between the
+    /// Mac Mini smoke and TrueNAS deploy — use only if the tool is
+    /// known-broken or the deploy is critical and manual-reviewed.
+    #[arg(long, global = true)]
+    skip_verify: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -149,6 +156,7 @@ fn main() -> ExitCode {
         skip_git: cli.skip_git,
         social_only: cli.social_only,
         force_ci_drift: cli.force_ci_drift,
+        skip_verify: cli.skip_verify,
     };
 
     let result = match cli.command {

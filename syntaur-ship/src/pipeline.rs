@@ -34,6 +34,10 @@ pub struct RunOptions {
     /// can't be fixed until an unrelated release cadence). Logged into
     /// the journal as an explicit skip-flag so it's auditable.
     pub force_ci_drift: bool,
+    /// Skip the syntaur-verify visual audit stage. Emergency flag —
+    /// the audit is the only automated gate on UX regressions between
+    /// Mac Mini smoke and TrueNAS deploy.
+    pub skip_verify: bool,
 }
 
 pub struct StageContext<'a> {
@@ -273,6 +277,11 @@ fn run_full_inner(cfg: &Config, opts: &RunOptions, ctx: &StageContext) -> Result
         // Canary: re-probe Mac Mini /health after 45s to catch
         // delayed-crash bugs before rsync'ing to TrueNAS.
         stages::canary::run(ctx)?;
+        // Phase 6: syntaur-verify visual audit against Mac Mini. Fails
+        // the pipeline on regressions (console errors, visual diffs,
+        // Opus-flagged regressions) before TrueNAS is touched. Opt-out
+        // via --skip-verify for emergencies.
+        stages::verify::run(ctx)?;
         if !opts.skip_git {
             stages::git_push::run(ctx)?;
         } else {
