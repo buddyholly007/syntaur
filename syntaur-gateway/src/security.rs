@@ -53,6 +53,64 @@ pub fn bearer_from_headers(headers: &axum::http::HeaderMap) -> &str {
         .unwrap_or("")
 }
 
+/// Universal session-token extractor. Tries `Authorization: Bearer …`
+/// first, then falls back to the `syntaur_token` HttpOnly cookie set
+/// by `handle_login` / `handle_refresh_cookie`.
+///
+/// Returns `String` (not `&str`) because the cookie value comes out
+/// of an iterator over the `Cookie:` header — the slice doesn't
+/// outlive the function. Callers are already `.to_string()`-ing the
+/// `bearer_from_headers` result, so this is the same shape with a
+/// strictly broader detection path.
+///
+/// **The cookie is the durable layer.** sessionStorage / localStorage
+/// can be wiped by browser cache clearing, transient 401 handlers
+/// (now banned per `vault/feedback/never_clear_token_on_401.md`),
+/// private-window switches, etc. The cookie survives all of that.
+pub fn extract_session_token(headers: &axum::http::HeaderMap) -> String {
+    // 1. Authorization: Bearer <token> — the canonical path JS uses
+    let bearer = bearer_from_headers(headers);
+    if !bearer.is_empty() {
+        return bearer.to_string();
+    }
+    // 2. Cookie: syntaur_token=<token> — the durable fallback
+    if let Some(cookie_header) = headers.get("cookie").and_then(|v| v.to_str().ok()) {
+        for pair in cookie_header.split(';') {
+            let pair = pair.trim();
+            if let Some(rest) = pair.strip_prefix("syntaur_token=") {
+                let val = rest.trim();
+                if !val.is_empty() {
+                    return val.to_string();
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+/// Build a `Set-Cookie` header value for the session token.
+///
+/// Attributes:
+///   * `HttpOnly`     — JS can't read it, defends against XSS
+///   * `SameSite=Lax` — sent on top-level GETs from other origins
+///                      (so links from Telegram / email work) but not
+///                      on cross-origin POSTs (so CSRF still blocked
+///                      by the existing same-origin middleware path)
+///   * `Path=/`       — site-wide
+///   * `Max-Age=2592000` — 30 days, matches the "remember me" pattern
+///   * No `Secure`    — gateway is served plain HTTP on the LAN. When
+///                      we move to HTTPS prod, flip this on.
+pub fn session_cookie_header(token: &str) -> String {
+    format!(
+        "syntaur_token={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000"
+    )
+}
+
+/// `Set-Cookie` value that clears the session cookie. Used by logout.
+pub fn clear_session_cookie_header() -> &'static str {
+    "syntaur_token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+}
+
 // ── 1. bootstrap_loopback_only ─────────────────────────────────────────────
 
 /// When the `users` table is empty, bootstrap surfaces are reachable only

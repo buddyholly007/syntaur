@@ -425,10 +425,40 @@ pub async fn first_run_redirect(
 
 /// POST /api/auth/login — exchange password or token for a valid API token.
 /// Tries: gateway password, gateway token, user API token.
+/// Build a `(HeaderMap, Json<LoginResponse>)` pair with the
+/// session-cookie Set-Cookie header attached. Wraps a successful
+/// login response so the user gets BOTH the body-side token (for
+/// JS sessionStorage) AND the HttpOnly cookie (durable, survives
+/// browser cache clearing).
+fn login_success_with_cookie(token: String) -> (axum::http::HeaderMap, Json<LoginResponse>) {
+    let mut h = axum::http::HeaderMap::new();
+    if let Ok(v) = crate::security::session_cookie_header(&token).parse() {
+        h.insert(axum::http::header::SET_COOKIE, v);
+    }
+    (
+        h,
+        Json(LoginResponse {
+            success: true,
+            token: Some(token),
+            error: None,
+        }),
+    )
+}
+fn login_failure(error: String) -> (axum::http::HeaderMap, Json<LoginResponse>) {
+    (
+        axum::http::HeaderMap::new(),
+        Json(LoginResponse {
+            success: false,
+            token: None,
+            error: Some(error),
+        }),
+    )
+}
+
 pub async fn handle_login(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoginRequest>,
-) -> Result<Json<LoginResponse>, StatusCode> {
+) -> Result<(axum::http::HeaderMap, Json<LoginResponse>), StatusCode> {
     // Global login rate limit (legacy — cheap first gate).
     let limit = state.config.security.rate_limit_login_per_minute;
     if limit > 0 {
@@ -455,32 +485,22 @@ pub async fn handle_login(
             serde_json::json!({ "identity": identity, "wait_secs": wait }),
             None, None,
         ).await;
-        return Ok(Json(LoginResponse {
-            success: false,
-            token: None,
-            error: Some("Too many failed attempts. Please wait a few minutes and try again.".to_string()),
-        }));
+        return Ok(login_failure(
+            "Too many failed attempts. Please wait a few minutes and try again.".to_string(),
+        ));
     }
 
     // Try 1: check if it's a valid user API token (ocp_*)
     if let Ok(Some(_resolved)) = state.users.resolve_token(&req.password).await {
         state.login_limiter.note_login_success(&identity);
-        return Ok(Json(LoginResponse {
-            success: true,
-            token: Some(req.password.clone()),
-            error: None,
-        }));
+        return Ok(login_success_with_cookie(req.password.clone()));
     }
 
     // Try 2: per-user password auth (username + password)
     if let Some(ref username) = req.username {
         if let Ok(Some(user)) = state.users.get_user_by_name(username).await {
             if user.disabled {
-                return Ok(Json(LoginResponse {
-                    success: false,
-                    token: None,
-                    error: Some("Account is disabled".to_string()),
-                }));
+                return Ok(login_failure("Account is disabled".to_string()));
             }
             if state.users.verify_password(user.id, &req.password).await.unwrap_or(false) {
                 if let Ok(token) = state.users.mint_token_with_expiry(user.id, "dashboard-session", Some(48)).await {
@@ -493,11 +513,7 @@ pub async fn handle_login(
                         serde_json::json!({ "method": "password" }),
                         None, None,
                     ).await;
-                    return Ok(Json(LoginResponse {
-                        success: true,
-                        token: Some(token),
-                        error: None,
-                    }));
+                    return Ok(login_success_with_cookie(token));
                 }
             }
             state.login_limiter.note_login_failure(&identity);
@@ -509,11 +525,7 @@ pub async fn handle_login(
                 serde_json::json!({ "reason": "bad_password", "username": username }),
                 None, None,
             ).await;
-            return Ok(Json(LoginResponse {
-                success: false,
-                token: None,
-                error: Some("Invalid username or password".to_string()),
-            }));
+            return Ok(login_failure("Invalid username or password".to_string()));
         }
         // Unknown username. Still notes a failure against the typed
         // identity so enumeration + guess is throttled together.
@@ -526,11 +538,7 @@ pub async fn handle_login(
             serde_json::json!({ "reason": "unknown_username", "username": username }),
             None, None,
         ).await;
-        return Ok(Json(LoginResponse {
-            success: false,
-            token: None,
-            error: Some("Invalid username or password".to_string()),
-        }));
+        return Ok(login_failure("Invalid username or password".to_string()));
     }
 
     // Try 3: if no username was supplied, try the primary admin user's
@@ -558,34 +566,54 @@ pub async fn handle_login(
         if let Ok(users) = state.users.list_users().await {
             if let Some(user) = users.first() {
                 if let Ok(token) = state.users.mint_token_with_expiry(user.id, "dashboard-session", Some(48)).await {
-                    return Ok(Json(LoginResponse {
-                        success: true,
-                        token: Some(token),
-                        error: None,
-                    }));
+                    return Ok(login_success_with_cookie(token));
                 }
             }
         }
         // mint_token failure is a real server error — don't silently succeed.
-        return Ok(Json(LoginResponse {
-            success: false,
-            token: None,
-            error: Some("Login succeeded but token mint failed. Check gateway logs.".to_string()),
-        }));
+        return Ok(login_failure(
+            "Login succeeded but token mint failed. Check gateway logs.".to_string(),
+        ));
     }
 
     state.login_limiter.note_login_failure(&identity);
-    Ok(Json(LoginResponse {
-        success: false,
-        token: None,
-        error: Some("Invalid password".to_string()),
-    }))
+    Ok(login_failure("Invalid password".to_string()))
 }
 
 #[derive(Deserialize)]
 pub struct LoginRequest {
     pub password: String,
     pub username: Option<String>,
+}
+
+/// POST /api/auth/refresh-cookie
+///
+/// Validates the current Authorization: Bearer token. If it resolves
+/// to a real user, sets the durable `syntaur_token` HttpOnly cookie
+/// so subsequent requests authenticate via cookie even when JS
+/// storage gets wiped (cache clear, transient 401 bug, private
+/// window). No body.
+///
+/// Used by `TOP_BAR_SCRIPT` immediately after a magic-link
+/// `?token=...` seeds sessionStorage — promotes the URL token to a
+/// durable cookie in one round-trip.
+pub async fn handle_refresh_cookie(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> Result<(axum::http::HeaderMap, Json<serde_json::Value>), StatusCode> {
+    let token = crate::security::extract_session_token(&headers);
+    if token.is_empty() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    // Validate via the same path /api/* uses — only mint a cookie if
+    // the token resolves to a real, non-revoked, non-expired user.
+    crate::resolve_principal(&state, &token).await?;
+
+    let mut out = axum::http::HeaderMap::new();
+    if let Ok(v) = crate::security::session_cookie_header(&token).parse() {
+        out.insert(axum::http::header::SET_COOKIE, v);
+    }
+    Ok((out, Json(serde_json::json!({ "ok": true }))))
 }
 
 #[derive(Serialize)]

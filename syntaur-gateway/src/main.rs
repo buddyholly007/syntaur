@@ -1822,10 +1822,12 @@ async fn handle_api_message(
     headers: axum::http::HeaderMap,
     Json(req): Json<ApiMessageRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    // Same auth resolution chain as handle_message_start. See that
+    // handler's comment for why we accept body / header / cookie.
     let token = if !req.token.is_empty() {
         req.token.clone()
     } else {
-        crate::security::bearer_from_headers(&headers).to_string()
+        crate::security::extract_session_token(&headers)
     };
     let principal = resolve_principal(&state, &token).await?;
 
@@ -2358,16 +2360,14 @@ async fn handle_message_start(
     Json(req): Json<ApiMessageRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     // Token resolution order: body field (legacy) → Authorization
-    // Bearer header → empty (which 401s in resolve_principal). The
-    // body field is the historical migration target; new callers
-    // that send only the Bearer header used to 401 here because the
-    // body field deserialised as empty. Header fallback closes the
-    // gap so chat / scheduler / tax / music / etc. all work without
-    // touching every call site.
+    // Bearer header → syntaur_token cookie → empty (which 401s).
+    // The cookie is the durable layer; sessionStorage can be wiped
+    // (cache clear, private window, prior 401-bounce bug) but the
+    // cookie survives, so the user keeps working without ceremony.
     let token = if !req.token.is_empty() {
         req.token.clone()
     } else {
-        crate::security::bearer_from_headers(&headers).to_string()
+        crate::security::extract_session_token(&headers)
     };
     let principal = resolve_principal(&state, &token).await?;
     let agent_id = req.agent.clone().unwrap_or_else(|| "main".to_string());
@@ -7083,6 +7083,7 @@ async fn main() {
         .route("/onboarding", get(pages::onboarding::render))
         .route("/profile", get(pages::profile::render))
         .route("/api/auth/login", post(setup::handle_login))
+        .route("/api/auth/refresh-cookie", post(setup::handle_refresh_cookie))
         .route("/api/auth/refresh", post(handle_auth_refresh))
         .route("/api/auth/stream-token", post(handle_auth_stream_token))
         .route("/api/auth/pair-client", post(handle_auth_pair_client))

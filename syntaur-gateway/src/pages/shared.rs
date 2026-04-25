@@ -431,6 +431,16 @@ const TOP_BAR_SCRIPT: &str = r##"
       url.searchParams.delete('token');
       const cleaned = url.pathname + (url.search ? url.search : '') + url.hash;
       try { history.replaceState(null, '', cleaned); } catch (_) {}
+      // Promote the URL token to a durable HttpOnly cookie so a future
+      // sessionStorage wipe doesn't strand the user. Fire-and-forget;
+      // failure is non-fatal because storage is already seeded.
+      try {
+        fetch('/api/auth/refresh-cookie', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Authorization': 'Bearer ' + tok },
+        }).catch(() => {});
+      } catch (_) {}
     }
   } catch (_) {}
 
