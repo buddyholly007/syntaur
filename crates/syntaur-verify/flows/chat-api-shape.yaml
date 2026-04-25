@@ -1,0 +1,66 @@
+# Regression flow for the 2026-04-25 "Connection error: The string did
+# not match the expected pattern" bug.
+#
+# Server-side, /api/message/start (and /api/message) was rejecting any
+# request without a `token` field in the body, even when a valid Bearer
+# header was present, because of an outdated `ApiMessageRequest`
+# struct. On Safari this surfaced as a cryptic `.json()` exception
+# because the 422 response body was empty.
+#
+# This flow asserts both endpoints accept Bearer-only auth (or 401
+# cleanly when not auth'd). 401 is the success state for unauth runs —
+# the bug looked like 422 with empty body. Anything OTHER than 401
+# without an auth header means CSRF / deserialization is rejecting
+# valid-shape requests again.
+name: "Chat API: /api/message + /start accept bearer-only"
+module: chat
+steps:
+  # Test 1: /api/message/start with Bearer header but no token in body.
+  # Expected: 401 (auth required, rejected cleanly) — NOT 422 (body
+  # malformed) and NOT 5xx.
+  - eval: |
+      (async () => {
+        const r = await fetch('/api/message/start', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer not-a-real-token',
+          },
+          body: JSON.stringify({ message: 'hi', agent: 'main' }),
+        });
+        if (r.status === 422) {
+          throw new Error('REGRESSION: /api/message/start 422 — body deserialization rejecting bearer-only auth (the 2026-04-25 bug)');
+        }
+        if (r.status >= 500) {
+          throw new Error('REGRESSION: /api/message/start 5xx — server crashed on bearer-only auth');
+        }
+        // 401 is the expected outcome for a fake token; anything in
+        // 200/401 is fine.
+        if (r.status !== 401 && r.status !== 200) {
+          throw new Error('UNEXPECTED: /api/message/start returned ' + r.status);
+        }
+        return { ok: true, status: r.status };
+      })()
+
+  # Test 2: same shape against /api/message (the non-streaming path).
+  - eval: |
+      (async () => {
+        const r = await fetch('/api/message', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer not-a-real-token',
+          },
+          body: JSON.stringify({ message: 'hi', agent: 'main' }),
+        });
+        if (r.status === 422) {
+          throw new Error('REGRESSION: /api/message 422 — body deserialization rejecting bearer-only auth');
+        }
+        if (r.status >= 500) {
+          throw new Error('REGRESSION: /api/message 5xx');
+        }
+        if (r.status !== 401 && r.status !== 200) {
+          throw new Error('UNEXPECTED: /api/message returned ' + r.status);
+        }
+        return { ok: true, status: r.status };
+      })()

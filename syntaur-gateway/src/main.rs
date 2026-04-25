@@ -1065,6 +1065,15 @@ async fn handle_stats(State(state): State<Arc<AppState>>) -> Json<GatewayStats> 
 
 #[derive(serde::Deserialize)]
 struct ApiMessageRequest {
+    /// Body-position token kept for backward compat with callers that
+    /// haven't migrated to `Authorization: Bearer`. New callers omit
+    /// this and rely on the header; the handler falls back to the
+    /// header when this is empty / missing. Default + Option means
+    /// missing-field deserialization no longer 422s the request,
+    /// which on Safari surfaces as a cryptic "The string did not
+    /// match the expected pattern" because `.json()` chokes on the
+    /// empty 422 body.
+    #[serde(default)]
     token: String,
     agent: Option<String>,
     message: String,
@@ -1810,9 +1819,15 @@ async fn resolve_agent(state: &AppState, agent_id: &str, user_id: i64) -> Resolv
 
 async fn handle_api_message(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<ApiMessageRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let principal = resolve_principal(&state, &req.token).await?;
+    let token = if !req.token.is_empty() {
+        req.token.clone()
+    } else {
+        crate::security::bearer_from_headers(&headers).to_string()
+    };
+    let principal = resolve_principal(&state, &token).await?;
 
     let agent_id = req.agent.unwrap_or_else(|| "main".to_string());
     let resolved = resolve_agent(&state, &agent_id, principal.user_id()).await;
@@ -2339,9 +2354,22 @@ struct ResearchClarifyRequest {
 
 async fn handle_message_start(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<ApiMessageRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let principal = resolve_principal(&state, &req.token).await?;
+    // Token resolution order: body field (legacy) → Authorization
+    // Bearer header → empty (which 401s in resolve_principal). The
+    // body field is the historical migration target; new callers
+    // that send only the Bearer header used to 401 here because the
+    // body field deserialised as empty. Header fallback closes the
+    // gap so chat / scheduler / tax / music / etc. all work without
+    // touching every call site.
+    let token = if !req.token.is_empty() {
+        req.token.clone()
+    } else {
+        crate::security::bearer_from_headers(&headers).to_string()
+    };
+    let principal = resolve_principal(&state, &token).await?;
     let agent_id = req.agent.clone().unwrap_or_else(|| "main".to_string());
     let turn_id = format!("turn-{}", uuid::Uuid::new_v4().simple());
 

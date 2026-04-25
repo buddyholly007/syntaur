@@ -3598,6 +3598,14 @@ const PAGE_JS: &str = r##"
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + TOKEN },
         body: JSON.stringify({ message: text, agent: 'thaddeus', conversation_id: cid }),
       });
+      // Defensive: a non-OK response often has an empty body, which
+      // makes Safari's `.json()` throw "The string did not match the
+      // expected pattern" — a cryptic error that loses the actual
+      // status code. Surface the HTTP status so 401/422/5xx triage
+      // is fast.
+      if (!startResp.ok) {
+        throw new Error(`/api/message/start returned HTTP ${startResp.status}`);
+      }
       const startData = await startResp.json();
       const turnId = startData.turn_id;
 
