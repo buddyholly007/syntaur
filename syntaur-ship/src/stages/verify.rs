@@ -78,6 +78,23 @@ pub fn run(ctx: &StageContext) -> Result<()> {
         // the normal (non-ship) code path which defaults to diff-mode.
         "--update-baselines",
     ]);
+    // Run the regression-flow corpus if any anonymous-safe flows
+    // exist in the workspace's flows/ dir. These catch interactive
+    // bugs the screenshot sweep misses — the 2026-04-25 module-reset
+    // bug shipped through unauth-screenshot verify because every page
+    // returned 200, but only a flow that asserts URL stays at
+    // /scheduler after navigation could have caught the JS bounce.
+    let flows_dir = ctx
+        .cfg
+        .workspace
+        .join("crates/syntaur-verify/flows");
+    if flows_dir.is_dir() {
+        cmd.arg("--flows-dir").arg(&flows_dir);
+        log::info!(
+            ">> verify: running regression flows from {}",
+            flows_dir.display()
+        );
+    }
     // Opus vision is opt-in when either the vault agent is running OR
     // OPENROUTER_API_KEY is set in this process's env. The verify
     // binary detects both and degrades heuristic-only otherwise.
