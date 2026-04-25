@@ -96,7 +96,15 @@ pub fn shell(page: Page, body_content: Markup) -> Markup {
                 @if page.authed {
                     (PreEscaped(GLOBAL_MINI_PLAYER_HTML))
                     (PreEscaped(TOP_BAR_SCRIPT))
-                    (PreEscaped(SPA_ROUTER_SCRIPT))
+                    // SPA router temporarily disabled — WebKitGTK's
+                    // detached-audio behavior plus per-page init
+                    // collisions caused real regressions on prod
+                    // (audio still pausing on nav, pill vanishing,
+                    // modules palette dead on /music). Need a heavier
+                    // per-page cleanup protocol + DOM-park-don't-detach
+                    // for the audio element before re-enabling. Tracked
+                    // in projects/syntaur_seamless_music.md Phase 3.
+                    // SPA_ROUTER_SCRIPT kept in source for the next pass.
                     (bug_report_overlay())
                 }
             }
@@ -933,6 +941,11 @@ const TOP_BAR_SCRIPT: &str = r##"
 /// middle, target=_blank) fall through to native navigation. Errors of
 /// any kind (404, parse failure, network) fall back to a hard redirect
 /// so the user never lands on a broken half-swapped page.
+///
+/// Currently disabled — see shell() body comment for the regression
+/// notes. Re-enabled by un-commenting the (PreEscaped(SPA_ROUTER_SCRIPT))
+/// line once the audio-park protocol is in place.
+#[allow(dead_code)]
 const SPA_ROUTER_SCRIPT: &str = r##"
 <script>
 (function() {

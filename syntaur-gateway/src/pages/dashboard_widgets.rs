@@ -227,6 +227,9 @@ impl DashboardWidget for NowPlayingWidget {
                         button class="sd-np-btn" data-act="next" aria-label="Next" { "›" }
                     }
                 }
+                div class="sd-np-progress" {
+                    div class="sd-np-progress-fill" data-slot="progress" style="width:0%" {}
+                }
             },
             WidgetSize::L => html! {
                 div class="sd-np-row sd-np-row-l" {
