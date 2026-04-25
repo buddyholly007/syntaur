@@ -468,7 +468,7 @@ pub async fn security_headers(req: Request, next: Next) -> Response {
          style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
          img-src 'self' data: blob: https:; \
          font-src 'self' data: https://fonts.gstatic.com; \
-         connect-src 'self' https: wss: ws:; \
+         connect-src 'self' https: wss: ws: http://127.0.0.1:18790 http://localhost:18790; \
          frame-ancestors 'none'; \
          base-uri 'self'; \
          form-action 'self'; \
