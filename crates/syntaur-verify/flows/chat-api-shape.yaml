@@ -15,6 +15,11 @@
 name: "Chat API: /api/message + /start accept bearer-only"
 module: chat
 steps:
+  # Need a page loaded before fetch() will use the gateway origin —
+  # any same-origin URL works; /landing is anon-safe + cheap.
+  - goto: "/landing"
+    wait_ms: 500
+
   # Test 1: /api/message/start with Bearer header but no token in body.
   # Expected: 401 (auth required, rejected cleanly) — NOT 422 (body
   # malformed) and NOT 5xx.
