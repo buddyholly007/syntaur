@@ -18,7 +18,7 @@
 use axum::response::Html;
 use maud::{html, Markup, PreEscaped};
 
-use super::shared::{shell, top_bar as shared_top_bar, Page};
+use super::shared::{shell, Page};
 
 // Legacy JS + shared modals stay as raw strings (JS can't be maud; modals
 // are a dense tangle of dialogs the JS expects at specific IDs).
@@ -36,11 +36,12 @@ pub async fn render() -> Html<String> {
         extra_style: Some(EXTRA_STYLE),
         body_class: None,
         head_boot: None,
+        crumb: None,
+        topbar_status: None,
     };
     // Substitute the server-rendered palette index into the JS template.
     let resolved_js = NEW_JS.replace("%%SS_INDEX%%", &palette_index_json());
     let body = html! {
-        (shared_top_bar("Settings", None))
         (sub_crumb_bar())
         // Agents page CSS — scoped via `.agent-*` class names so it's safe
         // to load globally. Powers the inlined Agent manager on the Agents

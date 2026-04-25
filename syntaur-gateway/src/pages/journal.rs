@@ -22,9 +22,10 @@ pub async fn render() -> Html<String> {
         extra_style: Some(EXTRA_STYLE),
         body_class: None,
         head_boot: None,
+        crumb: None,
+        topbar_status: None,
     };
     let body = html! {
-        (top_bar_standard("Journal"))
         (journal_hero())
         (chip_bar())
         div class="j-shell" {

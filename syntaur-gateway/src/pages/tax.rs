@@ -14,6 +14,8 @@ pub async fn render() -> Html<String> {
         extra_style: Some(EXTRA_STYLE),
         body_class: None,
         head_boot: None,
+        crumb: None,
+        topbar_status: None,
     };
     let body = html! {
         // Module paywall overlay (hidden by default, shown if module is locked)
@@ -70,7 +72,6 @@ pub async fn render() -> Html<String> {
             }
         }
         // Shared global top bar
-        (top_bar("Tax", None))
         // Tax-specific sub-bar — deadline pill + year selector. The
         // deadline-pill element ID is preserved so updateDeadlinePill JS
         // keeps updating it in place.

@@ -33,9 +33,10 @@ pub async fn render() -> Html<String> {
         // while theme.rs was still loading.
         body_class: Some("syntaur-ambient min-h-screen"),
         head_boot: Some(DASHBOARD_HEAD_BOOT),
+        crumb: None,
+        topbar_status: None,
     };
     let body = html! {
-        (top_bar("Dashboard", None))
         style { (PreEscaped(THEME_STYLE)) }
         style { (PreEscaped(DASHBOARD_STYLE)) }
         // Auth-fetch helper has to exist before THEME_SCRIPT so

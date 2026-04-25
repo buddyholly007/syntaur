@@ -14,11 +14,12 @@ pub async fn render() -> Html<String> {
         extra_style: Some(EXTRA_STYLE),
         body_class: None,
         head_boot: None,
+        crumb: None,
+        topbar_status: None,
     };
     // Bridge-live status is JS-driven; start absent. A small inline script
     // at the end of the page updates it when the local Media Bridge pings in.
     let body = html! {
-        (top_bar("Music", None))
         (PreEscaped(BODY_HTML))
         script { (PreEscaped(MUSIC_JS)) }
     };

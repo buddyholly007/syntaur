@@ -19,10 +19,10 @@ pub async fn render() -> Html<String> {
         extra_style: Some(EXTRA_STYLE),
         body_class: None,
         head_boot: None,
+        crumb: None,
+        topbar_status: None,
     };
     let body = html! {
-        (top_bar("Smart Home and Network", None))
-
         main class="sh-root" {
             // Left rail — rooms.
             aside class="sh-rooms" {

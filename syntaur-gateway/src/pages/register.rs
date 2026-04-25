@@ -12,6 +12,8 @@ pub async fn render() -> Html<String> {
         extra_style: None,
         body_class: None,
         head_boot: None,
+        crumb: None,
+        topbar_status: None,
     };
     let body = html! {
         div class="min-h-screen flex items-center justify-center bg-gray-950 px-4" {

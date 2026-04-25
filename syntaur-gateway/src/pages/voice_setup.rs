@@ -13,6 +13,8 @@ pub async fn render() -> Html<String> {
         extra_style: None,
         body_class: None,
         head_boot: None,
+        crumb: None,
+        topbar_status: None,
     };
     Html(shell(page, body()).into_string())
 }

@@ -14,6 +14,8 @@ pub async fn render() -> Html<String> {
         extra_style: Some(".glow { box-shadow: 0 0 60px rgba(14,165,233,0.15); }"),
         body_class: None,
         head_boot: None,
+        crumb: None,
+        topbar_status: None,
     };
     Html(shell(page, body()).into_string())
 }

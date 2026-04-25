@@ -20,9 +20,10 @@ pub async fn render() -> Html<String> {
         extra_style: Some(EXTRA_STYLE),
         body_class: None,
         head_boot: None,
+        crumb: None,
+        topbar_status: None,
     };
     let body = html! {
-        (top_bar("Social", None))
         // Social hero — persona pill + "Talk with Nyota" + subtitle. Sits
         // below the shared top bar, keeps the "Backstage. Quiet." identity
         // inside the canvas.

@@ -12,9 +12,10 @@ pub async fn render() -> Html<String> {
         extra_style: None,
         body_class: None,
         head_boot: None,
+        crumb: None,
+        topbar_status: None,
     };
     let body = html! {
-        (top_bar_standard("Profile"))
         div class="max-w-3xl mx-auto px-4 py-6 space-y-6" {
             div id="profile-header" class="flex items-center gap-4" {
                 div class="w-12 h-12 rounded-full bg-oc-600 flex items-center justify-center text-xl font-bold" id="profile-avatar" { "?" }

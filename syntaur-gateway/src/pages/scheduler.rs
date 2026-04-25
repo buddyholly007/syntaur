@@ -19,9 +19,10 @@ pub async fn render() -> Html<String> {
         extra_style: Some(EXTRA_STYLE),
         body_class: None,
         head_boot: None,
+        crumb: None,
+        topbar_status: None,
     };
     let body = html! {
-        (top_bar("Scheduler", None))
         // Sub-bar — view toggle + current-period label + "jump to today"
         div class="sch-subbar" {
             div class="sch-subbar-inner" {

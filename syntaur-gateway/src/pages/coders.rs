@@ -1366,6 +1366,8 @@ pub async fn render() -> Html<String> {
         extra_style: Some(EXTRA_STYLE),
         body_class: None,
         head_boot: None,
+        crumb: None,
+        topbar_status: None,
     };
 
     let body = html! {
@@ -1382,8 +1384,6 @@ pub async fn render() -> Html<String> {
         div class="crt-led" {}
 
         div class="workshop-root" {
-            (top_bar_standard("Coders"))
-
             // Main layout: sidebar + terminal + context panel
             div class="workshop-body" {
                 // Host sidebar

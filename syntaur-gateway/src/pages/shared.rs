@@ -11,6 +11,7 @@ use maud::{html, Markup, PreEscaped, DOCTYPE};
 
 /// Describes a page for the shell — everything that goes in `<head>` or
 /// decides whether to inject the bug-report overlay.
+#[derive(Default)]
 pub struct Page {
     pub title: &'static str,
     /// Authenticated pages get the bug-report overlay + button injected.
@@ -26,6 +27,14 @@ pub struct Page {
     /// reading localStorage pref + applying `html.theme-light` so
     /// the first paint is already in the right palette.
     pub head_boot: Option<&'static str>,
+    /// Top-bar crumb override. Defaults to `title` when None. Set this
+    /// when the crumb shown next to the brand should differ from the
+    /// browser-tab title (rare).
+    pub crumb: Option<&'static str>,
+    /// Top-bar status pill (right of crumb). None hides the pill.
+    /// Module pages with a single meaningful state set this; most
+    /// modules pass None.
+    pub topbar_status: Option<ModuleStatus>,
 }
 
 /// One of four standard module-status shapes shown in the top bar right
@@ -39,6 +48,7 @@ pub enum ModuleStatusKind {
     Pause,
 }
 
+#[derive(Clone)]
 pub struct ModuleStatus {
     pub kind: ModuleStatusKind,
     pub text: String,
@@ -92,19 +102,24 @@ pub fn shell(page: Page, body_content: Markup) -> Markup {
                 }
             }
             body class=(page.body_class.unwrap_or("bg-gray-950 text-gray-100 min-h-screen")) {
-                (body_content)
+                // Top bar lives at body root, OUTSIDE #syntaur-app-content.
+                // This is what makes SPA navigation tractable: the audio
+                // element (rendered inside top_bar()) is never inside the
+                // swap zone, so it's never destroyed mid-playback. Pages
+                // that want a different crumb than their title set
+                // page.crumb; same for status via page.topbar_status.
+                @if page.authed {
+                    (top_bar(page.crumb.unwrap_or(page.title), page.topbar_status.clone()))
+                }
+                // Stable container the SPA router replaces on navigation.
+                // EVERYTHING outside this container persists across nav.
+                main id="syntaur-app-content" data-page=(page.title) {
+                    (body_content)
+                }
                 @if page.authed {
                     (PreEscaped(GLOBAL_MINI_PLAYER_HTML))
                     (PreEscaped(TOP_BAR_SCRIPT))
-                    // SPA router temporarily disabled — WebKitGTK's
-                    // detached-audio behavior plus per-page init
-                    // collisions caused real regressions on prod
-                    // (audio still pausing on nav, pill vanishing,
-                    // modules palette dead on /music). Need a heavier
-                    // per-page cleanup protocol + DOM-park-don't-detach
-                    // for the audio element before re-enabling. Tracked
-                    // in projects/syntaur_seamless_music.md Phase 3.
-                    // SPA_ROUTER_SCRIPT kept in source for the next pass.
+                    (PreEscaped(SPA_ROUTER_SCRIPT))
                     (bug_report_overlay())
                 }
             }
@@ -923,14 +938,12 @@ const TOP_BAR_SCRIPT: &str = r##"
 "##;
 
 /// SPA-style content swap navigation. Click an internal link → fetch the
-/// new HTML → swap body content while preserving persistent nodes
-/// (#global-audio especially) → run the new page's inline scripts → push
-/// history. Audio plays through navigation with zero gap.
-///
-/// Persistent nodes survive the swap by being detached before the
-/// innerHTML replace and re-attached after, replacing the placeholder
-/// in the new doc. The audio element keeps playing through this because
-/// detached `<audio>` elements continue playback.
+/// new HTML → replace ONLY #syntaur-app-content's innerHTML → push
+/// history. The top bar (with its <audio id="global-audio">), modules
+/// palette, mini-player pill, and bug-report overlay all live OUTSIDE
+/// #syntaur-app-content, so they're never touched by the swap. Audio
+/// keeps playing through navigation with zero gap because the audio
+/// element is never detached from the DOM.
 ///
 /// CSP note: the gateway sets `script-src 'self' 'unsafe-inline'` for
 /// HTML responses (security.rs line 519-521), so cloned scripts without
@@ -941,28 +954,11 @@ const TOP_BAR_SCRIPT: &str = r##"
 /// middle, target=_blank) fall through to native navigation. Errors of
 /// any kind (404, parse failure, network) fall back to a hard redirect
 /// so the user never lands on a broken half-swapped page.
-///
-/// Currently disabled — see shell() body comment for the regression
-/// notes. Re-enabled by un-commenting the (PreEscaped(SPA_ROUTER_SCRIPT))
-/// line once the audio-park protocol is in place.
-#[allow(dead_code)]
 const SPA_ROUTER_SCRIPT: &str = r##"
 <script>
 (function() {
   if (window.__syntaurSpaInstalled) return;
   window.__syntaurSpaInstalled = true;
-
-  // Nodes preserved across navigations. Order matters for the audio
-  // element — it must be reattached before any music page's init
-  // script tries to set its src, otherwise the new init creates a
-  // FRESH audio element and the old one plays in the background.
-  const PERSIST_IDS = [
-    'global-audio',
-    'syntaur-mini-player',
-    'modules-palette',
-    'avatar-menu',
-    'bug-report-overlay',
-  ];
 
   function shouldRoute(a, ev) {
     if (!a || ev.defaultPrevented) return false;
@@ -1000,12 +996,11 @@ const SPA_ROUTER_SCRIPT: &str = r##"
       const html = await resp.text();
       const doc = new DOMParser().parseFromString(html, 'text/html');
 
-      // ── title + body class
+      // ── title
       if (doc.title) document.title = doc.title;
 
-      // ── per-page <style class="syntaur-page"> swap
-      // Stable styles (BASE / TOP_BAR) carry no marker class and
-      // survive untouched.
+      // ── per-page <style class="syntaur-page"> swap. Stable styles
+      // (BASE / TOP_BAR) carry no marker class and survive untouched.
       document.head.querySelectorAll('style.syntaur-page').forEach(s => s.remove());
       doc.head.querySelectorAll('style.syntaur-page').forEach(s => {
         document.head.appendChild(s.cloneNode(true));
@@ -1019,56 +1014,55 @@ const SPA_ROUTER_SCRIPT: &str = r##"
         document.head.appendChild(fresh);
       });
 
-      // ── Detach persistent nodes from current body
-      const persisted = {};
-      for (const id of PERSIST_IDS) {
-        const el = document.getElementById(id);
-        if (el && el.parentNode) {
-          el.parentNode.removeChild(el);
-          persisted[id] = el;
-        }
+      // ── Update top-bar crumb + status from new page's data-page
+      // attribute on the new content container. This lets us avoid
+      // a full top-bar re-render (which would re-create #global-audio
+      // and break music continuity). The top bar's #module-name span
+      // gets its text content updated; the status pill's class /
+      // text are updated if the new page exposes them.
+      const newMain = doc.getElementById('syntaur-app-content');
+      const moduleName = document.querySelector('.syntaur-topbar .module-name');
+      if (moduleName && newMain && newMain.dataset.page) {
+        moduleName.textContent = newMain.dataset.page;
+      }
+      // ── Body class (some pages opt into ambient theming)
+      if (doc.body && doc.body.className) document.body.className = doc.body.className;
+
+      // ── Replace ONLY #syntaur-app-content's innerHTML. The top bar,
+      // audio element, pill, palette, and bug overlay all live outside
+      // this container and are not touched.
+      const liveMain = document.getElementById('syntaur-app-content');
+      if (!liveMain) { location.href = url; return; }
+      if (newMain) {
+        liveMain.innerHTML = newMain.innerHTML;
+        liveMain.dataset.page = newMain.dataset.page || '';
+      } else {
+        // New page didn't render the expected wrapper — fall back to a
+        // hard navigation rather than guessing.
+        location.href = url;
+        return;
       }
 
-      // ── Replace body
-      document.body.className = doc.body.className;
-      document.body.innerHTML = doc.body.innerHTML;
-
-      // ── Re-insert persistent nodes (replace placeholder if present)
-      for (const id of PERSIST_IDS) {
-        const live = persisted[id];
-        if (!live) continue;
-        const placeholder = document.getElementById(id);
-        if (placeholder && placeholder !== live && placeholder.parentNode) {
-          placeholder.parentNode.replaceChild(live, placeholder);
-        } else {
-          document.body.appendChild(live);
-        }
-      }
-
-      // ── Re-execute body inline scripts (innerHTML doesn't run them).
-      // Idempotency guards (window.__syntaur*Bound) make this safe for
-      // scripts like TOP_BAR_SCRIPT that listen on persistent elements.
-      // Per-page IIFEs typically rebuild their UI from scratch and don't
-      // need cross-navigation idempotency.
-      const oldScripts = Array.from(document.body.querySelectorAll('script'));
+      // ── Re-execute the inline scripts inside the new container so
+      // each module's IIFE fires. innerHTML doesn't auto-run scripts.
+      const oldScripts = Array.from(liveMain.querySelectorAll('script'));
       for (const old of oldScripts) {
         const fresh = document.createElement('script');
         for (const a of old.attributes) fresh.setAttribute(a.name, a.value);
         fresh.textContent = old.textContent;
         if (old.parentNode) old.parentNode.replaceChild(fresh, old);
-        else document.body.appendChild(fresh);
       }
 
       // ── History
       if (!isPopState) history.pushState({ syntaurSpa: true }, '', url);
       window.scrollTo(0, 0);
 
-      // ── Subscribers (per-page cleanup hooks can listen for this)
+      // ── Subscribers (per-page cleanup hooks can listen)
       window.dispatchEvent(new CustomEvent('syntaur:navigated', { detail: { url } }));
     } catch (e) {
       if (e && e.name === 'AbortError') return;
       // Anything else — fall back to a real navigation. Better to
-      // visibly reload than to leave a half-swapped DOM.
+      // visibly reload than to leave a half-swapped page.
       location.href = url;
     } finally {
       inflightCtrl = null;
