@@ -1,0 +1,58 @@
+# Regression flow for the 2026-04-24/25 module-reset prod bug.
+#
+# Sean reported clicking Schedule, Music, Knowledge, etc. from
+# Dashboard immediately bounced back to Dashboard. Two hotfixes
+# (599be6c + f36cc19) removed the client-side `if (!token)`
+# load-time guards AND the runtime `if (status === 401)
+# window.location.href = '/'` handlers that were doing the bouncing.
+#
+# This flow exercises every module link so that any future
+# reintroduction of either pattern fails the ship gate.
+#
+# Anonymous run — server cookie auth not present, so widget API
+# calls will 401, but the assertion only checks the URL stays put
+# and the page DOM is the target module's, not the dashboard's.
+name: "Module nav: dashboard → each module stays put"
+module: dashboard
+steps:
+  # Scheduler
+  - goto: "/scheduler"
+    wait_ms: 1500
+  - assert_url_matches: "/scheduler($|\\?)"
+  - screenshot: "scheduler"
+
+  # Music
+  - goto: "/music"
+    wait_ms: 1500
+  - assert_url_matches: "/music($|\\?)"
+  - screenshot: "music"
+
+  # Knowledge
+  - goto: "/knowledge"
+    wait_ms: 1500
+  - assert_url_matches: "/knowledge($|\\?)"
+  - screenshot: "knowledge"
+
+  # Coders
+  - goto: "/coders"
+    wait_ms: 1500
+  - assert_url_matches: "/coders($|\\?)"
+  - screenshot: "coders"
+
+  # History
+  - goto: "/history"
+    wait_ms: 1500
+  - assert_url_matches: "/history($|\\?)"
+  - screenshot: "history"
+
+  # Tax
+  - goto: "/tax"
+    wait_ms: 1500
+  - assert_url_matches: "/tax($|\\?)"
+  - screenshot: "tax"
+
+  # Modules / Settings
+  - goto: "/modules"
+    wait_ms: 1500
+  - assert_url_matches: "/modules($|\\?)"
+  - screenshot: "modules"

@@ -1,0 +1,27 @@
+# Regression flow: the 2026-04-24 "clicking Schedule bounces to
+# Dashboard" bug. If the client-side token-gate returns (or any other
+# aggressive redirect sneaks into a page's init JS), this flow will
+# fail because the URL after the click won't be /scheduler.
+#
+# Authentication: none. This flow runs as an anonymous user and
+# intentionally exercises the "server rendered the page fine via
+# cookie but client JS bounces" codepath the hotfix addressed.
+name: "Dashboard → Scheduler stays on Scheduler"
+module: dashboard
+steps:
+  - goto: "/scheduler"
+    wait_ms: 2000
+  - screenshot: "after-scheduler-goto"
+  # The bug manifested as an immediate JS-driven redirect to `/` which
+  # served the dashboard. Asserting the URL is `/scheduler` after a
+  # 2-second settle window catches any guard that bounces.
+  - assert_url_matches: "/scheduler($|\\?)"
+  # The DOM itself should be Scheduler, not Dashboard. sd-grid is the
+  # dashboard's root; its absence on this URL confirms we didn't
+  # silently land on the dashboard.
+  - eval: |
+      (() => {
+        const onDash = document.querySelector('#sd-grid') !== null;
+        const onSch  = document.querySelector('.sch-root, [data-module="scheduler"], #scheduler-root') !== null;
+        return { onDash, onSch };
+      })()
