@@ -5750,6 +5750,24 @@ async fn main() {
         }
     };
 
+    // Phase 6: load persisted LLM provider reputation (latency EMA, hard-failure
+    // cooldown timestamps, rate-limit pcts) into the global PROVIDER_METRICS
+    // map BEFORE AppState construction. Without this every gateway restart
+    // resets the in-memory metrics and the chain re-discovers slow/broken
+    // providers on the first 1-2 requests after each deploy. Indexer migration
+    // ran above so the v68 `provider_health` table exists.
+    {
+        let store = Arc::new(crate::llm::ProviderHealthStore::new(index_path.clone()));
+        match store.load_into_globals() {
+            Ok(0) => info!("  Provider health: no persisted entries (first boot or fresh DB)"),
+            Ok(n) => info!("  Provider health: loaded {} provider(s) from DB", n),
+            Err(e) => warn!("  Provider health: load failed (continuing with cold metrics): {}", e),
+        }
+        // 30s flush cadence. Cheap (~10 rows max) and keeps crash-window loss
+        // below 30s of metric drift. See `ProviderHealthStore::spawn_flusher`.
+        Arc::clone(&store).spawn_flusher(30);
+    }
+
     // Open the research session store on the same database file. Indexer
     // migrations are already complete by this point so the v2 research
     // tables exist.

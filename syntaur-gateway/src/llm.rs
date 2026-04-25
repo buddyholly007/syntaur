@@ -220,6 +220,161 @@ fn position_dominant_mode() -> bool {
         == Some("position")
 }
 
+// ── Phase 6: persist provider reputation across restarts ────────────────────
+//
+// Without persistence, every container restart wipes the in-memory latency
+// EMA + hard-failure cooldown stored in `PROVIDER_METRICS`. The chain then
+// re-discovers that NIM 49B is slow / lmstudio is unreachable / cerebras
+// 429s on burst load every cold start, so the first 1-2 requests after each
+// deploy pay the full discovery cost.
+//
+// `ProviderHealthStore` wraps a SQLite connection (the gateway's `index.db`).
+// Two operations:
+//   - `load_into_globals` — at startup, read every row, populate
+//     `PROVIDER_METRICS`. Runs once before any LLM traffic.
+//   - `flush_globals` — walk PROVIDER_METRICS, upsert each entry to the table.
+//     Called periodically by `spawn_flusher` (default 30s) so writes are
+//     batched and don't block LLM hot paths. 30s window is also short enough
+//     that a crash at any point loses at most 30s of metric drift.
+//
+// Schema: `provider_health` table (v68). Keyed by provider name only —
+// matches the existing `provider_metrics(name)` keying. Same-endpoint
+// different-models providers should use distinct names in config to get
+// independent reputation tracking.
+
+use rusqlite::Connection;
+
+pub struct ProviderHealthStore {
+    db_path: std::path::PathBuf,
+}
+
+impl ProviderHealthStore {
+    pub fn new(db_path: std::path::PathBuf) -> Self {
+        Self { db_path }
+    }
+
+    /// Read every persisted provider row and seed PROVIDER_METRICS so the
+    /// first ranked_order computation after startup uses post-restart history
+    /// instead of the cold-start defaults. Idempotent — running twice on the
+    /// same DB just rewrites the same atomics.
+    pub fn load_into_globals(&self) -> Result<usize, String> {
+        let conn = Connection::open(&self.db_path)
+            .map_err(|e| format!("provider_health: open {}: {}", self.db_path.display(), e))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT name, avg_latency_ms, total_requests, rate_limit_pct, last_hard_failure_at \
+                 FROM provider_health",
+            )
+            .map_err(|e| format!("provider_health: prepare: {}", e))?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, f64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                ))
+            })
+            .map_err(|e| format!("provider_health: query: {}", e))?;
+
+        let mut loaded = 0usize;
+        for row in rows {
+            let (name, avg_ms, total, rl_pct, last_fail) = row
+                .map_err(|e| format!("provider_health: row: {}", e))?;
+            let m = provider_metrics(&name);
+            // Convert ms back to us — same encoding `record_latency` writes.
+            let ema_us = (avg_ms.max(0.0) * 1000.0) as u64;
+            m.latency_ema_us.store(ema_us, Ordering::Relaxed);
+            m.total_requests.store(total.max(0) as u64, Ordering::Relaxed);
+            m.rate_limit_remaining_pct
+                .store(rl_pct.clamp(0, 100) as u32, Ordering::Relaxed);
+            m.last_hard_failure_at
+                .store(last_fail.max(0) as u64, Ordering::Relaxed);
+            loaded += 1;
+        }
+        Ok(loaded)
+    }
+
+    /// Walk PROVIDER_METRICS once and UPSERT every entry. Holds the metrics
+    /// map's std::sync::Mutex for the snapshot only — actual SQLite writes
+    /// happen with the map unlocked so LLM call paths aren't blocked.
+    pub fn flush_globals(&self) -> Result<usize, String> {
+        // Snapshot the global map under the std mutex — we copy the per-entry
+        // values out and release the lock before doing any I/O.
+        let snapshot: Vec<(String, f64, u64, u32, u64)> = {
+            let map = PROVIDER_METRICS
+                .get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+            let guard = map.lock().map_err(|e| format!("metrics map poisoned: {}", e))?;
+            guard
+                .iter()
+                .map(|(name, m)| {
+                    (
+                        name.clone(),
+                        m.avg_latency_ms(),
+                        m.total_requests.load(Ordering::Relaxed),
+                        m.rate_limit_remaining_pct.load(Ordering::Relaxed),
+                        m.last_hard_failure_at.load(Ordering::Relaxed),
+                    )
+                })
+                .collect()
+        };
+
+        if snapshot.is_empty() {
+            return Ok(0);
+        }
+
+        let now = now_epoch_secs() as i64;
+        let mut conn = Connection::open(&self.db_path)
+            .map_err(|e| format!("provider_health: open: {}", e))?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("provider_health: tx: {}", e))?;
+        for (name, avg_ms, total, rl_pct, last_fail) in &snapshot {
+            tx.execute(
+                "INSERT INTO provider_health \
+                   (name, avg_latency_ms, total_requests, rate_limit_pct, last_hard_failure_at, updated_at) \
+                   VALUES (?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT(name) DO UPDATE SET \
+                   avg_latency_ms = excluded.avg_latency_ms, \
+                   total_requests = excluded.total_requests, \
+                   rate_limit_pct = excluded.rate_limit_pct, \
+                   last_hard_failure_at = excluded.last_hard_failure_at, \
+                   updated_at = excluded.updated_at",
+                rusqlite::params![
+                    name,
+                    *avg_ms,
+                    *total as i64,
+                    *rl_pct as i64,
+                    *last_fail as i64,
+                    now,
+                ],
+            )
+            .map_err(|e| format!("provider_health: upsert {}: {}", name, e))?;
+        }
+        tx.commit()
+            .map_err(|e| format!("provider_health: commit: {}", e))?;
+        Ok(snapshot.len())
+    }
+
+    /// Spawn a background flusher that calls `flush_globals` every
+    /// `interval_secs` seconds. Cheap on idle (one row per declared provider,
+    /// max ~10) — write traffic stays well below SQLite's contention threshold.
+    pub fn spawn_flusher(self: Arc<Self>, interval_secs: u64) {
+        tokio::spawn(async move {
+            let interval = std::time::Duration::from_secs(interval_secs.max(1));
+            loop {
+                tokio::time::sleep(interval).await;
+                match self.flush_globals() {
+                    Ok(n) if n > 0 => debug!("[provider_health] flushed {} entries", n),
+                    Ok(_) => {}
+                    Err(e) => warn!("[provider_health] flush error: {}", e),
+                }
+            }
+        });
+    }
+}
+
 /// True when an error string from `call_provider` / `call_provider_capped`
 /// indicates a "hard" failure that should put the provider in the 60s
 /// skip-in-ranking cooldown. Covers rate limits, auth/billing errors,
@@ -1373,5 +1528,145 @@ mod tests {
         assert!(!is_structural_error("text 4 chars"));
         assert!(!is_structural_error("2 tool calls"));
         assert!(!is_structural_error(""));
+    }
+
+    // ── Phase 6: ProviderHealthStore round-trip ──────────────────────────
+
+    /// Apply just the v68 migration to a fresh in-memory connection — keeps
+    /// these tests isolated from the full schema migration ladder so a future
+    /// schema change doesn't break this test suite. Mirrors the provider_health
+    /// CREATE TABLE in `index/schema.rs`.
+    fn create_provider_health_table(path: &std::path::Path) {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS provider_health (
+                name TEXT PRIMARY KEY,
+                avg_latency_ms REAL NOT NULL DEFAULT 0,
+                total_requests INTEGER NOT NULL DEFAULT 0,
+                rate_limit_pct INTEGER NOT NULL DEFAULT 0,
+                last_hard_failure_at INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL DEFAULT 0
+            );",
+        )
+        .unwrap();
+    }
+
+    /// Reset a provider's globals to known values without going through the
+    /// public API (those public methods don't expose all the atomics directly).
+    fn reset_metrics(name: &str, avg_ms: f64, total: u64, rl_pct: u32, last_fail: u64) {
+        let m = provider_metrics(name);
+        m.latency_ema_us
+            .store((avg_ms * 1000.0) as u64, Ordering::Relaxed);
+        m.total_requests.store(total, Ordering::Relaxed);
+        m.rate_limit_remaining_pct.store(rl_pct, Ordering::Relaxed);
+        m.last_hard_failure_at.store(last_fail, Ordering::Relaxed);
+        m.in_flight.store(0, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn provider_health_store_flush_then_load_round_trip() {
+        // Use a unique provider name so the global PROVIDER_METRICS map doesn't
+        // collide with other tests running in parallel.
+        let name = "test-roundtrip-provider-001";
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        create_provider_health_table(&path);
+
+        // Seed: pretend this provider has 7 successful calls averaging 1234ms,
+        // 35% rate-limit headroom, and a hard failure 1500s ago.
+        reset_metrics(name, 1234.0, 7, 35, 1_700_000_000);
+
+        let store = ProviderHealthStore::new(path.clone());
+        let n = store.flush_globals().unwrap();
+        assert!(n >= 1, "flush should have written at least our seed row");
+
+        // Wipe the in-memory globals to simulate a process restart.
+        reset_metrics(name, 0.0, 0, 0, 0);
+
+        // Load back from DB.
+        let loaded = store.load_into_globals().unwrap();
+        assert!(loaded >= 1, "load should have rehydrated at least our row");
+
+        let m = provider_metrics(name);
+        // EMA roundtrip: 1234.0 ms encoded as 1234000 us.
+        assert_eq!(m.latency_ema_us.load(Ordering::Relaxed), 1_234_000);
+        assert_eq!(m.total_requests.load(Ordering::Relaxed), 7);
+        assert_eq!(m.rate_limit_remaining_pct.load(Ordering::Relaxed), 35);
+        assert_eq!(m.last_hard_failure_at.load(Ordering::Relaxed), 1_700_000_000);
+    }
+
+    #[test]
+    fn provider_health_store_flush_is_idempotent_upsert() {
+        // Multiple flushes with no changes between them must not duplicate rows
+        // or change values. The ON CONFLICT(name) DO UPDATE clause carries this.
+        let name = "test-idempotent-provider-002";
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        create_provider_health_table(&path);
+        reset_metrics(name, 555.0, 10, 80, 0);
+
+        let store = ProviderHealthStore::new(path.clone());
+        store.flush_globals().unwrap();
+        store.flush_globals().unwrap();
+        store.flush_globals().unwrap();
+
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM provider_health WHERE name = ?",
+                rusqlite::params![name],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "three flushes of same name produce exactly one row");
+    }
+
+    #[test]
+    fn provider_health_store_flush_picks_up_metric_changes() {
+        // Sequence: flush v1 → mutate metrics → flush v2 → load → verify v2 won.
+        let name = "test-update-provider-003";
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        create_provider_health_table(&path);
+
+        reset_metrics(name, 1000.0, 5, 100, 0);
+        let store = ProviderHealthStore::new(path.clone());
+        store.flush_globals().unwrap();
+
+        // Simulate further activity.
+        reset_metrics(name, 2500.0, 12, 40, 1_700_000_000);
+        store.flush_globals().unwrap();
+
+        // Reset in-memory and load — should see v2 values.
+        reset_metrics(name, 0.0, 0, 0, 0);
+        store.load_into_globals().unwrap();
+        let m = provider_metrics(name);
+        assert_eq!(m.latency_ema_us.load(Ordering::Relaxed), 2_500_000);
+        assert_eq!(m.total_requests.load(Ordering::Relaxed), 12);
+        assert_eq!(m.rate_limit_remaining_pct.load(Ordering::Relaxed), 40);
+        assert_eq!(m.last_hard_failure_at.load(Ordering::Relaxed), 1_700_000_000);
+    }
+
+    #[test]
+    fn provider_health_store_load_empty_db_returns_zero_not_error() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        create_provider_health_table(&path);
+
+        let store = ProviderHealthStore::new(path);
+        let n = store.load_into_globals().unwrap();
+        assert_eq!(n, 0, "empty provider_health table loads 0 entries cleanly");
+    }
+
+    #[test]
+    fn provider_health_store_load_missing_table_returns_error() {
+        // If migration hasn't run (no provider_health table), load surfaces an
+        // error so the caller can choose to log + continue with cold metrics.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        // Note: NOT calling create_provider_health_table — DB exists but no schema.
+        let store = ProviderHealthStore::new(path);
+        let result = store.load_into_globals();
+        assert!(result.is_err(), "missing table → error, caller decides to continue");
     }
 }

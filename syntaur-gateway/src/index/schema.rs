@@ -2412,6 +2412,27 @@ const MIGRATIONS: &[&str] = &[
             VALUES (new.id, new.summary);
     END;
     "#,
+
+    // v68 (Phase 6): persist LLM provider reputation across gateway restarts.
+    // Without this, every container restart wipes the in-memory latency EMA +
+    // hard-failure cooldown, so the chain re-discovers that (e.g.) lmstudio
+    // is unreachable or that NIM 49B is slow on every cold start. The first
+    // 1-2 requests after each deploy pay the full discovery cost.
+    //
+    // Keyed by `name` only — same key as `provider_metrics()` in llm.rs.
+    // Per-(name, model_id) keying is a future refactor; for now config-side
+    // we work around shared metrics by giving same-endpoint different-models
+    // distinct provider names (e.g. "nvidia" + "nvidia-fast").
+    r#"
+    CREATE TABLE IF NOT EXISTS provider_health (
+        name                    TEXT PRIMARY KEY,
+        avg_latency_ms          REAL    NOT NULL DEFAULT 0,
+        total_requests          INTEGER NOT NULL DEFAULT 0,
+        rate_limit_pct          INTEGER NOT NULL DEFAULT 0,
+        last_hard_failure_at    INTEGER NOT NULL DEFAULT 0,
+        updated_at              INTEGER NOT NULL DEFAULT 0
+    );
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
