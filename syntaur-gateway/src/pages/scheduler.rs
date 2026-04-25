@@ -2308,7 +2308,13 @@ const PAGE_JS: &str = r##"
   }
 
   // ── View/nav controls ──────────────────────────────────────────────
-  window.schSwitchView = function(v) { S.view = v; loadAll(); };
+  // schSwitchView used to call loadAll(), but loadAll() re-reads prefs
+  // and overwrites S.view from prefs.default_view (or forces 'day' on
+  // narrow screens), which clobbered the click before renderAll() ran —
+  // making the Week and Day buttons appear inert. The visible cursor's
+  // events are already in S.events from the last loadAll(), so a view
+  // change just needs a re-render.
+  window.schSwitchView = function(v) { S.view = v; renderAll(); };
   window.schNav = function(dir) {
     if (S.view === 'month') S.cursor = new Date(S.cursor.getFullYear(), S.cursor.getMonth()+dir, 1);
     else if (S.view === 'week') S.cursor = addDays(S.cursor, 7 * dir);
