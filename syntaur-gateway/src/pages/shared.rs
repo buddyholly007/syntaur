@@ -81,10 +81,14 @@ pub fn shell(page: Page, body_content: Markup) -> Markup {
                 style { (PreEscaped(BASE_STYLES)) }
                 style { (PreEscaped(TOP_BAR_STYLES)) }
                 @if let Some(extra) = page.extra_style {
-                    style { (PreEscaped(extra)) }
+                    // Marker class lets the SPA router find + replace
+                    // per-page styles when content-swapping between modules.
+                    // Stable styles above (BASE / TOP_BAR) are not marked,
+                    // so they survive the swap.
+                    style class="syntaur-page" { (PreEscaped(extra)) }
                 }
                 @if let Some(boot) = page.head_boot {
-                    script { (PreEscaped(boot)) }
+                    script class="syntaur-page-boot" { (PreEscaped(boot)) }
                 }
             }
             body class=(page.body_class.unwrap_or("bg-gray-950 text-gray-100 min-h-screen")) {
@@ -92,6 +96,7 @@ pub fn shell(page: Page, body_content: Markup) -> Markup {
                 @if page.authed {
                     (PreEscaped(GLOBAL_MINI_PLAYER_HTML))
                     (PreEscaped(TOP_BAR_SCRIPT))
+                    (PreEscaped(SPA_ROUTER_SCRIPT))
                     (bug_report_overlay())
                 }
             }
@@ -440,6 +445,14 @@ const MODULES_PALETTE_HTML: &str = r#"
 const TOP_BAR_SCRIPT: &str = r##"
 <script>
 (function() {
+  // SPA-safe idempotency. The SPA router re-executes body inline
+  // scripts after content swap; without this guard, each navigation
+  // would double-bind every listener on the persisted global-audio
+  // element + accumulate intervals. Once we've installed our wires
+  // they survive across navigations, so re-runs become no-ops.
+  if (window.__syntaurTopBarBound) return;
+  window.__syntaurTopBarBound = true;
+
   // ── universal token magic-link pickup ──────────────────
   // Any page with ?token=ocp_… will seed sessionStorage and strip
   // the token from the URL bar (so it isn't bookmarked / shared).
@@ -901,10 +914,181 @@ const TOP_BAR_SCRIPT: &str = r##"
 </script>
 "##;
 
+/// SPA-style content swap navigation. Click an internal link → fetch the
+/// new HTML → swap body content while preserving persistent nodes
+/// (#global-audio especially) → run the new page's inline scripts → push
+/// history. Audio plays through navigation with zero gap.
+///
+/// Persistent nodes survive the swap by being detached before the
+/// innerHTML replace and re-attached after, replacing the placeholder
+/// in the new doc. The audio element keeps playing through this because
+/// detached `<audio>` elements continue playback.
+///
+/// CSP note: the gateway sets `script-src 'self' 'unsafe-inline'` for
+/// HTML responses (security.rs line 519-521), so cloned scripts without
+/// the original page's nonce still execute. If CSP later moves to
+/// strict-dynamic + nonce-only, the router needs to forward nonces.
+///
+/// Opt-out per link with `data-spa="no"`. Modified clicks (cmd/ctrl,
+/// middle, target=_blank) fall through to native navigation. Errors of
+/// any kind (404, parse failure, network) fall back to a hard redirect
+/// so the user never lands on a broken half-swapped page.
+const SPA_ROUTER_SCRIPT: &str = r##"
+<script>
+(function() {
+  if (window.__syntaurSpaInstalled) return;
+  window.__syntaurSpaInstalled = true;
+
+  // Nodes preserved across navigations. Order matters for the audio
+  // element — it must be reattached before any music page's init
+  // script tries to set its src, otherwise the new init creates a
+  // FRESH audio element and the old one plays in the background.
+  const PERSIST_IDS = [
+    'global-audio',
+    'syntaur-mini-player',
+    'modules-palette',
+    'avatar-menu',
+    'bug-report-overlay',
+  ];
+
+  function shouldRoute(a, ev) {
+    if (!a || ev.defaultPrevented) return false;
+    if (a.dataset.spa === 'no') return false;
+    if (ev.button !== 0) return false;
+    if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return false;
+    if (a.target && a.target !== '' && a.target !== '_self') return false;
+    if (a.hasAttribute('download')) return false;
+    const href = a.getAttribute('href');
+    if (!href) return false;
+    if (href.startsWith('#')) return false;
+    // Different-origin or non-http(s) — let browser handle.
+    if (/^[a-z][a-z0-9+.\-]*:/i.test(href) && !href.startsWith(location.origin)) return false;
+    if (/^https?:\/\//i.test(href) && new URL(href).origin !== location.origin) return false;
+    // Backend endpoints + static assets — never SPA-route.
+    if (/^\/(api|tailwind|favicon|app-icon|icon-|manifest|static|assets|robots|sitemap|\.well-known)/i.test(href)) return false;
+    if (/\.(jpg|jpeg|png|gif|webp|svg|ico|css|js|json|pdf|zip|woff|woff2|mp3|mp4|wav|ogg|flac|m3u|m4a)(\?|$)/i.test(href)) return false;
+    return true;
+  }
+
+  let inflightCtrl = null;
+
+  async function navigate(url, isPopState) {
+    if (inflightCtrl) inflightCtrl.abort();
+    inflightCtrl = new AbortController();
+    try {
+      const resp = await fetch(url, {
+        credentials: 'same-origin',
+        headers: { 'Accept': 'text/html' },
+        signal: inflightCtrl.signal,
+      });
+      if (!resp.ok) { location.href = url; return; }
+      const ct = resp.headers.get('content-type') || '';
+      if (!ct.includes('text/html')) { location.href = url; return; }
+      const html = await resp.text();
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+
+      // ── title + body class
+      if (doc.title) document.title = doc.title;
+
+      // ── per-page <style class="syntaur-page"> swap
+      // Stable styles (BASE / TOP_BAR) carry no marker class and
+      // survive untouched.
+      document.head.querySelectorAll('style.syntaur-page').forEach(s => s.remove());
+      doc.head.querySelectorAll('style.syntaur-page').forEach(s => {
+        document.head.appendChild(s.cloneNode(true));
+      });
+      // ── per-page head_boot script (re-execute via clone)
+      document.head.querySelectorAll('script.syntaur-page-boot').forEach(s => s.remove());
+      doc.head.querySelectorAll('script.syntaur-page-boot').forEach(s => {
+        const fresh = document.createElement('script');
+        for (const a of s.attributes) fresh.setAttribute(a.name, a.value);
+        fresh.textContent = s.textContent;
+        document.head.appendChild(fresh);
+      });
+
+      // ── Detach persistent nodes from current body
+      const persisted = {};
+      for (const id of PERSIST_IDS) {
+        const el = document.getElementById(id);
+        if (el && el.parentNode) {
+          el.parentNode.removeChild(el);
+          persisted[id] = el;
+        }
+      }
+
+      // ── Replace body
+      document.body.className = doc.body.className;
+      document.body.innerHTML = doc.body.innerHTML;
+
+      // ── Re-insert persistent nodes (replace placeholder if present)
+      for (const id of PERSIST_IDS) {
+        const live = persisted[id];
+        if (!live) continue;
+        const placeholder = document.getElementById(id);
+        if (placeholder && placeholder !== live && placeholder.parentNode) {
+          placeholder.parentNode.replaceChild(live, placeholder);
+        } else {
+          document.body.appendChild(live);
+        }
+      }
+
+      // ── Re-execute body inline scripts (innerHTML doesn't run them).
+      // Idempotency guards (window.__syntaur*Bound) make this safe for
+      // scripts like TOP_BAR_SCRIPT that listen on persistent elements.
+      // Per-page IIFEs typically rebuild their UI from scratch and don't
+      // need cross-navigation idempotency.
+      const oldScripts = Array.from(document.body.querySelectorAll('script'));
+      for (const old of oldScripts) {
+        const fresh = document.createElement('script');
+        for (const a of old.attributes) fresh.setAttribute(a.name, a.value);
+        fresh.textContent = old.textContent;
+        if (old.parentNode) old.parentNode.replaceChild(fresh, old);
+        else document.body.appendChild(fresh);
+      }
+
+      // ── History
+      if (!isPopState) history.pushState({ syntaurSpa: true }, '', url);
+      window.scrollTo(0, 0);
+
+      // ── Subscribers (per-page cleanup hooks can listen for this)
+      window.dispatchEvent(new CustomEvent('syntaur:navigated', { detail: { url } }));
+    } catch (e) {
+      if (e && e.name === 'AbortError') return;
+      // Anything else — fall back to a real navigation. Better to
+      // visibly reload than to leave a half-swapped DOM.
+      location.href = url;
+    } finally {
+      inflightCtrl = null;
+    }
+  }
+
+  document.addEventListener('click', (ev) => {
+    const a = ev.target && ev.target.closest && ev.target.closest('a[href]');
+    if (!shouldRoute(a, ev)) return;
+    let url;
+    try { url = new URL(a.getAttribute('href'), location.href).toString(); }
+    catch (_) { return; }
+    if (new URL(url).origin !== location.origin) return;
+    ev.preventDefault();
+    navigate(url, false);
+  });
+
+  window.addEventListener('popstate', () => {
+    navigate(location.href, true);
+  });
+})();
+</script>
+"##;
+
 /// Bug-report overlay + submit flow. Placed by JS into `.syntaur-topbar` as a
 /// small icon button just before the avatar. Pure vanilla JS.
 const BUG_REPORT_JS: &str = r#"
 (function() {
+  // SPA-safe: once installed, don't re-append the overlay or re-bind
+  // listeners on subsequent body swaps. The overlay is in PERSIST_IDS
+  // so it survives navigation; rerunning would create a duplicate.
+  if (window.__syntaurBugReportBound) return;
+  window.__syntaurBugReportBound = true;
   // Button is rendered server-side in top_bar(). This script owns the
   // modal + submit. Token lookup happens lazily on open/submit so the
   // modal installs even before the login flow has written to storage.
