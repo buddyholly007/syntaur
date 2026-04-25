@@ -355,12 +355,21 @@ const TOP_BAR_STYLES: &str = r#"
 }
 #syntaur-mini-player[hidden] { display: none; }
 #syntaur-mini-player .smp-cover {
-    width: 28px; height: 28px; border-radius: 50%;
+    width: 32px; height: 32px; border-radius: 6px;
     background: rgb(31, 41, 55); display: inline-flex; align-items: center; justify-content: center;
     color: rgb(156, 163, 175); text-decoration: none; flex-shrink: 0;
+    overflow: hidden; position: relative;
 }
+#syntaur-mini-player .smp-cover .smp-art {
+    position: absolute; inset: 0;
+    background-size: cover; background-position: center;
+    background-repeat: no-repeat;
+    transition: opacity 200ms ease;
+}
+#syntaur-mini-player .smp-cover:not(.has-art) .smp-art { display: none; }
+#syntaur-mini-player .smp-cover.has-art .smp-cover-fallback { display: none; }
 #syntaur-mini-player .smp-cover:hover { color: rgb(229, 231, 235); background: rgb(55, 65, 81); }
-#syntaur-mini-player .smp-meta { min-width: 0; display: flex; flex-direction: column; max-width: 240px; }
+#syntaur-mini-player .smp-meta { min-width: 0; display: flex; flex-direction: column; max-width: 240px; gap: 2px; }
 #syntaur-mini-player .smp-title {
     font-weight: 600; color: rgb(229, 231, 235);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -369,6 +378,20 @@ const TOP_BAR_STYLES: &str = r#"
 #syntaur-mini-player .smp-sub   {
     color: rgb(156, 163, 175); font-size: 11px; line-height: 1.2;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* Click-to-seek progress bar — sits below the title/artist lines.
+   Hidden when no track is loaded (smp-progress-fill width = 0%). */
+#syntaur-mini-player .smp-progress {
+    height: 3px; background: rgba(148, 163, 184, 0.25);
+    border-radius: 2px; cursor: pointer; margin-top: 1px;
+    overflow: hidden; min-width: 80px;
+    transition: background 120ms ease;
+}
+#syntaur-mini-player .smp-progress:hover { background: rgba(148, 163, 184, 0.4); }
+#syntaur-mini-player .smp-progress-fill {
+    height: 100%; width: 0%; background: rgb(56, 189, 248);
+    border-radius: 2px;
+    transition: width 200ms linear;
 }
 #syntaur-mini-player .smp-btn {
     background: transparent; border: none; cursor: pointer;
@@ -386,11 +409,15 @@ const TOP_BAR_STYLES: &str = r#"
 const GLOBAL_MINI_PLAYER_HTML: &str = r#"
 <div id="syntaur-mini-player" hidden aria-label="Now playing">
   <a href="/music" class="smp-cover" title="Open music module" aria-label="Music">
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+    <span class="smp-art" id="smp-art" aria-hidden="true"></span>
+    <svg class="smp-cover-fallback" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
   </a>
   <div class="smp-meta">
     <div class="smp-title" id="smp-title">—</div>
     <div class="smp-sub"   id="smp-sub">—</div>
+    <div class="smp-progress" id="smp-progress" role="progressbar" aria-label="Track progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+      <div class="smp-progress-fill" id="smp-progress-fill"></div>
+    </div>
   </div>
   <button class="smp-btn" id="smp-play" onclick="syntaurMpControl('play_pause')" aria-label="Play / pause">
     <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
@@ -677,7 +704,10 @@ const TOP_BAR_SCRIPT: &str = r##"
       s.position = ga.currentTime;
       s.playing = !ga.paused;
       writeMusic(s);
+      paintProgress();
     });
+    ga.addEventListener('loadedmetadata', () => paintProgress());
+    ga.addEventListener('seeked', () => paintProgress());
     ga.addEventListener('pause', () => {
       if (awaitingUserGestureToResume) { updatePill(); return; }
       const s = readMusic();
@@ -700,6 +730,47 @@ const TOP_BAR_SCRIPT: &str = r##"
     });
   }
 
+  // Set MediaSession metadata so OS-level lockscreen / hardware-key
+  // controls show the right track name + art on every page where
+  // local audio is playing — not just /music. Idempotent: safe to
+  // call repeatedly with the same values.
+  function syncMediaSession(s) {
+    if (!('mediaSession' in navigator) || !s || !s.trackId) return;
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: s.title || ('Track ' + s.trackId),
+        artist: s.artist || '',
+        album: s.album || '',
+        artwork: [
+          { src: '/api/music/local/art/' + s.trackId, sizes: '512x512', type: 'image/jpeg' },
+        ],
+      });
+      navigator.mediaSession.playbackState = (ga && !ga.paused) ? 'playing' : 'paused';
+      navigator.mediaSession.setActionHandler('play',  () => { if (ga && ga.paused) ga.play(); });
+      navigator.mediaSession.setActionHandler('pause', () => { if (ga && !ga.paused) ga.pause(); });
+      navigator.mediaSession.setActionHandler('seekto', (e) => { if (ga && e.seekTime != null) ga.currentTime = e.seekTime; });
+      navigator.mediaSession.setActionHandler('seekforward',  () => { if (ga) ga.currentTime = Math.min((ga.duration || 1e9), ga.currentTime + 10); });
+      navigator.mediaSession.setActionHandler('seekbackward', () => { if (ga) ga.currentTime = Math.max(0, ga.currentTime - 10); });
+    } catch(_e) {}
+  }
+
+  // Paint the pill's progress bar fill + aria-valuenow. Cheap; called
+  // on every timeupdate. Hidden when there's no duration yet.
+  function paintProgress() {
+    const wrap = document.getElementById('smp-progress');
+    const fill = document.getElementById('smp-progress-fill');
+    if (!wrap || !fill || !ga) return;
+    const dur = ga.duration;
+    if (!isFinite(dur) || dur <= 0) {
+      fill.style.width = '0%';
+      wrap.setAttribute('aria-valuenow', '0');
+      return;
+    }
+    const pct = Math.max(0, Math.min(100, (ga.currentTime / dur) * 100));
+    fill.style.width = pct.toFixed(2) + '%';
+    wrap.setAttribute('aria-valuenow', Math.round(pct).toString());
+  }
+
   // Repaint the floating pill from either local state (preferred) or
   // a cloud now_playing poll (fallback).
   let _lastCloudEntity = null;
@@ -717,6 +788,13 @@ const TOP_BAR_SCRIPT: &str = r##"
       const sub = document.getElementById('smp-sub');
       if (title) title.textContent = s.title || 'Track ' + s.trackId;
       if (sub) sub.textContent = (s.artist || '') + (s.album ? ' · ' + s.album : '');
+      const cover = pill.querySelector('.smp-cover');
+      const art = document.getElementById('smp-art');
+      if (cover && art) {
+        const url = '/api/music/local/art/' + s.trackId;
+        art.style.backgroundImage = "url('" + url + "')";
+        cover.classList.add('has-art');
+      }
       const pb = document.getElementById('smp-play');
       if (pb) {
         const playing = ga && !ga.paused;
@@ -724,8 +802,18 @@ const TOP_BAR_SCRIPT: &str = r##"
           ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>'
           : '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>';
       }
+      paintProgress();
+      syncMediaSession(s);
       return;
     }
+    // Hide art slot when falling back to cloud or empty state.
+    const cover = pill.querySelector('.smp-cover');
+    if (cover) cover.classList.remove('has-art');
+    // Cloud sources don't surface progress through the same pipeline,
+    // so leave the bar at 0% (visually a hairline) until cloud paints
+    // its own progress fraction below.
+    const fill = document.getElementById('smp-progress-fill');
+    if (fill) fill.style.width = '0%';
 
     // No local — try cloud.
     const tk = token();
@@ -777,11 +865,33 @@ const TOP_BAR_SCRIPT: &str = r##"
     } catch(_e) {}
   };
 
+  // Click-to-seek on the pill's progress bar. Cheap math: target.x
+  // relative to bar width × duration. Only meaningful when local
+  // session is active and ga has a known duration.
+  (function bindPillSeek() {
+    const wrap = document.getElementById('smp-progress');
+    if (!wrap) return;
+    wrap.addEventListener('click', (ev) => {
+      if (!ga || !isFinite(ga.duration) || ga.duration <= 0) return;
+      const rect = wrap.getBoundingClientRect();
+      const x = Math.max(0, Math.min(rect.width, ev.clientX - rect.left));
+      const frac = rect.width > 0 ? x / rect.width : 0;
+      try { ga.currentTime = frac * ga.duration; } catch(_e) {}
+    });
+  })();
+
   // Bootstrap: resume any saved session + paint the pill on every
   // page load. The /music page uses the same global-audio element —
   // when the user clicks a new track there, playLocalTrack stops the
   // resumed audio cleanly before starting the new one.
   resumeSavedMusic();
+  // syncMediaSession depends on resumeSavedMusic having set ga.src,
+  // so it's safe to call right after — the metadata fields come from
+  // localStorage (which already has the right title/artist/album).
+  {
+    const _s = readMusic();
+    if (_s) syncMediaSession(_s);
+  }
   updatePill();
   // Cloud poll stays on its old cadence for pages where local isn't active.
   setInterval(() => { if (!readMusic()) updatePill(); }, 6000);
