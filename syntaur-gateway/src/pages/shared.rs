@@ -444,6 +444,23 @@ const TOP_BAR_SCRIPT: &str = r##"
     }
   } catch (_) {}
 
+  // ── cookie backfill for already-logged-in users ────────
+  // If storage has a token but the browser has no syntaur_token
+  // cookie, install the cookie so a future storage wipe (deploy
+  // storm, browser eviction) doesn't strand the session.
+  // One-shot per page, fire-and-forget.
+  try {
+    const stored = (sessionStorage.getItem('syntaur_token') || localStorage.getItem('syntaur_token') || '');
+    const hasCookie = (document.cookie || '').split(';').some(c => c.trim().startsWith('syntaur_token='));
+    if (stored && stored.startsWith('ocp_') && !hasCookie) {
+      fetch('/api/auth/refresh-cookie', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Authorization': 'Bearer ' + stored },
+      }).catch(() => {});
+    }
+  } catch (_) {}
+
   // ── avatar menu toggle ─────────────────────────────────
   window.toggleAvatarMenu = function(ev) {
     if (ev && ev.stopPropagation) ev.stopPropagation();
