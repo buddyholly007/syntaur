@@ -34,21 +34,26 @@ body.bg-gray-950 { background: var(--bg) !important; color: var(--ink) !importan
 /* ======== Digital rain canvas — fixed behind everything ======== */
 #rain-canvas { position: fixed; inset: 0; z-index: 0; pointer-events: none; opacity: 0.18; mix-blend-mode: screen; }
 
-/* ======== CRT scanline + vignette overlays — inside the glass area ======== */
-.crt-scan { position: fixed; inset: 32px 38px 62px 38px; pointer-events: none; z-index: 10;
+/* ======== CRT scanline + vignette overlays — inside the glass area ========
+   `top: 80px` = top bar height (48px) + bezel border (32px). Pre-refactor
+   the top bar was painted INSIDE the monitor frame; after lifting it into
+   shell() the bar lives above and the bezel needs to start below it.
+   Bottom/sides unchanged (62 / 38). */
+.crt-scan { position: fixed; inset: 80px 38px 62px 38px; pointer-events: none; z-index: 10;
     background: repeating-linear-gradient(to bottom, transparent 0, transparent 2px, rgba(0,0,0,0.18) 3px, transparent 4px);
     mix-blend-mode: multiply; border-radius: 22px; }
-.crt-vignette { position: fixed; inset: 32px 38px 62px 38px; pointer-events: none; z-index: 11;
+.crt-vignette { position: fixed; inset: 80px 38px 62px 38px; pointer-events: none; z-index: 11;
     background: radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,0.4) 100%);
     border-radius: 22px; }
-.crt-flicker { position: fixed; inset: 32px 38px 62px 38px; pointer-events: none; z-index: 12;
+.crt-flicker { position: fixed; inset: 80px 38px 62px 38px; pointer-events: none; z-index: 12;
     background: rgba(51,255,102,0.02); animation: flicker 3.5s infinite; border-radius: 22px; }
 @keyframes flicker { 0%,19%,21%,23%,25%,54%,56%,100% { opacity: 0.98; } 20%,24%,55% { opacity: 0.88; } }
 
 /* ======== 90s beige CRT monitor bezel — warm cream plastic (Apple-style) ======== */
 body.bg-gray-950 { overflow: hidden; }
 .crt-bezel {
-    position: fixed; inset: 0; pointer-events: none; z-index: 20;
+    /* Top bar lives in shell() now (48px); start the monitor below it. */
+    position: fixed; inset: 48px 0 0 0; pointer-events: none; z-index: 20;
     /* Chunky plastic frame — thick all around, extra-thick bottom for brand plate */
     border-style: solid;
     border-width: 32px 38px 62px 38px;

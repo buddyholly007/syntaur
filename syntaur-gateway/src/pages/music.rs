@@ -3371,6 +3371,34 @@ function stopRealEqualizer() {
   // need to re-bind on library re-renders like we did when it lived
   // inside #local-library-card. If the top bar is ever replaced, bind
   // will no-op thanks to the `data-wired` guard.
+
+  // Rehydrate the now-playing card on SPA arrival. When the SPA router
+  // swaps /music in while audio is already playing, the IIFE re-runs
+  // with a fresh closure (localPlaybackCurrent = null, no card paint).
+  // Read localStorage.syntaurMusic — if a track is loaded in
+  // global-audio, populate the card so title / art / viz appear
+  // without making the user re-click play.
+  try {
+    const raw = localStorage.getItem('syntaurMusic');
+    const s = raw ? JSON.parse(raw) : null;
+    const a = document.getElementById('global-audio');
+    if (s && s.trackId && a && a.src) {
+      localPlaybackCurrent = s.trackId;
+      localPlaybackActive = true;
+      setLocalNowPlaying(s.title || '', s.artist || '', s.trackId, {
+        album: s.album || '',
+      });
+      // Start the visualizer if audio is currently playing.
+      if (!a.paused) {
+        try { ensureRealEqualizer(a); } catch(_) {}
+        const viz = document.getElementById('np-viz');
+        if (viz) viz.classList.remove('viz-paused');
+      } else {
+        const viz = document.getElementById('np-viz');
+        if (viz) viz.classList.add('viz-paused');
+      }
+    }
+  } catch(_) {}
 })();
 
 // Render one track row. Shared across the Tracks / Favorites / Recent

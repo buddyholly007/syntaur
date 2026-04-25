@@ -1369,6 +1369,12 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
     --ss-success:   #7fbf8a;
   }
   body.bg-gray-950 { background: var(--ss-bg) !important; color: var(--ss-ink) !important; }
+  /* THEME_STYLE's `body.syntaur-ambient { background: var(--bg) !important }`
+     loads after this block (it lives inside body) and would otherwise
+     win the cascade — turning Settings near-white in theme-light mode.
+     Two-class selector beats theme's single-class rule on specificity,
+     so this override wins regardless of load order. */
+  body.syntaur-ambient.bg-gray-950 { background: var(--ss-bg) !important; color: var(--ss-ink) !important; }
 
   /* Preserve legacy form classes referenced by embedded HTML chunks */
   .card { background: var(--ss-panel); border: 1px solid var(--ss-line); border-radius: 10px; padding: 20px; }
