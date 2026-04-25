@@ -612,15 +612,30 @@ const TOP_BAR_SCRIPT: &str = r##"
 
   const ga = document.getElementById('global-audio');
 
-  // Resume saved playback on page load. Skips on /music because that
-  // page mounts its own playback via playLocalTrack (the global-audio
-  // element is the SAME DOM node, so /music's UI hooks into it
-  // directly — see ensureRealEqualizer / wireLocalAudioEvents there).
+  // Persistence guard. ga.load() resets currentTime to 0 and emits a
+  // timeupdate before our loadedmetadata seek can run. Without this
+  // gate the timeupdate handler clobbers the saved position to 0,
+  // which is why pill-play used to "restart from the beginning" after
+  // navigation. Held true from `resumeSavedMusic` start until the
+  // post-seek state has been re-written.
+  let suspendPersist = false;
+  // The browser will block ga.play() on a fresh document with no user
+  // gesture — we don't want that block to flip localStorage's
+  // `playing` to false, because the user *intends* to keep playing
+  // and will click the pill in a moment. While true, the `pause`
+  // listener leaves `playing` alone.
+  let awaitingUserGestureToResume = false;
+
+  // Resume saved playback on page load. The /music page hooks into
+  // the SAME global-audio element via playLocalTrack — when the user
+  // clicks a track there, playLocalTrack stops the resumed audio
+  // cleanly before starting the new one.
   function resumeSavedMusic() {
     if (!ga) return;
     const s = readMusic();
     if (!s || !s.trackId) return;
     try {
+      suspendPersist = true;
       ga.src = '/api/music/local/file/' + s.trackId + '?token=' + encodeURIComponent(token());
       ga.load();
       ga.addEventListener('loadedmetadata', function once() {
@@ -628,16 +643,35 @@ const TOP_BAR_SCRIPT: &str = r##"
         if (s.position && s.position > 0 && s.position < ga.duration) {
           try { ga.currentTime = s.position; } catch(_e) {}
         }
+        // Re-write the saved state at the seeked position so the
+        // first post-resume timeupdate doesn't write a stale value.
+        const fresh = readMusic();
+        if (fresh) {
+          fresh.position = ga.currentTime;
+          // Keep `playing` as-is — autoplay block doesn't change intent.
+          writeMusic(fresh);
+        }
+        suspendPersist = false;
         if (s.playing) {
-          ga.play().catch(() => {});
+          awaitingUserGestureToResume = true;
+          const p = ga.play();
+          if (p && typeof p.then === 'function') {
+            p.then(() => { awaitingUserGestureToResume = false; })
+             .catch(() => {
+               // Stays true; pause listener won't flip `playing`. The
+               // pill / dashboard widget will render a "Resume" affordance
+               // and the next user click resolves the gesture.
+             });
+          }
         }
       }, { once: true });
-    } catch(_e) {}
+    } catch(_e) { suspendPersist = false; }
   }
 
   // Persist position + playing flag on every state change.
   if (ga) {
     ga.addEventListener('timeupdate', () => {
+      if (suspendPersist) return;
       const s = readMusic();
       if (!s) return;
       s.position = ga.currentTime;
@@ -645,11 +679,13 @@ const TOP_BAR_SCRIPT: &str = r##"
       writeMusic(s);
     });
     ga.addEventListener('pause', () => {
+      if (awaitingUserGestureToResume) { updatePill(); return; }
       const s = readMusic();
       if (s) { s.playing = false; writeMusic(s); }
       updatePill();
     });
     ga.addEventListener('play', () => {
+      awaitingUserGestureToResume = false;
       const s = readMusic();
       if (s) { s.playing = true; writeMusic(s); }
       updatePill();

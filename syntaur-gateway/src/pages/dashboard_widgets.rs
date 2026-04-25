@@ -278,38 +278,136 @@ impl DashboardWidget for NowPlayingWidget {
 (function() {{
   const root = document.getElementById('{id}');
   if (!root) return;
-  function refresh() {{
-    window.sdFetch('/api/music/now_playing', {{ credentials:'same-origin' }})
-      .then(r => r.ok ? r.json() : null)
-      .then(d => {{
-        if (!d) return;
-        const has = !!(d.song);
-        root.querySelectorAll('[data-slot=title]').forEach(el => el.textContent = has ? d.song : 'Nothing playing');
-        root.querySelectorAll('[data-slot=artist]').forEach(el => el.textContent = d.artist || '');
-        root.querySelectorAll('[data-slot=album]').forEach(el => el.textContent = d.album || '');
-        const art = d.art_url ? `url('${{d.art_url}}')` : '';
-        root.querySelectorAll('[data-slot=art]').forEach(el => {{
-          el.style.backgroundImage = art;
-          el.classList.toggle('sd-np-art-empty', has && !d.art_url);
-        }});
-        const play = root.querySelector('[data-act=toggle]');
-        if (play) play.textContent = (d.state === 'playing') ? '❚❚' : '▶';
-        const q = root.querySelector('[data-slot=queue]');
-        if (q) q.innerHTML = '<li class="sd-list-empty">Queue shown in the Music module.</li>';
-      }}).catch(() => {{}});
+
+  // Dashboard widget mirrors the SAME state surfaced by the bottom-
+  // right pill: localStorage.syntaurMusic + the global-audio element
+  // in the top bar. When local playback is active the widget reflects
+  // it in real time (no polling). When there's no local session, fall
+  // back to /api/music/now_playing for cloud sources (HA / Apple /
+  // Spotify) on a slower poll.
+
+  const ga = document.getElementById('global-audio');
+  const MUSIC_KEY = 'syntaurMusic';
+
+  function readLocal() {{
+    try {{ return JSON.parse(localStorage.getItem(MUSIC_KEY) || 'null'); }} catch (_) {{ return null; }}
   }}
-  refresh();
+  function fmtTime(sec) {{
+    if (!isFinite(sec) || sec < 0) return '';
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return m + ':' + String(s).padStart(2, '0');
+  }}
+  function setText(slot, text) {{
+    root.querySelectorAll('[data-slot=' + slot + ']').forEach(el => el.textContent = text);
+  }}
+  function setArt(url) {{
+    const bg = url ? "url('" + url + "')" : '';
+    root.querySelectorAll('[data-slot=art]').forEach(el => {{
+      el.style.backgroundImage = bg;
+      el.classList.toggle('sd-np-art-empty', !url);
+    }});
+  }}
+  function setProgress(frac) {{
+    root.querySelectorAll('[data-slot=progress]').forEach(el => {{
+      el.style.width = Math.max(0, Math.min(1, frac)) * 100 + '%';
+    }});
+  }}
+  function setPlayIcon(playing) {{
+    const play = root.querySelector('[data-act=toggle]');
+    if (play) play.textContent = playing ? '❚❚' : '▶';
+  }}
+
+  function paintLocal() {{
+    const s = readLocal();
+    if (!s || !s.trackId) return false;
+    setText('title', s.title || ('Track ' + s.trackId));
+    setText('artist', s.artist || '');
+    setText('album', s.album || '');
+    setArt('/api/music/local/art/' + s.trackId);
+    const playing = !!(ga && !ga.paused && ga.currentTime > 0);
+    setPlayIcon(playing);
+    if (ga && ga.duration) {{
+      setProgress((ga.currentTime || s.position || 0) / ga.duration);
+    }} else if (s.position) {{
+      // Pre-load: render the saved position against an unknown duration
+      // as a thin sliver so the bar isn't stuck at 0%.
+      setProgress(0.02);
+    }} else {{
+      setProgress(0);
+    }}
+    root.dataset.source = 'local';
+    return true;
+  }}
+
+  let _lastCloudPoll = 0;
+  async function paintCloud() {{
+    // Throttle cloud poll to 5s; widget calls this from the rAF loop
+    // too, so we'd otherwise flood the endpoint.
+    const now = Date.now();
+    if (now - _lastCloudPoll < 4500) return;
+    _lastCloudPoll = now;
+    try {{
+      const r = await window.sdFetch('/api/music/now_playing', {{ credentials: 'same-origin' }});
+      if (!r || !r.ok) return;
+      const d = await r.json();
+      if (!d) return;
+      const has = !!d.song;
+      setText('title', has ? d.song : 'Nothing playing');
+      setText('artist', d.artist || '');
+      setText('album', d.album || '');
+      setArt(d.art_url || '');
+      setPlayIcon(d.state === 'playing');
+      if (d.duration_ms && d.position_ms) {{
+        setProgress(d.position_ms / d.duration_ms);
+      }} else {{
+        setProgress(0);
+      }}
+      root.dataset.source = has ? 'cloud' : 'empty';
+    }} catch (_) {{}}
+  }}
+
+  function paint() {{
+    if (paintLocal()) return;
+    paintCloud();
+  }}
+
+  // Real-time updates from global-audio (no polling for local).
+  if (ga) {{
+    ga.addEventListener('timeupdate', paint);
+    ga.addEventListener('play',       paint);
+    ga.addEventListener('pause',      paint);
+    ga.addEventListener('ended',      paint);
+    ga.addEventListener('loadedmetadata', paint);
+  }}
+
+  // Cross-tab + cross-page state changes (the pill writing to
+  // localStorage on another page would surface here).
+  window.addEventListener('storage', (ev) => {{
+    if (ev.key === MUSIC_KEY) paint();
+  }});
+
+  // Click handlers: route through the same syntaurMpControl that the
+  // pill uses, so local sessions go to global-audio directly and only
+  // cloud sessions hit /api/music/control.
   root.querySelectorAll('[data-act]').forEach(btn => btn.addEventListener('click', ev => {{
     ev.stopPropagation();
+    ev.preventDefault();
     const act = btn.getAttribute('data-act');
     const action = act === 'toggle' ? 'play_pause' : act;
-    window.sdFetch('/api/music/control', {{
-      method:'POST', credentials:'same-origin',
-      headers: {{ 'Content-Type': 'application/json' }},
-      body: JSON.stringify({{ action, token: (window.sdToken && window.sdToken()) || '' }})
-    }}).then(refresh).catch(() => {{}});
+    if (typeof window.syntaurMpControl === 'function') {{
+      window.syntaurMpControl(action);
+      // Local play/pause updates fire through audio events; cloud
+      // actions don't, so kick a paint after a short delay.
+      setTimeout(paint, 350);
+    }}
   }}));
-  const timer = setInterval(refresh, 5000);
+
+  paint();
+  // Cloud-only fallback poll. paint() short-circuits to local when
+  // a session exists, so this only refreshes when nothing local is
+  // playing.
+  const timer = setInterval(paint, 5000);
   root.__cleanup = () => clearInterval(timer);
 }})();
 "#))) }

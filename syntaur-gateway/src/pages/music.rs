@@ -249,15 +249,121 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   .alb-name { font-size: 12px; color: #e0e5ec; margin-top: 6px; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .alb-artist { font-size: 10.5px; color: #8a94a3; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-  /* Row-thumbnail album art (track list) */
+  /* Row-thumbnail album art (track list) — promoted from the
+     16-28px file-listing thumbnail to a 44px music-player tile.
+     Hover reveals a circular play overlay; the currently-playing
+     row gets an inline equalizer animation in place of the play
+     icon. */
   .row-art {
-    width: 28px; height: 28px; flex-shrink: 0; border-radius: 3px;
-    background: #0b0f17 center/cover no-repeat; display: block;
+    width: 44px; height: 44px; flex-shrink: 0; border-radius: 4px;
+    background: #0b0f17 center/cover no-repeat;
+    display: block; position: relative; overflow: hidden;
+    box-shadow: 0 1px 2px rgba(0,0,0,.35);
   }
   .row-art.placeholder::after {
     content: '♪'; display: flex; align-items: center; justify-content: center;
-    width: 100%; height: 100%; color: #3a4250; font-size: 14px;
+    width: 100%; height: 100%; color: #3a4250; font-size: 22px;
   }
+  /* Hover overlay (▶ on dim wash). Visible on the row level so the
+     entire row hover triggers it, matching Apple Music behaviour. */
+  .music-row .row-art::before {
+    content: '';
+    position: absolute; inset: 0; pointer-events: none;
+    background: rgba(0,0,0,0); transition: background 120ms ease;
+  }
+  .music-row:hover .row-art::before {
+    background: rgba(0,0,0,0.45);
+  }
+  .music-row .row-art .row-art-play {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: #fff; font-size: 18px; opacity: 0; transition: opacity 120ms ease;
+    pointer-events: none; text-shadow: 0 1px 2px rgba(0,0,0,.5);
+  }
+  .music-row:hover .row-art .row-art-play { opacity: 0.95; }
+
+  /* Currently-playing row treatment. Subtle accent background +
+     animated equalizer in place of the play overlay. */
+  .music-row.is-playing { background: rgba(56,189,248,.06); }
+  .music-row.is-playing .row-art::before { background: rgba(0,0,0,0.30); }
+  .music-row.is-playing .row-art-play { opacity: 0; }
+  .music-row.is-playing .row-art-eq   { opacity: 1; }
+  .music-row.is-paused-current  { background: rgba(56,189,248,.04); }
+  .row-art-eq {
+    position: absolute; inset: 0; display: flex; align-items: flex-end; justify-content: center;
+    gap: 2px; padding: 8px 10px; opacity: 0; pointer-events: none;
+    transition: opacity 140ms ease;
+  }
+  .row-art-eq span {
+    display: block; width: 3px; background: #38bdf8; border-radius: 1px;
+    animation: rowEq 900ms ease-in-out infinite;
+  }
+  .row-art-eq span:nth-child(1) { animation-delay:    0ms; height: 40%; }
+  .row-art-eq span:nth-child(2) { animation-delay:  150ms; height: 70%; }
+  .row-art-eq span:nth-child(3) { animation-delay:  300ms; height: 50%; }
+  .music-row.is-paused-current .row-art-eq span { animation-play-state: paused; }
+  @keyframes rowEq {
+    0%, 100% { transform: scaleY(0.45); }
+    50%      { transform: scaleY(1.0); }
+  }
+  /* Selected row (single click): a faint bracket without committing
+     to the louder is-playing accent. Survives scrolling. */
+  .music-row.is-selected { background: rgba(148,163,184,.07); }
+
+  /* Music row layout — a real listing, not a file-browser row.
+     44px art, 14px title, 12px secondary line, 12px tabular-nums
+     duration, hover-only icons that don't shift the layout. */
+  .music-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 6px 10px; border-radius: 6px;
+    cursor: default; transition: background 120ms ease;
+    user-select: none; -webkit-user-select: none;
+  }
+  .music-row:hover { background: rgba(148,163,184,.05); }
+  .music-row .mr-text { flex: 1; min-width: 0; line-height: 1.25; }
+  .music-row .mr-title {
+    display: flex; align-items: center; gap: 6px;
+    color: #e7ecf3; font-size: 14px; font-weight: 400;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .music-row .mr-sub {
+    color: #94a3b8; font-size: 12px; margin-top: 2px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .music-row .mr-dur {
+    color: #6a7380; font-size: 12px; flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum';
+  }
+  .music-row .mr-actions {
+    display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+    opacity: 0; transition: opacity 120ms ease;
+  }
+  .music-row:hover .mr-actions,
+  .music-row.is-selected .mr-actions { opacity: 1; }
+  .music-row .mr-actions button {
+    background: transparent; border: 0; color: #6a7380;
+    font: inherit; font-size: 11px; cursor: pointer; padding: 2px 6px;
+    border-radius: 3px;
+  }
+  .music-row .mr-actions button:hover { color: #e2e8f0; background: rgba(148,163,184,.08); }
+  .music-row .mr-fav { background: transparent; border: 0; cursor: pointer; padding: 2px; font-size: 14px; line-height: 1; }
+  .music-row .mr-fav.is-loved { color: #ec4899; }
+  .music-row .mr-fav:not(.is-loved) {
+    color: #6a7380; opacity: 0; transition: opacity 120ms ease;
+  }
+  .music-row:hover .mr-fav:not(.is-loved),
+  .music-row .mr-fav.is-loved { opacity: 1; }
+  /* Compact source/format badges sit beside the title without
+     fighting it for visual weight. */
+  .music-row .mr-badge {
+    font-size: 9px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    text-transform: uppercase; letter-spacing: 0.04em;
+    padding: 1px 4px; border-radius: 3px;
+    border: 1px solid currentColor; color: #38bdf8;
+    flex-shrink: 0;
+  }
+  .music-row .mr-badge.mb-mb     { color: #34d399; }
+  .music-row .mr-badge.mb-source { color: #f59e0b; }
 
   /* Playlist detail header */
   .pl-header {
@@ -2654,11 +2760,39 @@ function setLocalNowPlaying(title, artist, trackId, extra) {
       authFetch('/api/music/local/played/' + trackId, { method: 'POST' }).catch(()=>{});
     }
   }, 2500);
+
+  // Mark the row in the visible list as the playing one — drives the
+  // is-playing accent + equalizer animation in renderTrackRow output.
+  // Cheap because at most one row needs to be re-classed at a time.
+  try { paintRowPlayingState(trackId, false /* paused? */); } catch(_) {}
+}
+
+// Toggle .is-playing / .is-paused-current on the row matching the
+// currently playing trackId. Removes both classes from any other row.
+// Called from setLocalNowPlaying (on track change) and from the
+// audio play/pause listeners (for live state changes within a track).
+function paintRowPlayingState(trackId, paused) {
+  const rows = document.querySelectorAll('.music-row');
+  rows.forEach(r => {
+    const id = parseInt(r.dataset.trackId, 10);
+    if (id === trackId) {
+      r.classList.toggle('is-playing', !paused);
+      r.classList.toggle('is-paused-current', paused);
+    } else {
+      r.classList.remove('is-playing');
+      r.classList.remove('is-paused-current');
+    }
+  });
 }
 
 let localPlaybackCurrent = null;
 
 function clearLocalNowPlaying() {
+  // Drop the row classes BEFORE we wipe localPlaybackCurrent.
+  try {
+    document.querySelectorAll('.music-row.is-playing, .music-row.is-paused-current')
+      .forEach(r => { r.classList.remove('is-playing'); r.classList.remove('is-paused-current'); });
+  } catch(_) {}
   localPlaybackActive = false;
   localPlaybackCurrent = null;
   const songEl = document.getElementById('np-song');
@@ -3172,6 +3306,9 @@ function stopRealEqualizer() {
       if (playBtn) playBtn.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
       const viz = document.getElementById('np-viz');
       if (viz) viz.classList.remove('viz-paused');
+      if (localPlaybackCurrent != null) {
+        try { paintRowPlayingState(localPlaybackCurrent, false); } catch(_) {}
+      }
     });
     a.addEventListener('pause', () => {
       // Pause ≠ stop. Keep track info visible, just pause the viz.
@@ -3179,6 +3316,9 @@ function stopRealEqualizer() {
       if (viz) viz.classList.add('viz-paused');
       const playBtn = document.getElementById('np-play');
       if (playBtn) playBtn.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>';
+      if (localPlaybackCurrent != null) {
+        try { paintRowPlayingState(localPlaybackCurrent, true); } catch(_) {}
+      }
     });
     a.addEventListener('ended', () => {
       // Advance in queue rather than clearing the card — that's what
@@ -3243,33 +3383,48 @@ function renderTrackRow(t) {
   const srcBadge = t.metadata_source === 'llm'
     ? ' <span title="AI-inferred tags" class="text-[9px] text-amber-400 font-mono uppercase">auto</span>'
     : t.metadata_source === 'musicbrainz'
-      ? ' <span title="Canonical MusicBrainz" class="text-[9px] text-emerald-400 font-mono uppercase">MB</span>'
+      ? ' <span title="Canonical MusicBrainz" class="mr-badge mb-mb">MB</span>'
       : '';
   const fmtBadge = (t.bit_depth >= 24 || t.sample_rate > 48000)
-    ? ' <span class="text-[9px] font-mono uppercase text-cyan-300 border border-cyan-700/50 px-1 rounded">' + (t.bit_depth || '') + (t.bit_depth && t.sample_rate ? '/' : '') + (t.sample_rate ? Math.round(t.sample_rate/1000) : '') + '</span>'
+    ? ' <span class="mr-badge">' + (t.bit_depth || '') + (t.bit_depth && t.sample_rate ? '/' : '') + (t.sample_rate ? Math.round(t.sample_rate/1000) : '') + '</span>'
     : '';
   const minutes = (ms) => { if (!ms) return ''; const s = Math.round(ms/1000); return Math.floor(s/60) + ':' + String(s%60).padStart(2,'0'); };
-  const heart = t.favorite
-    ? '<button class="text-[11px] text-pink-400 flex-shrink-0 local-fav-btn" data-track-id="' + t.id + '" title="Unlove">♥</button>'
-    : '<button class="text-[11px] text-gray-600 hover:text-pink-400 opacity-0 group-hover:opacity-100 transition-opacity local-fav-btn flex-shrink-0" data-track-id="' + t.id + '" title="Love">♡</button>';
-  const art = t.has_art
-    ? '<span class="row-art" style="background-image:url(/api/music/local/art/' + t.id + ')"></span>'
-    : '<span class="row-art placeholder"></span>';
-  return '<div class="flex items-center gap-2 px-2 py-1 rounded hover:bg-gray-900 group" data-track-row="' + t.id + '" style="user-select:none;-webkit-user-select:none;">'
+  // Heart toggles between ♥ (loved, always visible) and ♡ (hover-only).
+  // CSS handles the visibility via .is-loved / :hover.
+  const heartCls = 'mr-fav local-fav-btn' + (t.favorite ? ' is-loved' : '');
+  const heartGlyph = t.favorite ? '♥' : '♡';
+  // Art is now a 44px tile with hover-revealed play icon and an
+  // equalizer slot that only animates when this row is the playing
+  // one (toggled via .is-playing class on the row by wireLocalAudioEvents).
+  const artBgStyle = t.has_art ? ' style="background-image:url(/api/music/local/art/' + t.id + ')"' : '';
+  const artClass = 'row-art' + (t.has_art ? '' : ' placeholder');
+  const art = '<span class="' + artClass + '"' + artBgStyle + '>'
+    + '<span class="row-art-play" aria-hidden="true">▶</span>'
+    + '<span class="row-art-eq" aria-hidden="true"><span></span><span></span><span></span></span>'
+    + '</span>';
+  // Whole row is the play target via dblclick; single click selects.
+  // The action buttons stop propagation themselves. We keep the
+  // existing .local-play-btn class on a transparent inner button so
+  // the rest of the JS (selection sweeps, queue building) keeps
+  // working without churn.
+  return '<div class="music-row" data-track-row="' + t.id + '" data-track-id="' + t.id + '">'
     + art
-    + '<button class="flex-1 min-w-0 text-left local-play-btn"'
+    + '<button class="local-play-btn mr-text" tabindex="-1" aria-label="Play ' + title + '"'
     + ' data-track-id="' + t.id + '"'
     + ' data-track-title="' + title + '"'
-    + ' data-track-artist="' + artist + '">'
-    + '<p class="text-xs text-gray-200 truncate">' + title + srcBadge + fmtBadge + '</p>'
+    + ' data-track-artist="' + artist + '"'
+    + ' style="background:transparent;border:0;text-align:left;flex:1;min-width:0;cursor:default;padding:0;color:inherit;font:inherit;">'
+    + '<div class="mr-title">' + title + srcBadge + fmtBadge + '</div>'
     + (artist || album
-      ? '<p class="text-[10px] text-gray-500 truncate">' + [artist, album].filter(Boolean).join(' · ') + '</p>'
+      ? '<div class="mr-sub">' + [artist, album].filter(Boolean).join(' · ') + '</div>'
       : '')
     + '</button>'
-    + heart
-    + '<span class="text-[10px] text-gray-600 font-mono flex-shrink-0">' + minutes(t.duration_ms) + '</span>'
-    + '<button class="text-[10px] text-gray-600 hover:text-pink-400 opacity-0 group-hover:opacity-100 transition-opacity local-add-to-pl-btn flex-shrink-0" title="Add to playlist" data-track-id="' + t.id + '">+ List</button>'
-    + '<button class="text-[10px] text-gray-600 hover:text-oc-400 opacity-0 group-hover:opacity-100 transition-opacity local-details-btn flex-shrink-0" title="Details + edit + lyrics" data-track-id="' + t.id + '">Details</button>'
+    + '<button class="' + heartCls + '" data-track-id="' + t.id + '" title="' + (t.favorite ? 'Unlove' : 'Love') + '">' + heartGlyph + '</button>'
+    + '<div class="mr-actions">'
+    +   '<button class="local-add-to-pl-btn" data-track-id="' + t.id + '" title="Add to playlist">+ List</button>'
+    +   '<button class="local-details-btn"   data-track-id="' + t.id + '" title="Details, edit, lyrics">Details</button>'
+    + '</div>'
+    + '<span class="mr-dur">' + minutes(t.duration_ms) + '</span>'
     + '</div>';
 }
 
@@ -3617,20 +3772,31 @@ async function runNLSearch() {
     if (favBtn) {
       ev.stopPropagation();
       const id = parseInt(favBtn.dataset.trackId, 10);
-      const isLoved = favBtn.textContent.trim() === '♥';
+      const isLoved = favBtn.classList.contains('is-loved');
       try {
         await fetch('/api/music/local/favorite/' + id, { method: 'POST', headers: {'Content-Type':'application/json'},
           body: JSON.stringify({ favorite: !isLoved }) });
         favBtn.textContent = isLoved ? '♡' : '♥';
-        favBtn.className = isLoved
-          ? 'text-[11px] text-gray-600 hover:text-pink-400 opacity-0 group-hover:opacity-100 transition-opacity local-fav-btn flex-shrink-0'
-          : 'text-[11px] text-pink-400 flex-shrink-0 local-fav-btn';
+        favBtn.classList.toggle('is-loved', !isLoved);
+        favBtn.title = isLoved ? 'Love' : 'Unlove';
       } catch(e) {}
       return;
     }
     const playBtn = ev.target.closest('.local-play-btn');
     if (playBtn) {
+      // Single-click on the row plays + selects. Selection is a visual
+      // cue ("which row did I just interact with?") — survives scroll
+      // and re-renders. WebKitGTK has a known dblclick-freeze quirk
+      // (handled by the dblclick swallow above), so keeping single-click
+      // as the play trigger is intentional.
       const id = parseInt(playBtn.dataset.trackId, 10);
+      const row = playBtn.closest('.music-row');
+      if (row && row.parentElement) {
+        row.parentElement.querySelectorAll('.music-row.is-selected').forEach(r => {
+          if (r !== row) r.classList.remove('is-selected');
+        });
+        row.classList.add('is-selected');
+      }
       playLocalTrack(id, playBtn.dataset.trackTitle || '', playBtn.dataset.trackArtist || '');
       return;
     }
