@@ -1,0 +1,62 @@
+# Regression flow: assert no JS clears `syntaur_token` on a 401.
+#
+# History: the historical pattern of `if (status === 401) {
+# sessionStorage.removeItem('syntaur_token'); window.location.href =
+# '/'; }` silently nuked cookie-authed users' tokens during gateway
+# restarts and any transient 401, surfacing as the 2026-04-24/25
+# "module-reset" + "Connection error 401" prod bugs. The reaction
+# was to remove every such handler (commits 599be6c, f36cc19). This
+# flow makes sure they never come back.
+#
+# Test: load /dashboard with a sentinel token in storage, force a
+# /api/me 401 by using a known-bad bearer, verify the token is STILL
+# in storage after the failed call.
+name: "Auth: 401 must not clear syntaur_token"
+module: dashboard
+steps:
+  - goto: "/dashboard"
+    wait_ms: 500
+
+  # Seed a sentinel token. We use `ocp_TEST_SENTINEL_…` so it never
+  # collides with a real token + we can grep for it in the assertion.
+  - eval: |
+      (() => {
+        const sentinel = 'ocp_TEST_SENTINEL_FOR_401_REGRESSION_FLOW';
+        sessionStorage.setItem('syntaur_token', sentinel);
+        localStorage.setItem('syntaur_token', sentinel);
+        return { seeded: sentinel.slice(0, 16) + '…' };
+      })()
+
+  # Force a 401 by sending an explicit bad bearer (override sentinel
+  # with a known-rejected value via the request, NOT storage). Real
+  # browser would have valid sentinel in storage but the response
+  # comes back 401 because we used a bogus bearer for THIS request.
+  - eval: |
+      (async () => {
+        const r = await fetch('/api/me', {
+          headers: { 'Authorization': 'Bearer definitely-not-a-real-token-' + Date.now() },
+        });
+        return { status: r.status };
+      })()
+
+  # The assertion. If any /api/me 401 handler nuked the token, the
+  # sentinel is gone. If the rule from feedback/never_clear_token_on_401.md
+  # is honored, the sentinel is still there.
+  - eval: |
+      (() => {
+        const ss = sessionStorage.getItem('syntaur_token') || '';
+        const ls = localStorage.getItem('syntaur_token') || '';
+        const sentinel = 'ocp_TEST_SENTINEL_FOR_401_REGRESSION_FLOW';
+        if (ss !== sentinel || ls !== sentinel) {
+          throw new Error(
+            'REGRESSION: a 401 handler cleared syntaur_token. ' +
+            'sessionStorage=' + (ss ? ss.slice(0,16)+'…' : '<empty>') + ' ' +
+            'localStorage=' + (ls ? ls.slice(0,16)+'…' : '<empty>') + '. ' +
+            'See feedback/never_clear_token_on_401.md.'
+          );
+        }
+        // Cleanup so the sentinel doesn't pollute baselines/dom-walks.
+        sessionStorage.removeItem('syntaur_token');
+        localStorage.removeItem('syntaur_token');
+        return { ok: true };
+      })()

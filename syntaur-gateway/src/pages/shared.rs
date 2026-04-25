@@ -413,6 +413,27 @@ const MODULES_PALETTE_HTML: &str = r#"
 const TOP_BAR_SCRIPT: &str = r##"
 <script>
 (function() {
+  // ── universal token magic-link pickup ──────────────────
+  // Any page with ?token=ocp_… will seed sessionStorage and strip
+  // the token from the URL bar (so it isn't bookmarked / shared).
+  // Lets a URL like https://host/scheduler?token=… recover a
+  // logged-out session without making the user re-login. Only
+  // accepts tokens that look like our `ocp_` prefix to avoid
+  // arbitrary-string mass-assignment.
+  try {
+    const url = new URL(window.location.href);
+    const tok = url.searchParams.get('token') || '';
+    if (tok && tok.startsWith('ocp_') && tok.length > 16) {
+      try {
+        sessionStorage.setItem('syntaur_token', tok);
+        localStorage.setItem('syntaur_token', tok);
+      } catch (_) {}
+      url.searchParams.delete('token');
+      const cleaned = url.pathname + (url.search ? url.search : '') + url.hash;
+      try { history.replaceState(null, '', cleaned); } catch (_) {}
+    }
+  } catch (_) {}
+
   // ── avatar menu toggle ─────────────────────────────────
   window.toggleAvatarMenu = function(ev) {
     if (ev && ev.stopPropagation) ev.stopPropagation();
