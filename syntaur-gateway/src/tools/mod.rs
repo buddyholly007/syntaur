@@ -901,6 +901,21 @@ impl ToolRegistry {
         for tool in self.extensions.values() {
             defs.push(tool.schema());
         }
+        // Deterministic order by tool name. Without this, `extensions` is a
+        // HashMap with randomized iteration order, so the serialized `tools`
+        // array bytes differ per request — even when the same agent has the
+        // same tool set. That defeats prompt-prefix caching on local backends
+        // (llama.cpp/turboquant) which hit warm only when bytes match exactly.
+        // Cloud providers don't care about ordering, so sorting is free for them.
+        defs.sort_by(|a, b| {
+            let name_of = |v: &serde_json::Value| -> String {
+                v.pointer("/function/name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            };
+            name_of(a).cmp(&name_of(b))
+        });
         if schema_compression_enabled() {
             for d in defs.iter_mut() {
                 compress_tool_schema(d);
