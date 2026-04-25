@@ -139,6 +139,14 @@ pub struct PageCapture {
     /// to re-thread the parameter through every call site.
     #[serde(default)]
     pub viewport: Viewport,
+    /// Layout sanity warnings from in-page assertions. We probe a
+    /// short list of "pages MUST satisfy this" invariants (most
+    /// notably: `main#syntaur-app-content` has non-zero height —
+    /// the WebKit-vs-Chromium divergence that hid `/coders` content
+    /// for users on real WebKit renderers). Empty when the page is
+    /// well-formed.
+    #[serde(default)]
+    pub layout_warnings: Vec<String>,
 }
 
 impl Browser {
@@ -497,6 +505,63 @@ impl Browser {
             .ok()
             .and_then(|v| v.into_value::<u16>().ok());
 
+        // ── Layout sanity probes ───────────────────────────────────
+        // Engine-portable JS assertions that catch classes of layout
+        // bug headless Chromium otherwise tolerates but real WebKit
+        // (the user's wry+webkit2gtk viewer) breaks on. Each probe
+        // returns a string — empty if OK, message if regressed. The
+        // probes here grew out of the 2026-04-25 bug where a missing
+        // min-height on `main#syntaur-app-content` plus a body
+        // `overflow: hidden` collapsed the swap container to 0px in
+        // WebKit but still rendered fine in headless Chromium, so
+        // verify reported green while users saw an empty `/coders`.
+        // Probes intentionally simulate the WebKit-strict constraint
+        // (recompute layout after locking body overflow) so the
+        // single-engine sweep catches the divergence class.
+        let layout_warnings: Vec<String> = page
+            .evaluate(
+                r#"
+                (() => {
+                    const warns = [];
+                    const main = document.querySelector('main#syntaur-app-content');
+                    if (main) {
+                        const r = main.getBoundingClientRect();
+                        if (r.height < 1) {
+                            warns.push('main#syntaur-app-content has height ' + r.height + 'px (collapsed) — WebKit will render this page empty');
+                        }
+                        if (r.width < 1) {
+                            warns.push('main#syntaur-app-content has width ' + r.width + 'px (collapsed)');
+                        }
+                        // Re-probe under WebKit-strict simulation: lock
+                        // body { overflow: hidden } and recompute.
+                        // Catches pages that today inherit body's
+                        // implicit min-height: 100vh from Tailwind but
+                        // would collapse if the body's overflow path
+                        // changed. Restored after measurement.
+                        const prevOverflow = document.body.style.overflow;
+                        document.body.style.overflow = 'hidden';
+                        // Force layout recompute.
+                        void main.offsetHeight;
+                        const r2 = main.getBoundingClientRect();
+                        document.body.style.overflow = prevOverflow;
+                        if (r2.height < 1 && r.height >= 1) {
+                            warns.push('main#syntaur-app-content collapses to 0px under body{overflow:hidden} — fragile for WebKit pages with overflow:hidden bodies (e.g. /coders)');
+                        }
+                    } else if (!document.body.classList.contains('public-shell')) {
+                        // Only warn for authed pages — public shells (login, register) intentionally don't render the swap container.
+                        if (document.querySelector('.syntaur-topbar')) {
+                            warns.push('expected main#syntaur-app-content not found (authed page missing SPA shell wrapper)');
+                        }
+                    }
+                    return warns;
+                })()
+                "#,
+            )
+            .await
+            .ok()
+            .and_then(|v| v.into_value::<Vec<String>>().ok())
+            .unwrap_or_default();
+
         let console = console_task.await.unwrap_or_default();
         let elapsed_ms = start.elapsed().as_millis() as u64;
 
@@ -509,6 +574,7 @@ impl Browser {
             http_status,
             elapsed_ms,
             viewport: self.viewport,
+            layout_warnings,
         })
     }
 }

@@ -694,6 +694,27 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
                         persona: pov.slug.clone(),
                     });
                 }
+
+                // Layout sanity probes (engine-portable). These flag
+                // pages that render fine in headless Chromium but
+                // collapse in WebKit-strict layouts. Origin: 2026-04-25
+                // /coders empty-glass bug — main collapsed to 0px in
+                // wry+webkit2gtk because body{overflow:hidden} + missing
+                // min-height on the SPA wrapper. Headless Chromium
+                // tolerated the missing height; WebKit didn't.
+                for warning in &cap.layout_warnings {
+                    findings.push(Finding {
+                        module_slug: module.slug.clone(),
+                        kind: FindingKind::Regression,
+                        severity: Severity::Regression,
+                        title: format!("Layout broken [{}]", pov_label),
+                        detail: warning.clone(),
+                        artifact: Some(cap.screenshot_path.clone()),
+                        captured_at: Utc::now(),
+                        edits: None,
+                        persona: pov.slug.clone(),
+                    });
+                }
             }
 
             // ── Phase 3: baseline diff ──────────────────────────

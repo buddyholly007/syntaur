@@ -218,6 +218,14 @@ tailwind.config = {
 const BASE_STYLES: &str = r#"
 @import url('/fonts.css');
 body { font-family: 'Inter', sans-serif; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; }
+/* SPA shell: the swappable container needs an explicit min-height so
+   pages with body { overflow: hidden } (coders' CRT layout) and pages
+   with viewport-relative inner heights (.ss-shell calc(100vh - 53px))
+   have a real height to compute against. Headless Chromium tolerated
+   the missing height by inferring fill-body; WebKitGTK collapsed main
+   to height: 0 and the content vanished. The 48px subtracts the
+   shell-rendered top bar so main fills exactly the area below it. */
+main#syntaur-app-content { display: block; min-height: calc(100vh - 48px); }
 .card { @apply bg-gray-800 rounded-xl border border-gray-700; }
 .badge { @apply inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium; }
 .badge-green { @apply bg-green-900/50 text-green-400; }
