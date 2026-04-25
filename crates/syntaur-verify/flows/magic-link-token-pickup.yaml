@@ -1,0 +1,40 @@
+name: "Magic-link E2E: ?token= → sessionStorage → /api/message/start works"
+module: dashboard
+steps:
+  # Step 1: Hit /dashboard with a fake-but-valid-format token via the magic-link URL.
+  # If TOP_BAR_SCRIPT works, sessionStorage will be seeded.
+  - goto: "/dashboard?token=ocp_TEST_MAGIC_LINK_E2E_FLOW_xxxxxxxxxxxx"
+    wait_ms: 1500
+
+  # Step 2: assert the URL got cleaned (token stripped from URL bar)
+  - assert_url_matches: "/dashboard$"
+
+  # Step 3: assert sessionStorage was seeded
+  - eval: |
+      (() => {
+        const ss = sessionStorage.getItem('syntaur_token') || '';
+        const ls = localStorage.getItem('syntaur_token') || '';
+        if (!ss || !ls) {
+          throw new Error('REGRESSION: magic-link did not seed storage. ss=' + (ss?'set':'empty') + ' ls=' + (ls?'set':'empty'));
+        }
+        if (!ss.startsWith('ocp_TEST_MAGIC_LINK_E2E_FLOW')) {
+          throw new Error('REGRESSION: storage has wrong token: ' + ss.slice(0,16));
+        }
+        return { ok: true, len: ss.length };
+      })()
+
+  # Step 4: assert that on a fresh navigation (same tab), the token persists
+  # so the page-level PAGE_JS picks it up
+  - goto: "/scheduler"
+    wait_ms: 1000
+  - eval: |
+      (() => {
+        const ss = sessionStorage.getItem('syntaur_token') || '';
+        if (!ss.startsWith('ocp_TEST_MAGIC_LINK_E2E_FLOW')) {
+          throw new Error('REGRESSION: token did not persist across navigation');
+        }
+        // Cleanup so this sentinel doesn't pollute downstream tests
+        sessionStorage.removeItem('syntaur_token');
+        localStorage.removeItem('syntaur_token');
+        return { ok: true };
+      })()
