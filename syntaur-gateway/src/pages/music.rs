@@ -1173,7 +1173,7 @@ const BODY_HTML: &str = r##"<!-- Module sub-bar — "Bridge live" indicator + re
 </div><!-- /split -->"##;
 
 const MUSIC_JS: &str = r##"const token = sessionStorage.getItem('syntaur_token') || localStorage.getItem('syntaur_token') || '';
-if (!token) { window.location.href = '/'; }
+// Client-side token-gate removed 2026-04-25 (module-reset bug fix).
 
 // ── Syntaur Media Bridge (optional local companion) ──────────────────────
 // Runs on the user's desktop at 127.0.0.1:18790. When alive, we prefer it
@@ -1263,8 +1263,8 @@ async function authFetch(url, opts) {
   opts.headers['Authorization'] = 'Bearer ' + token;
   const resp = await fetch(url, opts);
   if (resp.status === 401) {
-    try { sessionStorage.removeItem('syntaur_token'); } catch(e){}
-    window.location.href = '/';
+    // 2026-04-25: stop bouncing on widget 401 (module-reset bug fix).
+    // Throw so callers can render an empty/error state instead.
     throw new Error('unauthorized');
   }
   return resp;

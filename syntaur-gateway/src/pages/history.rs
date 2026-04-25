@@ -88,7 +88,8 @@ async function api(path, opts) {
   opts = opts || {};
   opts.headers = Object.assign({ 'Authorization': 'Bearer ' + token }, opts.headers || {});
   const r = await fetch(path, opts);
-  if (r.status === 401) { sessionStorage.removeItem('syntaur_token'); window.location.href = '/'; return null; }
+  // 2026-04-25: stop bouncing on widget 401 (module-reset bug fix).
+  if (r.status === 401) { return null; }
   return r.json();
 }
 

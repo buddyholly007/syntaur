@@ -1045,7 +1045,8 @@ async function apiGet(path) {
     if (agent) url += (url.includes('?') ? '&' : '?') + 'agent=' + encodeURIComponent(agent);
   }
   const r = await fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
-  if (r.status === 401) { sessionStorage.removeItem('syntaur_token'); window.location.href = '/'; return null; }
+  // 2026-04-25: stop bouncing on widget 401 (module-reset bug fix).
+  if (r.status === 401) { return null; }
   return r.json();
 }
 

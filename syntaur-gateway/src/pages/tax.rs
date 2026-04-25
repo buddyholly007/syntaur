@@ -3574,7 +3574,7 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
 
 const PAGE_JS: &str = r##"
 const token = sessionStorage.getItem('syntaur_token') || '';
-if (!token) { window.location.href = '/'; }
+// Client-side token-gate removed 2026-04-25 (module-reset bug fix).
 
 // ── Module License Check ──
 let moduleUnlocked = false;

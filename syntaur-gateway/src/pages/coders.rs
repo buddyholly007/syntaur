@@ -305,10 +305,11 @@ const S = {
 
 // ======== INIT ========
 document.addEventListener('DOMContentLoaded', async () => {
-    if (!S.token) {
-        window.location.href = '/';
-        return;
-    }
+    // Client-side `if (!S.token) location.href='/'` guard removed
+    // 2026-04-25 — bounced cookie-authed users back to dashboard
+    // whenever sessionStorage was empty (module-reset bug). Server
+    // cookie auth already authorized this page render; if S.token is
+    // empty here, real API calls will 401 and widgets handle it.
     await loadHosts();
     if (S.hosts.length === 0) {
         await seedDefaultHosts();

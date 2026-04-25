@@ -81,7 +81,11 @@ async function loadModules() {
     const resp = await fetch('/api/setup/modules', {
       headers: { 'Authorization': 'Bearer ' + token }
     });
-    if (resp.status === 401) { sessionStorage.removeItem('syntaur_token'); window.location.href = '/'; return; }
+    // 2026-04-25: stop bouncing on widget 401. Cookie-authed users
+    // hit this when sessionStorage is empty + cookie carries auth;
+    // bouncing made the module-reset bug. Just return — UI shows
+    // empty state. syntaurLogout() (top bar) is the path back to /.
+    if (resp.status === 401) { return; }
     const data = await resp.json();
     const allMods = [...data.core_modules, ...data.extension_modules];
     const enabled = allMods.filter(m => m.enabled);

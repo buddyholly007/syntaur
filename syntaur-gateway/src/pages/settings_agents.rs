@@ -184,7 +184,8 @@ const esc = (s) => String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&
 
 async function apiGet(path) {
   const r = await fetch(path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(token));
-  if (r.status === 401) { sessionStorage.removeItem('syntaur_token'); window.location.href = '/'; return null; }
+  // 2026-04-25: stop bouncing on widget 401 (module-reset bug fix).
+  if (r.status === 401) { return null; }
   return r.json();
 }
 async function apiPost(path, body) {
