@@ -360,10 +360,33 @@ fn open_in_system_browser(url: &str) {
 
 /// Check if a URL is internal (belongs to the Syntaur gateway) or external.
 fn is_external_url(url: &str, gateway_origin: &str) -> bool {
-    if url.starts_with(gateway_origin) { return false; }
     if url.starts_with("about:") || url.starts_with("data:") || url.starts_with("blob:") { return false; }
     if url.starts_with("javascript:") { return false; }
-    url.starts_with("http://") || url.starts_with("https://")
+    if !(url.starts_with("http://") || url.starts_with("https://")) { return false; }
+    // Compare by ORIGIN (scheme + host + port), not by full string prefix.
+    // Otherwise launching with `?token=…` or any path/query in SYNTAUR_URL
+    // would treat every internal click (e.g. `/scheduler`) as external and
+    // route it to the companion panel.
+    extract_origin(url) != extract_origin(gateway_origin)
+}
+
+/// Pull `scheme://host[:port]` off the front of a URL. Manual parse — no
+/// `url` crate dep — because we only need the prefix and the input is one
+/// of two trusted shapes: our own gateway URL or a click target from the
+/// page. Returns the empty string if `url` doesn't look like an absolute
+/// http(s) URL, which makes `is_external_url`'s caller treat malformed
+/// inputs as external (the safer side for an intercept).
+fn extract_origin(url: &str) -> String {
+    let scheme_end = match url.find("://") {
+        Some(i) => i,
+        None => return String::new(),
+    };
+    let scheme = &url[..scheme_end];
+    if scheme != "http" && scheme != "https" { return String::new(); }
+    let after_scheme = &url[scheme_end + 3..];
+    let host_end = after_scheme.find(|c: char| c == '/' || c == '?' || c == '#')
+        .unwrap_or(after_scheme.len());
+    format!("{}://{}", scheme, &after_scheme[..host_end])
 }
 
 #[cfg(target_os = "linux")]
@@ -694,4 +717,42 @@ fn run_viewer(url: &str) -> Result<(), String> {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_origin, is_external_url};
+
+    #[test]
+    fn origin_strips_path_query_fragment() {
+        assert_eq!(extract_origin("http://192.168.1.239:18789"), "http://192.168.1.239:18789");
+        assert_eq!(extract_origin("http://192.168.1.239:18789/"), "http://192.168.1.239:18789");
+        assert_eq!(extract_origin("http://192.168.1.239:18789/?token=abc"), "http://192.168.1.239:18789");
+        assert_eq!(extract_origin("http://192.168.1.239:18789/scheduler"), "http://192.168.1.239:18789");
+        assert_eq!(extract_origin("https://example.com:8443/path?q=1#frag"), "https://example.com:8443");
+        assert_eq!(extract_origin("https://example.com/path"), "https://example.com");
+    }
+
+    #[test]
+    fn origin_rejects_non_http() {
+        assert_eq!(extract_origin("javascript:alert(1)"), "");
+        assert_eq!(extract_origin("about:blank"), "");
+        assert_eq!(extract_origin("data:text/plain,hi"), "");
+        assert_eq!(extract_origin("not a url"), "");
+    }
+
+    #[test]
+    fn launch_url_with_token_does_not_break_internal_nav() {
+        let launched = "http://192.168.1.239:18789/?token=ocp_FAKE";
+        // Same-origin click should NOT be external.
+        assert!(!is_external_url("http://192.168.1.239:18789/scheduler", launched));
+        assert!(!is_external_url("http://192.168.1.239:18789/", launched));
+        // Different host SHOULD be external.
+        assert!(is_external_url("https://www.google.com", launched));
+        assert!(is_external_url("http://192.168.1.69:8080/foo", launched));
+        // about:/data:/javascript: never external.
+        assert!(!is_external_url("about:blank", launched));
+        assert!(!is_external_url("data:text/plain,hi", launched));
+        assert!(!is_external_url("javascript:void(0)", launched));
+    }
 }

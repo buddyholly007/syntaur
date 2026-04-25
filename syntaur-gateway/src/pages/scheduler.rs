@@ -3635,6 +3635,12 @@ const PAGE_JS: &str = r##"
       // This pattern is copied from /chat's own SSE handler.
       const es = new EventSource(`/api/message/${turnId}/stream?token=${encodeURIComponent(TOKEN)}`);
       let gotComplete = false;
+      // Track whether Thaddeus used any tool this turn that may have
+      // mutated calendar / list / habit / todo state. On `complete` we
+      // re-run loadAll() so the UI reflects the change immediately —
+      // otherwise the user sees Thaddeus say "done" while the calendar
+      // still shows the old event until the next manual refresh.
+      let mutatingToolFired = false;
       const finish = () => {
         es.close();
         thadSending = false;
@@ -3655,6 +3661,19 @@ const PAGE_JS: &str = r##"
           case 'tool_call_started':
             if (thought) thought.textContent = 'Using ' + (ev.tool_name || 'a tool') + '…';
             break;
+          case 'tool_call_completed': {
+            // Conservative match: any tool whose name suggests it touched
+            // scheduler-owned data, AND succeeded. Read-only tools (list_*,
+            // get_*) are excluded so questions like "what's on my calendar
+            // today" don't trigger a full reload.
+            const tn = (ev.tool_name || '').toLowerCase();
+            if (ev.success !== false
+              && /^(create|add|update|edit|delete|remove|cancel|complete|toggle|move)_/.test(tn)
+              && /(calendar|event|todo|list|habit|reminder|item|meal)/.test(tn)) {
+              mutatingToolFired = true;
+            }
+            break;
+          }
           case 'complete':
             gotComplete = true;
             if (thought && thought.parentElement) thought.parentElement.remove();
@@ -3662,13 +3681,19 @@ const PAGE_JS: &str = r##"
             const displayResp = (ev.response || '').replace(/\s*\[HANDBACK\]\s*/gi, '');
             schThadAppend('bot', displayResp || 'Thaddeus had no reply.');
             finish();
+            if (mutatingToolFired) {
+              // Refresh calendar/lists/habits in the background — non-blocking
+              // and best-effort. Failure is silent because the chat already
+              // succeeded; UI staleness is the only user-visible cost.
+              try { loadAll().catch(() => {}); } catch (_) {}
+            }
             break;
           case 'error':
             if (thought && thought.parentElement) thought.parentElement.remove();
             schThadAppend('bot', 'Error: ' + (ev.message || 'no details'));
             finish();
             break;
-          // Other events (started, tool_call_completed) we silently accept.
+          // Other events (started) silently accepted.
         }
       };
       es.onerror = () => {
