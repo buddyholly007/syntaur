@@ -218,14 +218,23 @@ tailwind.config = {
 const BASE_STYLES: &str = r#"
 @import url('/fonts.css');
 body { font-family: 'Inter', sans-serif; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; }
-/* SPA shell: the swappable container needs an explicit min-height so
-   pages with body { overflow: hidden } (coders' CRT layout) and pages
-   with viewport-relative inner heights (.ss-shell calc(100vh - 53px))
-   have a real height to compute against. Headless Chromium tolerated
-   the missing height by inferring fill-body; WebKitGTK collapsed main
-   to height: 0 and the content vanished. The 48px subtracts the
-   shell-rendered top bar so main fills exactly the area below it. */
-main#syntaur-app-content { display: block; min-height: calc(100vh - 48px); }
+/* SPA shell: the swappable container is a flex column with an
+   explicit height of `viewport - top-bar`. Pages whose root layout
+   wants `height: 100vh` (coders' CRT workshop-root) or
+   `min-height: calc(100vh - Npx)` (settings .ss-shell) used to anchor
+   to body's viewport context; after the SPA refactor lifted top_bar
+   out and wrapped content in this main, those root layouts had no
+   parent with a real height and collapsed to 0px on SPA-arrival in
+   WebKit (fresh-load worked because the layout pipeline computes
+   viewport-relative units differently from the swap path). Fix:
+   give main a real height + make it a flex container so children
+   that say `height: 100%` or `flex: 1` have something concrete to
+   claim. The 48px subtracts the shell-rendered top bar. */
+main#syntaur-app-content {
+  display: flex; flex-direction: column;
+  min-height: calc(100vh - 48px);
+  height: calc(100vh - 48px);
+}
 .card { @apply bg-gray-800 rounded-xl border border-gray-700; }
 .badge { @apply inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium; }
 .badge-green { @apply bg-green-900/50 text-green-400; }
