@@ -32,6 +32,44 @@ pub fn run(ctx: &StageContext) -> Result<()> {
     let sm = ctx.cfg.social_manager.to_str().unwrap();
     let cargo = cargo_bin();
 
+    // Refresh mtimes on every gateway+mace .rs file before cargo runs.
+    //
+    // Why: git-checkout preserves the committed file's mtime, which can
+    // be older than the previously built artifact in target/. cargo's
+    // incremental check uses mtime, so it can think "source is older
+    // than build artifact, nothing to do" even when source content
+    // changed. We hit this on 2026-04-24 — a Cortex prompt-string edit
+    // (commit 32c1184) was correctly committed + checked out but
+    // didn't end up in the binary because cargo's freshness check
+    // passed. The user-visible effect: ship reports SUCCESS but the
+    // change isn't actually deployed.
+    //
+    // Doing this for the two crates we explicitly build below.
+    // Cheap (touch on a few hundred .rs files is sub-second),
+    // bulletproof (fresh mtimes guarantee cargo recompiles their
+    // compilation units), preserves the dep cache (axum/tokio/etc.
+    // stay built).
+    if !ctx.opts.dry_run && !ctx.opts.skip_build {
+        for crate_rel in ["syntaur-gateway", "mace"] {
+            let crate_path = ctx.cfg.workspace.join(crate_rel);
+            if !crate_path.is_dir() {
+                continue;
+            }
+            log::info!(">> touching .rs files under {}", crate_path.display());
+            let touch_status = Command::new("find")
+                .arg(&crate_path)
+                .args(["-name", "*.rs", "-not", "-path", "*/target/*"])
+                .arg("-exec")
+                .arg("touch")
+                .arg("{}")
+                .arg("+")
+                .status();
+            if let Err(e) = touch_status {
+                log::warn!("[build] mtime refresh failed (non-fatal): {e}");
+            }
+        }
+    }
+
     log::info!(">> cd {ws} && cargo build --release -p syntaur-gateway -p mace");
     if !ctx.opts.dry_run {
         let status = Command::new(&cargo)
