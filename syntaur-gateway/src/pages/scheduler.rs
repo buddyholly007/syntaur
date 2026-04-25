@@ -3281,7 +3281,7 @@ const PAGE_JS: &str = r##"
 
   // ── T2 #13 — Journal cross-link ───────────────────────────────────
   window.schOpenJournalForDay = function(dateKey) {
-    window.location.href = '/journal?date=' + encodeURIComponent(dateKey);
+    (window.syntaurGo || ((u)=>location.href=u))('/journal?date=' + encodeURIComponent(dateKey));
   };
 
   // ── T4 #22 — Moon phase + sunrise/sunset ──────────────────────────

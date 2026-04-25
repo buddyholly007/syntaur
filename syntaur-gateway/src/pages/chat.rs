@@ -642,7 +642,7 @@ async function acceptHandoff(module) {
       if (seeded && seeded.conversation_id) qs.set('specialist_conv', seeded.conversation_id);
       if (seeded && seeded.greeting) qs.set('greeting', seeded.greeting);
       if (token) qs.set('token', token);
-      window.location.href = `${base}?${qs.toString()}`;
+      (window.syntaurGo || ((u)=>location.href=u))(`${base}?${qs.toString()}`);
     }
     function dismissEscalation(module) {
       // Tell the backend to suppress this escalation
@@ -809,8 +809,9 @@ function handoffToMaurice(btn) {
   // Preserve the auth token so the /coders page can authenticate immediately.
   if (token) params.set('token', token);
 
-  // Navigate — /coders takes over from here.
-  location.href = '/coders?' + params.toString();
+  // Navigate — /coders takes over from here. Through syntaurGo so
+  // music keeps playing across the swap.
+  (window.syntaurGo || ((u)=>location.href=u))('/coders?' + params.toString());
 }
 
 // Drag and drop

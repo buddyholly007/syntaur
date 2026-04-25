@@ -425,7 +425,7 @@ async function autoReturn(summary) {
     if (S.token) params.set('token', S.token);
     if (returnConv) params.set('conv_id', returnConv);
     if (summary) params.set('mace_summary', summary.slice(0, 400));
-    window.location.href = '/chat' + (params.toString() ? '?' + params.toString() : '');
+    (window.syntaurGo || ((u)=>location.href=u))('/chat' + (params.toString() ? '?' + params.toString() : ''));
 }
 
 // Wait until the given tab's WebSocket is OPEN (or give up after timeoutMs).
@@ -596,7 +596,7 @@ async function returnToMainAgent() {
     const params = new URLSearchParams();
     if (S.token) params.set('token', S.token);
     if (convId) params.set('conv_id', convId);
-    window.location.href = '/chat' + (params.toString() ? '?' + params.toString() : '');
+    (window.syntaurGo || ((u)=>location.href=u))('/chat' + (params.toString() ? '?' + params.toString() : ''));
 }
 
 function stayInCoders() {

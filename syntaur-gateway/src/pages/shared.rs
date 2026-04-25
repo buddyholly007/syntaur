@@ -576,7 +576,11 @@ const TOP_BAR_SCRIPT: &str = r##"
       return;
     }
     list.innerHTML = items.map(m =>
-      `<li data-path="${m.path}" onclick="location.href='${m.path}'">`
+      // Route through syntaurGo so the SPA router gets the click —
+      // hard `location.href=` was killing music continuity when users
+      // navigated via ⌘K. syntaurGo falls back to location.href if
+      // the router isn't installed yet.
+      `<li data-path="${m.path}" onclick="window.closeModulesPalette&&window.closeModulesPalette();window.syntaurGo&&window.syntaurGo('${m.path}')">`
       + `<span class="m-icon">›</span>`
       + `<span>${m.name}</span>`
       + (m.sub ? `<span class="m-sub">${m.sub}</span>` : '')
@@ -886,7 +890,8 @@ const TOP_BAR_SCRIPT: &str = r##"
         if (ga.paused) ga.play().catch(()=>{}); else ga.pause();
       } else if (action === 'next' || action === 'prev') {
         // Next/prev for local require a queue — surfaced on /music.
-        if (action === 'next') window.location.href = '/music';
+        if (action === 'next' && window.syntaurGo) window.syntaurGo('/music');
+        else if (action === 'next') window.location.href = '/music';
       }
       return;
     }
@@ -1083,6 +1088,25 @@ const SPA_ROUTER_SCRIPT: &str = r##"
   window.addEventListener('popstate', () => {
     navigate(location.href, true);
   });
+
+  // Programmatic-navigation helper. Anywhere we'd otherwise write
+  // `location.href = '/some/internal/path'`, use syntaurGo() instead
+  // so the navigation goes through the SPA router and music keeps
+  // playing. Same-origin only — external URLs and downloads fall
+  // through to a real navigation. Falls back to location.href if
+  // the router was somehow not installed.
+  window.syntaurGo = function(href) {
+    if (!href) return;
+    let url;
+    try { url = new URL(href, location.href).toString(); }
+    catch (_) { location.href = href; return; }
+    if (new URL(url).origin !== location.origin) {
+      // Different origin (e.g., OAuth redirect) — hard nav.
+      location.href = href;
+      return;
+    }
+    navigate(url, false);
+  };
 })();
 </script>
 "##;

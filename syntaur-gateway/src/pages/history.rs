@@ -178,7 +178,7 @@ function closeModal() {
 function resumeConversation() {
   if (currentConvId) {
     sessionStorage.setItem('resume_conv_id', currentConvId);
-    location.href = '/chat';
+    (window.syntaurGo || ((u)=>location.href=u))('/chat');
   }
 }
 
