@@ -1065,6 +1065,21 @@ const SPA_ROUTER_SCRIPT: &str = r##"
         return;
       }
 
+      // ── Force a synchronous layout pass after the innerHTML swap.
+      // WebKitGTK's layout pipeline doesn't always re-establish the
+      // height-context chain when the new content's root layout uses
+      // `height: 100vh` (coders' workshop-root), `height: 100%`, or
+      // `flex: 1` against an ancestor whose previous layout was
+      // computed under a different content tree. The result was
+      // /coders rendering as just the CRT bezel with empty glass on
+      // SPA-arrival but rendering correctly on fresh-load. Reading
+      // offsetHeight is the canonical browser-portable trick to
+      // trigger an immediate reflow; we read it on both the swapped
+      // container and the body to be thorough. Chromium ignores this
+      // (its layout was already correct); WebKit uses it.
+      void liveMain.offsetHeight;
+      void document.body.offsetHeight;
+
       // ── Re-execute the inline scripts inside the new container so
       // each module's IIFE fires. innerHTML doesn't auto-run scripts.
       const oldScripts = Array.from(liveMain.querySelectorAll('script'));
@@ -1074,6 +1089,14 @@ const SPA_ROUTER_SCRIPT: &str = r##"
         fresh.textContent = old.textContent;
         if (old.parentNode) old.parentNode.replaceChild(fresh, old);
       }
+
+      // ── One more reflow after scripts run, then on next two
+      // animation frames — covers any IIFE that mutates DOM/CSS in
+      // ways that the engine should re-layout again.
+      void liveMain.offsetHeight;
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => { void liveMain.offsetHeight; });
+      });
 
       // ── History
       if (!isPopState) history.pushState({ syntaurSpa: true }, '', url);
