@@ -20,37 +20,37 @@ futures-util = { workspace = true }
 axum = { version = "0.8", features = ["macros", "multipart", "ws"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 regex = "1"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
 chrono = "0.4"
 uuid = { version = "1", features = ["v4"] }
-lru = "0.12"
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+lru = "0.17"
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 base64 = "0.22"
 libc = "0.2"
-rand = "0.8"
-mdns-sd = "0.13"
-sha2 = "0.10"
-hmac = "0.12"
+rand = "0.10"
+mdns-sd = "0.19"
+sha2 = "0.11"
+hmac = "0.13"
 aes-gcm = "0.10"
 async-stream = "0.3"
-maud = "0.26"
+maud = "0.27"
 serde_yaml = "0.9"
 
 # PDF text extraction for the uploaded_files RAG connector.
-pdf-extract = "0.7"
+pdf-extract = "0.10"
 # AcroForm field filling for IRS Form 4868 (extension filing).
-lopdf = "0.34"
+lopdf = "0.38"
 
 # Document format extractors for RAG knowledge indexing.
-calamine = "0.26"       # XLSX/XLS/ODS spreadsheets
-quick-xml = "0.37"      # DOCX/PPTX/ODT/EPUB XML parsing
-zip = "2"               # OOXML/ODF/EPUB are ZIP archives
-mailparse = "0.15"      # RFC 5322 .eml email parsing
+calamine = "0.34"       # XLSX/XLS/ODS spreadsheets
+quick-xml = "0.39"      # DOCX/PPTX/ODT/EPUB XML parsing
+zip = "7"               # OOXML/ODF/EPUB are ZIP archives
+mailparse = "0.16"      # RFC 5322 .eml email parsing
 
 # Phase 0 voice skill router: pure-Rust ONNX embeddings for find_tool dispatch.
 # BGE-small-en-v1.5 (~30MB) is downloaded into the cache dir on first init.
 # Uses CPU; 384-dim embeddings; ~50ms per query on a desktop Intel.
-fastembed = "4"
+fastembed = "5"
 
 shell-words = "1"
 thiserror = { workspace = true }
@@ -62,7 +62,7 @@ tower-http = { version = "0.6", features = ["limit", "cors"] }
 bytes = "1"
 
 # Local music library — pure-Rust audio metadata (MP3/FLAC/M4A/OGG/WAV/Opus).
-lofty = "0.22"
+lofty = "0.24"
 tokio-util = { version = "0.7", features = ["io"] }
 
 ed25519-dalek = "2"

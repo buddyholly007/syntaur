@@ -23,10 +23,10 @@ axum = { version = "0.8", features = ["ws", "macros"] }
 tower-http = { version = "0.6", features = ["cors"] }
 
 # CDP driver for Chromium automation
-chromiumoxide = "0.7"
+chromiumoxide = "0.9"
 
 # Platform helpers
-directories = "5"
+directories = "6"
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
