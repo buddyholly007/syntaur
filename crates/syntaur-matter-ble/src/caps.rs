@@ -463,7 +463,13 @@ fn render_control_human(c: &Control) -> String {
         Control::Sensor(SensorKind::Temperature) => "Sensor     Temperature".into(),
         Control::Sensor(SensorKind::Humidity) => "Sensor     Humidity".into(),
         Control::Sensor(SensorKind::Illuminance) => "Sensor     Light level".into(),
-        Control::PowerMeter => "Energy     Live power (W)".into(),
-        Control::EnergyMeter => "Energy     Cumulative (Wh)".into(),
+        // Two distinct measurements that share the energy endpoint on
+        // most plugs. The previous "Energy" prefix was wrong on the rate
+        // row (a watt is power, not energy) and also collided with the
+        // on/off switch row's "Power" prefix. Plain-language labels
+        // here; live values render in W and kWh (the unit users see on
+        // their utility bill) at display time.
+        Control::PowerMeter => "Current power draw (W)".into(),
+        Control::EnergyMeter => "Total used (kilowatt-hours)".into(),
     }
 }
