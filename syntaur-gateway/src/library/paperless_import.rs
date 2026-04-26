@@ -194,6 +194,9 @@ async fn ingest_via_self(
         "doc_date": doc_date_db,
     }).to_string();
     let db_path = state.db_path.clone();
+    // Copy out the field we need from `&PaperlessDoc` before the move
+    // closure: a reference can't outlive the function, but i64 can.
+    let paperless_id = doc.id;
     let _ = tokio::task::spawn_blocking(move || -> Result<()> {
         let conn = rusqlite::Connection::open(&db_path).map_err(|e| anyhow!("db: {e}"))?;
         conn.execute(
@@ -210,7 +213,7 @@ async fn ingest_via_self(
             "INSERT OR IGNORE INTO library_links
              (user_id, src_kind, src_id, dst_kind, dst_id, relation, confidence, created_at, created_by)
              VALUES (?, 'library', ?, 'paperless', ?, 'imported_from', 1.0, ?, 'paperless-import')",
-            params![user_id, fid, doc.id, now],
+            params![user_id, fid, paperless_id, now],
         );
         Ok(())
     }).await.map_err(|e| anyhow!("join: {e}"))?;

@@ -238,14 +238,16 @@ pub async fn handle_redeem_share(
     // Bump view_count + audit (best-effort, before serving). Doing the
     // bump first means a transient DB error doesn't leak a free read.
     let db_path = state.db_path.clone();
+    let scope_kind_for_audit = scope_kind.clone();
+    let scope_value_for_audit = scope_value.clone();
     let _ = tokio::task::spawn_blocking(move || {
         let conn = match rusqlite::Connection::open(&db_path) { Ok(c) => c, Err(_) => return };
         let _ = conn.execute(
             "UPDATE library_share_urls SET view_count = view_count + 1 WHERE id = ?",
             params![share_id],
         );
-        let file_id_for_audit: Option<i64> = if scope_kind == "file" {
-            scope_value.parse::<i64>().ok()
+        let file_id_for_audit: Option<i64> = if scope_kind_for_audit == "file" {
+            scope_value_for_audit.parse::<i64>().ok()
         } else { None };
         let _ = log_audit(
             &conn, file_id_for_audit, owner_user_id, "share_redeem",
@@ -310,18 +312,25 @@ pub async fn handle_list_audit(
              ORDER BY ts DESC LIMIT ?"
         };
         let mut stmt = match conn.prepare(sql) { Ok(s) => s, Err(_) => return vec![] };
-        let mapped = if let Some(fid) = file_id {
-            stmt.query_map(params![user_id, since, fid, limit], |r| Ok(AuditRow {
-                id: r.get(0)?, file_id: r.get(1)?, action: r.get(2)?,
-                actor: r.get(3)?, reason: r.get(4)?, ts: r.get(5)?,
-            }))
+        // Each branch gets its own closure (rusqlite closures are nominal
+        // types — even structurally identical closures are different
+        // types, so we can't unify the two arms into one `mapped` binding).
+        // Collect inside each branch and return a Vec<AuditRow>.
+        let make_row = |r: &rusqlite::Row<'_>| Ok::<AuditRow, rusqlite::Error>(AuditRow {
+            id: r.get(0)?, file_id: r.get(1)?, action: r.get(2)?,
+            actor: r.get(3)?, reason: r.get(4)?, ts: r.get(5)?,
+        });
+        if let Some(fid) = file_id {
+            match stmt.query_map(params![user_id, since, fid, limit], &make_row) {
+                Ok(it) => it.filter_map(|r| r.ok()).collect(),
+                Err(_) => vec![],
+            }
         } else {
-            stmt.query_map(params![user_id, since, limit], |r| Ok(AuditRow {
-                id: r.get(0)?, file_id: r.get(1)?, action: r.get(2)?,
-                actor: r.get(3)?, reason: r.get(4)?, ts: r.get(5)?,
-            }))
-        };
-        match mapped { Ok(it) => it.filter_map(|r| r.ok()).collect(), Err(_) => vec![] }
+            match stmt.query_map(params![user_id, since, limit], &make_row) {
+                Ok(it) => it.filter_map(|r| r.ok()).collect(),
+                Err(_) => vec![],
+            }
+        }
     })
     .await
     .unwrap_or_default();
