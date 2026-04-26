@@ -6973,6 +6973,10 @@ async fn main() {
             post(smart_home::api::handle_refresh_state),
         )
         .route(
+            "/api/smart-home/devices/{id}/discover-caps",
+            post(smart_home::api::handle_discover_caps),
+        )
+        .route(
             "/api/smart-home/automations",
             get(smart_home::api::handle_list_automations)
                 .post(smart_home::api::handle_create_automation),

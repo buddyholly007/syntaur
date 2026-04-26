@@ -559,6 +559,173 @@ pub async fn handle_refresh_state(
     Ok(Json(json!({ "device": updated })))
 }
 
+/// POST /api/smart-home/devices/{id}/discover-caps — open a CASE
+/// session against a Matter device's commissioned node, walk the
+/// Descriptor cluster on every endpoint, and persist the resulting
+/// `DeviceCapabilities` JSON on the device row. The Smart Home tile
+/// UI and agent tool surface read `capabilities_json` to scope which
+/// controls render and which tools the agent is offered for the
+/// device.
+///
+/// Resolves the operational fabric automatically when the install has
+/// exactly one fabric (the common case). Multi-fabric installs must
+/// pass `fabric_label` in the body. `addr` is an optional `IP:PORT`
+/// override that skips mDNS — useful when the device sits on a
+/// different VLAN than the gateway and mDNS doesn't reflect across
+/// subnets.
+///
+/// Driver-gated: only Matter devices are wired in v1; other drivers
+/// return 501.
+pub async fn handle_discover_caps(
+    State(state): State<std::sync::Arc<AppState>>,
+    Path(id): Path<i64>,
+    body: Option<Json<DiscoverCapsBody>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let user_id = current_user_id(&state);
+    let db = state.db_path.clone();
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+
+    let device = {
+        let db = db.clone();
+        tokio::task::spawn_blocking(move || -> rusqlite::Result<Option<devices::Device>> {
+            let conn = rusqlite::Connection::open(&db)?;
+            devices::get(&conn, user_id, id)
+        })
+        .await
+        .map_err(|e| err_500(format!("join error: {e}")))?
+        .map_err(|e| err_500(format!("db error: {e}")))?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "device not found" })),
+            )
+        })?
+    };
+
+    if device.driver != "matter" {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({
+                "error": format!(
+                    "discover-caps: driver '{}' not wired (Matter only in v1)",
+                    device.driver
+                )
+            })),
+        ));
+    }
+
+    let node_id: u64 = device
+        .external_id
+        .strip_prefix("node:")
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!(
+                        "device external_id '{}' is not a Matter node reference",
+                        device.external_id
+                    )
+                })),
+            )
+        })?;
+
+    // Fabric resolution + load both touch the disk. Off the async
+    // executor so we don't stall the runtime on filesystem I/O.
+    let fabric_label_hint = body.fabric_label.clone();
+    let (fabric_label, fabric) =
+        tokio::task::spawn_blocking(move || -> Result<(String, syntaur_matter::FabricHandle), (StatusCode, Json<serde_json::Value>)> {
+            let label = match fabric_label_hint {
+                Some(l) => l,
+                None => {
+                    let fabrics = syntaur_matter::list_fabrics().map_err(|e| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({ "error": format!("list fabrics: {e:?}") })),
+                        )
+                    })?;
+                    match fabrics.as_slice() {
+                        [single] => single.label.clone(),
+                        [] => {
+                            return Err((
+                                StatusCode::FAILED_DEPENDENCY,
+                                Json(json!({
+                                    "error": "no Matter fabric configured. Run POST /api/smart-home/matter/fabric/init first."
+                                })),
+                            ));
+                        }
+                        _ => {
+                            return Err((
+                                StatusCode::BAD_REQUEST,
+                                Json(json!({
+                                    "error": "multiple fabrics present; pass fabric_label in body to disambiguate",
+                                    "fabrics": fabrics.iter().map(|f| f.label.clone()).collect::<Vec<_>>(),
+                                })),
+                            ));
+                        }
+                    }
+                }
+            };
+            let fabric = syntaur_matter::load_fabric(&label).map_err(|e| {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "error": format!("load fabric {label}: {e:?}") })),
+                )
+            })?;
+            Ok((label, fabric))
+        })
+        .await
+        .map_err(|e| err_500(format!("join error: {e}")))??;
+
+    let addr_override = match body.addr.as_deref() {
+        Some(s) => Some(s.parse::<std::net::SocketAddr>().map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("addr '{s}' parse: {e}") })),
+            )
+        })?),
+        None => None,
+    };
+
+    log::info!(
+        "[discover-caps] device {} (node {:#x}) on fabric {} (addr_override={:?})",
+        id, node_id, fabric_label, addr_override
+    );
+
+    let caps = syntaur_matter_ble::discover_capabilities_for_node(&fabric, node_id, addr_override)
+        .await
+        .map_err(|e| err_500(format!("discover_capabilities_for_node: {e:?}")))?;
+
+    let caps_for_persist = caps.clone();
+    let updated = tokio::task::spawn_blocking(move || -> rusqlite::Result<Option<devices::Device>> {
+        let conn = rusqlite::Connection::open(&db)?;
+        devices::set_capabilities(&conn, user_id, id, &caps_for_persist)?;
+        devices::get(&conn, user_id, id)
+    })
+    .await
+    .map_err(|e| err_500(format!("join error: {e}")))?
+    .map_err(|e| err_500(format!("db error: {e}")))?;
+
+    Ok(Json(json!({
+        "ok": true,
+        "device": updated,
+        "capabilities": caps,
+        "human": caps.render_human(),
+    })))
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DiscoverCapsBody {
+    /// Multi-fabric installs disambiguate here. Single-fabric installs
+    /// can omit; we'll resolve via `list_fabrics()`.
+    #[serde(default)]
+    pub fabric_label: Option<String>,
+    /// Optional `IP:PORT` override that skips operational mDNS.
+    /// Standard Matter port is 5540. Useful cross-VLAN.
+    #[serde(default)]
+    pub addr: Option<String>,
+}
+
 // ── automation (CRUD — plan Week 6/10 milestone) ────────────────────────
 //
 // Stores the canonical AST in `smart_home_automations.spec_json` so the
