@@ -78,6 +78,13 @@ pub async fn scan_for_discriminator_ext(
 
     let mut events = central.events().await?;
     let mut hits: Vec<CommissionableDevice> = Vec::new();
+    // 2026-04-25: stale-cache guard. BlueZ replays cached "known device"
+    // entries when scan starts, including peripherals whose RPA has rotated
+    // since. Accepting on first-event causes connect() to hang on a MAC the
+    // peer no longer responds to. Require >= 2 events for the same id within
+    // the scan session to confirm it is actively advertising NOW.
+    use std::collections::HashMap;
+    let mut sighting_counts: HashMap<btleplug::platform::PeripheralId, u32> = HashMap::new();
     let hard_deadline = tokio::time::Instant::now() + timeout;
     // Set once we see our first Matter-service advertisement — stops
     // the loop `post_first_hit_grace` later instead of after the full
@@ -129,11 +136,17 @@ pub async fn scan_for_discriminator_ext(
                 continue;
             }
         }
+        let count = sighting_counts.entry(id.clone()).or_insert(0);
+        *count += 1;
+        if *count < 2 {
+            // Discard the first sighting — could be a cache replay.
+            continue;
+        }
         if !hits.iter().any(|h| h.address == dev.address) {
             hits.push(dev.clone());
         }
         if want_discriminator.is_some() {
-            // Exact match requested and found — stop immediately.
+            // Exact match requested and confirmed (>=2 sightings) — stop.
             break;
         }
         // No exact filter: start a short grace window after first hit

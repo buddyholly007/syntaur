@@ -65,20 +65,23 @@ impl FabricHandle {
     /// plus a direct read of the CA secret key + IPK so we can
     /// serialize both back out for persistence.
     pub fn new(label: impl Into<String>) -> Result<Self, MatterFabricError> {
+        use rs_matter::cert::builder::{RcacBuilder, SubjectDN, Validity};
+        use rs_matter::crypto::{
+            test_only_crypto, CanonPkcPublicKey, CanonPkcSecretKey, RngCore,
+        };
+
         let label = validate_label(&label.into())?;
         let crypto = test_only_crypto();
 
-        // Random non-zero u64 for fabric_id so multi-fabric installs
-        // don't collide. Upper 16 bits left zero for legibility.
+        // Random fabric_id (non-zero, 60-ish bits of entropy with high
+        // nibble masked for legibility).
         let mut fab_bytes = [0u8; 8];
         let mut rand = crypto
             .rand()
             .map_err(|e| MatterFabricError::Matter(format!("rand(): {e:?}")))?;
-        // rs-matter's `RngCore` is unhappy producing 0, so loop until non-zero.
         loop {
-            use rs_matter::crypto::RngCore;
             rand.fill_bytes(&mut fab_bytes);
-            fab_bytes[0] &= 0x0F; // cap at 4-bit prefix for readability; still ~60 bits of entropy
+            fab_bytes[0] &= 0x0F;
             let n = u64::from_be_bytes(fab_bytes);
             if n != 0 {
                 break;
@@ -86,68 +89,51 @@ impl FabricHandle {
         }
         let fabric_id = u64::from_be_bytes(fab_bytes);
 
-        let mut creds = FabricCredentials::new(&crypto, fabric_id)
-            .map_err(|e| MatterFabricError::Matter(format!("FabricCredentials::new: {e:?}")))?;
-
-        let rcac = creds.root_cert().to_vec();
-        let ipk = creds.ipk();
-        let mut ipk_bytes = [0u8; 16];
-        ipk_bytes.copy_from_slice(ipk.access());
-
-        // Extract the CA signing key. rs-matter's FabricCredentials
-        // keeps the CA key as an in-memory `CanonPkcSecretKey`; we
-        // need the raw 32-byte scalar to persist. Re-issue a
-        // credentials-generation call with a throwaway CSR just to
-        // observe the signing flow isn't the move — instead, tap into
-        // the NocGenerator's private root_privkey via an internal
-        // helper we add in sign.rs. For Phase 1, we instead
-        // regenerate the CA from a random seed we control end-to-end:
-        //
-        // Strategy: generate our own P-256 keypair via the Crypto
-        // trait, then hand it to a NocGenerator::from_root_ca built
-        // against a matching self-signed RCAC. This way we hold the
-        // 32-byte scalar directly.
-        //
-        // But FabricCredentials::new already generated a random CA.
-        // That scalar is captured inside its NocGenerator. Since the
-        // struct doesn't expose it, Phase 1 keeps rs-matter's default
-        // API path AND stores the CA key by working around: rebuild
-        // the whole creds from a caller-controlled keypair below.
-        //
-        // Simpler in practice: use the stable-CA path from
-        // `matter_fabric_import::sign_self_noc`. That code already
-        // works, and we have the CA key in hand from the start.
-        let _ = creds; // drop the randomly-generated one; rebuild controlled below
-
-        let our_ca_key = crypto
+        // Generate ONE CA keypair that will both sign the RCAC AND sign
+        // future NOCs. Earlier versions of this fabric used FabricCredentials::new
+        // for the RCAC (random CA #1) and a separately-generated key for NOC
+        // signing (CA #2). The chain didn't validate, which broke CASE
+        // handshakes. Verified 2026-04-25 against Eve Energy.
+        let ca_secret = crypto
             .generate_secret_key()
             .map_err(|e| MatterFabricError::Matter(format!("generate_secret_key: {e:?}")))?;
-        let mut canon = rs_matter::crypto::CanonPkcSecretKey::new();
-        our_ca_key
-            .write_canon(&mut canon)
-            .map_err(|e| MatterFabricError::Matter(format!("write_canon: {e:?}")))?;
+        let ca_public = ca_secret
+            .pub_key()
+            .map_err(|e| MatterFabricError::Matter(format!("pub_key: {e:?}")))?;
+        let mut ca_secret_canon = CanonPkcSecretKey::new();
+        ca_secret
+            .write_canon(&mut ca_secret_canon)
+            .map_err(|e| MatterFabricError::Matter(format!("write_canon ca: {e:?}")))?;
         let mut ca_scalar = [0u8; 32];
-        ca_scalar.copy_from_slice(canon.access());
+        ca_scalar.copy_from_slice(ca_secret_canon.access());
 
-        // Build a fresh NocGenerator from our known-seed CA; use that
-        // to emit the RCAC so `root_cert_hex` matches the scalar.
-        use rs_matter::commissioner::NocGenerator;
-        let rcac_id: u64 = 1;
-        let gen = NocGenerator::from_root_ca(
-            &crypto,
-            rs_matter::crypto::CanonPkcSecretKey::from(&ca_scalar),
-            // Placeholder empty slice; NocGenerator::from_root_ca
-            // actually needs a TLV RCAC. Phase 3 fills this in via
-            // a hand-built self-signed RCAC; for Phase 1 we keep the
-            // random RCAC from the first `FabricCredentials::new`
-            // call above.
-            &rcac,
-            fabric_id,
-            rcac_id,
-        )
-        .map_err(|e| MatterFabricError::Matter(format!("NocGenerator::from_root_ca: {e:?}")))?;
-        // Silence unused warning — Phase 3 will use `gen` to sign.
-        let _ = gen;
+        // Random rcac_id and serial.
+        let mut rcac_id_bytes = [0u8; 8];
+        rand.fill_bytes(&mut rcac_id_bytes);
+        let rcac_id = u64::from_be_bytes(rcac_id_bytes) | 1; // ensure non-zero
+        let mut serial = [0u8; 8];
+        rand.fill_bytes(&mut serial);
+
+        // Random IPK.
+        let mut ipk_bytes = [0u8; 16];
+        rand.fill_bytes(&mut ipk_bytes);
+
+        // Build the RCAC with our CA keypair self-signing.
+        let mut cert_buf = [0u8; 1024];
+        let cert_len = {
+            let mut builder = RcacBuilder::new(&mut cert_buf);
+            builder
+                .build(
+                    &crypto,
+                    SubjectDN::rcac(fabric_id, rcac_id),
+                    Validity::new(762624000, 0xFFFFFFFE),
+                    &ca_public,
+                    &ca_secret,
+                    &serial,
+                )
+                .map_err(|e| MatterFabricError::Matter(format!("RcacBuilder::build: {e:?}")))?
+        };
+        let rcac = cert_buf[..cert_len].to_vec();
 
         Ok(FabricHandle {
             label,

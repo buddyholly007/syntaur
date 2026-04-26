@@ -1,0 +1,64 @@
+[package]
+name = "rs-matter-examples"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "onoff_light"
+
+[[bin]]
+name = "onoff_light_bt"
+required-features = ["zbus"]
+
+[[bin]]
+name = "onoff_light_work_stealing"
+required-features = ["sync-mutex"]
+
+[[bin]]
+name = "speaker"
+
+[[bin]]
+name = "media_player"
+
+[[bin]]
+name = "bridge"
+
+[[bin]]
+name = "chip_tool_tests"
+
+[[bin]]
+name = "dimmable_light"
+
+[features]
+default = ["log"]
+log = []
+mbedtls = ["rs-matter/mbedtls"]
+openssl = ["rs-matter/openssl"]
+sync-mutex = ["rs-matter/sync-mutex"]
+zbus = ["rs-matter/zbus"]
+astro-dnssd = ["rs-matter/astro-dnssd"]
+zeroconf = ["rs-matter/zeroconf"]
+avahi = ["rs-matter/zbus"]
+resolve = ["rs-matter/zbus"]
+chip-test = []
+# Temporary fix for unexpected cfgs lint
+defmt = []
+
+[dependencies]
+log = "0.4"
+env_logger = "0.11"
+embassy-futures = "0.1"
+embassy-sync = "0.7"
+embassy-time = { version = "0.5", features = ["std"] }
+embassy-time-queue-utils = { version = "0.3", features = ["generic-queue-64"] }
+static_cell = "1"
+nix = { version = "0.27", features = ["net"] }
+async-io = "2"
+async-compat = "0.2"
+futures-lite = "2"
+rs-matter = { path = "../rs-matter", features = ["async-io", "max-groups-per-fabric-12", "max-group-keys-per-fabric-2", "max-group-endpoints-per-fabric-3"] }
+rand = { version = "0.8", features = ["std", "std_rng"] }
+async-signal = "0.2"
+socket2 = "0.5"
+async-executor = "1"

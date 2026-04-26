@@ -80,8 +80,8 @@ const BTP_OPCODE_HANDSHAKE: u8 = 0x6C;
 // Using Matter spec minimums (MTU=23, window=1) for the initial
 // handshake — some devices silent-drop larger requests. Post-handshake
 // we could renegotiate upward if the peer allows.
-const BTP_PREF_MTU: u16 = 23;
-const BTP_PREF_WINDOW: u8 = 1;
+const BTP_PREF_MTU: u16 = 247;
+const BTP_PREF_WINDOW: u8 = 4;
 
 // Spec minimums.
 const BTP_MIN_MTU: u16 = 23;
@@ -385,8 +385,12 @@ impl BtpSession {
 
         // Get the notification stream BEFORE subscribing so BlueZ-backed
         // indications arriving in the subscribe-ack window are not dropped.
+        // Per Eve quirk (verified via M3 BTP trace 2026-04-25): subscribe()
+        // is intentionally deferred until AFTER the BTP Handshake Request
+        // is written — Eve only releases the queued Handshake Response
+        // indication after the CCCD-enable that follows the request. See
+        // do_handshake() below.
         let mut stream = peripheral.notifications().await?;
-        peripheral.subscribe(&c2).await?;
         let (tx, rx) = mpsc::unbounded_channel();
         let c2_uuid = c2.uuid;
         let notif_task = tokio::spawn(async move {
@@ -419,7 +423,7 @@ impl BtpSession {
         // Give CCCD enable time to land on the peer side — some firmware
         // (Eve, AiDot) doesn't fully register the subscription before
         // processing BTP frames. 5s is overkill but eliminates the class.
-        tokio::time::sleep(Duration::from_millis(5000)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await; // patched 2026-04-25: was 5000, M3 trace shows no such delay
         // Supported Versions is a list of up to 8 nibble-packed version
         // numbers, NOT a bitmap. chip-sdk sends 0x04 meaning "first
         // supported version = 4, no others". LE u32 = 0x00000004.
@@ -435,6 +439,17 @@ impl BtpSession {
             .write(&self.c1, &frame, WriteType::WithResponse)
             .await?;
         log::debug!("[btp] handshake Write Request sent (per spec §4.17.3.2 / CHIP PR #3161)");
+
+        // M3-order subscribe: enable C2 indications AFTER the request is on
+        // the wire. Eve queues the Handshake Response internally and only
+        // releases it once the CCCD on C2 is written 0x0002. Putting
+        // subscribe() before the request — the canonical BLE pattern —
+        // results in silent-drop on Eve. See nrf52840 sniffer capture
+        // 2026-04-25 (eve_via_aqara_v3 frames 23772/23780/23785 = working
+        // M3 order; eve_via_rust_patched frames 564/576/no-response =
+        // broken pre-fix order).
+        self.peripheral.subscribe(&self.c2).await?;
+        log::debug!("[btp] subscribe(C2) called AFTER handshake request (Eve order quirk)");
 
         let resp_frame = self.recv_raw_frame(Duration::from_secs(10)).await?;
         let (hdr, consumed) = BtpHdr::decode(&resp_frame)?;
@@ -644,6 +659,7 @@ pub struct BleCommissionExchange {
     session: Arc<BtpSession>,
     #[allow(dead_code)]
     passcode: u32,
+    pub(crate) pase_handle: tokio::sync::Mutex<Option<PaseHandle>>,
 }
 
 impl BleCommissionExchange {
@@ -655,12 +671,59 @@ impl BleCommissionExchange {
         passcode: u32,
     ) -> Result<Self, BtpError> {
         let session = Arc::new(BtpSession::open(device).await?);
-        Ok(Self { session, passcode })
+        Ok(Self { session, passcode, pase_handle: tokio::sync::Mutex::new(None) })
     }
 
     /// Access the underlying BTP session (tests / diagnostics).
     pub fn session(&self) -> &BtpSession {
         &self.session
+    }
+}
+
+/// Inflight command sent from `CommissionExchange::*` to the long-running
+/// PASE worker. Two variants: standard IM invokes, and the post-PASE CASE
+/// handshake + CommissioningComplete pair (needed because CommissioningComplete
+/// must run on CASE per Matter Core §11.10.6.6).
+pub enum InvokeCmd {
+    Im {
+        cluster: u32,
+        command: u32,
+        payload: Vec<u8>,
+        response_tx: tokio::sync::oneshot::Sender<
+            Result<Vec<u8>, syntaur_matter::error::MatterFabricError>,
+        >,
+    },
+    CaseAndComplete {
+        fabric_id: u64,
+        controller_node_id: u64,
+        peer_node_id: u64,
+        rcac: Vec<u8>,
+        ca_secret_key_scalar: [u8; 32],
+        ipk: [u8; 16],
+        vendor_id: u16,
+        response_tx: tokio::sync::oneshot::Sender<
+            Result<(), syntaur_matter::error::MatterFabricError>,
+        >,
+    },
+}
+
+/// Holds onto the channel used to dispatch invokes onto the cached PASE
+/// session, plus the cancel flag + handles needed for orderly teardown
+/// when this `BleCommissionExchange` is dropped.
+pub struct PaseHandle {
+    pub cmd_tx: flume::Sender<InvokeCmd>,
+    pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub _outbound: tokio::task::JoinHandle<()>,
+    pub _inbound: tokio::task::JoinHandle<()>,
+    pub _blocking: tokio::task::JoinHandle<Result<(), syntaur_matter::error::MatterFabricError>>,
+}
+
+impl Drop for PaseHandle {
+    fn drop(&mut self) {
+        self.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        self._outbound.abort();
+        self._inbound.abort();
+        // _blocking will exit when its channels close.
     }
 }
 
@@ -678,49 +741,92 @@ impl syntaur_matter::commission::CommissionExchange for BleCommissionExchange {
                 + 'a,
         >,
     > {
-        // Drive PASE + IM through a fresh exchange bridged to our
-        // BtpSession. One invoke() = one PASE setup + one cluster
-        // command round-trip. Future optimization: cache the PASE
-        // session across multiple invoke() calls in a single
-        // commissioning run; the current commissioner spec does 8+
-        // invokes in sequence, so caching saves 7 PASE re-runs.
         Box::pin(async move {
-            self.with_pase_op::<Vec<u8>>(move |ex| {
-                Box::pin(async move {
-                    use rs_matter::im::client::ImClient;
-                    use rs_matter::im::CmdResp;
-                    use rs_matter::tlv::TLVElement;
-                    use syntaur_matter::error::MatterFabricError;
-
-                    let tlv_payload = TLVElement::new(&payload);
-                    let resp = ImClient::invoke_single_cmd(
-                        ex,
-                        0, // endpoint 0 for commissioning cluster commands
-                        cluster,
-                        command,
-                        tlv_payload,
-                        None,
-                    )
-                    .await
-                    .map_err(|e| MatterFabricError::Matter(format!(
-                        "invoke_single_cmd cluster={cluster:#x} cmd={command:#x}: {e:?}"
-                    )))?;
-                    match resp {
-                        CmdResp::Cmd(data) => Ok(data.data.raw_data().to_vec()),
-                        CmdResp::Status(s) => {
-                            if s.status.status == rs_matter::im::IMStatusCode::Success {
-                                Ok(Vec::new())
-                            } else {
-                                Err(MatterFabricError::Matter(format!(
-                                    "IM status {:?} (cluster={cluster:#x} cmd={command:#x})",
-                                    s.status
-                                )))
-                            }
-                        }
-                    }
+            let cmd_tx = self.ensure_pase().await?;
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+            cmd_tx
+                .send_async(InvokeCmd::Im {
+                    cluster,
+                    command,
+                    payload,
+                    response_tx,
                 })
-            })
-            .await
+                .await
+                .map_err(|e| {
+                    syntaur_matter::error::MatterFabricError::Matter(format!(
+                        "invoke cmd queue closed: {e}"
+                    ))
+                })?;
+            response_rx.await.map_err(|e| {
+                syntaur_matter::error::MatterFabricError::Matter(format!(
+                    "invoke response channel dropped: {e}"
+                ))
+            })?
+        })
+    }
+
+    fn case_and_commissioning_complete<'a>(
+        &'a mut self,
+        fabric: &'a syntaur_matter::FabricHandle,
+        peer_node_id: u64,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<(), syntaur_matter::error::MatterFabricError>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            use syntaur_matter::error::MatterFabricError;
+            let cmd_tx = self.ensure_pase().await?;
+            let rcac = hex::decode(&fabric.root_cert_hex).map_err(|e| {
+                MatterFabricError::Matter(format!("rcac hex decode: {e}"))
+            })?;
+            let ca_decoded = hex::decode(&fabric.ca_secret_key_hex).map_err(|e| {
+                MatterFabricError::Matter(format!("ca key hex decode: {e}"))
+            })?;
+            if ca_decoded.len() != 32 {
+                return Err(MatterFabricError::Matter(format!(
+                    "ca key wrong length: {}B",
+                    ca_decoded.len()
+                )));
+            }
+            let mut ca_secret_key_scalar = [0u8; 32];
+            ca_secret_key_scalar.copy_from_slice(&ca_decoded);
+            let ipk_decoded = hex::decode(&fabric.ipk_hex).map_err(|e| {
+                MatterFabricError::Matter(format!("ipk hex decode: {e}"))
+            })?;
+            if ipk_decoded.len() != 16 {
+                return Err(MatterFabricError::Matter(format!(
+                    "ipk wrong length: {}B",
+                    ipk_decoded.len()
+                )));
+            }
+            let mut ipk = [0u8; 16];
+            ipk.copy_from_slice(&ipk_decoded);
+
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+            cmd_tx
+                .send_async(InvokeCmd::CaseAndComplete {
+                    fabric_id: fabric.fabric_id,
+                    controller_node_id: fabric.controller_node_id,
+                    peer_node_id,
+                    rcac,
+                    ca_secret_key_scalar,
+                    ipk,
+                    vendor_id: fabric.vendor_id,
+                    response_tx,
+                })
+                .await
+                .map_err(|e| {
+                    MatterFabricError::Matter(format!("case cmd queue closed: {e}"))
+                })?;
+            response_rx.await.map_err(|e| {
+                MatterFabricError::Matter(format!(
+                    "case response channel dropped: {e}"
+                ))
+            })?
         })
     }
 }
@@ -873,35 +979,35 @@ impl BleCommissionExchange {
     /// returning whatever the op returns. Mirrors
     /// `tools::matter_direct::with_pase_op` but routes through the
     /// BTP bridge rather than UDP.
-    async fn with_pase_op<R>(
+    /// Ensure the cached PASE session is running. Spawns the long-lived
+    /// blocking task on first call; subsequent calls return the existing
+    /// channel sender. The blocking task does PASE once and then loops
+    /// dispatching `InvokeCmd`s onto fresh secured exchanges (each
+    /// invoke gets its own Exchange via `Exchange::initiate(_, 0, 0, true)`
+    /// on the SAME PASE-secured session — required because rs-matter
+    /// exchanges are single-use).
+    async fn ensure_pase(
         &self,
-        op: impl for<'e> FnOnce(
-                &'e mut rs_matter::transport::exchange::Exchange<'_>,
-            ) -> std::pin::Pin<
-                Box<
-                    dyn std::future::Future<
-                            Output = Result<R, syntaur_matter::error::MatterFabricError>,
-                        > + 'e,
-                >,
-            >
-            + Send
-            + 'static,
-    ) -> Result<R, syntaur_matter::error::MatterFabricError>
-    where
-        R: Send + 'static,
-    {
+    ) -> Result<flume::Sender<InvokeCmd>, syntaur_matter::error::MatterFabricError> {
+        let mut guard = self.pase_handle.lock().await;
+        if let Some(h) = guard.as_ref() {
+            return Ok(h.cmd_tx.clone());
+        }
+
         let session = Arc::clone(&self.session);
         let passcode = self.passcode;
         let peer_btaddr = session.peer_btaddr;
 
-        // Two flume channels bridging the main runtime and spawn_blocking.
+        // BTP bridge channels (matter <-> BTP I/O).
         let (to_ble_tx, to_ble_rx) = flume::bounded::<Vec<u8>>(8);
         let (from_ble_tx, from_ble_rx) = flume::bounded::<Vec<u8>>(8);
-        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // Invoke command queue (CommissionExchange::invoke -> blocking task).
+        let (cmd_tx, cmd_rx) = flume::bounded::<InvokeCmd>(4);
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-        // Outbound pump — drain to_ble_rx + push to session.send_sdu.
+        // Outbound pump.
         let pump_out_session = Arc::clone(&session);
-        let pump_out_cancel = Arc::clone(&cancel);
+        let pump_out_cancel = std::sync::Arc::clone(&cancel);
         let outbound = tokio::spawn(async move {
             while !pump_out_cancel.load(std::sync::atomic::Ordering::Relaxed) {
                 match to_ble_rx.recv_async().await {
@@ -911,20 +1017,20 @@ impl BleCommissionExchange {
                             break;
                         }
                     }
-                    Err(_) => break, // channel closed
+                    Err(_) => break,
                 }
             }
         });
 
-        // Inbound pump — read SDUs, push to from_ble_tx.
+        // Inbound pump.
         let pump_in_session = Arc::clone(&session);
-        let pump_in_cancel = Arc::clone(&cancel);
+        let pump_in_cancel = std::sync::Arc::clone(&cancel);
         let inbound = tokio::spawn(async move {
             while !pump_in_cancel.load(std::sync::atomic::Ordering::Relaxed) {
                 match pump_in_session.recv_sdu(Duration::from_secs(30)).await {
                     Ok(pkt) => {
                         if from_ble_tx.send_async(pkt).await.is_err() {
-                            break; // consumer gone
+                            break;
                         }
                     }
                     Err(BtpError::Timeout) => continue,
@@ -936,16 +1042,18 @@ impl BleCommissionExchange {
             }
         });
 
-        // rs-matter work on a blocking thread with futures_lite executor.
         let peer_addr = rs_matter::transport::network::Address::Btp(
             rs_matter::transport::network::BtAddr(peer_btaddr),
         );
-        let cancel_for_blocking = Arc::clone(&cancel);
-        let join = tokio::task::spawn_blocking(
-            move || -> Result<R, syntaur_matter::error::MatterFabricError> {
+
+        let blocking = tokio::task::spawn_blocking(
+            move || -> Result<(), syntaur_matter::error::MatterFabricError> {
                 use rs_matter::crypto::test_only_crypto;
                 use rs_matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
+                use rs_matter::im::client::ImClient;
+                use rs_matter::im::CmdResp;
                 use rs_matter::sc::pase::PaseInitiator;
+                use rs_matter::tlv::TLVElement;
                 use rs_matter::transport::exchange::Exchange;
                 use rs_matter::transport::network::NoNetwork;
                 use rs_matter::utils::epoch::sys_epoch;
@@ -971,44 +1079,238 @@ impl BleCommissionExchange {
                 futures_lite::future::block_on(async move {
                     let transport_fut = async {
                         let tres = matter.run(&crypto, &bridge, &bridge, NoNetwork).await;
-                        Err::<R, MatterFabricError>(MatterFabricError::Matter(format!(
+                        Err::<(), MatterFabricError>(MatterFabricError::Matter(format!(
                             "transport exited prematurely: {tres:?}"
                         )))
                     };
 
-                    let op_fut = async {
-                        let mut ex = Exchange::initiate_unsecured(&matter, &crypto, peer_addr)
-                            .await
-                            .map_err(|e| MatterFabricError::Matter(format!(
-                                "unsecured exchange (pre-PASE): {e:?}"
-                            )))?;
-                        PaseInitiator::initiate(&mut ex, &crypto, passcode)
-                            .await
-                            .map_err(|e| MatterFabricError::Matter(format!(
-                                "PASE handshake: {e:?}"
-                            )))?;
-                        op(&mut ex).await
+                    let cmd_loop = async {
+                        // Phase 1: PASE handshake — once, on an unsecured exchange.
+                        {
+                            let mut ex = Exchange::initiate_unsecured(&matter, &crypto, peer_addr)
+                                .await
+                                .map_err(|e| MatterFabricError::Matter(format!(
+                                    "unsecured exchange (pre-PASE): {e:?}"
+                                )))?;
+                            PaseInitiator::initiate(&mut ex, &crypto, passcode)
+                                .await
+                                .map_err(|e| MatterFabricError::Matter(format!(
+                                    "PASE handshake: {e:?}"
+                                )))?;
+                            // Drop unsecured ex so subsequent invokes get the new secured session.
+                        }
+
+                        // Phase 2: dispatch loop.
+                        while let Ok(cmd) = cmd_rx.recv_async().await {
+                            match cmd {
+                                InvokeCmd::Im { cluster, command, payload, response_tx } => {
+                                    let result = async {
+                                        let mut ex2 = Exchange::initiate(&matter, 0, 0, true)
+                                            .await
+                                            .map_err(|e| MatterFabricError::Matter(format!(
+                                                "secured exchange (post-PASE): {e:?}"
+                                            )))?;
+                                        let tlv_payload = TLVElement::new(&payload);
+                                        let resp = ImClient::invoke_single_cmd(
+                                            &mut ex2,
+                                            0,
+                                            cluster,
+                                            command,
+                                            tlv_payload,
+                                            None,
+                                        )
+                                        .await
+                                        .map_err(|e| MatterFabricError::Matter(format!(
+                                            "invoke_single_cmd cluster={:#x} cmd={:#x}: {e:?}",
+                                            cluster, command
+                                        )))?;
+                                        match resp {
+                                            CmdResp::Cmd(data) => Ok(data.data.raw_data().to_vec()),
+                                            CmdResp::Status(s) => {
+                                                if s.status.status == rs_matter::im::IMStatusCode::Success {
+                                                    Ok(Vec::new())
+                                                } else {
+                                                    Err(MatterFabricError::Matter(format!(
+                                                        "IM status {:?} (cluster={:#x} cmd={:#x})",
+                                                        s.status, cluster, command
+                                                    )))
+                                                }
+                                            }
+                                        }
+                                    }
+                                    .await;
+                                    let _ = response_tx.send(result);
+                                }
+                                InvokeCmd::CaseAndComplete {
+                                    fabric_id,
+                                    controller_node_id,
+                                    peer_node_id,
+                                    rcac,
+                                    ca_secret_key_scalar,
+                                    ipk,
+                                    vendor_id,
+                                    response_tx,
+                                } => {
+                                    let result = case_and_commissioning_complete_impl(
+                                        &matter,
+                                        &crypto,
+                                        peer_addr,
+                                        fabric_id,
+                                        controller_node_id,
+                                        peer_node_id,
+                                        &rcac,
+                                        &ca_secret_key_scalar,
+                                        &ipk,
+                                        vendor_id,
+                                    )
+                                    .await;
+                                    let _ = response_tx.send(result);
+                                }
+                            }
+                        }
+
+                        Ok::<(), MatterFabricError>(())
                     };
 
-                    let result = futures_lite::future::or(transport_fut, op_fut).await;
-                    cancel_for_blocking
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
-                    result
+                    futures_lite::future::or(transport_fut, cmd_loop).await
                 })
             },
         );
 
-        let result = match join.await {
-            Ok(r) => r,
-            Err(e) => Err(syntaur_matter::error::MatterFabricError::Matter(format!(
-                "spawn_blocking join: {e}"
-            ))),
-        };
+        *guard = Some(PaseHandle {
+            cmd_tx: cmd_tx.clone(),
+            cancel,
+            _outbound: outbound,
+            _inbound: inbound,
+            _blocking: blocking,
+        });
+        Ok(cmd_tx)
+    }
+}
 
-        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-        outbound.abort();
-        inbound.abort();
-        result
+
+// ── CASE handshake + CommissioningComplete-on-CASE helper ──────────────────
+//
+// Runs inside the spawn_blocking task on futures_lite::block_on. Steps:
+// 1. Generate fresh controller keypair
+// 2. Sign controller NOC against the fabric's RCAC using its CA scalar
+// 3. Register fabric in matter.state.fabrics
+// 4. Run CaseInitiator::initiate on a fresh unsecured exchange
+// 5. Open the resulting CASE-secured exchange + invoke CommissioningComplete
+async fn case_and_commissioning_complete_impl<'a, C>(
+    matter: &rs_matter::Matter<'_>,
+    crypto: &C,
+    peer_addr: rs_matter::transport::network::Address,
+    fabric_id: u64,
+    _controller_node_id: u64,
+    peer_node_id: u64,
+    rcac: &[u8],
+    ca_secret_key_scalar: &[u8; 32],
+    ipk: &[u8; 16],
+    vendor_id: u16,
+) -> Result<(), syntaur_matter::error::MatterFabricError>
+where
+    C: rs_matter::crypto::Crypto,
+{
+    use rs_matter::commissioner::NocGenerator;
+    use rs_matter::crypto::{
+        CanonAeadKey, CanonPkcSecretKey, SecretKey, SigningSecretKey,
+        AEAD_CANON_KEY_LEN,
+    };
+    use rs_matter::im::client::ImClient;
+    use rs_matter::im::CmdResp;
+    use rs_matter::sc::case::CaseInitiator;
+    use rs_matter::tlv::TLVElement;
+    use rs_matter::transport::exchange::Exchange;
+    use std::num::NonZeroU8;
+    use syntaur_matter::error::MatterFabricError;
+
+    log::info!("[case] step 1: generating controller keypair");
+    let controller_secret_key = crypto.generate_secret_key().map_err(|e| {
+        MatterFabricError::Matter(format!("generate controller key: {e:?}"))
+    })?;
+    let mut controller_csr_buf = [0u8; 256];
+    let controller_csr = controller_secret_key
+        .csr(&mut controller_csr_buf)
+        .map_err(|e| MatterFabricError::Matter(format!("controller csr: {e:?}")))?;
+    let mut controller_secret_canon = CanonPkcSecretKey::new();
+    controller_secret_key
+        .write_canon(&mut controller_secret_canon)
+        .map_err(|e| MatterFabricError::Matter(format!("write canon: {e:?}")))?;
+
+    log::info!("[case] step 2: signing controller NOC");
+    let ca_secret = CanonPkcSecretKey::from(ca_secret_key_scalar);
+    let mut gen = NocGenerator::from_root_ca(crypto, ca_secret, rcac, fabric_id, 1)
+        .map_err(|e| MatterFabricError::Matter(format!("NocGenerator::from_root_ca: {e:?}")))?;
+    let controller_creds = gen
+        .generate_noc(crypto, controller_csr, 1, &[])
+        .map_err(|e| MatterFabricError::Matter(format!("generate controller noc: {e:?}")))?;
+
+    log::info!("[case] step 3: registering fabric in matter.state.fabrics");
+    let mut ipk_canon = CanonAeadKey::new();
+    let mut ipk_arr = [0u8; AEAD_CANON_KEY_LEN];
+    let copy_n = ipk_arr.len().min(ipk.len());
+    ipk_arr[..copy_n].copy_from_slice(&ipk[..copy_n]);
+    ipk_canon.load_from_array(&ipk_arr);
+
+    // Fabric::fab_idx() returns NonZeroU8 directly — no Option-unwrap needed.
+    let fab_idx: NonZeroU8 = matter.with_state(|state| {
+        state
+            .fabrics
+            .add(
+                crypto,
+                controller_secret_canon.reference(),
+                rcac,
+                &controller_creds.noc,
+                &[],
+                Some(ipk_canon.reference()),
+                vendor_id,
+                1,
+            )
+            .map(|f| f.fab_idx())
+            .map_err(|e| MatterFabricError::Matter(format!("fabrics.add: {e:?}")))
+    })?;
+
+    log::info!("[case] step 4: opening unsecured exchange for CASE handshake");
+    let mut ex_unsec = Exchange::initiate_unsecured(matter, crypto, peer_addr)
+        .await
+        .map_err(|e| MatterFabricError::Matter(format!("unsecured ex (CASE): {e:?}")))?;
+
+    log::info!("[case] step 5: CaseInitiator::initiate (Sigma1/2/3)");
+    CaseInitiator::initiate(&mut ex_unsec, crypto, fab_idx, peer_node_id)
+        .await
+        .map_err(|e| MatterFabricError::Matter(format!("CASE handshake: {e:?}")))?;
+    drop(ex_unsec);
+
+    log::info!("[case] step 6: opening CASE-secured exchange + invoking CommissioningComplete");
+    // Exchange::initiate takes a u8 fabric index; unwrap the NonZero.
+    let mut ex_case = Exchange::initiate(matter, fab_idx.get(), peer_node_id, true)
+        .await
+        .map_err(|e| MatterFabricError::Matter(format!("CASE secured ex: {e:?}")))?;
+
+    let cc_payload = syntaur_matter::tlv_build::commissioning_complete();
+    let tlv = TLVElement::new(&cc_payload);
+    let resp = ImClient::invoke_single_cmd(&mut ex_case, 0, 0x0030, 0x04, tlv, None)
+        .await
+        .map_err(|e| MatterFabricError::Matter(format!(
+            "CommissioningComplete on CASE: {e:?}"
+        )))?;
+    match resp {
+        CmdResp::Cmd(_) => {
+            log::info!("[case] CommissioningComplete returned InvokeResponse — DEVICE COMMISSIONED");
+            Ok(())
+        }
+        CmdResp::Status(s) => {
+            if s.status.status == rs_matter::im::IMStatusCode::Success {
+                log::info!("[case] CommissioningComplete returned Success — DEVICE COMMISSIONED");
+                Ok(())
+            } else {
+                Err(MatterFabricError::Matter(format!(
+                    "CommissioningComplete on CASE returned status: {:?}",
+                    s.status
+                )))
+            }
+        }
     }
 }
 

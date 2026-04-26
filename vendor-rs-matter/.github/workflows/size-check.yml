@@ -1,0 +1,112 @@
+name: Size Check
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: "50 6 * * *"
+  workflow_dispatch:
+
+env:
+  RUST_TOOLCHAIN: stable
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build_and_run_size_report:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Rust
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy, rust-src
+
+      - name: Setup | Rust no-std Thumbv6 target
+        run: rustup target add thumbv6m-none-eabi
+
+      - name: Setup | Rust no-std Thumbv7 target
+        run: rustup target add thumbv7em-none-eabi
+
+      - name: Setup | Rust no-std Riscv32 target
+        run: rustup target add riscv32imac-unknown-none-elf
+
+      - name: Install libdbus
+        run: sudo apt-get install -y libdbus-1-dev
+
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Set up environment for size reports
+        uses: ./.github/actions/setup-size-reports
+        if: ${{ !env.ACT }}
+        with:
+          gh-context: ${{ toJson(github) }}
+
+      - name: Build | Host binary for size report
+        run: cd bloat-check; cargo build --release
+
+      - name: Clippy - bloat-check
+        run: cd bloat-check; cargo clippy --no-deps -- -Dwarnings
+
+      - name: Clippy - bloat-check - riscv32imac
+        run: cd bloat-check; cargo clippy --no-deps --target riscv32imac-unknown-none-elf -- -Dwarnings
+
+      - name: Build | Thumbv6m binary for size report
+#        run: cd bloat-check; cargo build --release --target thumbv6m-none-eabi -Zbuild-std=core,alloc,panic_abort
+        run: cd bloat-check; cargo build --release --target thumbv6m-none-eabi
+
+      - name: Build | Thumbv7em binary for size report
+#        run: cd bloat-check; cargo build --release --target thumbv7em-none-eabi -Zbuild-std=core,alloc,panic_abort
+        run: cd bloat-check; cargo build --release --target thumbv7em-none-eabi
+
+      - name: Build | Riscv32imac binary for size report
+#        run: cd bloat-check; cargo build --release --target riscv32imac-unknown-none-elf -Zbuild-std=core,alloc,panic_abort
+        run: cd bloat-check; cargo build --release --target riscv32imac-unknown-none-elf
+
+      - name: Examples
+        run: cargo build --release --no-default-features --features os,rustcrypto,log,zbus
+
+      - name: Prepare bloat report from the previous builds
+        run: |
+            python scripts/memory/gh_sizes.py \
+              "(core)" infologs-optz-ltofat x86_64-unknown-linux-gnu \
+              bloat-check/target/release/bloat-check \
+              /tmp/bloat_reports/
+            python scripts/memory/gh_sizes.py \
+              "(core)" infodefmt-optz-ltofat thumbv6m-none-eabi \
+              bloat-check/target/thumbv6m-none-eabi/release/bloat-check \
+              /tmp/bloat_reports/
+            python scripts/memory/gh_sizes.py \
+              "(core)" infodefmt-optz-ltofat thumbv7em-none-eabi \
+              bloat-check/target/thumbv7em-none-eabi/release/bloat-check \
+              /tmp/bloat_reports/
+            python scripts/memory/gh_sizes.py \
+              "(core)" infodefmt-optz-ltofat riscv32imac-unknown-none-elf \
+              bloat-check/target/riscv32imac-unknown-none-elf/release/bloat-check \
+              /tmp/bloat_reports/
+            python scripts/memory/gh_sizes.py \
+              onoff-light infologs-optz-ltofat x86_64-unknown-linux-gnu \
+              target/release/onoff_light \
+              /tmp/bloat_reports/
+            python scripts/memory/gh_sizes.py \
+              onoff-light-bt infologs-optz-ltofat x86_64-unknown-linux-gnu \
+              target/release/onoff_light_bt \
+              /tmp/bloat_reports/
+            python scripts/memory/gh_sizes.py \
+              dimmable-light infologs-optz-ltofat x86_64-unknown-linux-gnu \
+              target/release/dimmable_light \
+              /tmp/bloat_reports/
+            python scripts/memory/gh_sizes.py \
+              speaker infologs-optz-ltofat x86_64-unknown-linux-gnu \
+              target/release/speaker \
+              /tmp/bloat_reports/
+
+      - name: Uploading Size Reports
+        uses: ./.github/actions/upload-size-reports
+        if: ${{ !env.ACT }}
+        with:
+          platform-name: cross-platform

@@ -120,6 +120,18 @@ pub trait CommissionExchange: Send {
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Vec<u8>, MatterFabricError>> + Send + 'a>,
     >;
+
+    /// Drive CASE handshake on the operational identity (controller NOC
+    /// signed by the fabric's RCAC), then invoke CommissioningComplete
+    /// on the resulting CASE session. Required because CommissioningComplete
+    /// per Matter Core §11.10.6.6 must run on a CASE session, not PASE.
+    fn case_and_commissioning_complete<'a>(
+        &'a mut self,
+        fabric: &'a crate::FabricHandle,
+        peer_node_id: u64,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), MatterFabricError>> + Send + 'a>,
+    >;
 }
 
 /// Result of a successful commissioning run.
@@ -220,11 +232,18 @@ impl<'a> Commissioner<'a> {
         // precede AddNOC in the same failsafe.
         let fabric_rcac = hex::decode(&self.fabric.root_cert_hex)
             .map_err(|e| MatterFabricError::Matter(format!("root_cert_hex decode: {e}")))?;
+        eprintln!("RCAC FULL ({} bytes): {}",
+                  fabric_rcac.len(),
+                  fabric_rcac.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(""));
+        let payload = add_trusted_root_certificate(&fabric_rcac);
+        eprintln!("AddTrustedRootCert payload: {} bytes, first 16: {:02x?}",
+                  payload.len(),
+                  &payload[..payload.len().min(16)]);
         let _ = ex
             .invoke(
                 CLUSTER_OPERATIONAL_CREDENTIALS,
                 CMD_ADD_TRUSTED_ROOT_CERT,
-                add_trusted_root_certificate(&fabric_rcac),
+                payload,
             )
             .await?;
 
@@ -296,14 +315,15 @@ impl<'a> Commissioner<'a> {
             None => {}
         }
 
-        // Step 8 — CommissioningComplete. Device now switches to CASE
-        // operational sessions only — any further ops use our NOC.
-        let _ = ex
-            .invoke(
-                CLUSTER_GENERAL_COMMISSIONING,
-                CMD_COMMISSIONING_COMPLETE,
-                commissioning_complete(),
-            )
+        // Step 8 — CASE handshake then CommissioningComplete on CASE.
+        // Per Matter Core §11.10.6.6, CommissioningComplete must run on
+        // a CASE-secured session using the operational NOC, not the PASE
+        // setup session. The transport impl is responsible for:
+        //   1. Generating controller keypair + signing controller NOC
+        //   2. Registering fabric in rs-matter's FabricMgr
+        //   3. Running CaseInitiator::initiate(exchange, crypto, fab_idx, peer_node_id)
+        //   4. Invoking CommissioningComplete on the CASE-secured exchange
+        ex.case_and_commissioning_complete(self.fabric, assigned_node_id)
             .await?;
 
         Ok(CommissionedDevice {
@@ -335,7 +355,10 @@ impl<'a> Commissioner<'a> {
 /// small TLV scan; a full parser is overkill.
 fn extract_csr_from_response(tlv: &[u8]) -> Result<Vec<u8>, MatterFabricError> {
     let outer = tag_octets(tlv, 0)
-        .ok_or_else(|| MatterFabricError::Matter("CSRResponse: missing tag 0".into()))?;
+        .ok_or_else(|| {
+            eprintln!("CSRResponse raw bytes ({} bytes): {:02x?}", tlv.len(), tlv);
+            MatterFabricError::Matter(format!("CSRResponse: missing tag 0 in {} bytes", tlv.len()))
+        })?;
     let csr = tag_octets(outer, 1)
         .ok_or_else(|| MatterFabricError::Matter("NOCSRElements: missing tag 1 (CSR)".into()))?;
     Ok(csr.to_vec())
@@ -350,9 +373,13 @@ fn extract_csr_from_response(tlv: &[u8]) -> Result<Vec<u8>, MatterFabricError> {
 /// device.
 fn tag_octets(blob: &[u8], want_tag: u8) -> Option<&[u8]> {
     let mut i = 0;
-    // skip optional leading 0x15 struct-begin marker
+    // Skip optional leading struct-begin marker. Matter responses can use
+    // either 0x15 (anonymous struct, 1 byte) or 0x35 <tag> (context-tagged
+    // struct, 2 bytes). Eve's CSRResponse comes wrapped in 0x35 0x01.
     if blob.first() == Some(&0x15) {
         i = 1;
+    } else if blob.first() == Some(&0x35) {
+        i = 2;  // skip control byte + 1-byte context tag
     }
     while i < blob.len() {
         let ctl = blob[i];

@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: "50 6 * * *"
+  workflow_dispatch:
+
+env:
+  RUST_TOOLCHAIN: stable
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build_and_test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        crypto-backend: ['rustcrypto', 'mbedtls', 'openssl']
+        features: ['', 'alloc', 'os']
+
+    steps:
+      - name: Rust
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy, rust-src
+
+      - name: Setup | Rust no-std Riscv32 target
+        run: rustup target add riscv32imac-unknown-none-elf
+
+      - name: Setup | Rust no-std Thumbv6 target
+        run: rustup target add thumbv6m-none-eabi
+
+      - name: Setup | Rust no-std Thumbv7 target
+        run: rustup target add thumbv7em-none-eabi
+
+      - name: Install libdbus
+        run: sudo apt-get install -y libdbus-1-dev
+
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Fmt
+        if: matrix.features == 'os' && matrix.crypto-backend == 'rustcrypto'
+        run: cargo fmt -- --check
+
+      - name: Clippy - All
+        if: matrix.features == 'os' && matrix.crypto-backend == 'rustcrypto'
+        run: cargo clippy --no-deps -- -Dwarnings
+
+      - name: Clippy - baremetal
+        if: matrix.features == '' && matrix.crypto-backend == 'rustcrypto'
+        run: cd rs-matter; cargo clippy --no-deps --no-default-features --features ${{matrix.crypto-backend}},${{matrix.features}},defmt --target riscv32imac-unknown-none-elf -- -Dwarnings
+
+      - name: Clippy
+        run: cd rs-matter; cargo clippy --no-deps --no-default-features --features ${{matrix.crypto-backend}},${{matrix.features}},log -- -Dwarnings
+
+      - name: Clippy | defmt
+        run: export DEFMT_LOG=trace; cd rs-matter; cargo clippy --no-deps --no-default-features --features ${{matrix.crypto-backend}},${{matrix.features}},defmt -- -Dwarnings
+
+      - name: Build
+        run: cd rs-matter; cargo build --no-default-features --features ${{matrix.crypto-backend}},${{matrix.features}},log
+
+      - name: Benchmark
+        if: matrix.features == 'os' && matrix.crypto-backend == 'rustcrypto'
+        run: cd rs-matter; cargo bench --no-default-features --features ${{matrix.crypto-backend}},${{matrix.features}},log
+
+      - name: Test
+        if: matrix.features == 'os'
+        run: cd rs-matter; cargo test --no-default-features --features ${{matrix.crypto-backend}},${{matrix.features}},async-io,log
+
+      - name: Examples
+        if: matrix.features == 'os' && matrix.crypto-backend == 'rustcrypto'
+        run: cargo build --no-default-features --features ${{matrix.crypto-backend}},${{matrix.features}},log,zbus
+
+      - name: Examples - Sync Mutex
+        if: matrix.features == 'os' && matrix.crypto-backend == 'rustcrypto'
+        run: cargo build --no-default-features --features ${{matrix.crypto-backend}},${{matrix.features}},log,zbus,sync-mutex
+
+      - name: Xtask Fmt
+        if: matrix.features == 'os' && matrix.crypto-backend == 'rustcrypto'
+        run: cd xtask; cargo fmt -- --check
+
+      - name: Xtask Clippy
+        if: matrix.features == 'os' && matrix.crypto-backend == 'rustcrypto'
+        run: cd xtask; cargo clippy --no-deps -- -Dwarnings

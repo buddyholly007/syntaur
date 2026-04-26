@@ -78,3 +78,7 @@ strip = true
 # downstream callers to the fixed version 0.103.x.
 [patch.crates-io]
 rustls-webpki = { git = "https://github.com/rustls/webpki", tag = "v/0.103.13" }
+
+[patch."https://github.com/project-chip/rs-matter"]
+rs-matter = { path = "vendor-rs-matter/rs-matter" }
+rs-matter-macros = { path = "vendor-rs-matter/rs-matter-macros" }
