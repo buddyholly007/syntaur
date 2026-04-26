@@ -33,6 +33,11 @@ struct Args {
     off_ms: u64,
     /// Time to hold ON between on-command and the next off-command, in milliseconds.
     on_ms: u64,
+    /// Optional `IP:PORT` override that skips operational mDNS lookup.
+    /// Useful for cross-VLAN devices where mDNS doesn't reflect across
+    /// subnet boundaries — e.g., a bulb on the IoT VLAN viewed from
+    /// the Default VLAN. Standard Matter operational port is 5540.
+    addr: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -68,14 +73,56 @@ enum Op {
     /// channel (Meross app, Tapo app, etc.) and Syntaur cannot push
     /// firmware directly.
     OtaStatus,
+    /// Walk the Descriptor cluster on every endpoint and render a
+    /// human-readable capability summary: device-type label, supported
+    /// controls (Power / Brightness / Color temp / Color), and ranges
+    /// in human units (brightness 0-100%, color temp Warm←→Cool with
+    /// Kelvin in parens). Drives the per-device tile UI and the agent
+    /// tool surface — we only show controls that the device actually
+    /// supports.
+    Caps,
 }
 
 const CLUSTER_ON_OFF: u32 = 0x0006;
+const CLUSTER_LEVEL_CONTROL: u32 = 0x0008;
+const CLUSTER_DESCRIPTOR: u32 = 0x001D;
 const CLUSTER_BASIC_INFO: u32 = 0x0028;
 const CLUSTER_OTA_REQUESTOR: u32 = 0x0029;
 const CLUSTER_GENERAL_COMMISSIONING: u32 = 0x0030;
 const CLUSTER_ELEC_POWER: u32 = 0x0090;
 const CLUSTER_ELEC_ENERGY: u32 = 0x0091;
+const CLUSTER_DOOR_LOCK: u32 = 0x0101;
+const CLUSTER_WINDOW_COVERING: u32 = 0x0102;
+const CLUSTER_THERMOSTAT: u32 = 0x0201;
+const CLUSTER_FAN_CONTROL: u32 = 0x0202;
+const CLUSTER_COLOR_CONTROL: u32 = 0x0300;
+const CLUSTER_ILLUMINANCE_MEASUREMENT: u32 = 0x0400;
+const CLUSTER_TEMPERATURE_MEASUREMENT: u32 = 0x0402;
+const CLUSTER_RELATIVE_HUMIDITY_MEASUREMENT: u32 = 0x0405;
+const CLUSTER_OCCUPANCY_SENSING: u32 = 0x0406;
+
+// Descriptor cluster (0x001D) attribute IDs — Matter Core 1.5 §9.5.5
+const ATTR_DESCRIPTOR_DEVICE_TYPE_LIST: u32 = 0x0000;
+const ATTR_DESCRIPTOR_SERVER_LIST: u32 = 0x0001;
+const ATTR_DESCRIPTOR_PARTS_LIST: u32 = 0x0003;
+
+// Universal cluster attribute — present on every cluster.
+const ATTR_FEATURE_MAP: u32 = 0xFFFC;
+
+// LevelControl cluster (0x0008) attribute IDs — Matter Core 1.5 §1.6
+const ATTR_LEVEL_MIN: u32 = 0x0002;
+const ATTR_LEVEL_MAX: u32 = 0x0003;
+
+// ColorControl cluster (0x0300) attribute IDs — Matter Core 1.5 §3.2.6
+const ATTR_COLOR_TEMP_PHYS_MIN_MIREDS: u32 = 0x400B;
+const ATTR_COLOR_TEMP_PHYS_MAX_MIREDS: u32 = 0x400C;
+
+// ColorControl FeatureMap bits.
+const FEATURE_COLORCTRL_HS: u32 = 1 << 0; // Hue/Saturation
+const FEATURE_COLORCTRL_EHUE: u32 = 1 << 1; // Enhanced Hue
+const FEATURE_COLORCTRL_CL: u32 = 1 << 2; // Color Loop
+const FEATURE_COLORCTRL_XY: u32 = 1 << 3; // CIE 1931 XY
+const FEATURE_COLORCTRL_CT: u32 = 1 << 4; // Color Temperature
 const CMD_OFF: u32 = 0x00;
 const CMD_ON: u32 = 0x01;
 const CMD_TOGGLE: u32 = 0x02;
@@ -115,6 +162,7 @@ fn parse_args() -> Result<Args, String> {
         "complete" => Op::Complete,
         "info" => Op::Info,
         "ota-status" => Op::OtaStatus,
+        "caps" => Op::Caps,
         "rapid-cycle" => Op::RapidCycle,
         "-h" | "--help" => return Err(usage()),
         other => return Err(format!("unknown subcommand: {other}\n{}", usage())),
@@ -125,6 +173,7 @@ fn parse_args() -> Result<Args, String> {
     let mut cycles: u32 = 5;
     let mut off_ms: u64 = 600;
     let mut on_ms: u64 = 600;
+    let mut addr: Option<String> = None;
     let mut i = 1;
     while i < argv.len() {
         match argv[i].as_str() {
@@ -165,6 +214,10 @@ fn parse_args() -> Result<Args, String> {
                     .parse().map_err(|e| format!("--on-ms: {e}"))?;
                 i += 2;
             }
+            "--addr" => {
+                addr = Some(argv.get(i + 1).cloned().ok_or("--addr needs IP:PORT")?);
+                i += 2;
+            }
             other => return Err(format!("unknown flag: {other}\n{}", usage())),
         }
     }
@@ -176,12 +229,14 @@ fn parse_args() -> Result<Args, String> {
         cycles,
         off_ms,
         on_ms,
+        addr,
     })
 }
 
 fn usage() -> String {
-    "usage: matter-op <on|off|toggle|state|power|energy|complete|info|ota-status|rapid-cycle> \
+    "usage: matter-op <on|off|toggle|state|power|energy|complete|info|ota-status|caps|rapid-cycle> \
         --fabric-label LABEL --node-id N [--endpoint EP] \
+        [--addr IP:PORT  (skip mDNS — useful cross-VLAN)] \
         [--cycles N --off-ms MS --on-ms MS  (rapid-cycle only)]".to_string()
 }
 
@@ -196,10 +251,17 @@ async fn main() -> Result<(), String> {
         .map_err(|e| format!("load fabric {}: {e:?}", args.fabric_label))?;
     log::info!("loaded fabric {} (fabric_id {:#x})", fabric.label, fabric.fabric_id);
 
-    log::info!("discovering operational mDNS for node {:#x} ({:016X})", args.node_id, args.node_id);
-    let addr = discover_operational(args.node_id, Duration::from_secs(15))
-        .map_err(|e| format!("mdns: {e:?}"))?;
-    log::info!("resolved {addr}");
+    let addr = if let Some(a) = args.addr.as_deref() {
+        log::info!("[matter-op] using --addr override {a} (skipping mDNS)");
+        a.parse::<std::net::SocketAddr>()
+            .map_err(|e| format!("--addr {a:?} parse: {e}"))?
+    } else {
+        log::info!("discovering operational mDNS for node {:#x} ({:016X})", args.node_id, args.node_id);
+        let a = discover_operational(args.node_id, Duration::from_secs(15))
+            .map_err(|e| format!("mdns: {e:?}"))?;
+        log::info!("resolved {a}");
+        a
+    };
 
     let rcac = hex::decode(&fabric.root_cert_hex)
         .map_err(|e| format!("rcac hex decode: {e}"))?;
@@ -636,6 +698,271 @@ async fn main() -> Result<(), String> {
                             // last cycle — caller wants the device powered on).
                             if cycle < rapid_cycles {
                                 tokio::time::sleep(std::time::Duration::from_millis(rapid_on_ms)).await;
+                            }
+                        }
+                    }
+                    Op::Caps => {
+                        // Walk Descriptor cluster on every endpoint and render
+                        // a human-readable capability summary.
+                        // -------- nameplate (BasicInformation, ep 0) --------
+                        async fn read_str(
+                            ex: &mut rs_matter::transport::exchange::Exchange<'_>,
+                            ep: u16, cluster: u32, attr: u32,
+                        ) -> Option<String> {
+                            match ImClient::read_single_attr(ex, ep, cluster, attr, false).await {
+                                Ok(AttrResp::Data(d)) => d.data.utf8().ok().map(|s| s.to_string()),
+                                _ => None,
+                            }
+                        }
+                        async fn read_u16_attr(
+                            ex: &mut rs_matter::transport::exchange::Exchange<'_>,
+                            ep: u16, cluster: u32, attr: u32,
+                        ) -> Option<u16> {
+                            match ImClient::read_single_attr(ex, ep, cluster, attr, false).await {
+                                Ok(AttrResp::Data(d)) => d.data.u16().ok(),
+                                _ => None,
+                            }
+                        }
+                        async fn read_u8_attr(
+                            ex: &mut rs_matter::transport::exchange::Exchange<'_>,
+                            ep: u16, cluster: u32, attr: u32,
+                        ) -> Option<u8> {
+                            match ImClient::read_single_attr(ex, ep, cluster, attr, false).await {
+                                Ok(AttrResp::Data(d)) => d.data.u8().ok(),
+                                _ => None,
+                            }
+                        }
+                        async fn read_u32_attr(
+                            ex: &mut rs_matter::transport::exchange::Exchange<'_>,
+                            ep: u16, cluster: u32, attr: u32,
+                        ) -> Option<u32> {
+                            match ImClient::read_single_attr(ex, ep, cluster, attr, false).await {
+                                Ok(AttrResp::Data(d)) => d.data.u32().ok(),
+                                _ => None,
+                            }
+                        }
+                        async fn read_u16_list(
+                            ex: &mut rs_matter::transport::exchange::Exchange<'_>,
+                            ep: u16, cluster: u32, attr: u32,
+                        ) -> Vec<u16> {
+                            match ImClient::read_single_attr(ex, ep, cluster, attr, false).await {
+                                Ok(AttrResp::Data(d)) => match d.data.array() {
+                                    Ok(arr) => arr
+                                        .iter()
+                                        .filter_map(|e| e.ok().and_then(|x| x.u16().ok()))
+                                        .collect(),
+                                    Err(_) => Vec::new(),
+                                },
+                                _ => Vec::new(),
+                            }
+                        }
+                        async fn read_u32_list(
+                            ex: &mut rs_matter::transport::exchange::Exchange<'_>,
+                            ep: u16, cluster: u32, attr: u32,
+                        ) -> Vec<u32> {
+                            match ImClient::read_single_attr(ex, ep, cluster, attr, false).await {
+                                Ok(AttrResp::Data(d)) => match d.data.array() {
+                                    Ok(arr) => arr
+                                        .iter()
+                                        .filter_map(|e| e.ok().and_then(|x| x.u32().ok()))
+                                        .collect(),
+                                    Err(_) => Vec::new(),
+                                },
+                                _ => Vec::new(),
+                            }
+                        }
+                        async fn read_device_types(
+                            ex: &mut rs_matter::transport::exchange::Exchange<'_>,
+                            ep: u16,
+                        ) -> Vec<u32> {
+                            // DeviceTypeList is a list of struct{DeviceType u32 (ctx 0), Revision u16 (ctx 1)}.
+                            // We only need the type ids.
+                            match ImClient::read_single_attr(ex, ep, CLUSTER_DESCRIPTOR, ATTR_DESCRIPTOR_DEVICE_TYPE_LIST, false).await {
+                                Ok(AttrResp::Data(d)) => match d.data.array() {
+                                    Ok(arr) => arr
+                                        .iter()
+                                        .filter_map(|e| {
+                                            let elem = e.ok()?;
+                                            let s = elem.r#struct().ok()?;
+                                            let t = s.find_ctx(0).ok()?;
+                                            t.u32().or_else(|_| t.u16().map(|v| v as u32)).ok()
+                                        })
+                                        .collect(),
+                                    Err(_) => Vec::new(),
+                                },
+                                _ => Vec::new(),
+                            }
+                        }
+
+                        fn level_to_pct(level: u8, max: u8) -> u8 {
+                            // Matter LevelControl uses 1..max (typically 254 = 100%).
+                            // Round half-up.
+                            let max = max.max(1) as u32;
+                            let l = level as u32;
+                            ((l * 100 + max / 2) / max).min(100) as u8
+                        }
+
+                        fn device_type_label(types: &[u32]) -> &'static str {
+                            // Pick the most-specific known device type. Matter
+                            // Application Cluster Library §1.5.
+                            for &t in types {
+                                match t {
+                                    0x010D => return "Extended Color Light",
+                                    0x010C => return "Color Temperature Light",
+                                    0x0101 => return "Dimmable Light",
+                                    0x0100 => return "On/Off Light",
+                                    0x010B => return "Dimmable Plug-in Unit",
+                                    0x010A => return "On/Off Plug-in Unit",
+                                    0x0202 => return "Window Covering",
+                                    0x000A => return "Door Lock",
+                                    0x0301 => return "Thermostat",
+                                    0x002B => return "Fan",
+                                    0x0107 => return "Occupancy Sensor",
+                                    0x0302 => return "Temperature Sensor",
+                                    0x0307 => return "Humidity Sensor",
+                                    0x0106 => return "Light Sensor",
+                                    0x0850 => return "Smart Plug (Energy)",
+                                    _ => {}
+                                }
+                            }
+                            "Device"
+                        }
+
+                        // -------- nameplate --------
+                        let vname = read_str(ex, 0, CLUSTER_BASIC_INFO, ATTR_BASIC_VENDOR_NAME).await;
+                        let vid = read_u16_attr(ex, 0, CLUSTER_BASIC_INFO, ATTR_BASIC_VENDOR_ID).await;
+                        let pname = read_str(ex, 0, CLUSTER_BASIC_INFO, ATTR_BASIC_PRODUCT_NAME).await;
+                        let pid = read_u16_attr(ex, 0, CLUSTER_BASIC_INFO, ATTR_BASIC_PRODUCT_ID).await;
+                        let sw_str = read_str(ex, 0, CLUSTER_BASIC_INFO, ATTR_BASIC_SOFTWARE_VERSION_STRING).await;
+                        println!(
+                            "\n{} {} (VID {} PID {}, sw {})",
+                            vname.as_deref().unwrap_or("?"),
+                            pname.as_deref().unwrap_or("?"),
+                            vid.map(|v| format!("{:#06x}", v)).unwrap_or_else(|| "?".into()),
+                            pid.map(|v| format!("{:#06x}", v)).unwrap_or_else(|| "?".into()),
+                            sw_str.as_deref().unwrap_or("?"),
+                        );
+
+                        // -------- enumerate endpoints --------
+                        let mut endpoints: Vec<u16> = vec![0];
+                        endpoints.extend(read_u16_list(ex, 0, CLUSTER_DESCRIPTOR, ATTR_DESCRIPTOR_PARTS_LIST).await);
+
+                        for ep in endpoints {
+                            let dev_types = read_device_types(ex, ep).await;
+                            let servers = read_u32_list(ex, ep, CLUSTER_DESCRIPTOR, ATTR_DESCRIPTOR_SERVER_LIST).await;
+
+                            // Skip pure-meta endpoints (root or bridge endpoints
+                            // with no actionable cluster).
+                            let actionable = [
+                                CLUSTER_ON_OFF, CLUSTER_LEVEL_CONTROL, CLUSTER_COLOR_CONTROL,
+                                CLUSTER_THERMOSTAT, CLUSTER_DOOR_LOCK, CLUSTER_WINDOW_COVERING,
+                                CLUSTER_FAN_CONTROL, CLUSTER_OCCUPANCY_SENSING,
+                                CLUSTER_TEMPERATURE_MEASUREMENT, CLUSTER_RELATIVE_HUMIDITY_MEASUREMENT,
+                                CLUSTER_ILLUMINANCE_MEASUREMENT,
+                                CLUSTER_ELEC_POWER, CLUSTER_ELEC_ENERGY,
+                            ];
+                            let is_actionable = servers.iter().any(|c| actionable.contains(c));
+                            // Hide pure-meta endpoints (the root endpoint 0 on
+                            // most devices, or composed-device root endpoints
+                            // that only host BasicInformation + Descriptor).
+                            if !is_actionable {
+                                continue;
+                            }
+
+                            // Fallback heuristic for unlabeled endpoints whose
+                            // dev-type list isn't in our hardcoded map: infer
+                            // a label from the cluster mix (e.g., Meross/Eve
+                            // park their energy clusters on a separate
+                            // unlabeled endpoint).
+                            let label = {
+                                let l = device_type_label(&dev_types);
+                                if l == "Device"
+                                    && (servers.contains(&CLUSTER_ELEC_POWER)
+                                        || servers.contains(&CLUSTER_ELEC_ENERGY))
+                                {
+                                    "Power Meter"
+                                } else {
+                                    l
+                                }
+                            };
+                            println!("\n  Endpoint {}: {}", ep, label);
+
+                            // Render in canonical order so output is stable across runs.
+                            for &cid in &actionable {
+                                if !servers.contains(&cid) { continue; }
+                                match cid {
+                                    CLUSTER_ON_OFF => {
+                                        println!("    Power      ON / OFF");
+                                    }
+                                    CLUSTER_LEVEL_CONTROL => {
+                                        let min = read_u8_attr(ex, ep, CLUSTER_LEVEL_CONTROL, ATTR_LEVEL_MIN).await.unwrap_or(1);
+                                        let max = read_u8_attr(ex, ep, CLUSTER_LEVEL_CONTROL, ATTR_LEVEL_MAX).await.unwrap_or(254);
+                                        let lo = level_to_pct(min, max);
+                                        let hi = level_to_pct(max, max);
+                                        println!("    Brightness {}%–{}%  (raw level {}–{})", lo, hi, min, max);
+                                    }
+                                    CLUSTER_COLOR_CONTROL => {
+                                        let fmap = read_u32_attr(ex, ep, CLUSTER_COLOR_CONTROL, ATTR_FEATURE_MAP).await.unwrap_or(0);
+                                        let has_ct = fmap & FEATURE_COLORCTRL_CT != 0;
+                                        let has_color = fmap & (FEATURE_COLORCTRL_HS | FEATURE_COLORCTRL_XY | FEATURE_COLORCTRL_EHUE | FEATURE_COLORCTRL_CL) != 0;
+                                        if has_ct {
+                                            let pmin = read_u16_attr(ex, ep, CLUSTER_COLOR_CONTROL, ATTR_COLOR_TEMP_PHYS_MIN_MIREDS).await;
+                                            let pmax = read_u16_attr(ex, ep, CLUSTER_COLOR_CONTROL, ATTR_COLOR_TEMP_PHYS_MAX_MIREDS).await;
+                                            // Lower mireds → cooler/bluer (high K).
+                                            // Higher mireds → warmer/oranger (low K).
+                                            match (pmin, pmax) {
+                                                (Some(mn), Some(mx)) if mn > 0 && mx > 0 => {
+                                                    let k_cool = 1_000_000u32 / mn as u32;
+                                                    let k_warm = 1_000_000u32 / mx as u32;
+                                                    println!("    Color temp Warm ←——→ Cool  ({} K – {} K)", k_warm, k_cool);
+                                                }
+                                                _ => println!("    Color temp Warm ←——→ Cool"),
+                                            }
+                                        }
+                                        if has_color {
+                                            let mut spaces = vec![];
+                                            if fmap & FEATURE_COLORCTRL_HS != 0 { spaces.push("Hue/Sat"); }
+                                            if fmap & FEATURE_COLORCTRL_EHUE != 0 { spaces.push("Enhanced Hue"); }
+                                            if fmap & FEATURE_COLORCTRL_XY != 0 { spaces.push("XY"); }
+                                            if fmap & FEATURE_COLORCTRL_CL != 0 { spaces.push("Color Loop"); }
+                                            println!("    Color      Full color picker  ({})", spaces.join(", "));
+                                        }
+                                        if !has_ct && !has_color {
+                                            println!("    Color      (cluster present, no recognized features in FeatureMap=0x{:x})", fmap);
+                                        }
+                                    }
+                                    CLUSTER_THERMOSTAT => {
+                                        println!("    Climate    Heat / Cool / Auto + setpoints");
+                                    }
+                                    CLUSTER_DOOR_LOCK => {
+                                        println!("    Lock       Lock / Unlock");
+                                    }
+                                    CLUSTER_WINDOW_COVERING => {
+                                        println!("    Cover      Open / Close + position");
+                                    }
+                                    CLUSTER_FAN_CONTROL => {
+                                        println!("    Fan        Speed control");
+                                    }
+                                    CLUSTER_OCCUPANCY_SENSING => {
+                                        println!("    Sensor     Occupancy (motion)");
+                                    }
+                                    CLUSTER_TEMPERATURE_MEASUREMENT => {
+                                        println!("    Sensor     Temperature");
+                                    }
+                                    CLUSTER_RELATIVE_HUMIDITY_MEASUREMENT => {
+                                        println!("    Sensor     Humidity");
+                                    }
+                                    CLUSTER_ILLUMINANCE_MEASUREMENT => {
+                                        println!("    Sensor     Light level");
+                                    }
+                                    CLUSTER_ELEC_POWER => {
+                                        println!("    Energy     Live power (W)");
+                                    }
+                                    CLUSTER_ELEC_ENERGY => {
+                                        println!("    Energy     Cumulative (Wh)");
+                                    }
+                                    _ => {}
+                                }
                             }
                         }
                     }
