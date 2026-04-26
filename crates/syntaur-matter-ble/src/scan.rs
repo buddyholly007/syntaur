@@ -63,6 +63,32 @@ pub async fn scan_for_discriminator_ext(
     timeout: Duration,
     post_first_hit_grace: Duration,
 ) -> Result<Vec<CommissionableDevice>, btleplug::Error> {
+    // Adapter power-cycle BEFORE asking btleplug for the central — BlueZ
+    // can hold a discovery-client registration tied to a previous matter
+    // process's D-Bus connection (or to ble-relay, or anything else that
+    // exited without StopDiscovery). When that happens, btleplug's
+    // start_scan returns `org.bluez.Error.InProgress` ("Operation already
+    // in progress") and `stop_scan` from a fresh session can't clear it,
+    // because BlueZ associates the registration with the *prior* sender.
+    // Cycling power resets per-adapter state without sudo (D-Bus
+    // org.bluez.Adapter1.Powered is set-able by any user that already has
+    // bluetooth group access). 200ms idle between off/on lets BlueZ's
+    // adapter1 state machine settle.
+    //
+    // We shell out to `bluetoothctl` rather than going through bluez-async
+    // directly because btleplug 0.11 does not expose set_powered, and
+    // adding bluez-async as a direct dep introduces a second mDNS-style
+    // singleton risk. The shell-out is fast (<100ms total) and runs on
+    // the cold path before scan, not in any hot loop.
+    let _ = std::process::Command::new("bluetoothctl")
+        .args(["power", "off"])
+        .output();
+    std::thread::sleep(Duration::from_millis(200));
+    let _ = std::process::Command::new("bluetoothctl")
+        .args(["power", "on"])
+        .output();
+    std::thread::sleep(Duration::from_millis(200));
+
     let manager = Manager::new().await?;
     let adapters = manager.adapters().await?;
     let central = adapters
@@ -70,12 +96,22 @@ pub async fn scan_for_discriminator_ext(
         .next()
         .ok_or_else(|| btleplug::Error::DeviceNotFound)?;
 
-    // 2026-04-26: Drop BlueZ UUID filter — BlueZ"s SetDiscoveryFilter UUID list
-    // checks only the device"s Service Class UUID advertising field, NOT entries
+    // Idempotent stop-scan in case the power cycle didn't catch
+    // every edge (e.g. a same-session prior call that left scan
+    // running). stop_scan is safe when nothing's running.
+    let _ = central.stop_scan().await;
+
+    // 2026-04-26: Drop BlueZ UUID filter — BlueZ's SetDiscoveryFilter UUID list
+    // checks only the device's Service Class UUID advertising field, NOT entries
     // in ServiceData. Eve Energy advertises 0xFFF6 only via ServiceData, so the
     // filtered scan never returns it. We post-filter on service_data.get below.
     central.start_scan(ScanFilter::default()).await?;
 
+    // From this point on, any error path must `stop_scan` before returning
+    // or BlueZ's discovery state will leak into the next process invocation
+    // and trigger "Operation already in progress" on the next start_scan.
+    // We use an inner async block + match so stop_scan runs on both Ok and Err.
+    let scan_result: Result<Vec<CommissionableDevice>, btleplug::Error> = async {
     let mut events = central.events().await?;
     let mut hits: Vec<CommissionableDevice> = Vec::new();
     // 2026-04-25: stale-cache guard. BlueZ replays cached "known device"
@@ -158,8 +194,11 @@ pub async fn scan_for_discriminator_ext(
         }
     }
 
-    let _ = central.stop_scan().await;
     Ok(hits)
+    }
+    .await;
+    let _ = central.stop_scan().await;
+    scan_result
 }
 
 fn parse_matter_service_data(data: &[u8], address: &str) -> Option<CommissionableDevice> {

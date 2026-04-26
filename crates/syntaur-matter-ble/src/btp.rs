@@ -289,12 +289,17 @@ impl BtpSession {
             .next()
             .ok_or(BtpError::NoAdapter)?;
 
+        // Cache-refresh scan. ScanFilter::default() (NOT ::services) — BlueZ's
+        // services filter checks Service Class UUIDs, but Matter devices only
+        // advertise UUID 0xFFF6 via ServiceData, so the filter would silently
+        // hide every device. Same fix as src/scan.rs.
+        //
+        // The repeat scan is also load-bearing for resolving Eve's resolvable
+        // private address: between commissioning attempts Eve rotates its RPA,
+        // and BlueZ caches the *previous* MAC under the same identity. A fresh
+        // scan walks the discovery callback so BlueZ updates the cache.
         log::debug!("[btp] open: start_scan (refresh cache for {})", device.address);
-        adapter
-            .start_scan(ScanFilter {
-                services: vec![MATTER_SERVICE_UUID],
-            })
-            .await?;
+        adapter.start_scan(ScanFilter::default()).await?;
         let peripheral = {
             let deadline = std::time::Instant::now() + Duration::from_secs(8);
             loop {
@@ -324,16 +329,57 @@ impl BtpSession {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
-        log::debug!("[btp] open: connect()");
-        match tokio::time::timeout(Duration::from_secs(15), peripheral.connect()).await {
-            Ok(Ok(())) => log::debug!("[btp] open: connect OK"),
-            Ok(Err(e)) => {
-                log::warn!("[btp] open: connect returned btleplug error: {e:?}");
-                return Err(e.into());
-            }
-            Err(_) => {
-                log::warn!("[btp] open: connect() hung past 15s — giving up");
-                return Err(BtpError::Protocol("connect() timed out at 15s"));
+        // Connect with bounded retry on the BlueZ transients we own. BlueZ
+        // returns `le-connection-abort-by-local` when something on the local
+        // side aborts the LE link layer early (often because a previous GATT
+        // session on the same peripheral hasn't fully torn down yet, or a
+        // parallel scan/connect is still mid-operation). The fix is *not* to
+        // restart bluetoothd — it's to disconnect cleanly, idle briefly, and
+        // re-issue connect() so BlueZ's per-device state machine catches up.
+        // Three attempts with widening backoff covers every flake we've seen
+        // empirically (Eve, Aqara, Meross all clear within 1–2 retries).
+        let mut last_err: Option<BtpError> = None;
+        let mut attempt: u32 = 0;
+        let max_attempts: u32 = 3;
+        loop {
+            attempt += 1;
+            log::debug!("[btp] open: connect() attempt {attempt}/{max_attempts}");
+            match tokio::time::timeout(Duration::from_secs(15), peripheral.connect()).await {
+                Ok(Ok(())) => {
+                    log::debug!("[btp] open: connect OK on attempt {attempt}");
+                    break;
+                }
+                Ok(Err(e)) => {
+                    let msg = format!("{e:?}");
+                    let transient = msg.contains("le-connection-abort-by-local")
+                        || msg.contains("Operation already in progress")
+                        || msg.contains("Software caused connection abort")
+                        || msg.contains("Connection refused");
+                    log::warn!(
+                        "[btp] open: connect attempt {attempt}/{max_attempts} returned btleplug error (transient={transient}): {msg}"
+                    );
+                    last_err = Some(e.into());
+                    if !transient || attempt >= max_attempts {
+                        return Err(last_err.unwrap());
+                    }
+                    let _ = peripheral.disconnect().await;
+                    let backoff = Duration::from_millis(500_u64 * attempt as u64);
+                    log::info!(
+                        "[btp] open: bluez transient — disconnect + sleep {backoff:?} before retry"
+                    );
+                    tokio::time::sleep(backoff).await;
+                }
+                Err(_) => {
+                    log::warn!(
+                        "[btp] open: connect() attempt {attempt} hung past 15s"
+                    );
+                    last_err = Some(BtpError::Protocol("connect() timed out at 15s"));
+                    if attempt >= max_attempts {
+                        return Err(last_err.unwrap());
+                    }
+                    let _ = peripheral.disconnect().await;
+                    tokio::time::sleep(Duration::from_millis(500_u64 * attempt as u64)).await;
+                }
             }
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -1065,8 +1111,10 @@ impl BleCommissionExchange {
 
         let blocking = tokio::task::spawn_blocking(
             move || -> Result<(), syntaur_matter::error::MatterFabricError> {
-                use rs_matter::crypto::test_only_crypto;
-                use rs_matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
+                use rs_matter::crypto::default_crypto;
+                use rs_matter::dm::devices::test::{
+                    DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET,
+                };
                 use rs_matter::im::client::ImClient;
                 use rs_matter::im::CmdResp;
                 use rs_matter::sc::pase::PaseInitiator;
@@ -1075,9 +1123,13 @@ impl BleCommissionExchange {
                 use rs_matter::transport::network::NoNetwork;
                 use rs_matter::utils::epoch::sys_epoch;
                 use rs_matter::Matter;
+                use rand_core::OsRng;
                 use syntaur_matter::error::MatterFabricError;
 
-                let crypto = test_only_crypto();
+                // OsRng — PASE Sigma1 uses InitiatorRandom + ephemeral ECDH
+                // just like CASE; same replay-protection drop on second
+                // attempt with deterministic-RNG identical nonces.
+                let crypto = default_crypto(OsRng, DAC_PRIVKEY);
                 let matter =
                     Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, sys_epoch, 0);
                 matter
