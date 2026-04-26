@@ -19,6 +19,23 @@
 //!
 //! Fabric must already exist in `~/.syntaur/matter_fabrics/<label>.enc`
 //! (create one via `matter-fabric new <label>`).
+//!
+//! ## Shared-BLE peripherals
+//!
+//! On hosts where another Syntaur service (e.g. `ble-relay` for the
+//! Limitless Pendant) holds an active connection to hci0, BLE
+//! commissioning fights for the adapter — connects flap with
+//! `le-connection-abort-by-local`, scans return stale advertisements,
+//! and the BTP transcript drops mid-handshake.
+//!
+//! On entry, this binary checks `SYNTAUR_PAUSE_BLE_SERVICES`
+//! (default: `ble-relay`) for systemd --user services that are
+//! currently active. Each one is stopped before the BLE work and
+//! restarted at process exit via an RAII guard, regardless of whether
+//! commissioning succeeded.
+//!
+//! Set `SYNTAUR_PAUSE_BLE_SERVICES=` (empty) to disable the hook on
+//! hosts where you want the pause to happen out-of-band.
 
 use std::env;
 use std::process::ExitCode;
@@ -46,11 +63,107 @@ async fn main() -> ExitCode {
         }
     };
 
+    // Pause shared BLE peripherals (e.g. ble-relay) while we own hci0.
+    // The guard restores them on Drop in any exit path below.
+    let _ble_pause = BleServicePauseGuard::install();
+
     if let Err(e) = run(args).await {
         eprintln!("commissioning failed: {e}");
         return ExitCode::from(2);
     }
     ExitCode::SUCCESS
+}
+
+/// RAII guard that pauses systemd --user services that hold the local
+/// BLE adapter, then restarts them on Drop.
+///
+/// Reads `SYNTAUR_PAUSE_BLE_SERVICES` (comma-separated, default
+/// `ble-relay`). Empty value disables the hook entirely.
+struct BleServicePauseGuard {
+    paused: Vec<String>,
+}
+
+impl BleServicePauseGuard {
+    fn install() -> Self {
+        let raw = env::var("SYNTAUR_PAUSE_BLE_SERVICES")
+            .unwrap_or_else(|_| "ble-relay".to_string());
+        let services: Vec<String> = raw
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if services.is_empty() {
+            log::info!("[ble-pause] disabled (SYNTAUR_PAUSE_BLE_SERVICES is empty)");
+            return Self { paused: Vec::new() };
+        }
+        let mut paused = Vec::new();
+        for svc in services {
+            if !is_active_user_service(&svc) {
+                log::debug!("[ble-pause] {svc} not active — skipping");
+                continue;
+            }
+            log::info!("[ble-pause] stopping shared BLE service '{svc}'");
+            match stop_user_service(&svc) {
+                Ok(()) => paused.push(svc),
+                Err(e) => log::warn!("[ble-pause] failed to stop {svc}: {e} — continuing anyway"),
+            }
+        }
+        if paused.is_empty() {
+            log::info!("[ble-pause] no shared BLE services were running");
+        }
+        Self { paused }
+    }
+}
+
+impl Drop for BleServicePauseGuard {
+    fn drop(&mut self) {
+        for svc in self.paused.drain(..) {
+            log::info!("[ble-pause] restarting '{svc}'");
+            if let Err(e) = start_user_service(&svc) {
+                log::warn!("[ble-pause] failed to restart {svc}: {e}. Run: systemctl --user start {svc}");
+            }
+        }
+    }
+}
+
+fn is_active_user_service(name: &str) -> bool {
+    // `is-active` exits 0 when active, non-zero otherwise. We don't
+    // care about the textual output — just the exit code.
+    std::process::Command::new("systemctl")
+        .args(["--user", "is-active", "--quiet", name])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn stop_user_service(name: &str) -> Result<(), String> {
+    let out = std::process::Command::new("systemctl")
+        .args(["--user", "stop", name])
+        .output()
+        .map_err(|e| format!("spawn systemctl: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "systemctl --user stop {name} exit {:?} — {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+fn start_user_service(name: &str) -> Result<(), String> {
+    let out = std::process::Command::new("systemctl")
+        .args(["--user", "start", name])
+        .output()
+        .map_err(|e| format!("spawn systemctl: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "systemctl --user start {name} exit {:?} — {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
 }
 
 struct Args {
@@ -150,7 +263,13 @@ fn print_usage() {
                         --assigned-node-id <N> \\
                         [--wifi-ssid S --wifi-psk P] \\
                         [--thread-dataset-hex HEX | --thread-dataset-file PATH] \\
-                        [--timeout-secs N]\n"
+                        [--timeout-secs N]
+
+  Env:
+    SYNTAUR_PAUSE_BLE_SERVICES   comma-separated systemd --user services to
+                                 stop while commissioning (default: ble-relay).
+                                 Set empty to disable the hook.
+"
     );
 }
 

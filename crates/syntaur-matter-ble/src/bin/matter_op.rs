@@ -85,6 +85,9 @@ fn parse_args() -> Result<Args, String> {
             "--node-id" => {
                 let v = argv.get(i + 1).ok_or("--node-id needs a value")?;
                 let n = if let Some(hex) = v.strip_prefix("0x") {
+                    if hex.is_empty() {
+                        return Err("--node-id 0x needs hex digits after the prefix".into());
+                    }
                     u64::from_str_radix(hex, 16).map_err(|e| format!("--node-id hex: {e}"))?
                 } else {
                     v.parse::<u64>().map_err(|e| format!("--node-id: {e}"))?
@@ -117,7 +120,8 @@ fn usage() -> String {
 async fn main() -> Result<(), String> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    let args = parse_args().map_err(|e| { eprintln!("{e}"); e })?;
+    // Don't double-print: main's Err is reported by the runtime.
+    let args = parse_args()?;
 
     let fabric = syntaur_matter::persist::load_fabric(&args.fabric_label)
         .map_err(|e| format!("load fabric {}: {e:?}", args.fabric_label))?;
@@ -130,11 +134,9 @@ async fn main() -> Result<(), String> {
 
     let rcac = hex::decode(&fabric.root_cert_hex)
         .map_err(|e| format!("rcac hex decode: {e}"))?;
-    let mut ca_secret_key_scalar = [0u8; 32];
-    let ca_decoded = hex::decode(&fabric.ca_secret_key_hex)
-        .map_err(|e| format!("ca_secret hex decode: {e}"))?;
-    if ca_decoded.len() != 32 { return Err(format!("ca_secret wrong length: {}", ca_decoded.len())); }
-    ca_secret_key_scalar.copy_from_slice(&ca_decoded);
+    // CA secret key is not needed once a controller NOC is persisted in the
+    // fabric file (the persisted-NOC code path uses the controller's own
+    // private key for CASE Sigma3). Only validate fabric integrity.
     let mut ipk = [0u8; 16];
     let ipk_decoded = hex::decode(&fabric.ipk_hex).map_err(|e| format!("ipk hex decode: {e}"))?;
     if ipk_decoded.len() != 16 { return Err(format!("ipk wrong length: {}", ipk_decoded.len())); }
@@ -162,8 +164,6 @@ async fn main() -> Result<(), String> {
     let op = args.op;
     let endpoint = args.endpoint;
     let node_id = args.node_id;
-
-    let _ = ca_secret_key_scalar; // not needed for persisted-NOC path
 
     // Auto-retry on CASE Sigma1→2 hang. Meross MSS315 over WiFi shows
     // ~1-in-5 timeouts where Sigma1 is acked (MRPStandAloneAck) but no
@@ -195,7 +195,7 @@ async fn main() -> Result<(), String> {
             move |ex| {
                 Box::pin(async move {
                     use rs_matter::im::client::ImClient;
-                    use rs_matter::im::{AttrResp, CmdResp};
+                    use rs_matter::im::{AttrResp, CmdResp, IMStatusCode};
                     use rs_matter::tlv::TLVElement;
                     use syntaur_matter::error::MatterFabricError;
 
@@ -223,7 +223,7 @@ async fn main() -> Result<(), String> {
                                 println!("✓ CommissioningComplete (InvokeResponse) — failsafe disarmed");
                             }
                             CmdResp::Status(s) => {
-                                if s.status.status == rs_matter::im::IMStatusCode::Success {
+                                if s.status.status == IMStatusCode::Success {
                                     println!("✓ CommissioningComplete (Success) — failsafe disarmed");
                                 } else {
                                     println!("✗ CommissioningComplete returned {:?}", s.status);
@@ -252,7 +252,7 @@ async fn main() -> Result<(), String> {
                         match resp {
                             CmdResp::Cmd(_) => println!("✓ {label} (InvokeResponse)"),
                             CmdResp::Status(s) => {
-                                if s.status.status == rs_matter::im::IMStatusCode::Success {
+                                if s.status.status == IMStatusCode::Success {
                                     println!("✓ {label} (Success)");
                                 } else {
                                     println!("✗ {label} returned {:?}", s.status);
@@ -304,9 +304,10 @@ async fn main() -> Result<(), String> {
                                     break;
                                 }
                                 AttrResp::Status(s) => {
-                                    if format!("{:?}", s.status.status).contains("UnsupportedCluster")
-                                        || format!("{:?}", s.status.status).contains("UnsupportedEndpoint")
-                                    {
+                                    if matches!(
+                                        s.status.status,
+                                        IMStatusCode::UnsupportedCluster | IMStatusCode::UnsupportedEndpoint
+                                    ) {
                                         continue;
                                     }
                                     println!("power read returned status: {:?} [ep {}]", s, try_ep);
@@ -334,15 +335,48 @@ async fn main() -> Result<(), String> {
                                 .map_err(|e| MatterFabricError::Matter(format!("read CumEnergy ep{try_ep}: {e:?}")))?;
                             match resp {
                                 AttrResp::Data(d) => {
-                                    println!("energy raw TLV ({} bytes) [ep {}]", d.data.raw_data().len(), try_ep);
-                                    println!("  hex: {}", d.data.raw_data().iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(""));
+                                    // EnergyMeasurementStruct (Matter 1.3, cluster 0x0091):
+                                    //   tag 0: Energy (int64u, mWh)
+                                    //   tag 1: StartTimestamp (optional epoch-s)
+                                    //   tag 2: EndTimestamp (optional epoch-s)
+                                    //   tag 3: StartSystime (optional system-ms)
+                                    //   tag 4: EndSystime (optional system-ms)
+                                    // Decode the Energy field; print Wh/kWh for human use.
+                                    //
+                                    // rs-matter's `.u64()` only accepts wire-type
+                                    // U8/U16/U32/U64. Eve Energy encodes 0 as S8
+                                    // (smallest-fit signed) so we fall back to
+                                    // `.i64()` and cast — cumulative energy can
+                                    // never be negative per the spec.
+                                    let mwh_result = d.data.r#struct()
+                                        .and_then(|seq| seq.find_ctx(0))
+                                        .and_then(|e| e.u64().or_else(|_| e.i64().map(|v| v.max(0) as u64)));
+                                    match mwh_result {
+                                        Ok(mwh) => {
+                                            let wh = mwh as f64 / 1000.0;
+                                            let kwh = wh / 1000.0;
+                                            println!(
+                                                "energy: {} mWh ({:.3} Wh / {:.6} kWh) [ep {}]",
+                                                mwh, wh, kwh, try_ep
+                                            );
+                                        }
+                                        Err(e) => {
+                                            println!("energy: struct decode failed ({e:?}) [ep {}]; raw {} bytes",
+                                                try_ep, d.data.raw_data().len());
+                                            println!("  hex: {}",
+                                                d.data.raw_data().iter()
+                                                    .map(|b| format!("{:02x}", b))
+                                                    .collect::<Vec<_>>().join(""));
+                                        }
+                                    }
                                     printed = true;
                                     break;
                                 }
                                 AttrResp::Status(s) => {
-                                    if format!("{:?}", s.status.status).contains("UnsupportedCluster")
-                                        || format!("{:?}", s.status.status).contains("UnsupportedEndpoint")
-                                    {
+                                    if matches!(
+                                        s.status.status,
+                                        IMStatusCode::UnsupportedCluster | IMStatusCode::UnsupportedEndpoint
+                                    ) {
                                         continue;
                                     }
                                     println!("energy read returned status: {:?} [ep {}]", s, try_ep);
