@@ -502,7 +502,7 @@ body.sd-quiet .sd-tile.sd-tile-system { display: none; }
 .sd-list-item:last-child { border-bottom: none; }
 .sd-list-time { color: var(--fg-mute); font-variant-numeric: tabular-nums; font-size: 12px; }
 .sd-list-title { color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.sd-list-empty { color: var(--fg-mute); font-size: 13px; font-style: italic; }
+.sd-list-empty { color: var(--fg-mute); font-size: 13px; font-style: italic; white-space: normal; overflow-wrap: anywhere; line-height: 1.4; padding: 4px 0; }
 
 .sd-xl-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; flex: 1; min-height: 0; }
 .sd-xl-left, .sd-xl-right { display: flex; flex-direction: column; min-height: 0; }
@@ -778,14 +778,16 @@ body.sd-quiet .sd-tile.sd-tile-system { display: none; }
    it on tablet + mobile screenshots). Fixed-position full-width
    banner below the topbar on ≤768px so it takes its own space. */
 .sd-first-run-tip {
-  position: absolute; top: calc(100% + 8px); right: 0;
+  position: absolute; top: calc(100% + 8px); left: 0; right: auto;
   background: var(--bg-card); border: 1px solid var(--accent-line);
   border-radius: 12px; padding: 10px 14px; z-index: 50;
-  font-size: 13px; color: var(--fg); max-width: 260px;
+  font-size: 13px; color: var(--fg);
+  width: max-content; max-width: min(360px, calc(100vw - 32px));
+  white-space: normal;
   box-shadow: var(--shadow-soft);
 }
 .sd-first-run-tip::before {
-  content: ""; position: absolute; top: -6px; right: 24px;
+  content: ""; position: absolute; top: -6px; left: 24px; right: auto;
   width: 10px; height: 10px; background: var(--bg-card);
   border-top: 1px solid var(--accent-line); border-left: 1px solid var(--accent-line);
   transform: rotate(45deg);
@@ -1338,10 +1340,11 @@ const DASHBOARD_SCRIPT: &str = r##"
       tip.className = 'sd-first-run-tip';
       tip.id = 'sd-first-run-tip';
       tip.innerHTML = 'Click <b>Customize</b> to add or rearrange widgets. <button class="sd-tip-close" aria-label="Dismiss">×</button>';
-      const right = document.querySelector('.sd-customize-right');
-      if (right) {
-        right.style.position = 'relative';
-        right.appendChild(tip);
+      const anchor = document.getElementById('sd-customize-btn');
+      const wrap = anchor ? anchor.parentElement : document.querySelector('.sd-customize-right');
+      if (wrap) {
+        wrap.style.position = 'relative';
+        wrap.appendChild(tip);
         const dismiss = () => {
           if (!tip.isConnected) return;
           tip.style.transition = 'opacity 300ms ease';

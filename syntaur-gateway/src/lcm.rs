@@ -12,6 +12,13 @@ pub struct LcmManager {
 }
 
 impl LcmManager {
+    /// Expose the on-disk path so external modules (agent settings cog
+    /// Maintenance section) can open their own connection for one-off
+    /// queries without pushing every CRUD into LcmManager.
+    pub fn db_path_str(&self) -> String {
+        self.db_path.clone()
+    }
+
     pub fn new(db_path: &str, config: LcmConfig) -> Self {
         // Ensure database exists with correct schema
         if let Ok(conn) = Connection::open(db_path) {

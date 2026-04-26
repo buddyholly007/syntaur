@@ -737,7 +737,8 @@ const EXTRA_STYLE: &str = r##"
   .lib-cortex {
     border-left: 1px solid var(--lib-gold);
     background: linear-gradient(180deg, rgba(244,234,213,0.95), rgba(237,225,196,0.95));
-    display: flex; flex-direction: column; overflow: hidden;
+    display: flex; flex-direction: column;
+    height: 100%; min-height: 0; overflow: hidden;
     box-shadow: inset 3px 0 8px rgba(0,0,0,0.25);
     position: relative;
   }
@@ -800,7 +801,7 @@ const EXTRA_STYLE: &str = r##"
 
   /* Messages area */
   .cortex-messages {
-    flex: 1; overflow-y: auto;
+    flex: 1; min-height: 0; overflow-y: auto;
     padding: 14px 16px; gap: 12px;
     display: flex; flex-direction: column;
     mask-image: linear-gradient(to bottom, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);

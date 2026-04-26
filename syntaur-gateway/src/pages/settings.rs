@@ -2309,7 +2309,13 @@ async function ssRefreshSetup() {
       const hr = await fetch('/health');
       if (hr.ok) {
         const h = await hr.json();
-        const names = (h.agents || []).map(a => (typeof a === 'object' ? (a.name || a.id) : a)).filter(Boolean);
+        const names = (h.agents || [])
+          .map(a => {
+            if (typeof a === 'string') return a;
+            if (a && typeof a === 'object') return a.name || a.id || null;
+            return null;
+          })
+          .filter(n => n && n !== 'undefined');
         if (names.length === 0) {
           helperList.textContent = 'your helpers';
         } else if (names.length === 1) {

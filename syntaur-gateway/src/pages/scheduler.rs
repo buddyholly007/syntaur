@@ -542,7 +542,13 @@ body { background: var(--sch-bg); color: var(--sch-ink); font-family: var(--sch-
 .sch-mini-arrow:hover { color: var(--sch-accent); }
 .sch-mini-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 1px; }
 .sch-mini-grid .dow { text-align: center; color: var(--sch-ink-faint); font-size: 10px; padding: 2px 0; }
-.sch-mini-day { text-align: center; padding: 3px 0; border-radius: 3px; cursor: pointer; color: var(--sch-ink-dim); }
+.sch-mini-day {
+  text-align: center; padding: 3px 0; border-radius: 3px; cursor: pointer;
+  color: var(--sch-ink-dim);
+  background: transparent; border: 1px solid transparent;
+  font: inherit; line-height: 1.2; box-sizing: border-box;
+  width: 100%; min-width: 0;
+}
 .sch-mini-day:hover { background: color-mix(in srgb, var(--sch-accent) 15%, transparent); color: var(--sch-ink); }
 .sch-mini-day.today { background: var(--sch-accent); color: var(--sch-paper); font-weight: 600; }
 .sch-mini-day.other-month { color: var(--sch-ink-faint); opacity: 0.4; }

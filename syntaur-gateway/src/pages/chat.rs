@@ -5,9 +5,7 @@
 use axum::response::Html;
 use maud::{html, PreEscaped};
 
-use super::agent_settings_card::{
-    agent_settings_back, chat_card_flip, resource_budget_script, resource_budget_styles,
-};
+use super::agent_settings_card::cog_button;
 use super::shared::{shell, top_bar, Page};
 
 pub async fn render() -> Html<String> {
@@ -20,22 +18,40 @@ pub async fn render() -> Html<String> {
         crumb: None,
         topbar_status: None,
     };
-    // Phase 8 of vault/projects/syntaur_per_chat_settings.md: wrap the
-    // chat surface in chat_card_flip so the cog at top-right reveals the
-    // settings back-of-card. The chat content (BODY_HTML) stays
-    // server-rendered as today; only the wrapper changes. The agent ID
-    // is "main" because /chat is the dashboard chat surface — settings
-    // are scoped to whichever main-thread agent is currently active
-    // (the back's hydrate-on-flip fetch reads window.currentAgent).
-    let front = html! {
-        (PreEscaped(BODY_HTML))
-    };
-    let back = agent_settings_back("main");
+    // Cog server-rendered into the persona strip alongside "+ New chat".
+    // Click → opens the singleton slide-over (lives in shell). Auto-mount
+    // would also catch this surface via PANEL_REGISTRY, but server-side
+    // emit avoids the boot-flicker where the cog only appears after JS
+    // has run.
     let body = html! {
-        (resource_budget_styles())
-        (chat_card_flip("main", front, back))
-        (resource_budget_script())
+        (PreEscaped(BODY_HTML))
+        // Stick the cog into the persona strip via JS hook — the BODY_HTML
+        // here is a raw string we don't want to mutate. The IIFE below
+        // runs once at parse time and parks a button next to + New chat.
+        script class="syntaur-page" {
+            (PreEscaped(r#"
+                (function () {
+                    var strip = document.querySelector('.chat-agent-strip .inner');
+                    if (!strip || strip.querySelector('.cf-cog')) return;
+                    var b = document.createElement('button');
+                    b.type = 'button';
+                    b.className = 'cf-cog';
+                    b.setAttribute('data-agent', 'main');
+                    b.setAttribute('aria-label', 'Agent settings');
+                    b.title = 'Agent settings';
+                    b.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M19.43 12.98c.04-.32.07-.64.07-.98s-.03-.66-.07-.98l2.11-1.65c.19-.15.24-.42.12-.64l-2-3.46c-.12-.22-.39-.3-.61-.22l-2.49 1c-.52-.4-1.08-.73-1.69-.98l-.38-2.65C14.46 2.18 14.25 2 14 2h-4c-.25 0-.46.18-.49.42l-.38 2.65c-.61.25-1.17.59-1.69.98l-2.49-1c-.23-.09-.49 0-.61.22l-2 3.46c-.13.22-.07.49.12.64l2.11 1.65c-.04.32-.07.65-.07.98s.03.66.07.98l-2.11 1.65c-.19.15-.24.42-.12.64l2 3.46c.12.22.39.3.61.22l2.49-1c.52.4 1.08.73 1.69.98l.38 2.65c.03.24.24.42.49.42h4c.25 0 .46-.18.49-.42l.38-2.65c.61-.25 1.17-.59 1.69-.98l2.49 1c.23.09.49 0 .61-.22l2-3.46c.12-.22.07-.49-.12-.64l-2.11-1.65zM12 15.5c-1.93 0-3.5-1.57-3.5-3.5s1.57-3.5 3.5-3.5 3.5 1.57 3.5 3.5-1.57 3.5-3.5 3.5z"/></svg><span class="cf-cog-label">Settings</span>';
+                    // Static positioning inside the flex strip — no need
+                    // for absolute. Slot AFTER the chips, BEFORE + New chat.
+                    b.style.position = 'static';
+                    b.style.marginLeft = '8px';
+                    var newChat = strip.querySelector('.new-chat-btn');
+                    if (newChat) strip.insertBefore(b, newChat); else strip.appendChild(b);
+                })();
+            "#))
+        }
     };
+    // Re-export of cog_button kept for any future server-side use.
+    let _ = cog_button;
     Html(shell(page, body).into_string())
 }
 

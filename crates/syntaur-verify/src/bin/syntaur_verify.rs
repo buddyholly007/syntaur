@@ -705,7 +705,7 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
                 for warning in &cap.layout_warnings {
                     findings.push(Finding {
                         module_slug: module.slug.clone(),
-                        kind: FindingKind::Regression,
+                        kind: FindingKind::VisualDiff,
                         severity: Severity::Regression,
                         title: format!("Layout broken [{}]", pov_label),
                         detail: warning.clone(),
@@ -1449,43 +1449,123 @@ fn handle_baseline(
         }
     };
 
-    // Force re-baseline mode: overwrite any existing baseline with the
-    // current shot and emit a suggestion so the run report makes the
-    // action visible.
+    // Re-baseline mode: gated by diff size so the syntaur-ship pipeline
+    // (which always passes --update-baselines) cannot silently accept
+    // a regression as the new "good". Three bands:
+    //
+    //   pixel-diff < 5%   → silent overwrite (font hinting, anti-alias,
+    //                        dynamic content noise; no finding emitted)
+    //   pixel-diff 5-30%  → overwrite + Suggestion (small layout tweak)
+    //   pixel-diff >= 30% → DO NOT overwrite, emit Regression with a
+    //                        clear explanation. syntaur-ship treats
+    //                        Regressions as deploy-blockers, so the user
+    //                        sees the broken capture before it overwrites
+    //                        the good baseline. Re-running with
+    //                        SYNTAUR_VERIFY_FORCE_BASELINE=1 promotes
+    //                        anyway when the change is intentional.
+    //
+    // Bug 2026-04-26: pre-fix, the card-flip back-face overlay rendered
+    // mirrored on top of front, producing >70% pixel diff. Verify silently
+    // accepted it as the new baseline. This gate would have blocked.
     if update_baselines {
+        const SAFE_PCT: f64 = 5.0;
+        const REGRESSION_PCT: f64 = 30.0;
+        let force_anyway = std::env::var("SYNTAUR_VERIFY_FORCE_BASELINE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        // Compare against existing baseline if any. First-run with no prior
+        // baseline → just save (handled below by the !exists branch — re-fall
+        // through after this gated block by setting a flag).
+        let prior_diff_pct = if store.exists_for(module_slug, persona, viewport) {
+            match store.load_for(module_slug, persona, viewport) {
+                Ok(prior) => {
+                    diff_pngs(&prior, &current, /* emit_diff_image = */ false)
+                        .map(|d| d.pixel_delta_pct)
+                        .ok()
+                }
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+
+        let action: &'static str = match prior_diff_pct {
+            Some(pct) if pct >= REGRESSION_PCT && !force_anyway => "block",
+            Some(pct) if pct >= SAFE_PCT => "overwrite_loud",
+            Some(_) => "overwrite_silent",
+            None => "overwrite_silent", // no prior baseline
+        };
+
+        if action == "block" {
+            // DO NOT overwrite — emit a Regression that the ship pipeline
+            // will treat as a deploy-blocker.
+            let pct = prior_diff_pct.unwrap_or(0.0);
+            findings.push(Finding {
+                module_slug: module_slug.to_string(),
+                kind: FindingKind::VisualDiff,
+                severity: Severity::Regression,
+                title: format!(
+                    "Visual diff {:.1}% vs baseline ({} · {}) — refused to auto-overwrite",
+                    pct,
+                    pov_label,
+                    viewport.slug()
+                ),
+                detail: format!(
+                    "current capture differs by {:.1}% from baseline (threshold {}%). \
+                     syntaur-ship would have silently accepted this as the new baseline. \
+                     Review {} vs current. If intentional, set \
+                     SYNTAUR_VERIFY_FORCE_BASELINE=1 and re-run.",
+                    pct,
+                    REGRESSION_PCT,
+                    store.path_for(module_slug, persona, viewport).display(),
+                ),
+                artifact: Some(current_path.to_path_buf()),
+                captured_at: Utc::now(),
+                edits: None,
+                persona: persona.map(|s| s.to_string()),
+            });
+            log::warn!(
+                "[verify] BLOCKED auto-baseline-overwrite for {} [{} · {}]: {:.1}% diff",
+                module_slug, pov_label, viewport.slug(), pct,
+            );
+            return;
+        }
+
         match store.save_for(module_slug, persona, viewport, &current) {
             Ok(()) => {
                 log::info!(
-                    "[verify] baseline updated for {} [{} · {}]",
-                    module_slug,
-                    pov_label,
-                    viewport.slug()
+                    "[verify] baseline updated for {} [{} · {}] (diff {:?})",
+                    module_slug, pov_label, viewport.slug(), prior_diff_pct,
                 );
-                findings.push(Finding {
-                    module_slug: module_slug.to_string(),
-                    kind: FindingKind::Other,
-                    severity: Severity::Suggestion,
-                    title: format!(
-                        "Baseline updated ({} · {})",
-                        pov_label,
-                        viewport.slug()
-                    ),
-                    detail: format!(
-                        "overwrote {} with current capture",
-                        store.path_for(module_slug, persona, viewport).display()
-                    ),
-                    artifact: Some(current_path.to_path_buf()),
-                    captured_at: Utc::now(),
-                    edits: None,
-                    persona: persona.map(|s| s.to_string()),
-                });
+                if action == "overwrite_loud" {
+                    let pct = prior_diff_pct.unwrap_or(0.0);
+                    findings.push(Finding {
+                        module_slug: module_slug.to_string(),
+                        kind: FindingKind::Other,
+                        severity: Severity::Suggestion,
+                        title: format!(
+                            "Baseline updated ({} · {}) — {:.1}% diff",
+                            pov_label, viewport.slug(), pct,
+                        ),
+                        detail: format!(
+                            "overwrote {} with current capture (diff {:.1}% — under \
+                             {}% block threshold; review if unexpected)",
+                            store.path_for(module_slug, persona, viewport).display(),
+                            pct, REGRESSION_PCT,
+                        ),
+                        artifact: Some(current_path.to_path_buf()),
+                        captured_at: Utc::now(),
+                        edits: None,
+                        persona: persona.map(|s| s.to_string()),
+                    });
+                }
+                // overwrite_silent emits no finding by design — sub-5% noise.
             }
             Err(e) => {
                 log::warn!(
                     "[verify] baseline save failed for {} [{} · {}]: {e:#}",
-                    module_slug,
-                    pov_label,
-                    viewport.slug()
+                    module_slug, pov_label, viewport.slug(),
                 );
             }
         }

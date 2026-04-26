@@ -86,15 +86,24 @@ async function loadModules() {
     // hit this when sessionStorage is empty + cookie carries auth;
     // bouncing made the module-reset bug. Just return — UI shows
     // empty state. syntaurLogout() (top bar) is the path back to /.
-    if (resp.status === 401) { return; }
+    if (resp.status === 401) {
+      document.getElementById('module-summary').textContent = 'Sign in to view modules.';
+      renderList('core-list', []);
+      renderList('ext-list', []);
+      return;
+    }
     const data = await resp.json();
-    const allMods = [...data.core_modules, ...data.extension_modules];
+    const core = data.core_modules || [];
+    const ext = data.extension_modules || [];
+    const allMods = [...core, ...ext];
     const enabled = allMods.filter(m => m.enabled);
-    const totalTools = allMods.reduce((s, m) => s + m.tool_count, 0);
+    const totalTools = allMods.reduce((s, m) => s + (m.tool_count || 0), 0);
     document.getElementById('module-summary').textContent =
-      `${enabled.length} of ${allMods.length} modules enabled — ${totalTools} total tools`;
-    renderList('core-list', data.core_modules);
-    renderList('ext-list', data.extension_modules);
+      allMods.length === 0
+        ? 'No modules available.'
+        : `${enabled.length} of ${allMods.length} modules enabled — ${totalTools} total tools`;
+    renderList('core-list', core);
+    renderList('ext-list', ext);
   } catch(e) {
     document.getElementById('module-summary').textContent = 'Error loading modules';
   }

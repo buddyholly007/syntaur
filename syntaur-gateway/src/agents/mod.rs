@@ -18,3 +18,4 @@ pub mod templates;
 pub mod import;
 pub mod settings;
 pub mod compute;
+pub mod endpoints;

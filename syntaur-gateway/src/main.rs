@@ -34,6 +34,8 @@ mod license;
 mod tax;
 mod tax_pdf;
 mod ledger;
+mod library;
+mod drafts;
 mod financial;
 mod calendar_reminder;
 mod sync;
@@ -175,6 +177,21 @@ pub struct AppState {
     /// `None` when the file is absent so /api/ledger/* returns 503 rather
     /// than panicking. Migrated 2026-04-22.
     pub ledger: Option<Arc<crate::ledger::LedgerService>>,
+    /// Set true by `POST /api/system/drain` (called by deploy.sh before
+    /// SIGTERM). Reflected in `/health.restart_pending` so connected
+    /// clients can flush in-progress autosave state to `/api/drafts/save`
+    /// before the container restarts. See `drafts.rs`.
+    pub restart_pending: Arc<std::sync::atomic::AtomicBool>,
+    /// UTC unix timestamp at which `restart_pending` was flipped on. 0
+    /// when not pending. Lets clients show "restarting in 6s…" rather
+    /// than just a vague "restart pending" toast.
+    pub restart_pending_since: Arc<std::sync::atomic::AtomicI64>,
+    /// AES-256 master key used for at-rest envelope encryption. Loaded
+    /// from `~/.syntaur/master.key` at startup; ephemeral if that file
+    /// can't be read (degrades gracefully — encrypted blobs become
+    /// unreadable across restarts, which is the worst case but doesn't
+    /// crash the service). See `library::encryption`.
+    pub master_key: Arc<aes_gcm::Key<aes_gcm::Aes256Gcm>>,
 }
 
 /// Run the `bootstrap-admin` CLI subcommand. Parses `--name <name>` from
@@ -1002,11 +1019,15 @@ async fn handle_health(State(state): State<Arc<AppState>>) -> Json<serde_json::V
     let default_agent = state.config.agents.list.first().map(|a| a.id.as_str()).unwrap_or("main");
     let chain = llm::LlmChain::from_config(&state.config, default_agent, state.client.clone());
     let providers = chain.provider_stats().await;
+    let restart_pending = state.restart_pending.load(std::sync::atomic::Ordering::SeqCst);
+    let restart_pending_since = state.restart_pending_since.load(std::sync::atomic::Ordering::SeqCst);
 
     Json(serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_secs": uptime,
+        "restart_pending": restart_pending,
+        "restart_pending_since": if restart_pending { restart_pending_since } else { 0 },
         "agents": state.config.agents.list.iter().map(|a| {
             serde_json::json!({
                 "id": a.id,
@@ -6565,6 +6586,9 @@ async fn main() {
                 None
             }
         },
+        restart_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        restart_pending_since: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+        master_key: Arc::new(master_key),
     });
 
     // Calendar reminder background task: checks for upcoming events every 60s.
@@ -6641,6 +6665,14 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    // Library subsystem: ensure on-disk layout + start the consume-folder
+    // watcher (no-op when no user has the feature enabled). The watcher
+    // polls every 30s for files dropped into `_consume/`.
+    if let Err(e) = library::ensure_layout() {
+        log::warn!("[library] ensure_layout failed: {e}");
+    }
+    library::consume_watcher::spawn(Arc::clone(&state));
 
     // Shutdown signal — all tasks watch this
     let (shutdown_tx, _) = watch::channel(false);
@@ -6898,6 +6930,7 @@ async fn main() {
         .route("/setup/tailscale", get(pages::tailscale_setup::render))
         .route("/modules", get(pages::modules::render))
         .route("/journal", get(pages::journal::render))
+        .route("/library", get(pages::library::render))
         .route("/music", get(pages::music::render))
         .route("/voice-setup", get(pages::voice_setup::render))
         .route("/settings", get(pages::settings::render))
@@ -7135,6 +7168,18 @@ async fn main() {
         .route("/api/agents/{agent_id}/settings_back", get(handle_api_agent_settings_back))
         // Resource Budget bar — pinned at the top of the settings card flip.
         .route("/api/compute/state", get(crate::agents::compute::handle_compute_state))
+        // Per-chat agent settings cog — section backends (Phases 2-7).
+        .route("/api/tools/list", get(crate::agents::endpoints::handle_tools_list))
+        .route("/api/voice/sample", post(crate::agents::endpoints::handle_voice_sample))
+        .route("/api/voice/tts/{provider}/voices", get(crate::agents::endpoints::handle_voice_catalog))
+        .route("/api/llm/local/models", get(crate::agents::endpoints::handle_llm_local_models))
+        .route("/api/llm/providers/health", get(crate::agents::endpoints::handle_llm_providers_health))
+        .route("/api/llm/providers/{provider}/catalog", get(crate::agents::endpoints::handle_llm_provider_catalog))
+        .route("/api/agents/{agent_id}/test_prompt", post(crate::agents::endpoints::handle_test_prompt))
+        .route("/api/agents/{agent_id}/export", get(crate::agents::endpoints::handle_agent_export))
+        .route("/api/agents/{agent_id}/import", post(crate::agents::endpoints::handle_agent_import))
+        .route("/api/agents/{agent_id}/history", axum::routing::delete(crate::agents::endpoints::handle_agent_history_delete))
+        .route("/api/conversations/active", get(crate::agents::endpoints::handle_conv_active_export))
         .route("/api/settings/preferences", get(handle_api_settings_prefs_get).put(handle_api_settings_prefs_put))
         .route("/api/settings/export", get(handle_api_settings_export))
         .route("/api/settings/wipe_memories", post(handle_api_settings_wipe_memories))
@@ -7349,6 +7394,42 @@ async fn main() {
         .route("/api/music/shortcut_setup", get(music::handle_shortcut_setup_guide))
         .route("/api/music/local_events", get(music::handle_local_events))
         .route("/apple_music_capture", get(sync::handle_apple_music_capture_page))
+        // ── Library — auto-classified document intake (Phase 1+) ─────────
+        // See vault/projects/syntaur_doc_intake_storage.md for the full
+        // architecture. /api/library/ingest is the universal intake;
+        // hint=receipt|tax_form|photo|... pre-classifies for known callers.
+        .route("/api/library/ingest", post(library::handle_ingest))
+        .route("/api/library/files", get(library::handle_list))
+        .route("/api/library/files/{id}/content", get(library::handle_get_content))
+        .route("/api/library/inbox", get(library::handle_inbox_list))
+        .route("/api/library/inbox/{id}/confirm", post(library::handle_inbox_confirm))
+        .route("/api/library/tags", get(library::tags::handle_list))
+        .route("/api/library/tags", post(library::tags::handle_create))
+        .route("/api/library/files/{id}/tags", post(library::tags::handle_apply))
+        .route("/api/library/tax/{year}/export", get(library::year_archive::handle_export_year))
+        .route("/api/library/faces/clusters", get(library::faces::handle_list_clusters))
+        .route("/api/library/faces/clusters/{id}/name", post(library::faces::handle_rename_cluster))
+        .route("/api/library/photos/sync/since", get(library::photos_sync::handle_since))
+        .route("/api/library/photos/sync/cursor", post(library::photos_sync::handle_cursor_ack))
+        // Phase 8: time-limited share URLs + append-only audit log.
+        .route("/api/library/files/{id}/share", post(library::shares::handle_create_file_share))
+        .route("/api/library/years/{year}/share", post(library::shares::handle_create_year_share))
+        .route("/api/library/share/{token}", get(library::shares::handle_redeem_share))
+        .route("/api/library/audit", get(library::shares::handle_list_audit))
+        // Phase 9: cross-user share ACL (household sharing).
+        .route("/api/library/shares", get(library::acl::handle_list))
+        .route("/api/library/shares", post(library::acl::handle_create))
+        .route("/api/library/shares/incoming", get(library::acl::handle_list_incoming))
+        .route("/api/library/shares/{id}", axum::routing::delete(library::acl::handle_delete))
+        // Paperless one-shot importer (admin only).
+        .route("/api/library/import/paperless", post(library::paperless_import::handle_import))
+        // Pre-restart autosave + graceful drain. deploy.sh hits drain;
+        // pages poll /health and flush hooks to /api/drafts/save when
+        // they see restart_pending=true. See drafts.rs.
+        .route("/api/drafts/save", post(drafts::handle_save))
+        .route("/api/drafts/{scope}", get(drafts::handle_list))
+        .route("/api/drafts/{scope}/{scope_key}", axum::routing::delete(drafts::handle_delete))
+        .route("/api/system/drain", post(drafts::handle_drain))
         .with_state(Arc::clone(&state))
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),

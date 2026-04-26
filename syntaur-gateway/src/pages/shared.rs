@@ -121,6 +121,15 @@ pub fn shell(page: Page, body_content: Markup) -> Markup {
                     (PreEscaped(TOP_BAR_SCRIPT))
                     (PreEscaped(SPA_ROUTER_SCRIPT))
                     (bug_report_overlay())
+                    // Per-chat agent settings cog auto-mounter — runs on
+                    // every authed page so /knowledge, /scheduler, /journal,
+                    // /coders, /dashboard etc. all get the cog injected onto
+                    // their respective chat panels (PANEL_REGISTRY) plus the
+                    // mic-next-to-send (SEND_REGISTRY / INPUT_ROW_REGISTRY).
+                    // /chat additionally wraps server-side via chat_card_flip.
+                    (super::agent_settings_card::resource_budget_styles())
+                    (super::agent_settings_card::agent_settings_overlay())
+                    (super::agent_settings_card::resource_budget_script())
                 }
             }
         }
@@ -574,6 +583,7 @@ const TOP_BAR_SCRIPT: &str = r##"
     { path: '/knowledge',  name: 'Knowledge', sub: 'Cortex' },
     { path: '/music',      name: 'Music',     sub: 'Silvr' },
     { path: '/journal',    name: 'Journal',   sub: 'Mushi' },
+    { path: '/library',    name: 'Library',   sub: 'Maxine' },
     { path: '/social',     name: 'Social',    sub: 'Nyota' },
     { path: '/dashboard',  name: 'Dashboard', sub: 'Overview' },
     { path: '/settings',   name: 'Settings',  sub: null },
@@ -955,6 +965,125 @@ const TOP_BAR_SCRIPT: &str = r##"
   setInterval(() => { if (!readMusic()) updatePill(); }, 6000);
   // Local-pill icon updates on timer so pause/play stays in sync.
   setInterval(() => { if (readMusic()) updatePill(); }, 1000);
+
+  // ── pre-restart autosave coordinator ──────────────────────
+  // Pages register autosave callbacks via window.SyntaurAutosave.register(scope, scopeKey, getValue).
+  // Every 15s we poll /health and on restart_pending=true we flush every
+  // registered hook to /api/drafts/save. On reconnect, modules call
+  // SyntaurAutosave.restore(scope) to fetch + rehydrate.
+  //
+  // Why a global queue rather than per-page polling:
+  //   • One /health call per tab regardless of how many composers are open
+  //   • Single flush moment so every form gets the same drain window
+  //   • Modules don't need to know about the gateway lifecycle — they just
+  //     hand us a getter and a rehydrator
+  window.SyntaurAutosave = (function() {
+    const hooks = new Map(); // key -> { scope, scopeKey, get }
+    let drainStarted = 0;
+    let toastShown = false;
+
+    function tokenHeader() {
+      const t = (sessionStorage.getItem('syntaur_token') || localStorage.getItem('syntaur_token') || '');
+      return t ? { 'Authorization': 'Bearer ' + t } : {};
+    }
+
+    function register(scope, scopeKey, getValue) {
+      const key = scope + ':' + scopeKey;
+      hooks.set(key, { scope, scopeKey, get: getValue });
+      return function unregister() { hooks.delete(key); };
+    }
+
+    async function flushAll() {
+      const headers = Object.assign({ 'Content-Type': 'application/json' }, tokenHeader());
+      const promises = [];
+      for (const [, h] of hooks) {
+        let value;
+        try { value = h.get(); } catch (e) { continue; }
+        if (value == null) continue;
+        // Skip empty strings + empty objects so we don't spam drafts table.
+        if (typeof value === 'string' && !value.trim()) continue;
+        if (typeof value === 'object' && Object.keys(value).length === 0) continue;
+        promises.push(fetch('/api/drafts/save', {
+          method: 'POST', headers,
+          body: JSON.stringify({ scope: h.scope, scope_key: h.scopeKey, value }),
+        }).catch(() => {}));
+      }
+      try { await Promise.allSettled(promises); } catch (_) {}
+    }
+
+    async function restore(scope) {
+      try {
+        const r = await fetch('/api/drafts/' + encodeURIComponent(scope), { headers: tokenHeader() });
+        if (!r.ok) return [];
+        const j = await r.json();
+        return Array.isArray(j.drafts) ? j.drafts : [];
+      } catch (_) { return []; }
+    }
+
+    async function discard(scope, scopeKey) {
+      try {
+        await fetch('/api/drafts/' + encodeURIComponent(scope) + '/' + encodeURIComponent(scopeKey), {
+          method: 'DELETE', headers: tokenHeader(),
+        });
+      } catch (_) {}
+    }
+
+    function showRestartToast(secsAgo) {
+      if (toastShown) return;
+      toastShown = true;
+      const t = document.createElement('div');
+      t.style.cssText = 'position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#1f2937;color:#fff;padding:10px 16px;border-radius:8px;font-size:13px;font-family:system-ui,sans-serif;box-shadow:0 4px 12px rgba(0,0,0,0.4);z-index:99999;display:flex;align-items:center;gap:10px;';
+      t.innerHTML = '<span style="width:8px;height:8px;background:#fbbf24;border-radius:50%;animation:syntaur-pulse 1s infinite;"></span><span>Gateway restarting — your work is being saved…</span>';
+      const style = document.createElement('style');
+      style.textContent = '@keyframes syntaur-pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.4 } }';
+      document.head.appendChild(style);
+      document.body.appendChild(t);
+      setTimeout(() => { try { t.remove(); } catch (_) {} }, 12000);
+    }
+
+    let lastUptime = null;
+    async function poll() {
+      try {
+        const r = await fetch('/health', { headers: tokenHeader() });
+        if (!r.ok) return;
+        const j = await r.json();
+        // Detect a restart-cycle completion: uptime went down → flush
+        // any drafts the page has by registering. Modules use this to
+        // surface "restore your draft?" prompts on page load.
+        if (lastUptime != null && j.uptime_secs < lastUptime - 5) {
+          window.dispatchEvent(new CustomEvent('syntaur:gateway-restored', { detail: { uptime: j.uptime_secs } }));
+        }
+        lastUptime = j.uptime_secs;
+        if (j.restart_pending && j.restart_pending_since && j.restart_pending_since !== drainStarted) {
+          drainStarted = j.restart_pending_since;
+          showRestartToast();
+          // Fire-and-forget — every registered hook flushes in parallel.
+          flushAll();
+        }
+      } catch (_) {}
+    }
+    poll();
+    setInterval(poll, 15000);
+
+    // Beforeunload safety net — if user closes the tab while restart is
+    // pending, flush synchronously via sendBeacon (works even after the
+    // page is being torn down).
+    window.addEventListener('beforeunload', function() {
+      if (!drainStarted) return;
+      const headers = tokenHeader();
+      for (const [, h] of hooks) {
+        let value;
+        try { value = h.get(); } catch (_) { continue; }
+        if (value == null) continue;
+        const blob = new Blob([JSON.stringify({ scope: h.scope, scope_key: h.scopeKey, value })], { type: 'application/json' });
+        // sendBeacon ignores Authorization header, so cookie auth must
+        // be active. Falls back gracefully if not.
+        try { navigator.sendBeacon('/api/drafts/save', blob); } catch (_) {}
+      }
+    });
+
+    return { register, restore, discard, flushAll };
+  })();
 })();
 </script>
 "##;

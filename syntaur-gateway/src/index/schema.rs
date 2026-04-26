@@ -2547,6 +2547,290 @@ const MIGRATIONS: &[&str] = &[
         ('deepgram',    'cloud',                      0,    0, 'seeded', 0)
     ;
     "#,
+
+    // ── V70: library — auto-classified document intake (Phase 1) ──────────
+    // Foundation for the document scanning protocol per
+    // vault/projects/syntaur_doc_intake_storage.md. Adds the file inventory
+    // + low-confidence triage queue. Tags, link mesh, encryption come in
+    // later phases. The link mesh is opt-in (see plan), so library_links is
+    // intentionally NOT added here — it lands in Phase 3 when the auto-link
+    // triggers ship.
+    r#"
+    CREATE TABLE IF NOT EXISTS library_files (
+        id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id               INTEGER NOT NULL DEFAULT 0,
+        sha256                TEXT NOT NULL,
+        -- path under ~/.syntaur/library/ (e.g. "tax/2026/personal/receipts/...jpg")
+        relative_path         TEXT NOT NULL,
+        original_filename     TEXT NOT NULL,
+        content_type          TEXT NOT NULL,
+        size_bytes            INTEGER NOT NULL,
+        -- one of: photo, receipt, tax_form, personal_doc, manual, unknown
+        kind                  TEXT NOT NULL,
+        classifier_confidence REAL NOT NULL DEFAULT 0.0,
+        -- one of: filed, inbox, trash
+        status                TEXT NOT NULL DEFAULT 'filed',
+        -- extracted document date (YYYY-MM-DD); null until extracted
+        doc_date              TEXT,
+        -- ingest timestamp (epoch seconds)
+        scan_date             INTEGER NOT NULL,
+        -- free-form metadata as JSON: vendor, amount_cents, classifier
+        -- rationale, alternatives, vision-LLM raw response, etc.
+        meta_json             TEXT NOT NULL DEFAULT '{}',
+        UNIQUE(user_id, sha256)
+    );
+    CREATE INDEX IF NOT EXISTS idx_library_files_user ON library_files(user_id);
+    CREATE INDEX IF NOT EXISTS idx_library_files_kind ON library_files(user_id, kind);
+    CREATE INDEX IF NOT EXISTS idx_library_files_status ON library_files(user_id, status);
+    CREATE INDEX IF NOT EXISTS idx_library_files_doc_date ON library_files(user_id, doc_date);
+    CREATE INDEX IF NOT EXISTS idx_library_files_sha ON library_files(sha256);
+
+    -- Inbox queue for low-confidence classifications. Row exists while the
+    -- file's status='inbox'; deleted when the user confirms (status flips
+    -- to 'filed') or rejects (status flips to 'trash').
+    CREATE TABLE IF NOT EXISTS library_inbox_items (
+        id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_id               INTEGER NOT NULL REFERENCES library_files(id) ON DELETE CASCADE,
+        suggested_kind        TEXT NOT NULL,
+        suggested_confidence  REAL NOT NULL,
+        -- top-3 alternatives as JSON array of {kind, confidence}
+        alternatives_json     TEXT NOT NULL DEFAULT '[]',
+        classifier_notes      TEXT,
+        created_at            INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_library_inbox_file ON library_inbox_items(file_id);
+
+    -- Tags (Phase 5) — Paperless-parity tag system. System tags are
+    -- auto-applied by the classifier; user tags are free-form. Smart
+    -- folders are saved tag queries (rendered later in the /library UI).
+    CREATE TABLE IF NOT EXISTS library_tags (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id           INTEGER NOT NULL DEFAULT 0,
+        name              TEXT NOT NULL,
+        kind              TEXT NOT NULL DEFAULT 'user',  -- 'system' | 'user'
+        color             TEXT,
+        created_at        INTEGER NOT NULL,
+        UNIQUE(user_id, name)
+    );
+    CREATE INDEX IF NOT EXISTS idx_library_tags_user ON library_tags(user_id);
+
+    CREATE TABLE IF NOT EXISTS library_file_tags (
+        file_id           INTEGER NOT NULL REFERENCES library_files(id) ON DELETE CASCADE,
+        tag_id            INTEGER NOT NULL REFERENCES library_tags(id) ON DELETE CASCADE,
+        PRIMARY KEY(file_id, tag_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_library_file_tags_tag ON library_file_tags(tag_id);
+
+    CREATE TABLE IF NOT EXISTS library_smart_folders (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id           INTEGER NOT NULL DEFAULT 0,
+        name              TEXT NOT NULL,
+        query_json        TEXT NOT NULL,
+        created_at        INTEGER NOT NULL,
+        UNIQUE(user_id, name)
+    );
+    CREATE INDEX IF NOT EXISTS idx_smart_folders_user ON library_smart_folders(user_id);
+
+    -- Audit log (Phase 8) — append-only mutation history per file.
+    -- Year-seal flow flips a flag in library_settings preventing
+    -- further DELETE on rows where file's tax-year is sealed.
+    CREATE TABLE IF NOT EXISTS library_audit_log (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_id       INTEGER REFERENCES library_files(id) ON DELETE SET NULL,
+        user_id       INTEGER NOT NULL DEFAULT 0,
+        action        TEXT NOT NULL,                  -- create|update|move|tag|untag|delete|restore|share
+        actor         TEXT NOT NULL,
+        sha_before    TEXT,
+        sha_after     TEXT,
+        reason        TEXT,
+        ts            INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_library_audit_file ON library_audit_log(file_id);
+    CREATE INDEX IF NOT EXISTS idx_library_audit_ts ON library_audit_log(ts);
+
+    -- Link mesh (Phase 3 — auto-link triggers; opt-in per the plan).
+    -- The library_links table is created here so auto-link triggers can
+    -- start writing once the user enables the mesh; if disabled the
+    -- table just stays empty.
+    CREATE TABLE IF NOT EXISTS library_links (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id           INTEGER NOT NULL DEFAULT 0,
+        src_kind          TEXT NOT NULL,
+        src_id            INTEGER NOT NULL,
+        dst_kind          TEXT NOT NULL,
+        dst_id            INTEGER NOT NULL,
+        relation          TEXT NOT NULL,
+        confidence        REAL,
+        created_at        INTEGER NOT NULL,
+        created_by        TEXT NOT NULL,
+        UNIQUE(src_kind, src_id, dst_kind, dst_id, relation)
+    );
+    CREATE INDEX IF NOT EXISTS idx_links_src ON library_links(src_kind, src_id);
+    CREATE INDEX IF NOT EXISTS idx_links_dst ON library_links(dst_kind, dst_id);
+    CREATE INDEX IF NOT EXISTS idx_links_user ON library_links(user_id);
+
+    -- Per-user library settings (Phase 6/9). Holds the link-mesh opt-in
+    -- flag, retention preferences, encryption status, and PIN/recovery
+    -- metadata. NULL row = factory defaults.
+    CREATE TABLE IF NOT EXISTS library_settings (
+        user_id                       INTEGER PRIMARY KEY,
+        link_mesh_enabled             INTEGER NOT NULL DEFAULT 0,
+        encryption_enabled            INTEGER NOT NULL DEFAULT 0,
+        photos_apple_sync_enabled     INTEGER NOT NULL DEFAULT 0,
+        consume_folder_enabled        INTEGER NOT NULL DEFAULT 0,
+        keep_originals_days           INTEGER NOT NULL DEFAULT 90,
+        pin_unlock_minutes            INTEGER NOT NULL DEFAULT 30,
+        sealed_years_json             TEXT NOT NULL DEFAULT '[]',
+        updated_at                    INTEGER NOT NULL
+    );
+
+    -- Cross-user share ACL (Phase 9). Empty by default; rows added when
+    -- user shares a file or folder with another user via the share UI.
+    CREATE TABLE IF NOT EXISTS library_shares (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        owner_user_id INTEGER NOT NULL,
+        shared_with_user_id INTEGER NOT NULL,
+        -- subject: a single file (file_id) OR a path prefix ('tax/2026/personal/')
+        scope_kind    TEXT NOT NULL,         -- 'file' | 'prefix'
+        scope_value   TEXT NOT NULL,         -- file_id as text OR path prefix
+        permission    TEXT NOT NULL,         -- 'read' | 'write'
+        created_at    INTEGER NOT NULL,
+        UNIQUE(owner_user_id, shared_with_user_id, scope_kind, scope_value)
+    );
+    CREATE INDEX IF NOT EXISTS idx_library_shares_recipient
+        ON library_shares(shared_with_user_id);
+    CREATE INDEX IF NOT EXISTS idx_library_shares_owner
+        ON library_shares(owner_user_id);
+
+    -- Time-limited share URLs (Phase 8). Hand a CPA a link that expires.
+    CREATE TABLE IF NOT EXISTS library_share_urls (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        token         TEXT NOT NULL UNIQUE,
+        owner_user_id INTEGER NOT NULL,
+        scope_kind    TEXT NOT NULL,         -- 'file' | 'year' | 'tag'
+        scope_value   TEXT NOT NULL,
+        expires_at    INTEGER NOT NULL,
+        max_views     INTEGER,
+        view_count    INTEGER NOT NULL DEFAULT 0,
+        watermarked   INTEGER NOT NULL DEFAULT 1,
+        created_at    INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_library_share_urls_token ON library_share_urls(token);
+
+    -- Apple Photos sync state (Phase 7). Tracks last-sync cursors so
+    -- the Mac Mini agent doesn't re-process the same delta.
+    CREATE TABLE IF NOT EXISTS library_apple_photos_sync (
+        user_id           INTEGER PRIMARY KEY,
+        last_pull_cursor  TEXT,
+        last_push_cursor  TEXT,
+        last_sync_at      INTEGER NOT NULL DEFAULT 0
+    );
+
+    -- Vendor aliases (Phase 2 — link mesh support). Learned over time
+    -- as users confirm low-confidence auto-link suggestions. Seeded set
+    -- lives in code (library/cleanup.rs::VENDOR_ALIASES).
+    CREATE TABLE IF NOT EXISTS library_vendor_aliases (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id       INTEGER NOT NULL DEFAULT 0,
+        canonical     TEXT NOT NULL,
+        alias         TEXT NOT NULL,
+        source        TEXT NOT NULL DEFAULT 'user',  -- 'seeded' | 'user' | 'learned'
+        created_at    INTEGER NOT NULL,
+        UNIQUE(user_id, alias)
+    );
+    CREATE INDEX IF NOT EXISTS idx_vendor_aliases_user ON library_vendor_aliases(user_id);
+
+    -- Face clusters + embeddings (Phase 4). Embeddings stored as raw
+    -- BLOB (512 floats f32 = 2048 bytes from ArcFace).
+    CREATE TABLE IF NOT EXISTS library_face_clusters (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id       INTEGER NOT NULL DEFAULT 0,
+        name          TEXT,                          -- user-assigned; NULL = unnamed
+        kind          TEXT NOT NULL DEFAULT 'person', -- 'person' | 'pet'
+        sample_file_id INTEGER REFERENCES library_files(id) ON DELETE SET NULL,
+        created_at    INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_face_clusters_user ON library_face_clusters(user_id);
+
+    CREATE TABLE IF NOT EXISTS library_face_detections (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_id       INTEGER NOT NULL REFERENCES library_files(id) ON DELETE CASCADE,
+        cluster_id    INTEGER REFERENCES library_face_clusters(id) ON DELETE SET NULL,
+        bbox_x        INTEGER NOT NULL,
+        bbox_y        INTEGER NOT NULL,
+        bbox_w        INTEGER NOT NULL,
+        bbox_h        INTEGER NOT NULL,
+        embedding     BLOB,
+        confidence    REAL,
+        created_at    INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_face_detections_file ON library_face_detections(file_id);
+    CREATE INDEX IF NOT EXISTS idx_face_detections_cluster ON library_face_detections(cluster_id);
+
+    -- Albums (Phase 4). Auto-generated from date+GPS clusters; user
+    -- can confirm + name. Photo membership is a join.
+    CREATE TABLE IF NOT EXISTS library_albums (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id         INTEGER NOT NULL DEFAULT 0,
+        name            TEXT NOT NULL,
+        kind            TEXT NOT NULL DEFAULT 'auto',  -- 'auto' | 'user' | 'shared'
+        cover_file_id   INTEGER REFERENCES library_files(id) ON DELETE SET NULL,
+        date_start      TEXT,
+        date_end        TEXT,
+        gps_centroid    TEXT,                          -- "lat,lng" or NULL
+        created_at      INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_albums_user ON library_albums(user_id);
+
+    CREATE TABLE IF NOT EXISTS library_album_files (
+        album_id      INTEGER NOT NULL REFERENCES library_albums(id) ON DELETE CASCADE,
+        file_id       INTEGER NOT NULL REFERENCES library_files(id) ON DELETE CASCADE,
+        sort_index    INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(album_id, file_id)
+    );
+
+    -- FTS5 virtual table for OCR text + filename + extracted metadata.
+    -- Phase 5 search uses this for the text-side; vector embeddings
+    -- live in chunk_embeddings (existing) when wired up.
+    CREATE VIRTUAL TABLE IF NOT EXISTS library_files_fts USING fts5(
+        original_filename,
+        ocr_text,
+        vendor,
+        notes,
+        content='library_files',
+        content_rowid='id'
+    );
+    "#,
+
+    // ── V71: Pre-restart autosave + restart-pending coordination ──────────
+    // Sean's ask 2026-04-26: on every gateway restart (deploys are
+    // frequent), users with unsaved work should not lose state. Pages
+    // with form/draft state register an autosave hook that flushes a
+    // serialized snapshot to client_drafts when the gateway broadcasts
+    // a `restart_pending` flag via /health. On reconnect after restart,
+    // pages restore from the most-recent draft for their (scope, key).
+    //
+    // The drain endpoint (/api/system/drain) sets restart_pending=true
+    // in-process; the deploy script calls it BEFORE `docker restart` and
+    // waits 5-10s for clients to flush. The flag is naturally cleared
+    // when the process restarts (it's not persisted).
+    r#"
+    CREATE TABLE IF NOT EXISTS client_drafts (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id       INTEGER NOT NULL DEFAULT 0,
+        scope         TEXT NOT NULL,         -- e.g. "chat:main", "library/inbox", "scheduler/draft"
+        scope_key     TEXT NOT NULL,         -- e.g. conversation_id, file_id, draft_id
+        value_json    TEXT NOT NULL,         -- arbitrary JSON snapshot
+        bytes         INTEGER NOT NULL,
+        created_at    INTEGER NOT NULL,
+        ttl_at        INTEGER NOT NULL,       -- expiration epoch; cleaner sweeps past this
+        UNIQUE(user_id, scope, scope_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_client_drafts_user_scope
+        ON client_drafts(user_id, scope);
+    CREATE INDEX IF NOT EXISTS idx_client_drafts_ttl
+        ON client_drafts(ttl_at);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

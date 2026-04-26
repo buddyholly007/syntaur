@@ -1215,7 +1215,7 @@ const BODY_HTML: &str = r##"<!-- Module sub-bar — "Bridge live" indicator + re
 
       <!-- Conversation transcript -->
       <div id="dj-thread" class="dj-thread mt-3">
-        <p class="text-xs text-gray-600 italic px-1 py-2">// no sessions yet — drop a vibe below</p>
+        <p class="text-xs text-gray-500 px-1 py-2">No DJ sessions yet. Tell the AI a vibe below to build your first set.</p>
       </div>
 
       <!-- Compose row -->
@@ -1529,7 +1529,9 @@ async function loadSpeakers() {
     if (data.can_group) document.getElementById('group-controls').classList.remove('hidden');
     loadEqOptions();
   } catch(e) {
-    if (e.message !== 'unauthorized') list.innerHTML = `<p class="text-xs text-red-400">Load failed: ${e.message}</p>`;
+    list.innerHTML = e.message === 'unauthorized'
+      ? `<p class="text-xs text-gray-500 italic">Sign in to see speakers.</p>`
+      : `<p class="text-xs text-red-400">Load failed: ${e.message}</p>`;
   }
 }
 
@@ -1802,7 +1804,7 @@ function renderDjThread() {
   const clearBtn  = document.getElementById('dj-clear-thread');
   if (!container) return;
   if (djThread.length === 0) {
-    container.innerHTML = '<p class="text-xs text-gray-600 italic px-1 py-2">// no sessions yet — drop a vibe below</p>';
+    container.innerHTML = '<p class="text-xs text-gray-500 px-1 py-2">No DJ sessions yet. Tell the AI a vibe below to build your first set.</p>';
     if (clearBtn) clearBtn.classList.add('hidden');
     return;
   }

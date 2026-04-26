@@ -40,6 +40,16 @@ serde_yaml = "0.9"
 pdf-extract = "0.7"
 # AcroForm field filling for IRS Form 4868 (extension filing).
 lopdf = "0.34"
+# Cover-sheet PDF generator for tax-year audit exports.
+printpdf = "0.7"
+# Receipt image cleanup (rotate/resize/re-encode JPEG) for the library
+# document-intake pipeline. JPEG encoder is built-in; HEIC needs the
+# `heif` feature which we skip to keep build time / native-deps small.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "bmp", "tiff"] }
+# Tempfile for PDF→PNG conversion in the library classifier (also used
+# in tests below; declaring at the top level so production code can use
+# it for short-lived intermediate files in the intake pipeline).
+tempfile = "3"
 
 # Document format extractors for RAG knowledge indexing.
 calamine = "0.26"       # XLSX/XLS/ODS spreadsheets

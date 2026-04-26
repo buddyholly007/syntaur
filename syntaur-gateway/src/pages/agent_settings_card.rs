@@ -13,46 +13,87 @@
 
 use maud::{html, Markup, PreEscaped};
 
-/// Wrap any chat surface in a flip container. `front` = the existing
-/// chat markup (rendered as-is by the caller). `back` = the settings
-/// panel — by default the full nine-section layout returned by
-/// [`agent_settings_back`], but callers may pass a stripped-down
-/// "Open in /chat" link for tiny surfaces (dashboard widget S size).
+/// Wrap any chat surface in a flip container. (Legacy — retained for
+/// /chat which was server-side wrapped in earlier ships. New surfaces
+/// use [`cog_button`] + the slide-over [`agent_settings_overlay`]
+/// instead, because wrapping arbitrary side panels (drawers, fixed-
+/// positioned rails) broke their layout.)
 ///
-/// The `agent_id` is the per-card identity key — every card flips into
-/// its own agent's settings, so `/chat`'s flip toggles Peter while
-/// `/scheduler`'s flips Thaddeus.
-pub fn chat_card_flip(agent_id: &str, front: Markup, back: Markup) -> Markup {
+/// 2026-04-26: Sean reported only /chat showed the cog after Phase 8
+/// shipped. Root cause: side-panel wrap-and-move-into-cf-front strips
+/// `position: fixed` / sibling-flex constraints. New approach is
+/// non-invasive — we APPEND the cog to each panel without moving the
+/// panel itself, and clicking the cog opens a viewport-anchored
+/// slide-over drawer holding the full back-of-card.
+pub fn chat_card_flip(agent_id: &str, front: Markup, _back: Markup) -> Markup {
+    // /chat keeps its server-side mount. The cog is now a plain
+    // overlay button (no wrap). Front content renders untouched.
     html! {
-        div class="chat-card-flip" data-agent=(agent_id) data-flipped="false" {
-            // Cog lives in the FRONT face's top-right; flipping reveals
-            // the back. The Done button on the back flips it back.
-            div class="cf-face cf-front" {
-                // Mic is NOT in the corner — it's injected by JS next to
-                // each surface's send button (see SEND_REGISTRY below in
-                // RESOURCE_BUDGET_JS). Sean's spec: "cog in upper right
-                // or left and mic next to the text send button".
-                button
-                    type="button"
-                    class="cf-cog"
-                    aria-label="Agent settings"
-                    aria-pressed="false"
-                    title="Agent settings"
-                {
-                    svg
-                        width="14" height="14" viewBox="0 0 16 16"
-                        fill="none" stroke="currentColor"
-                        stroke-width="1.5"
-                        stroke-linecap="round" stroke-linejoin="round"
+        div class="chat-cog-host" data-agent=(agent_id) {
+            (cog_button(agent_id))
+            (front)
+        }
+    }
+}
+
+/// The cog button itself — same markup whether emitted server-side or
+/// JS-injected onto a side panel. Click is delegated globally; the
+/// data-agent attribute identifies which agent's settings to load.
+pub fn cog_button(agent_id: &str) -> Markup {
+    html! {
+        button
+            type="button"
+            class="cf-cog"
+            data-agent=(agent_id)
+            aria-label="Agent settings"
+            aria-pressed="false"
+            title="Agent settings"
+        {
+            svg
+                width="18" height="18" viewBox="0 0 24 24"
+                fill="currentColor"
+            {
+                path d="M19.43 12.98c.04-.32.07-.64.07-.98s-.03-.66-.07-.98l2.11-1.65c.19-.15.24-.42.12-.64l-2-3.46c-.12-.22-.39-.3-.61-.22l-2.49 1c-.52-.4-1.08-.73-1.69-.98l-.38-2.65C14.46 2.18 14.25 2 14 2h-4c-.25 0-.46.18-.49.42l-.38 2.65c-.61.25-1.17.59-1.69.98l-2.49-1c-.23-.09-.49 0-.61.22l-2 3.46c-.13.22-.07.49.12.64l2.11 1.65c-.04.32-.07.65-.07.98s.03.66.07.98l-2.11 1.65c-.19.15-.24.42-.12.64l2 3.46c.12.22.39.3.61.22l2.49-1c.52.4 1.08.73 1.69.98l.38 2.65c.03.24.24.42.49.42h4c.25 0 .46-.18.49-.42l.38-2.65c.61-.25 1.17-.59 1.69-.98l2.49 1c.23.09.49 0 .61-.22l2-3.46c.12-.22.07-.49-.12-.64l-2.11-1.65zM12 15.5c-1.93 0-3.5-1.57-3.5-3.5s1.57-3.5 3.5-3.5 3.5 1.57 3.5 3.5-1.57 3.5-3.5 3.5z" {}
+            }
+            span class="cf-cog-label" { "Settings" }
+        }
+    }
+}
+
+/// Singleton viewport-anchored slide-over that holds the agent settings
+/// drawer. Lazy-fills on first cog click via /api/agents/{id}/settings_back,
+/// then re-fills as the user opens different agents' cogs. Lives in shell
+/// alongside the bug-report overlay so every authed page has it.
+pub fn agent_settings_overlay() -> Markup {
+    html! {
+        div id="syntaur-agent-overlay"
+            class="syntaur-agent-overlay"
+            data-open="false"
+            aria-hidden="true"
+        {
+            div class="sao-scrim" data-action="close-overlay" {}
+            aside class="sao-drawer" role="dialog" aria-label="Agent settings" {
+                header class="sao-head" {
+                    h2 class="sao-title" {
+                        span data-bind="overlay-agent" { "Agent" }
+                        " · settings"
+                    }
+                    button type="button"
+                        class="sao-close"
+                        data-action="close-overlay"
+                        aria-label="Close settings"
                     {
-                        circle cx="8" cy="8" r="2.2" {}
-                        path d="M8 1.5v1.6 M8 12.9v1.6 M14.5 8h-1.6 M3.1 8H1.5 M12.6 3.4l-1.1 1.1 M4.5 11.5l-1.1 1.1 M12.6 12.6l-1.1-1.1 M4.5 4.5l-1.1-1.1" {}
+                        svg width="14" height="14" viewBox="0 0 16 16"
+                            fill="none" stroke="currentColor"
+                            stroke-width="1.6" stroke-linecap="round"
+                        {
+                            path d="M3 3l10 10 M13 3L3 13" {}
+                        }
                     }
                 }
-                (front)
-            }
-            div class="cf-face cf-back" aria-hidden="true" {
-                (back)
+                div class="sao-body" data-bind="overlay-body" {
+                    div class="sao-skel" { "Loading…" }
+                }
             }
         }
     }
@@ -286,6 +327,18 @@ fn section_voice(agent_id: &str) -> Markup {
                         class="cf-voice-sample"
                         data-action="voice-sample"
                         { "▶ Sample" }
+                }
+                div class="cf-row cf-row-stack" {
+                    label class="cf-toggle" {
+                        input
+                            type="checkbox"
+                            data-action="tts-on-reply-toggle";
+                        span class="cf-toggle-slider" {}
+                        " Speak agent replies aloud"
+                    }
+                    span class="cf-row-hint" {
+                        "When enabled, the agent's responses are spoken via TTS as well as shown."
+                    }
                 }
             }
         }
@@ -607,89 +660,276 @@ pub fn resource_budget_script() -> Markup {
 
 const STYLES: &str = r#"
 /* ── Card flip wrapper ──────────────────────────────────────────── */
-.chat-card-flip {
+/* /chat's server-side wrapper. Just gives the cog a positioning context
+   without moving any chat content into a sub-face. */
+.chat-cog-host {
   position: relative;
-  perspective: 1200px;
   width: 100%;
   height: 100%;
-  /* Establish containing block so .cf-face's absolute inset:0 measures
-     against this element. Caller must size .chat-card-flip to whatever
-     the chat surface needs (already true on most surfaces). */
+  display: contents;
 }
-.chat-card-flip > .cf-face {
-  position: absolute;
+/* Side-panel cogs require a relative parent for the absolute cog. The
+   JS auto-mounter sets `position: relative` on each registered panel
+   only if its computed position is `static` — preserves any panel that
+   already has fixed/absolute/relative positioning. */
+[data-syntaur-cog-host] { position: relative; }
+
+/* ─── Slide-over agent settings drawer (singleton, lives in shell) ───
+   Cog click anywhere on the page opens this. Holds the back-of-card
+   markup fetched lazily from /api/agents/{id}/settings_back. */
+.syntaur-agent-overlay {
+  position: fixed;
   inset: 0;
-  transform-style: preserve-3d;
-  -webkit-backface-visibility: hidden;
-  backface-visibility: hidden;
-  transition: transform 320ms cubic-bezier(.6,.05,.4,1);
-  background: inherit;
-  border-radius: inherit;
-  overflow: auto;
-}
-.chat-card-flip > .cf-front { transform: rotateY(0deg); }
-.chat-card-flip > .cf-back  { transform: rotateY(180deg); }
-.chat-card-flip[data-flipped="true"] > .cf-front {
-  transform: rotateY(-180deg);
+  z-index: 9000;
   pointer-events: none;
 }
-.chat-card-flip[data-flipped="true"] > .cf-back {
-  transform: rotateY(0deg);
-  pointer-events: auto;
+.syntaur-agent-overlay[data-open="true"] { pointer-events: auto; }
+.syntaur-agent-overlay .sao-scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(8, 10, 14, 0.55);
+  opacity: 0;
+  transition: opacity 240ms ease-out;
 }
-.chat-card-flip[data-flipped="true"] > .cf-back[aria-hidden] {
-  /* Once flipped to back, expose to assistive tech. JS toggles too —
-     this is the no-JS fallback. */
+.syntaur-agent-overlay[data-open="true"] .sao-scrim { opacity: 1; }
+.syntaur-agent-overlay .sao-drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(720px, 92vw);
+  background: #0c0e10;
+  color: #ccd;
+  border-left: 1px solid rgba(255,255,255,0.08);
+  box-shadow: -8px 0 32px rgba(0,0,0,0.4);
+  display: flex;
+  flex-direction: column;
+  transform: translateX(100%);
+  transition: transform 280ms cubic-bezier(.4,.05,.2,1);
+  overflow: hidden;
+}
+.syntaur-agent-overlay[data-open="true"] .sao-drawer {
+  transform: translateX(0);
+}
+.syntaur-agent-overlay .sao-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+.syntaur-agent-overlay .sao-title {
+  flex: 1;
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #aab;
+  margin: 0;
+}
+.syntaur-agent-overlay .sao-close {
+  background: rgba(255,255,255,0.05);
+  color: #ccd;
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 6px;
+  padding: 5px 8px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.syntaur-agent-overlay .sao-close:hover {
+  background: rgba(255,255,255,0.1);
+}
+.syntaur-agent-overlay .sao-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 16px;
+}
+.syntaur-agent-overlay .sao-skel {
+  padding: 30px;
+  color: #889;
+  font-style: italic;
+  text-align: center;
 }
 @media (prefers-reduced-motion: reduce) {
-  .chat-card-flip > .cf-face { transition: none; }
+  .syntaur-agent-overlay .sao-drawer,
+  .syntaur-agent-overlay .sao-scrim { transition: none; }
 }
 
 .cf-cog {
   position: absolute;
-  top: 8px;
-  right: 8px;
-  z-index: 4;
-  background: rgba(255,255,255,0.04);
-  color: #aab;
-  border: 1px solid rgba(255,255,255,0.08);
+  top: 10px;
+  left: 12px;
+  z-index: 6;
+  background: rgba(99, 102, 241, 0.18);
+  color: #c7d2fe;
+  border: 1px solid rgba(99, 102, 241, 0.45);
   border-radius: 999px;
-  width: 28px;
-  height: 28px;
+  height: 30px;
+  padding: 0 10px 0 8px;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
+  gap: 6px;
   cursor: pointer;
   transition: color 120ms, background 120ms;
+  font: 500 11px/1 system-ui, -apple-system, "Segoe UI", sans-serif;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.2), 0 2px 6px rgba(0,0,0,0.4);
 }
-.cf-cog:hover { color: #fff; background: rgba(255,255,255,0.08); }
+.cf-cog:hover {
+  color: #fff;
+  background: rgba(99, 102, 241, 0.32);
+  border-color: rgba(99, 102, 241, 0.7);
+}
+.cf-cog svg { display: block; flex-shrink: 0; }
+.cf-cog-label { display: inline-block; }
+@media (max-width: 540px) {
+  /* Hide label on narrow surfaces (dashboard widget M, mobile);
+     keep just the gear icon. */
+  .cf-cog { padding: 0; width: 30px; justify-content: center; }
+  .cf-cog-label { display: none; }
+}
 .chat-card-flip[data-flipped="true"] .cf-cog {
   opacity: 0;
 }
 
-/* Inline mic — injected next to each surface's send button by the JS
-   SEND_REGISTRY. NOT positioned absolutely; flows inline alongside the
-   send button so it visually belongs to the input row. */
-.cf-mic-inline {
-  background: rgba(255,255,255,0.04);
-  color: #aab;
-  border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 999px;
-  width: 32px;
-  height: 32px;
+/* Chat-input button row — three buttons (Attach + PTT + Talk-Mode)
+   injected next to each surface's send button by the JS SEND_REGISTRY.
+   Flows inline alongside the send button so the trio visually belongs
+   to the input row. /chat is skipped — it has its own server-rendered
+   icons. */
+.cf-row-buttons {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 6px;
+  flex-shrink: 0;
+}
+.cf-rowbtn {
+  background: transparent;
+  color: #98a;
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 8px;
+  width: 30px;
+  height: 30px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: color 120ms, background 120ms;
-  flex-shrink: 0;
-  margin-right: 6px;
+  transition: color 120ms, background 120ms, border-color 120ms;
+  padding: 0;
 }
-.cf-mic-inline:hover { color: #fff; background: rgba(255,255,255,0.08); }
-.cf-mic-inline[aria-pressed="true"] {
-  background: rgba(74, 222, 128, 0.15);
-  color: #4ade80;
-  border-color: rgba(74, 222, 128, 0.4);
+.cf-rowbtn:hover {
+  color: #fff;
+  background: rgba(255,255,255,0.06);
+  border-color: rgba(255,255,255,0.12);
+}
+.cf-rowbtn.cf-rec {
+  color: #ef4444;
+  background: rgba(239,68,68,0.1);
+  border-color: rgba(239,68,68,0.4);
+  animation: cf-pulse 1s infinite;
+}
+.cf-rowbtn.cf-busy {
+  color: #fbbf24;
+  border-color: rgba(251,191,36,0.4);
+}
+@keyframes cf-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.4); }
+  50%      { box-shadow: 0 0 0 6px rgba(239,68,68,0); }
+}
+
+/* Attachment chip strip — sits above the input row when files are
+   attached. Each chip carries dataset.path so a future structured
+   send can include the path; today it also injects a [attached: …]
+   marker into the input value so the user sees the file is riding
+   along. */
+.cf-chip-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 8px 6px;
+}
+.cf-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 12px;
+  background: rgba(99,102,241,0.18);
+  color: #c7d2fe;
+  font-size: 12px;
+  line-height: 1.3;
+  border: 1px solid rgba(99,102,241,0.3);
+}
+.cf-chip-x {
+  background: none;
+  border: none;
+  color: #c7d2fe;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 0 0 4px;
+}
+.cf-chip-x:hover { color: #fff; }
+
+/* Talk-mode overlay — singleton, full-screen, breathing orb */
+#cf-talk-overlay {
+  position: fixed;
+  inset: 0;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15,23,42,0.95);
+  z-index: 9999;
+  backdrop-filter: blur(20px);
+  font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: #cbd5e1;
+}
+#cf-talk-close {
+  position: absolute;
+  top: 24px;
+  right: 24px;
+  background: transparent;
+  border: 1px solid #475569;
+  color: #cbd5e1;
+  border-radius: 8px;
+  padding: 8px 16px;
+  cursor: pointer;
+  font-size: 14px;
+}
+#cf-talk-close:hover { background: rgba(255,255,255,0.05); }
+#cf-talk-orb {
+  width: 200px;
+  height: 200px;
+  border-radius: 50%;
+  background: radial-gradient(circle, #6366f1 0%, #3730a3 100%);
+  box-shadow: 0 0 80px rgba(99,102,241,0.6);
+  transition: transform 0.18s ease, background 0.4s ease, box-shadow 0.4s ease;
+}
+#cf-talk-orb.cf-orb-thinking {
+  background: radial-gradient(circle, #fbbf24 0%, #b45309 100%);
+  box-shadow: 0 0 80px rgba(251,191,36,0.5);
+}
+#cf-talk-orb.cf-orb-replying {
+  background: radial-gradient(circle, #34d399 0%, #047857 100%);
+  box-shadow: 0 0 80px rgba(52,211,153,0.5);
+}
+#cf-talk-status {
+  margin-top: 32px;
+  font-size: 18px;
+  color: #cbd5e1;
+}
+#cf-talk-transcript {
+  margin-top: 16px;
+  font-size: 14px;
+  color: #94a3b8;
+  max-width: 600px;
+  text-align: center;
+  min-height: 40px;
+  padding: 0 24px;
 }
 
 .cf-back .cf-back-inner {
@@ -1302,114 +1542,448 @@ const RESOURCE_BUDGET_JS: &str = r#"
   if (window.__syntaurResourceBudgetLoaded) return;
   window.__syntaurResourceBudgetLoaded = true;
 
-  // ── Card flip controller ────────────────────────────────────────────
-  // The settings card and its corresponding chat card are the SAME
-  // .chat-card-flip; we toggle data-flipped="true|false". ESC + the
-  // back's "Done" button flip back. Focus is moved to the back's first
-  // focusable on flip-in and back to the cog on flip-out.
+  // ── Slide-over agent settings overlay controller ────────────────────
+  // Single overlay element lives in the shell. Cog click → fetch the
+  // back-of-card markup for that agent, paint into the overlay body,
+  // open. ESC / scrim / close button → close. Pre-Phase 8 we wrapped
+  // the chat surface in a flip container, but that broke the layout
+  // of fixed-position panels (drawer, rail). Slide-over is non-invasive
+  // — every chat panel just gets a cog appended, click goes through
+  // this controller.
 
-  function flipCard(card, to) {
-    if (!card) return;
-    const next = to === 'back' ? 'true' : 'false';
-    if (card.dataset.flipped === next) return;
-    card.dataset.flipped = next;
-    const back = card.querySelector('.cf-back');
-    if (back) back.setAttribute('aria-hidden', next === 'true' ? 'false' : 'true');
-    const cog = card.querySelector('.cf-cog');
-    if (cog) cog.setAttribute('aria-pressed', next);
-    if (next === 'true') {
-      const focusable = card.querySelector('.cf-back input, .cf-back button, .cf-back select, .cf-back textarea');
-      if (focusable) setTimeout(() => focusable.focus(), 200);
-    } else if (cog) {
-      cog.focus();
+  let overlayOpenedFromCog = null;
+  async function openAgentOverlay(agentId, returnFocusTo) {
+    const overlay = document.getElementById('syntaur-agent-overlay');
+    if (!overlay) return;
+    overlayOpenedFromCog = returnFocusTo || null;
+    const body = overlay.querySelector('[data-bind="overlay-body"]');
+    const titleEl = overlay.querySelector('[data-bind="overlay-agent"]');
+    if (titleEl) titleEl.textContent = agentId;
+    if (body && body.dataset.agent !== agentId) {
+      body.dataset.agent = agentId;
+      body.innerHTML = '<div class="sao-skel">Loading…</div>';
+      try {
+        const r = await fetch('/api/agents/' + encodeURIComponent(agentId) + '/settings_back', {
+          credentials: 'same-origin',
+          headers: { 'Accept': 'text/html' },
+        });
+        if (r.ok) body.innerHTML = await r.text();
+        else body.innerHTML = '<div class="sao-skel">Settings unavailable.</div>';
+      } catch (_) {
+        body.innerHTML = '<div class="sao-skel">Settings unavailable.</div>';
+      }
     }
+    overlay.dataset.open = 'true';
+    overlay.setAttribute('aria-hidden', 'false');
+    window.dispatchEvent(new CustomEvent('syntaur:agent-overlay-open',
+      { detail: { agent: agentId } }));
+    setTimeout(() => {
+      const focusable = overlay.querySelector('input, button, select, textarea');
+      if (focusable) focusable.focus();
+    }, 200);
+  }
+  function closeAgentOverlay() {
+    const overlay = document.getElementById('syntaur-agent-overlay');
+    if (!overlay) return;
+    overlay.dataset.open = 'false';
+    overlay.setAttribute('aria-hidden', 'true');
+    if (overlayOpenedFromCog && overlayOpenedFromCog.focus) {
+      overlayOpenedFromCog.focus();
+    }
+    overlayOpenedFromCog = null;
   }
 
   document.addEventListener('click', (ev) => {
     const cog = ev.target.closest('.cf-cog');
     if (cog) {
       ev.preventDefault();
-      flipCard(cog.closest('.chat-card-flip'), 'back');
+      const agent = cog.dataset.agent
+        || (cog.closest('[data-agent]') && cog.closest('[data-agent]').dataset.agent)
+        || 'main';
+      openAgentOverlay(agent, cog);
       return;
     }
-    const done = ev.target.closest('.cf-back-done');
-    if (done) {
+    const closer = ev.target.closest('[data-action="close-overlay"]');
+    if (closer) {
       ev.preventDefault();
-      flipCard(done.closest('.chat-card-flip'), 'front');
+      closeAgentOverlay();
       return;
     }
-    const mic = ev.target.closest('.cf-mic-inline');
-    if (mic) {
+    const back_done = ev.target.closest('.cf-back-done');
+    if (back_done) {
       ev.preventDefault();
-      const agent = mic.dataset.agent || 'main';
-      const key = 'syntaur:tts:' + agent;
-      const next = localStorage.getItem(key) === 'on' ? 'off' : 'on';
-      localStorage.setItem(key, next);
-      mic.setAttribute('aria-pressed', next === 'on' ? 'true' : 'false');
+      closeAgentOverlay();
       return;
     }
   });
 
-  // ── Inline mic injection next to each surface's send button ──────────
-  // Sean's spec: mic lives next to the text send button, not in the
-  // card corner. Each surface registers its send button selector + the
-  // owning agent. Idempotent — re-running just resyncs aria-pressed.
+  // ── Chat input button row (Attach + PTT + Talk-Mode) ────────────────
+  // Three buttons inject next to each surface's send button. /chat has
+  // its own equivalents server-rendered (#send-btn) — we skip it here.
+  // The TTS-on-reply toggle moved to the cog drawer (Voice section);
+  // the inline mic icon is gone.
+  //   📎 cf-attach    — file picker → POST /api/upload → chip strip
+  //   🎙️ cf-ptt       — push-to-talk → /api/voice/transcribe → input
+  //   💬 cf-talk-mode — overlay with breathing orb + VAD loop
   const SEND_REGISTRY = [
-    { selector: '#send-btn',          agent: 'main'     },  // /chat
-    { selector: '#cortex-ask-btn',    agent: 'cortex'   },  // /knowledge
-    { selector: '#sch-thad-send',     agent: 'thaddeus' },  // /scheduler
-    { selector: '#mushi-send-btn',    agent: 'mushi'    },  // /journal
-    { selector: '#silvr-ask',         agent: 'silvr'    },  // /music
-    { selector: '#ai-send-btn',       agent: 'maurice'  },  // /coders
+    { selector: '#cortex-send-btn',    agent: 'cortex'   },  // /knowledge
+    { selector: '#sch-thad-send',      agent: 'thaddeus' },  // /scheduler
+    { selector: '.j-mushi-send',       agent: 'mushi'    },  // /journal
+    { selector: '.sd-chat-send',       agent: 'main'     },  // /dashboard widget
+  ];
+  const INPUT_ROW_REGISTRY = [
+    { selector: '.ai-input-row',       agent: 'maurice'  },  // /coders Maurice
   ];
 
-  function injectMicNextToSend(sendBtn, agent) {
-    if (!sendBtn || !sendBtn.parentNode) return;
-    // Skip if a mic for this agent already exists in this row.
-    const existing = sendBtn.parentNode.querySelector(
-      '.cf-mic-inline[data-agent="' + agent + '"]'
-    );
-    if (existing) {
-      const on = localStorage.getItem('syntaur:tts:' + agent) === 'on';
-      existing.setAttribute('aria-pressed', on ? 'true' : 'false');
+  function _findInputFor(anchor) {
+    let el = anchor;
+    for (let i = 0; i < 5 && el; i++) {
+      el = el.parentElement;
+      if (!el) break;
+      const ta = el.querySelector('textarea, input[type="text"], input:not([type])');
+      if (ta) return ta;
+    }
+    return null;
+  }
+
+  function _triggerSend(sendBtn, input) {
+    if (sendBtn) {
+      sendBtn.click();
+    } else if (input) {
+      input.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'Enter', code: 'Enter', bubbles: true, cancelable: true
+      }));
+    }
+  }
+
+  function _attachClick(agent, anchor) {
+    const fid = '__cf_attach_' + agent;
+    let fi = document.getElementById(fid);
+    if (!fi) {
+      fi = document.createElement('input');
+      fi.type = 'file';
+      fi.id = fid;
+      fi.multiple = true;
+      fi.accept = 'image/*,application/pdf,.pdf,.txt,.md,.csv,.json,.docx,.xlsx,.pptx,audio/*';
+      fi.style.display = 'none';
+      document.body.appendChild(fi);
+    }
+    const handler = async (e) => {
+      const files = Array.from(e.target.files || []);
+      e.target.value = '';
+      for (const f of files) await _uploadOne(f, agent, anchor);
+      fi.removeEventListener('change', handler);
+    };
+    fi.addEventListener('change', handler);
+    fi.click();
+  }
+
+  async function _uploadOne(file, agent, anchor) {
+    const fd = new FormData();
+    fd.append('file', file, file.name);
+    const tok = sessionStorage.getItem('syntaur_token') || '';
+    try {
+      const r = await fetch('/api/upload', {
+        method: 'POST', body: fd,
+        headers: tok ? { 'Authorization': 'Bearer ' + tok } : {}
+      });
+      const j = await r.json();
+      if (!j.success) {
+        console.error('[attach] upload failed:', j.error);
+        return;
+      }
+      _addAttachmentChip(anchor, j, agent);
+    } catch (err) {
+      console.error('[attach] upload error:', err);
+    }
+  }
+
+  function _addAttachmentChip(anchor, file, agent) {
+    const row = anchor.closest(
+      '.cortex-input-row, .sch-thad-input-row, .j-mushi-input-row, .sd-chat-form, .ai-input-row, .flex'
+    ) || anchor.parentElement;
+    if (!row) return;
+    let strip = row.previousElementSibling;
+    if (!strip || !strip.classList || !strip.classList.contains('cf-chip-strip')) {
+      strip = document.createElement('div');
+      strip.className = 'cf-chip-strip';
+      strip.dataset.agent = agent;
+      row.parentNode.insertBefore(strip, row);
+    }
+    const chip = document.createElement('span');
+    chip.className = 'cf-chip';
+    chip.dataset.path = file.path || '';
+    chip.dataset.filename = file.filename || '';
+    const icon = (file.content_type || '').startsWith('image/') ? '🖼' : '📄';
+    chip.textContent = icon + ' ' + (file.filename || 'file') + ' ';
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.className = 'cf-chip-x';
+    x.textContent = '×';
+    x.addEventListener('click', () => {
+      const input = _findInputFor(anchor);
+      if (input) {
+        const marker = '\n[attached: ' + (file.filename || 'file') + ']';
+        if (input.value.includes(marker)) {
+          input.value = input.value.replace(marker, '');
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      }
+      chip.remove();
+    });
+    chip.appendChild(x);
+    strip.appendChild(chip);
+    // Surface the attachment in the input so the user knows it's
+    // riding along with the next message. Path is stored on the chip
+    // for future structured-attachment send-flow upgrades.
+    const input = _findInputFor(anchor);
+    if (input) {
+      const marker = '\n[attached: ' + (file.filename || 'file') + ']';
+      if (!input.value.includes(marker)) {
+        input.value = (input.value || '') + marker;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    }
+  }
+
+  // ── Push-to-talk: tap → record → tap-stop → STT → input ─────────────
+  async function _pttClick(btn, agent, sendBtn) {
+    if (btn._stopFn) { btn._stopFn(); return; }
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (e) {
+      alert('Microphone permission denied: ' + (e.message || e));
       return;
     }
-    const mic = document.createElement('button');
-    mic.type = 'button';
-    mic.className = 'cf-mic-inline';
-    mic.dataset.agent = agent;
-    mic.title = 'Speak replies (TTS)';
-    mic.setAttribute('aria-label', 'Toggle voice replies for ' + agent);
-    const on = localStorage.getItem('syntaur:tts:' + agent) === 'on';
-    mic.setAttribute('aria-pressed', on ? 'true' : 'false');
-    mic.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.5a2.5 2.5 0 00-2.5 2.5v4a2.5 2.5 0 005 0V4A2.5 2.5 0 008 1.5z"/><path d="M3.5 7.5v0.5a4.5 4.5 0 009 0V7.5 M8 12.5v2 M5.5 14.5h5"/></svg>';
-    sendBtn.parentNode.insertBefore(mic, sendBtn);
+    const mr = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+    const chunks = [];
+    mr.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+    btn.classList.add('cf-rec');
+    btn.setAttribute('aria-pressed', 'true');
+    let stopped = false;
+    const finish = async () => {
+      if (stopped) return;
+      stopped = true;
+      btn._stopFn = null;
+      try { mr.stop(); } catch (_) {}
+      stream.getTracks().forEach(t => { try { t.stop(); } catch (_) {} });
+      btn.classList.remove('cf-rec');
+      btn.setAttribute('aria-pressed', 'false');
+      btn.classList.add('cf-busy');
+      await new Promise(r => mr.addEventListener('stop', r, { once: true }));
+      if (chunks.length) {
+        const blob = new Blob(chunks, { type: 'audio/webm' });
+        const fd = new FormData();
+        fd.append('audio', blob, 'audio.webm');
+        fd.append('token', sessionStorage.getItem('syntaur_token') || '');
+        try {
+          const r = await fetch('/api/voice/transcribe', { method: 'POST', body: fd });
+          const j = await r.json();
+          const text = (j.text || '').trim();
+          if (text) {
+            const input = _findInputFor(sendBtn || btn);
+            if (input) {
+              const sep = (input.value && !/\s$/.test(input.value)) ? ' ' : '';
+              input.value = (input.value || '') + sep + text;
+              input.dispatchEvent(new Event('input', { bubbles: true }));
+              input.focus();
+            }
+          }
+        } catch (e) { console.error('[ptt] STT failed:', e); }
+      }
+      btn.classList.remove('cf-busy');
+    };
+    btn._stopFn = finish;
+    mr.start();
+    setTimeout(() => { if (!stopped) finish(); }, 60000);
   }
 
-  function injectAllInlineMics() {
-    for (const entry of SEND_REGISTRY) {
-      document.querySelectorAll(entry.selector).forEach(b =>
-        injectMicNextToSend(b, entry.agent)
-      );
+  // ── Talk Mode: overlay with breathing orb + VAD loop ─────────────────
+  let _talkActive = false;
+  function _talkExit() {
+    _talkActive = false;
+    const overlay = document.getElementById('cf-talk-overlay');
+    if (overlay) overlay.style.display = 'none';
+  }
+  function _talkClick(btn, agent, sendBtn) {
+    if (_talkActive) { _talkExit(); return; }
+    let overlay = document.getElementById('cf-talk-overlay');
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.id = 'cf-talk-overlay';
+      overlay.innerHTML =
+        '<button id="cf-talk-close" type="button">✕ Exit</button>' +
+        '<div id="cf-talk-orb"></div>' +
+        '<div id="cf-talk-status">Listening…</div>' +
+        '<div id="cf-talk-transcript"></div>';
+      document.body.appendChild(overlay);
+      document.getElementById('cf-talk-close').addEventListener('click', _talkExit);
+    }
+    overlay.dataset.agent = agent;
+    overlay.style.display = 'flex';
+    _talkLoop(agent, sendBtn);
+  }
+  async function _talkLoop(agent, sendBtn) {
+    _talkActive = true;
+    const orb = document.getElementById('cf-talk-orb');
+    const status = document.getElementById('cf-talk-status');
+    const transcript = document.getElementById('cf-talk-transcript');
+    while (_talkActive) {
+      status.textContent = 'Listening…';
+      orb.className = '';
+      transcript.textContent = '';
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (e) {
+        alert('Microphone permission denied');
+        _talkExit();
+        return;
+      }
+      const mr = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      const chunks = [];
+      mr.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+      const ac = new (window.AudioContext || window.webkitAudioContext)();
+      const src = ac.createMediaStreamSource(stream);
+      const an = ac.createAnalyser();
+      an.fftSize = 1024;
+      src.connect(an);
+      const buf = new Uint8Array(an.frequencyBinCount);
+      let silentMs = 0;
+      let speechSeen = false;
+      const startedAt = Date.now();
+      mr.start(100);
+      await new Promise(resolve => {
+        const tick = () => {
+          if (!_talkActive) { resolve(); return; }
+          an.getByteFrequencyData(buf);
+          let sum = 0;
+          for (let i = 0; i < buf.length; i++) sum += buf[i];
+          const avg = sum / buf.length;
+          if (avg > 14) {
+            speechSeen = true;
+            silentMs = 0;
+            const scale = 1 + Math.min(avg / 200, 0.6);
+            orb.style.transform = 'scale(' + scale.toFixed(2) + ')';
+          } else if (speechSeen) {
+            silentMs += 100;
+            orb.style.transform = 'scale(1)';
+          }
+          const elapsed = Date.now() - startedAt;
+          if ((speechSeen && silentMs > 1500) || elapsed > 30000) resolve();
+          else setTimeout(tick, 100);
+        };
+        tick();
+      });
+      try { mr.stop(); } catch (_) {}
+      stream.getTracks().forEach(t => { try { t.stop(); } catch (_) {} });
+      try { ac.close(); } catch (_) {}
+      if (!_talkActive) return;
+      if (!speechSeen || !chunks.length) continue;
+      status.textContent = 'Thinking…';
+      orb.className = 'cf-orb-thinking';
+      const blob = new Blob(chunks, { type: 'audio/webm' });
+      const fd = new FormData();
+      fd.append('audio', blob, 'audio.webm');
+      fd.append('token', sessionStorage.getItem('syntaur_token') || '');
+      let text = '';
+      try {
+        const r = await fetch('/api/voice/transcribe', { method: 'POST', body: fd });
+        const j = await r.json();
+        text = (j.text || '').trim();
+      } catch (e) { text = ''; }
+      if (!text) continue;
+      transcript.textContent = '"' + text + '"';
+      const input = _findInputFor(sendBtn);
+      if (!input) {
+        status.textContent = 'No input found — exiting';
+        await new Promise(r => setTimeout(r, 1500));
+        _talkExit();
+        return;
+      }
+      input.value = text;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      // Force TTS-on-reply ON during the conversation so the user
+      // hears the reply; restore prior pref when the reply window closes.
+      const ttsKey = 'syntaur:tts:' + agent;
+      const prevTts = localStorage.getItem(ttsKey);
+      localStorage.setItem(ttsKey, 'on');
+      _triggerSend(sendBtn, input);
+      status.textContent = 'Replying…';
+      orb.className = 'cf-orb-replying';
+      await new Promise(r => setTimeout(r, 5000));
+      if (prevTts !== 'on') localStorage.setItem(ttsKey, prevTts || 'off');
     }
   }
 
-  // Run once at boot, then again after SPA navigations + DOM changes
-  // (some pages render their input row asynchronously after first load).
-  injectAllInlineMics();
+  // ── Build button row + injection wiring ──────────────────────────────
+  function _mkBtn(cls, title, agent, svg, fn) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'cf-rowbtn ' + cls;
+    b.dataset.agent = agent;
+    b.title = title;
+    b.setAttribute('aria-label', title);
+    b.innerHTML = svg;
+    b.addEventListener('click', (e) => {
+      e.preventDefault(); e.stopPropagation(); fn(b);
+    });
+    return b;
+  }
+  function _buildButtonRow(agent, sendBtn) {
+    const wrap = document.createElement('span');
+    wrap.className = 'cf-row-buttons';
+    wrap.dataset.agent = agent;
+    const SVG_CLIP = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>';
+    const SVG_MIC  = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>';
+    const SVG_TALK = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>';
+    wrap.appendChild(_mkBtn('cf-attach',    'Attach file',                       agent, SVG_CLIP, (b) => _attachClick(agent, b)));
+    wrap.appendChild(_mkBtn('cf-ptt',       'Voice → text (push to talk)',       agent, SVG_MIC,  (b) => _pttClick(b, agent, sendBtn)));
+    wrap.appendChild(_mkBtn('cf-talk-mode', 'Conversation mode (hands-free)',    agent, SVG_TALK, (b) => _talkClick(b, agent, sendBtn)));
+    return wrap;
+  }
+  function injectButtonsNextToSend(sendBtn, agent) {
+    if (!sendBtn || !sendBtn.parentNode) return;
+    if (sendBtn.id === 'send-btn') return;  // /chat has its own
+    if (sendBtn.parentNode.querySelector('.cf-row-buttons[data-agent="' + agent + '"]')) return;
+    const wrap = _buildButtonRow(agent, sendBtn);
+    sendBtn.parentNode.insertBefore(wrap, sendBtn);
+  }
+  function injectButtonsAtRowStart(row, agent) {
+    if (!row) return;
+    if (row.querySelector('.cf-row-buttons[data-agent="' + agent + '"]')) return;
+    const wrap = _buildButtonRow(agent, null);
+    row.insertBefore(wrap, row.firstChild);
+  }
+  function injectAllButtons() {
+    for (const e of SEND_REGISTRY) {
+      document.querySelectorAll(e.selector).forEach(b => injectButtonsNextToSend(b, e.agent));
+    }
+    for (const e of INPUT_ROW_REGISTRY) {
+      document.querySelectorAll(e.selector).forEach(r => injectButtonsAtRowStart(r, e.agent));
+    }
+  }
+
+  injectAllButtons();
   window.addEventListener('syntaur:page-arrived', () => {
     autoMountSidePanels();
-    injectAllInlineMics();
+    injectAllButtons();
   });
-  // MutationObserver catches input rows that materialize after page load
-  // (e.g., scheduler's drawer that opens lazily, music's promotable tabs).
   if (typeof MutationObserver !== 'undefined') {
+    let scheduled = false;
     new MutationObserver((muts) => {
-      // Cheap check: any added node could be a chat input row. Just re-scan.
       for (const m of muts) {
         if (m.addedNodes && m.addedNodes.length) {
-          injectAllInlineMics();
-          break;
+          if (!scheduled) {
+            scheduled = true;
+            requestAnimationFrame(() => {
+              scheduled = false;
+              autoMountSidePanels();
+              injectAllButtons();
+            });
+          }
+          return;
         }
       }
     }).observe(document.body, { childList: true, subtree: true });
@@ -1427,98 +2001,50 @@ const RESOURCE_BUDGET_JS: &str = r#"
   // Each registry entry says: panel selector → agent id. Pages whose
   // panel doesn't match any selector get no cog (graceful degrade —
   // this means the user can only adjust those agents from /chat).
+  // Verified against deployed DOM 2026-04-26 (gateway cb0783a969).
+  // Earlier guesses (#sch-thad-chat, .mushi-rail, #silvr-chat, #ai-chat-card)
+  // matched zero elements — only /knowledge worked. /music has no AI-reply
+  // chat surface today (DJ is request-only, no thread), so it's omitted.
   const PANEL_REGISTRY = [
-    { selector: '#lib-cortex',   agent: 'cortex'    },  // /knowledge
-    { selector: '#sch-thad-chat',agent: 'thaddeus'  },  // /scheduler
-    { selector: '.mushi-rail',   agent: 'mushi'     },  // /journal
-    { selector: '#silvr-chat',   agent: 'silvr'     },  // /music
-    { selector: '#ai-chat-card', agent: 'maurice'   },  // /coders
+    { selector: '#lib-cortex',       agent: 'cortex'    },  // /knowledge
+    { selector: '#sch-thad-drawer',  agent: 'thaddeus'  },  // /scheduler
+    { selector: '#j-mushi',          agent: 'mushi'     },  // /journal
+    { selector: '#ai-messages',      agent: 'maurice'   },  // /coders Maurice
+    { selector: '.sd-chat',          agent: 'main'      },  // /dashboard widget
   ];
 
   function autoMountSidePanels() {
     for (const entry of PANEL_REGISTRY) {
-      const panel = document.querySelector(entry.selector);
-      if (!panel) continue;
-      if (panel.closest('.chat-card-flip')) continue;  // already wrapped
-      wrapPanel(panel, entry.agent);
+      document.querySelectorAll(entry.selector).forEach(panel => {
+        attachCogToPanel(panel, entry.agent);
+      });
     }
   }
 
-  function wrapPanel(panel, agent) {
-    // Build the flip wrapper around the existing panel element.
-    const wrap = document.createElement('div');
-    wrap.className = 'chat-card-flip';
-    wrap.dataset.agent = agent;
-    wrap.dataset.flipped = 'false';
-    // Inherit positioning from the panel so the absolute-positioned faces
-    // measure correctly.
-    wrap.style.position = panel.style.position || 'relative';
-
-    const front = document.createElement('div');
-    front.className = 'cf-face cf-front';
-    // Cog
+  function attachCogToPanel(panel, agent) {
+    if (!panel) return;
+    if (panel.dataset.syntaurCogHost === '1') return; // already mounted
+    panel.dataset.syntaurCogHost = '1';
+    panel.setAttribute('data-syntaur-cog-host', ''); // CSS hook
+    panel.dataset.agent = agent;
+    // Promote to relative if statically positioned. The cog is absolute
+    // top:10 left:12 of its nearest positioned ancestor; without this
+    // it would escape into a far-away container and render at the page
+    // origin instead of on the panel.
+    const cs = getComputedStyle(panel);
+    if (cs.position === 'static') {
+      panel.style.position = 'relative';
+    }
     const cog = document.createElement('button');
     cog.type = 'button';
     cog.className = 'cf-cog';
-    cog.setAttribute('aria-label', 'Agent settings');
+    cog.dataset.agent = agent;
+    cog.setAttribute('aria-label', 'Agent settings for ' + agent);
     cog.setAttribute('aria-pressed', 'false');
     cog.title = 'Agent settings';
-    cog.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v1.6 M8 12.9v1.6 M14.5 8h-1.6 M3.1 8H1.5 M12.6 3.4l-1.1 1.1 M4.5 11.5l-1.1 1.1 M12.6 12.6l-1.1-1.1 M4.5 4.5l-1.1-1.1"/></svg>';
-    // Mic
-    const mic = document.createElement('button');
-    mic.type = 'button';
-    mic.className = 'cf-mic';
-    mic.setAttribute('aria-label', 'Toggle voice replies');
-    mic.setAttribute('aria-pressed', localStorage.getItem('syntaur:tts:' + agent) === 'on' ? 'true' : 'false');
-    mic.title = 'Speak replies (TTS)';
-    mic.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.5a2.5 2.5 0 00-2.5 2.5v4a2.5 2.5 0 005 0V4A2.5 2.5 0 008 1.5z"/><path d="M3.5 7.5v0.5a4.5 4.5 0 009 0V7.5 M8 12.5v2 M5.5 14.5h5"/></svg>';
-    front.appendChild(cog);
-    front.appendChild(mic);
-
-    // Back: empty placeholder. We GET the back markup from the server
-    // on first flip so we don't pay the ~10KB cost up-front for surfaces
-    // the user never opens.
-    const back = document.createElement('div');
-    back.className = 'cf-face cf-back';
-    back.setAttribute('aria-hidden', 'true');
-    back.dataset.lazyLoad = '1';
-
-    // Insert the wrapper in the panel's place, then move the panel into
-    // the front face.
-    panel.parentNode.insertBefore(wrap, panel);
-    front.appendChild(panel);
-    wrap.appendChild(front);
-    wrap.appendChild(back);
-
-    // Make the front absolutely fill the wrapper but keep the panel's
-    // intrinsic content layout (overflow: auto on the face handles
-    // scroll). This is safer than rotating the panel directly and lets
-    // the existing panel CSS continue to work.
+    cog.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M19.43 12.98c.04-.32.07-.64.07-.98s-.03-.66-.07-.98l2.11-1.65c.19-.15.24-.42.12-.64l-2-3.46c-.12-.22-.39-.3-.61-.22l-2.49 1c-.52-.4-1.08-.73-1.69-.98l-.38-2.65C14.46 2.18 14.25 2 14 2h-4c-.25 0-.46.18-.49.42l-.38 2.65c-.61.25-1.17.59-1.69.98l-2.49-1c-.23-.09-.49 0-.61.22l-2 3.46c-.13.22-.07.49.12.64l2.11 1.65c-.04.32-.07.65-.07.98s.03.66.07.98l-2.11 1.65c-.19.15-.24.42-.12.64l2 3.46c.12.22.39.3.61.22l2.49-1c.52.4 1.08.73 1.69.98l.38 2.65c.03.24.24.42.49.42h4c.25 0 .46-.18.49-.42l.38-2.65c.61-.25 1.17-.59 1.69-.98l2.49 1c.23.09.49 0 .61-.22l2-3.46c.12-.22.07-.49-.12-.64l-2.11-1.65zM12 15.5c-1.93 0-3.5-1.57-3.5-3.5s1.57-3.5 3.5-3.5 3.5 1.57 3.5 3.5-1.57 3.5-3.5 3.5z"/></svg><span class="cf-cog-label">Settings</span>';
+    panel.insertBefore(cog, panel.firstChild);
   }
-
-  // Lazy-fetch the back markup on first flip for auto-mounted panels.
-  document.addEventListener('click', async (ev) => {
-    const cog = ev.target.closest('.cf-cog');
-    if (!cog) return;
-    const card = cog.closest('.chat-card-flip');
-    const back = card && card.querySelector('.cf-back');
-    if (!back || back.dataset.lazyLoad !== '1') return;
-    if (back.dataset.lazyLoaded === '1') return;
-    back.dataset.lazyLoaded = '1';
-    try {
-      const r = await fetch('/api/agents/' + encodeURIComponent(card.dataset.agent) + '/settings_back', {
-        credentials: 'same-origin',
-        headers: { 'Accept': 'text/html' },
-      });
-      if (!r.ok) {
-        back.innerHTML = '<div style="padding:14px;color:#aab">Settings unavailable.</div>';
-        return;
-      }
-      back.innerHTML = await r.text();
-    } catch (_) {
-      back.innerHTML = '<div style="padding:14px;color:#aab">Settings unavailable.</div>';
-    }
-  });
 
   // Run mount on initial load + after SPA navigations.
   autoMountSidePanels();
@@ -1572,11 +2098,27 @@ const RESOURCE_BUDGET_JS: &str = r#"
 
   document.addEventListener('keydown', (ev) => {
     if (ev.key !== 'Escape') return;
-    const flipped = document.querySelector('.chat-card-flip[data-flipped="true"]');
-    if (flipped) {
+    const overlay = document.getElementById('syntaur-agent-overlay');
+    if (overlay && overlay.dataset.open === 'true') {
       ev.preventDefault();
-      flipCard(flipped, 'front');
+      closeAgentOverlay();
     }
+  });
+
+  // ── Phase 9 polish: right-click on a chat panel opens settings ─────
+  // Power-user shortcut: right-click on a registered chat panel opens
+  // the agent's settings overlay without needing to aim at the cog.
+  // We intercept only the dead chrome of the panel — text selections,
+  // links, inputs, and buttons keep the native context menu.
+  document.addEventListener('contextmenu', (ev) => {
+    const host = ev.target.closest && ev.target.closest('[data-syntaur-cog-host]');
+    if (!host) return;
+    const tag = (ev.target.tagName || '').toLowerCase();
+    if (['a','input','textarea','button'].includes(tag)) return;
+    const sel = window.getSelection && window.getSelection().toString();
+    if (sel && sel.length > 0) return;
+    ev.preventDefault();
+    openAgentOverlay(host.dataset.agent || 'main', null);
   });
 
   // ── Identity section auto-save (Phase 1) ────────────────────────────
@@ -1738,6 +2280,24 @@ const RESOURCE_BUDGET_JS: &str = r#"
     const field = el.dataset.field;
     const out = back.querySelector('.cf-slider-val[data-bind="' + field + '"]');
     if (out) out.textContent = fmtSliderVal(field, el.value);
+  });
+
+  // ── TTS-on-reply toggle (cog drawer Voice section) ───────────────────
+  document.addEventListener('change', (ev) => {
+    const tg = ev.target.closest && ev.target.closest('[data-action="tts-on-reply-toggle"]');
+    if (!tg) return;
+    const card = tg.closest('.chat-card-flip') || tg.closest('[data-agent]');
+    const agent = (card && card.dataset && card.dataset.agent) || 'main';
+    const key = 'syntaur:tts:' + agent;
+    localStorage.setItem(key, tg.checked ? 'on' : 'off');
+  });
+  // Sync the toggle's checked state when the overlay opens for a given agent.
+  window.addEventListener('syntaur:agent-overlay-open', (ev) => {
+    const agent = (ev && ev.detail && ev.detail.agent) || 'main';
+    const on = localStorage.getItem('syntaur:tts:' + agent) === 'on';
+    document.querySelectorAll('[data-action="tts-on-reply-toggle"]').forEach(cb => {
+      cb.checked = on;
+    });
   });
 
   // ── Persona toolbar ──────────────────────────────────────────────────

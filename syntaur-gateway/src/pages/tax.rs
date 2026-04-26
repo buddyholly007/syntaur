@@ -3957,7 +3957,17 @@ async function loadOverview() {
     }
 
     analyzeDeductions(data);
-  } catch(e) { console.log('overview:', e); }
+  } catch(e) {
+    console.warn('[tax] loadOverview:', e);
+    for (const id of ['sum-total','sum-business','sum-deductible']) {
+      const el = document.getElementById(id);
+      if (el) el.textContent = '$0.00';
+    }
+    const rc = document.getElementById('sum-receipts');
+    if (rc) rc.textContent = '0';
+    const list = document.getElementById('category-list');
+    if (list) list.innerHTML = '<p class="text-sm text-gray-600">Could not load summary. Try refreshing.</p>';
+  }
 }
 
 function filterByCategory(cat) {
@@ -3992,13 +4002,13 @@ async function loadExpenses() {
         <div class="flex items-center justify-between py-2 border-b border-gray-700/50 last:border-0">
           <div class="flex-1 min-w-0">
             <div class="flex items-center gap-2">
-              <p class="text-sm text-gray-300 truncate">${esc(e.vendor)}</p>
+              <p class="text-sm text-gray-300 truncate">${esc(e.vendor || '(no vendor)')}</p>
               ${e.receipt_id ? `<a href="/api/tax/receipts/${e.receipt_id}/image" target="_blank" class="text-xs text-oc-500 hover:text-oc-400 flex-shrink-0" title="View receipt">&#128206;</a>` : ''}
             </div>
-            <p class="text-xs text-gray-500">${e.expense_date} &middot; ${e.category || 'Uncategorized'} &middot; <span class="${e.entity === 'business' ? 'text-oc-400' : 'text-purple-400'}">${e.entity}</span></p>
+            <p class="text-xs text-gray-500">${esc(e.expense_date || '—')} &middot; ${esc(e.category || 'Uncategorized')} &middot; <span class="${e.entity === 'business' ? 'text-oc-400' : 'text-purple-400'}">${esc(e.entity || 'personal')}</span></p>
             ${e.description ? '<p class="text-xs text-gray-600 truncate">' + esc(e.description) + '</p>' : ''}
           </div>
-          <span class="text-sm font-medium text-gray-200 flex-shrink-0 ml-3">${e.amount_display}</span>
+          <span class="text-sm font-medium text-gray-200 flex-shrink-0 ml-3">${esc(e.amount_display || '$0.00')}</span>
         </div>
       `).join('');
     }
@@ -4045,16 +4055,29 @@ async function loadReceipts() {
       list.innerHTML = '<p class="text-sm text-gray-600 col-span-full">No receipts uploaded yet. Upload a photo or PDF above.</p>';
     } else {
       list.innerHTML = receipts.map(r => `
-        <div class="bg-gray-900 rounded-lg border border-gray-700 overflow-hidden">
-          <img src="${r.image_url}" class="w-full h-32 object-cover bg-gray-800" alt="" onerror="this.style.display='none'">
-          <div class="p-3">
+        <div class="bg-gray-900 rounded-lg border border-gray-700 overflow-hidden flex flex-col">
+          <a href="${r.image_url}" target="_blank" rel="noopener" class="block group relative bg-gray-800" title="Open full scan in new tab">
+            <img src="${r.image_url}" class="w-full h-32 object-cover" alt="Scan of ${esc(r.vendor || 'receipt')}" onerror="this.parentElement.classList.add('rcpt-noimg');this.style.display='none'">
+            <div class="rcpt-noimg-fallback absolute inset-0 hidden items-center justify-center text-xs text-gray-500">
+              <span>📄 PDF / no preview — click to open</span>
+            </div>
+          </a>
+          <div class="p-3 flex-1 flex flex-col">
             <p class="text-sm font-medium text-gray-300">${esc(r.vendor || 'Scanning...')}</p>
             <p class="text-xs text-gray-500">${r.receipt_date || ''} ${r.amount_display ? '&middot; ' + r.amount_display : ''}</p>
             <p class="text-xs text-gray-600">${r.category || ''}</p>
-            <span class="inline-block mt-1 text-xs px-1.5 py-0.5 rounded ${r.status === 'scanned' ? 'bg-green-900/50 text-green-400' : 'bg-yellow-900/50 text-yellow-400'}">${r.status}</span>
+            <div class="flex items-center justify-between mt-2">
+              <span class="inline-block text-xs px-1.5 py-0.5 rounded ${r.status === 'scanned' ? 'bg-green-900/50 text-green-400' : 'bg-yellow-900/50 text-yellow-400'}">${r.status}</span>
+              <a href="${r.image_url}" target="_blank" rel="noopener" class="text-xs text-oc-500 hover:text-oc-400 underline" title="Open full scan in new tab">View scan ↗</a>
+            </div>
           </div>
         </div>
       `).join('');
+      // Show fallback caption when img onerror fired (parent gets .rcpt-noimg).
+      list.querySelectorAll('.rcpt-noimg .rcpt-noimg-fallback').forEach(el => {
+        el.classList.remove('hidden');
+        el.classList.add('flex');
+      });
     }
   } catch(e) { console.log('receipts:', e); }
 }

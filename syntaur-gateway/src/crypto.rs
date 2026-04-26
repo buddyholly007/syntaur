@@ -90,6 +90,56 @@ pub fn is_encrypted(stored: &str) -> bool {
     stored.starts_with(ENC_PREFIX)
 }
 
+// ── Binary envelope (for library file BLOBs) ──────────────────────────
+//
+// Format: `SYNX1` (5-byte magic) + `\0` + `nonce (12B)` + `ciphertext+tag`.
+// The leading magic lets the read path differentiate encrypted blobs
+// from legacy plaintext, so we can flip the "encrypt at rest" toggle
+// without rewriting every existing file. Detection is constant-time:
+// we just look at the first six bytes.
+
+/// Wire-format magic bytes (6) prefix on encrypted file blobs.
+pub const FILE_MAGIC: &[u8] = b"SYNX1\0";
+
+/// Encrypt a binary blob with the master key. Output starts with
+/// `FILE_MAGIC`; nonce is randomized per call. Used for library file
+/// BLOBs where the kind warrants at-rest protection (see
+/// `library::encryption::should_encrypt_kind`).
+pub fn encrypt_blob(key: &Key<Aes256Gcm>, plaintext: &[u8]) -> Result<Vec<u8>, String> {
+    let cipher = Aes256Gcm::new(key);
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let ciphertext = cipher
+        .encrypt(&nonce, plaintext)
+        .map_err(|e| format!("encrypt_blob: {}", e))?;
+    let mut out = Vec::with_capacity(FILE_MAGIC.len() + 12 + ciphertext.len());
+    out.extend_from_slice(FILE_MAGIC);
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ciphertext);
+    Ok(out)
+}
+
+/// Decrypt a binary blob. Returns the original plaintext if the input
+/// starts with `FILE_MAGIC`, otherwise returns the input unchanged
+/// (legacy plaintext bypass).
+pub fn decrypt_blob(key: &Key<Aes256Gcm>, stored: &[u8]) -> Result<Vec<u8>, String> {
+    if stored.len() < FILE_MAGIC.len() || !stored.starts_with(FILE_MAGIC) {
+        return Ok(stored.to_vec());
+    }
+    let body = &stored[FILE_MAGIC.len()..];
+    if body.len() < 12 { return Err("encrypted blob too short".into()); }
+    let (nonce_bytes, ciphertext) = body.split_at(12);
+    let nonce = Nonce::from_slice(nonce_bytes);
+    let cipher = Aes256Gcm::new(key);
+    cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|e| format!("decrypt_blob: {}", e))
+}
+
+/// True iff `bytes` starts with `FILE_MAGIC`.
+pub fn is_encrypted_blob(bytes: &[u8]) -> bool {
+    bytes.len() >= FILE_MAGIC.len() && bytes.starts_with(FILE_MAGIC)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -405,7 +405,7 @@ const EXTRA_STYLE: &str = r##"
   }
   .j-month-dow {
     color: var(--j-ink-mute); text-align: center; font-size: 10px;
-    font-style: italic; padding-bottom: 2px;
+    font-style: italic; padding: 4px 0 2px; line-height: 1.4;
   }
   .j-month-cell {
     aspect-ratio: 1/1; border-radius: 3px;

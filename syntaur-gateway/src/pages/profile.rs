@@ -144,13 +144,22 @@ let myAgents = [];
 let systemAgents = [];
 
 async function loadProfile() {
-  const me = await authFetch('/api/me?token=' + encodeURIComponent(token)).then(r => r.json());
-  if (me.user) {
+  let me = null;
+  try {
+    me = await authFetch('/api/me?token=' + encodeURIComponent(token)).then(r => r.json());
+  } catch(e) {
+    me = null;
+  }
+  if (me && me.user) {
     document.getElementById('profile-name').textContent = me.user.name;
     document.getElementById('profile-role').textContent = me.user.role;
     document.getElementById('profile-avatar').textContent = (me.user.name || '?')[0].toUpperCase();
+  } else {
+    document.getElementById('profile-name').textContent = 'Guest';
+    document.getElementById('profile-role').textContent = '';
+    document.getElementById('profile-avatar').textContent = '?';
   }
-  myAgents = me.agents || [];
+  myAgents = (me && me.agents) || [];
   renderAgents();
 
   // Load system agents for base_agent dropdown

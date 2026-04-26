@@ -39,6 +39,14 @@ members = [
 #   cd crates/rust-aidot-harvest && cargo build --release
 exclude = [
     "crates/rust-aidot-harvest",
+    # `syntaur-dictate` depends on `parakeet-rs` which requires
+    # `ort = ^2.0.0-rc.11`. The main workspace is stuck on
+    # `ort = =2.0.0-rc.5` because `fastembed v4.0.0` (the embedder
+    # syntaur-gateway uses) hard-pins that exact version. The two
+    # ort versions can't coexist in a single Cargo.lock, so dictate
+    # builds standalone:
+    #   cd crates/syntaur-dictate && cargo build --release
+    "crates/syntaur-dictate",
 ]
 
 [workspace.package]

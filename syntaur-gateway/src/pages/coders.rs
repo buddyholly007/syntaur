@@ -368,7 +368,7 @@ if (document.readyState === 'loading') {
 // fresh local tab.
 function resetCodersTransientState() {
     for (const tab of S.tabs) {
-        try { if (tab.ws) tab.ws.close(); } catch (_e) {}
+        try { if (tab.ws) { tab._intentionalClose = true; tab.ws.close(); } } catch (_e) {}
         try { if (tab.term) tab.term.dispose(); } catch (_e) {}
         if (tab.sessionId) {
             apiFetch('/api/terminal/sessions/' + tab.sessionId, { method: 'DELETE' }).catch(() => {});
@@ -911,9 +911,18 @@ async function connectSession(tab) {
     };
 
     ws.onclose = () => {
-        tab.status = 'error';
+        if (tab._intentionalClose) return;
+        tab.status = 'reconnecting';
         renderTabs();
-        term.write('\r\n\x1b[33m[Connection closed]\x1b[0m\r\n');
+        term.write('\r\n\x1b[33m[Connection lost — reconnecting…]\x1b[0m\r\n');
+        // Single auto-reconnect after a brief backoff. If the tab is
+        // still in the active set, reinitialise the session against
+        // the same host. User-driven reset wins via _intentionalClose.
+        setTimeout(() => {
+            if (S.tabs.includes(tab) && !tab._intentionalClose) {
+                initSession(tab);
+            }
+        }, 1500);
     };
 
     // Terminal input → WebSocket
