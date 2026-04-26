@@ -3780,9 +3780,11 @@ async function runNLSearch() {
 //     double-click fires a separate event with detail=2)
 //   • debounce the play handler itself (playLocalTrack has its own
 //     400 ms lockout as a third line of defence)
-(function() {
+function bindLocalLibraryDelegation() {
   const listEl = document.getElementById('local-lib-tracks');
   if (!listEl) return;
+  if (listEl.__syntaurBound) return;
+  listEl.__syntaurBound = true;
   listEl.addEventListener('dblclick', (ev) => {
     if (ev.target.closest('.local-play-btn') || ev.target.closest('.local-details-btn')) {
       ev.preventDefault();
@@ -3836,7 +3838,22 @@ async function runNLSearch() {
       return;
     }
   });
-})();
+}
+// First-load: bind now. The element should already be in the DOM by
+// this point in the script. SPA-revisit registration is below.
+bindLocalLibraryDelegation();
+// SPA-revisit: the router skips script re-execution to avoid
+// redeclaration errors, so on every arrival here re-bind against the
+// freshly-swapped #local-lib-tracks element. The .__syntaurBound flag
+// makes this a no-op if the element wasn't replaced.
+window.addEventListener('syntaur:page-arrived', (ev) => {
+  if (ev.detail && ev.detail.page === 'Music') {
+    bindLocalLibraryDelegation();
+    if (typeof refreshAll === 'function') refreshAll();
+    if (typeof loadLocalFolders === 'function') loadLocalFolders();
+    if (typeof loadLocalTracks === 'function') loadLocalTracks();
+  }
+});
 
 // ── Local track details drawer (MusicBrainz lookup + manual edit) ────
 const localDetailsState = { trackId: null, current: null, matches: [] };

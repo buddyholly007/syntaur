@@ -309,7 +309,7 @@ const S = {
 };
 
 // ======== INIT ========
-document.addEventListener('DOMContentLoaded', async () => {
+async function initCoders() {
     // Client-side `if (!S.token) location.href='/'` guard removed
     // 2026-04-25 — bounced cookie-authed users back to dashboard
     // whenever sessionStorage was empty (module-reset bug). Server
@@ -343,6 +343,45 @@ document.addEventListener('DOMContentLoaded', async () => {
         // and the session-closed marker show up in the side panel too — the
         // terminal isn't the only source of truth.
         startHandoffPolling();
+    }
+}
+// SPA-arrival init.
+//
+// First-load (direct URL) gates on readyState — DOMContentLoaded
+// hasn't fired yet during early script eval, so listen; otherwise run
+// now.
+//
+// SPA-revisit: the router skips re-executing this script (top-level
+// `let`/`const` would throw on redeclaration) and dispatches
+// `syntaur:page-arrived` instead. The listener registered on first
+// load survives revisits and re-runs initCoders against the freshly
+// swapped DOM.
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initCoders);
+} else {
+    initCoders();
+}
+// Reset transient session state on SPA-arrival. The DOM was destroyed
+// by the innerHTML swap, taking the xterm canvas elements with it; the
+// stale WebSockets in S.tabs would re-render as "connection closed"
+// against the fresh terminal area. Drop them so initCoders rebuilds a
+// fresh local tab.
+function resetCodersTransientState() {
+    for (const tab of S.tabs) {
+        try { if (tab.ws) tab.ws.close(); } catch (_e) {}
+        try { if (tab.term) tab.term.dispose(); } catch (_e) {}
+        if (tab.sessionId) {
+            apiFetch('/api/terminal/sessions/' + tab.sessionId, { method: 'DELETE' }).catch(() => {});
+        }
+    }
+    S.tabs.length = 0;
+    S.activeTab = null;
+    S_RENDERED.clear();
+}
+window.addEventListener('syntaur:page-arrived', (ev) => {
+    if (ev.detail && ev.detail.page === 'Coders') {
+        resetCodersTransientState();
+        initCoders();
     }
 });
 
@@ -611,27 +650,25 @@ function stayInCoders() {
 }
 
 async function seedDefaultHosts() {
-    // Detect which host the gateway is running on so we can mark it is_local
-    let gatewayIp = '';
-    try {
-        const status = await apiFetch('/api/setup/status');
-        // The gateway knows its own bind address — but we can infer from window.location
-        gatewayIp = window.location.hostname;
-    } catch(e) {}
-
+    // Sean's home network. The "first-visit network scan" wizard
+    // (planned, see vault/projects/coders_first_run_wizard.md) will
+    // replace these hard-coded entries with discovered hosts. Until
+    // then, fall back to the known LAN inventory; users who run
+    // Syntaur outside Sean's home will edit / delete via the UI.
+    //
+    // is_local is left unset here — the gateway-side handler picks
+    // whichever stored hostname matches its own bind address and
+    // flips the flag. This way the same seed list works regardless
+    // of which host is currently running the gateway.
     const defaults = [
-        { name: 'openclawprod', hostname: '192.168.1.35', port: 22, username: 'sean', auth_method: 'key', group_name: 'Servers', color: '#0ea5e9' },
-        { name: 'claudevm', hostname: '192.168.1.150', port: 22, username: 'sean', auth_method: 'key', group_name: 'Servers', color: '#a855f7' },
-        { name: 'Gaming PC', hostname: '192.168.1.69', port: 22, username: 'sean', auth_method: 'key', group_name: 'Workstations', color: '#f97316' },
-        { name: 'Mac Mini', hostname: '192.168.1.58', port: 22, username: 'sean', auth_method: 'key', group_name: 'Workstations', color: '#eab308' },
-        { name: 'TrueNAS', hostname: '192.168.1.239', port: 22, username: 'root', auth_method: 'key', group_name: 'Infrastructure', color: '#06b6d4' },
-        { name: 'Home Assistant', hostname: '192.168.1.3', port: 22, username: 'root', auth_method: 'key', group_name: 'Infrastructure', color: '#10b981' },
+        { name: 'TrueNAS',        hostname: '192.168.1.239', port: 22, username: 'truenas_admin', auth_method: 'key', group_name: 'Infrastructure', color: '#06b6d4' },
+        { name: 'claudevm',       hostname: '192.168.1.150', port: 22, username: 'sean',          auth_method: 'key', group_name: 'Servers',        color: '#a855f7' },
+        { name: 'Gaming PC',      hostname: '192.168.1.69',  port: 22, username: 'sean',          auth_method: 'key', group_name: 'Workstations',   color: '#f97316' },
+        { name: 'Mac Mini',       hostname: '192.168.1.58',  port: 22, username: 'sean',          auth_method: 'key', group_name: 'Workstations',   color: '#eab308' },
+        { name: 'Home Assistant', hostname: '192.168.1.3',   port: 22, username: 'root',          auth_method: 'key', group_name: 'Infrastructure', color: '#10b981' },
     ];
+    const gatewayIp = window.location.hostname;
     for (const h of defaults) {
-        // Mark the host matching the gateway IP as local (PTY, no SSH)
-        if (gatewayIp === h.hostname || gatewayIp === 'localhost' || gatewayIp === '127.0.0.1') {
-            // If accessing via localhost, mark the first server as local
-        }
         if (h.hostname === gatewayIp) h.is_local = true;
         try { await apiFetch('/api/terminal/hosts', { method: 'POST', body: JSON.stringify(h) }); } catch(e) {}
     }

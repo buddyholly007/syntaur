@@ -1070,18 +1070,28 @@ const SPA_ROUTER_SCRIPT: &str = r##"
       // height-context chain when the new content's root layout uses
       // `height: 100vh` (coders' workshop-root), `height: 100%`, or
       // `flex: 1` against an ancestor whose previous layout was
-      // computed under a different content tree. The result was
-      // /coders rendering as just the CRT bezel with empty glass on
-      // SPA-arrival but rendering correctly on fresh-load. Reading
-      // offsetHeight is the canonical browser-portable trick to
-      // trigger an immediate reflow; we read it on both the swapped
-      // container and the body to be thorough. Chromium ignores this
-      // (its layout was already correct); WebKit uses it.
+      // computed under a different content tree. Reading offsetHeight
+      // is the canonical browser-portable trick to trigger an immediate
+      // reflow. Chromium ignores it; WebKit uses it.
       void liveMain.offsetHeight;
       void document.body.offsetHeight;
 
       // ── Re-execute the inline scripts inside the new container so
       // each module's IIFE fires. innerHTML doesn't auto-run scripts.
+      //
+      // Important: this is best-effort. Most page scripts have top-level
+      // `let`/`const`/`function` declarations; the first execution puts
+      // those bindings in the global lexical environment, and a second
+      // execution throws `SyntaxError: Identifier 'X' has already been
+      // declared`, aborting the whole script body. Pages that need to
+      // re-bind to the freshly-swapped DOM should register a
+      // `syntaur:page-arrived` listener on first load — that listener
+      // survives the redeclaration abort and gets fired below regardless
+      // of whether scripts re-executed cleanly.
+      window.__syntaurVisitedPages = window.__syntaurVisitedPages || new Set();
+      const pageKey = (newMain && newMain.dataset.page) || url;
+      const firstVisit = !window.__syntaurVisitedPages.has(pageKey);
+      if (pageKey) window.__syntaurVisitedPages.add(pageKey);
       const oldScripts = Array.from(liveMain.querySelectorAll('script'));
       for (const old of oldScripts) {
         const fresh = document.createElement('script');
@@ -1102,8 +1112,14 @@ const SPA_ROUTER_SCRIPT: &str = r##"
       if (!isPopState) history.pushState({ syntaurSpa: true }, '', url);
       window.scrollTo(0, 0);
 
-      // ── Subscribers (per-page cleanup hooks can listen)
+      // ── Subscribers
+      // syntaur:navigated — fires every navigation (legacy, page-agnostic)
+      // syntaur:page-arrived — fires every arrival including revisits;
+      //   detail.firstVisit tells the listener whether scripts just ran
+      //   or were skipped (so the listener knows whether it needs to
+      //   trigger re-bind / re-fetch itself).
       window.dispatchEvent(new CustomEvent('syntaur:navigated', { detail: { url } }));
+      window.dispatchEvent(new CustomEvent('syntaur:page-arrived', { detail: { page: pageKey, url, firstVisit } }));
     } catch (e) {
       if (e && e.name === 'AbortError') return;
       // Anything else — fall back to a real navigation. Better to
