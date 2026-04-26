@@ -21,6 +21,14 @@ use rs_matter::transport::exchange::Exchange;
 
 use serde::{Deserialize, Serialize};
 
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use syntaur_matter::{error::MatterFabricError, FabricHandle};
+
+use crate::case_udp::{discover_operational, with_case_op_persisted};
+
 // ---------------- cluster + attribute IDs ----------------
 //
 // Re-defined here (instead of importing from matter-op) so the library
@@ -472,4 +480,131 @@ fn render_control_human(c: &Control) -> String {
         Control::PowerMeter => "Current power draw (W)".into(),
         Control::EnergyMeter => "Total used (kilowatt-hours)".into(),
     }
+}
+
+/// One-shot capability discovery for an already-commissioned Matter
+/// device. Resolves the operational address (mDNS or caller override),
+/// opens a CASE-secured `Exchange` against the persisted controller
+/// identity, and runs [`discover_capabilities`] inside it. Returns the
+/// resulting [`DeviceCapabilities`] so the caller can persist + render.
+///
+/// Mirrors the `matter-op` retry policy: up to 3 attempts on
+/// `"timed out"` (pre-9.5.33 Meross Sigma1→2 silent-drop) or
+/// `Error::Invalid` (post-9.5.33 Meross transient where a delayed
+/// Sigma3 ack triggers a retransmit then a Status-Report code 2).
+/// Eve-over-Thread tends to succeed first try; the retry costs nothing
+/// on success. Reads have no side effects, so retry is safe.
+///
+/// `addr_override` skips mDNS — useful cross-VLAN where mDNS doesn't
+/// reflect across subnets (e.g., gateway on Default VLAN, device on
+/// IoT VLAN). Standard Matter operational port is 5540.
+pub async fn discover_capabilities_for_node(
+    fabric: &FabricHandle,
+    node_id: u64,
+    addr_override: Option<SocketAddr>,
+) -> Result<DeviceCapabilities, MatterFabricError> {
+    let addr = match addr_override {
+        Some(a) => a,
+        None => discover_operational(node_id, Duration::from_secs(15))?,
+    };
+
+    let rcac = hex::decode(&fabric.root_cert_hex)
+        .map_err(|e| MatterFabricError::Matter(format!("rcac hex decode: {e}")))?;
+
+    let mut ipk = [0u8; 16];
+    let ipk_decoded = hex::decode(&fabric.ipk_hex)
+        .map_err(|e| MatterFabricError::Matter(format!("ipk hex decode: {e}")))?;
+    if ipk_decoded.len() != 16 {
+        return Err(MatterFabricError::Matter(format!(
+            "ipk wrong length: {}",
+            ipk_decoded.len()
+        )));
+    }
+    ipk.copy_from_slice(&ipk_decoded);
+
+    let controller_noc_hex = fabric.controller_noc_hex.as_ref().ok_or_else(|| {
+        MatterFabricError::Matter(format!(
+            "fabric {} has no persisted controller NOC — re-mint + re-commission",
+            fabric.label
+        ))
+    })?;
+    let controller_secret_key_hex = fabric.controller_secret_key_hex.as_ref().ok_or_else(|| {
+        MatterFabricError::Matter(format!(
+            "fabric {} missing controller_secret_key_hex",
+            fabric.label
+        ))
+    })?;
+    let controller_noc = hex::decode(controller_noc_hex)
+        .map_err(|e| MatterFabricError::Matter(format!("controller_noc hex decode: {e}")))?;
+    let controller_secret_decoded = hex::decode(controller_secret_key_hex)
+        .map_err(|e| MatterFabricError::Matter(format!("controller_secret hex decode: {e}")))?;
+    if controller_secret_decoded.len() != 32 {
+        return Err(MatterFabricError::Matter(format!(
+            "controller_secret wrong length: {}",
+            controller_secret_decoded.len()
+        )));
+    }
+    let mut controller_secret_scalar = [0u8; 32];
+    controller_secret_scalar.copy_from_slice(&controller_secret_decoded);
+
+    let fabric_vendor_id = fabric.vendor_id;
+    let fabric_fabric_id = fabric.fabric_id;
+
+    let max_attempts: u32 = 3;
+    let mut last_err: Option<MatterFabricError> = None;
+    for attempt in 1..=max_attempts {
+        if attempt > 1 {
+            log::info!("[caps] CASE retry {attempt}/{max_attempts} after timeout");
+        }
+        let slot: Arc<Mutex<Option<DeviceCapabilities>>> = Arc::new(Mutex::new(None));
+        let slot_inner = Arc::clone(&slot);
+        let rcac_attempt = rcac.clone();
+        let controller_noc_attempt = controller_noc.clone();
+        let result = with_case_op_persisted(
+            addr,
+            fabric_fabric_id,
+            node_id,
+            rcac_attempt,
+            controller_noc_attempt,
+            controller_secret_scalar,
+            ipk,
+            fabric_vendor_id,
+            move |ex| {
+                let slot_inner = Arc::clone(&slot_inner);
+                Box::pin(async move {
+                    let caps = discover_capabilities(ex).await;
+                    *slot_inner.lock().expect("caps slot poisoned") = Some(caps);
+                    Ok::<(), MatterFabricError>(())
+                })
+            },
+        )
+        .await;
+
+        match result {
+            Ok(()) => {
+                let caps = slot
+                    .lock()
+                    .expect("caps slot poisoned")
+                    .take()
+                    .ok_or_else(|| {
+                        MatterFabricError::Matter(
+                            "discover_capabilities returned without filling slot".into(),
+                        )
+                    })?;
+                return Ok(caps);
+            }
+            Err(MatterFabricError::Matter(ref msg))
+                if (msg.contains("timed out") || msg.contains("Error::Invalid"))
+                    && attempt < max_attempts =>
+            {
+                last_err = Some(MatterFabricError::Matter(msg.clone()));
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        MatterFabricError::Matter("caps discovery exhausted retries".into())
+    }))
 }

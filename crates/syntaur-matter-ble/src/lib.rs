@@ -16,5 +16,5 @@ pub mod caps;
 pub mod case_udp;
 pub mod scan;
 
-pub use caps::{discover_capabilities, Control, DeviceCapabilities, EndpointCaps, SensorKind};
+pub use caps::{discover_capabilities, discover_capabilities_for_node, Control, DeviceCapabilities, EndpointCaps, SensorKind};
 pub use scan::{scan_for_discriminator, CommissionableDevice, MATTER_SERVICE_UUID};
