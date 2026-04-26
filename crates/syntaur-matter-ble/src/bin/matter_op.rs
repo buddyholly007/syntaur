@@ -164,23 +164,42 @@ async fn main() -> Result<(), String> {
     let node_id = args.node_id;
 
     let _ = ca_secret_key_scalar; // not needed for persisted-NOC path
-    with_case_op_persisted(
-        addr,
-        fabric.fabric_id,
-        node_id,
-        rcac,
-        controller_noc,
-        controller_secret_scalar,
-        ipk,
-        fabric.vendor_id,
-        move |ex| {
-            Box::pin(async move {
-                use rs_matter::im::client::ImClient;
-                use rs_matter::im::{AttrResp, CmdResp};
-                use rs_matter::tlv::TLVElement;
-                use syntaur_matter::error::MatterFabricError;
 
-                match op {
+    // Auto-retry on CASE Sigma1→2 hang. Meross MSS315 over WiFi shows
+    // ~1-in-5 timeouts where Sigma1 is acked (MRPStandAloneAck) but no
+    // Sigma2 follows; subsequent attempts succeed with a fresh
+    // InitiatorRandom. Eve over Thread is solid, but the retry costs
+    // nothing on a successful first try and turns the Meross flake
+    // from a user-visible error into a silent retry. Since the closure
+    // only prints on success and bubbles MatterFabricError on failure,
+    // a timeout never produces output — safe to wrap in a retry loop.
+    let max_attempts: u32 = 3;
+    let fabric_vendor_id = fabric.vendor_id;
+    let fabric_fabric_id = fabric.fabric_id;
+    let mut last_err: Option<String> = None;
+    for attempt in 1..=max_attempts {
+        if attempt > 1 {
+            log::info!("[matter-op] CASE retry {attempt}/{max_attempts} after timeout");
+        }
+        let rcac_attempt = rcac.clone();
+        let controller_noc_attempt = controller_noc.clone();
+        let result = with_case_op_persisted(
+            addr,
+            fabric_fabric_id,
+            node_id,
+            rcac_attempt,
+            controller_noc_attempt,
+            controller_secret_scalar,
+            ipk,
+            fabric_vendor_id,
+            move |ex| {
+                Box::pin(async move {
+                    use rs_matter::im::client::ImClient;
+                    use rs_matter::im::{AttrResp, CmdResp};
+                    use rs_matter::tlv::TLVElement;
+                    use syntaur_matter::error::MatterFabricError;
+
+                    match op {
                     Op::Complete => {
                         // CommissioningComplete is empty payload per Matter
                         // Core 11.10.6.6 — same TLV bytes we send during
@@ -256,38 +275,111 @@ async fn main() -> Result<(), String> {
                         }
                     }
                     Op::Power => {
-                        let resp = ImClient::read_single_attr(ex, endpoint, CLUSTER_ELEC_POWER, ATTR_ACTIVE_POWER, false)
-                            .await
-                            .map_err(|e| MatterFabricError::Matter(format!("read ActivePower: {e:?}")))?;
-                        match resp {
-                            AttrResp::Data(d) => {
-                                let mw = d.data.i64().map_err(|e| MatterFabricError::Matter(format!(
-                                    "ActivePower i64 decode: {e:?}"
-                                )))?;
-                                println!("power: {} mW ({:.3} W)", mw, mw as f64 / 1000.0);
+                        // Walk plausible endpoints — Matter 1.3 Energy
+                        // devices place ElectricalPowerMeasurement on the
+                        // application endpoint, but Eve Energy places it
+                        // on a different endpoint than its OnOff cluster.
+                        // Try the user-specified endpoint first, then the
+                        // common alternates. Stop on first non-Unsupported
+                        // response.
+                        let candidates: Vec<u16> = {
+                            let mut v = vec![endpoint];
+                            for e in [1u16, 2, 3] {
+                                if !v.contains(&e) { v.push(e); }
                             }
-                            AttrResp::Status(s) => println!("power read returned status: {:?}", s),
+                            v
+                        };
+                        let mut printed = false;
+                        for try_ep in &candidates {
+                            let resp = ImClient::read_single_attr(ex, *try_ep, CLUSTER_ELEC_POWER, ATTR_ACTIVE_POWER, false)
+                                .await
+                                .map_err(|e| MatterFabricError::Matter(format!("read ActivePower ep{try_ep}: {e:?}")))?;
+                            match resp {
+                                AttrResp::Data(d) => {
+                                    let mw = d.data.i64().map_err(|e| MatterFabricError::Matter(format!(
+                                        "ActivePower i64 decode: {e:?}"
+                                    )))?;
+                                    println!("power: {} mW ({:.3} W) [ep {}]", mw, mw as f64 / 1000.0, try_ep);
+                                    printed = true;
+                                    break;
+                                }
+                                AttrResp::Status(s) => {
+                                    if format!("{:?}", s.status.status).contains("UnsupportedCluster")
+                                        || format!("{:?}", s.status.status).contains("UnsupportedEndpoint")
+                                    {
+                                        continue;
+                                    }
+                                    println!("power read returned status: {:?} [ep {}]", s, try_ep);
+                                    printed = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if !printed {
+                            println!("power: no endpoint exposes ElectricalPowerMeasurement (tried {:?})", candidates);
                         }
                     }
                     Op::Energy => {
-                        let resp = ImClient::read_single_attr(ex, endpoint, CLUSTER_ELEC_ENERGY, ATTR_CUM_ENERGY_IMPORTED, false)
-                            .await
-                            .map_err(|e| MatterFabricError::Matter(format!("read CumEnergy: {e:?}")))?;
-                        match resp {
-                            AttrResp::Data(d) => {
-                                println!("energy raw TLV: {} bytes", d.data.raw_data().len());
-                                println!("  hex: {}", d.data.raw_data().iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(""));
+                        let candidates: Vec<u16> = {
+                            let mut v = vec![endpoint];
+                            for e in [1u16, 2, 3] {
+                                if !v.contains(&e) { v.push(e); }
                             }
-                            AttrResp::Status(s) => println!("energy read returned status: {:?}", s),
+                            v
+                        };
+                        let mut printed = false;
+                        for try_ep in &candidates {
+                            let resp = ImClient::read_single_attr(ex, *try_ep, CLUSTER_ELEC_ENERGY, ATTR_CUM_ENERGY_IMPORTED, false)
+                                .await
+                                .map_err(|e| MatterFabricError::Matter(format!("read CumEnergy ep{try_ep}: {e:?}")))?;
+                            match resp {
+                                AttrResp::Data(d) => {
+                                    println!("energy raw TLV ({} bytes) [ep {}]", d.data.raw_data().len(), try_ep);
+                                    println!("  hex: {}", d.data.raw_data().iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(""));
+                                    printed = true;
+                                    break;
+                                }
+                                AttrResp::Status(s) => {
+                                    if format!("{:?}", s.status.status).contains("UnsupportedCluster")
+                                        || format!("{:?}", s.status.status).contains("UnsupportedEndpoint")
+                                    {
+                                        continue;
+                                    }
+                                    println!("energy read returned status: {:?} [ep {}]", s, try_ep);
+                                    printed = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if !printed {
+                            println!("energy: no endpoint exposes ElectricalEnergyMeasurement (tried {:?})", candidates);
                         }
                     }
                 }
-                Ok::<(), MatterFabricError>(())
-            })
-        },
-    )
-    .await
-    .map_err(|e| format!("CASE op: {e:?}"))?;
+                    Ok::<(), MatterFabricError>(())
+                })
+            },
+        )
+        .await;
+
+        match result {
+            Ok(()) => { last_err = None; break; }
+            Err(syntaur_matter::error::MatterFabricError::Matter(ref msg))
+                if msg.contains("timed out") && attempt < max_attempts =>
+            {
+                last_err = Some(format!("CASE op: {msg}"));
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                continue;
+            }
+            Err(e) => {
+                last_err = Some(format!("CASE op: {e:?}"));
+                break;
+            }
+        }
+    }
+    if let Some(msg) = last_err {
+        return Err(msg);
+    }
 
     Ok(())
 }

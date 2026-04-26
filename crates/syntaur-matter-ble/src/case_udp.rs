@@ -327,49 +327,84 @@ pub async fn case_and_commissioning_complete_via_udp(
     ipk: [u8; 16],
     vendor_id: u16,
 ) -> Result<(), MatterFabricError> {
-    log::info!("[case-udp] running CommissioningComplete via with_case_op");
-    with_case_op(
-        eve_addr,
-        fabric_id,
-        peer_node_id,
-        rcac,
-        ca_secret_key_scalar,
-        ipk,
-        vendor_id,
-        |ex_case| {
-            Box::pin(async move {
-                use rs_matter::im::client::ImClient;
-                use rs_matter::im::CmdResp;
-                use rs_matter::tlv::TLVElement;
+    // Auto-rescue: when the device's CASE listener flakes (Sigma1 acked,
+    // no Sigma2 — observed ~1-in-5 against Meross MSS315 over WiFi), the
+    // 30s timeout inside with_case_op fires and we'd previously bubble
+    // up to matter-ble-commission, leaving the device half-commissioned
+    // (failsafe armed, AddNOC pending rollback). Retrying with fresh
+    // OsRng nonces almost always succeeds — and the user's only other
+    // option was to know about `matter-op complete` and run it manually
+    // inside the failsafe window. Retrying here turns that into a
+    // built-in: the commissioner finalizes itself.
+    let max_attempts: u32 = 3;
+    for attempt in 1..=max_attempts {
+        log::info!(
+            "[case-udp] CommissioningComplete attempt {attempt}/{max_attempts}"
+        );
+        // rcac is Vec<u8> so it owns its bytes; clone per attempt so
+        // with_case_op (which moves the Vec) can run again on retry.
+        let rcac_for_attempt = rcac.clone();
+        let result = with_case_op(
+            eve_addr,
+            fabric_id,
+            peer_node_id,
+            rcac_for_attempt,
+            ca_secret_key_scalar,
+            ipk,
+            vendor_id,
+            |ex_case| {
+                Box::pin(async move {
+                    use rs_matter::im::client::ImClient;
+                    use rs_matter::im::CmdResp;
+                    use rs_matter::tlv::TLVElement;
 
-                let cc_payload = syntaur_matter::tlv_build::commissioning_complete();
-                let tlv = TLVElement::new(&cc_payload);
-                let resp = ImClient::invoke_single_cmd(ex_case, 0, 0x0030, 0x04, tlv, None)
-                    .await
-                    .map_err(|e| {
-                        MatterFabricError::Matter(format!(
-                            "CommissioningComplete on CASE/UDP: {e:?}"
-                        ))
-                    })?;
-                match resp {
-                    CmdResp::Cmd(_) => {
-                        log::info!("[case-udp] CommissioningComplete InvokeResponse — DEVICE COMMISSIONED");
-                        Ok(())
-                    }
-                    CmdResp::Status(s) => {
-                        if s.status.status == rs_matter::im::IMStatusCode::Success {
-                            log::info!("[case-udp] CommissioningComplete Success — DEVICE COMMISSIONED");
+                    let cc_payload = syntaur_matter::tlv_build::commissioning_complete();
+                    let tlv = TLVElement::new(&cc_payload);
+                    let resp = ImClient::invoke_single_cmd(ex_case, 0, 0x0030, 0x04, tlv, None)
+                        .await
+                        .map_err(|e| {
+                            MatterFabricError::Matter(format!(
+                                "CommissioningComplete on CASE/UDP: {e:?}"
+                            ))
+                        })?;
+                    match resp {
+                        CmdResp::Cmd(_) => {
+                            log::info!("[case-udp] CommissioningComplete InvokeResponse — DEVICE COMMISSIONED");
                             Ok(())
-                        } else {
-                            Err(MatterFabricError::Matter(format!(
-                                "CommissioningComplete on CASE/UDP returned status: {:?}",
-                                s.status
-                            )))
+                        }
+                        CmdResp::Status(s) => {
+                            if s.status.status == rs_matter::im::IMStatusCode::Success {
+                                log::info!("[case-udp] CommissioningComplete Success — DEVICE COMMISSIONED");
+                                Ok(())
+                            } else {
+                                Err(MatterFabricError::Matter(format!(
+                                    "CommissioningComplete on CASE/UDP returned status: {:?}",
+                                    s.status
+                                )))
+                            }
                         }
                     }
-                }
-            })
-        },
-    )
-    .await
+                })
+            },
+        )
+        .await;
+
+        match result {
+            Ok(()) => return Ok(()),
+            Err(MatterFabricError::Matter(ref msg))
+                if msg.contains("timed out") && attempt < max_attempts =>
+            {
+                log::warn!(
+                    "[case-udp] CASE timed out on attempt {attempt}; retrying with fresh OsRng nonces in 2s"
+                );
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    // Loop only exits via Ok or non-timeout Err above; if we reach here
+    // every attempt timed out.
+    Err(MatterFabricError::Matter(format!(
+        "CommissioningComplete on CASE/UDP timed out after {max_attempts} attempts"
+    )))
 }
