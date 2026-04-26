@@ -99,11 +99,17 @@ impl FabricHandle {
         use rs_matter::cert::builder::{RcacBuilder, SubjectDN, Validity};
         use rs_matter::commissioner::NocGenerator;
         use rs_matter::crypto::{
-            test_only_crypto, CanonPkcPublicKey, CanonPkcSecretKey, RngCore,
+            default_crypto, CanonPkcPublicKey, CanonPkcSecretKey, RngCore,
         };
+        use rs_matter::dm::devices::test::DAC_PRIVKEY;
+        use rand::rngs::OsRng;
 
         let label = validate_label(&label.into())?;
-        let crypto = test_only_crypto();
+        // OsRng so fabric_id, IPK, and CA + controller keypairs are all
+        // truly random per mint. test_only_crypto's WeakTestOnlyRand seed
+        // is fixed, which would mean every `matter-fabric new` mints a
+        // bit-identical fabric file.
+        let crypto = default_crypto(OsRng, DAC_PRIVKEY);
 
         // Random fabric_id (non-zero, 60-ish bits of entropy with high
         // nibble masked for legibility).

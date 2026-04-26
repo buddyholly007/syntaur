@@ -123,17 +123,24 @@ where
     tokio::task::spawn_blocking(move || -> Result<R, MatterFabricError> {
         futures_lite::future::block_on(async move {
             use rs_matter::crypto::{
-                test_only_crypto, CanonAeadKey, CanonPkcSecretKey, AEAD_CANON_KEY_LEN,
+                default_crypto, CanonAeadKey, CanonPkcSecretKey, AEAD_CANON_KEY_LEN,
             };
-            use rs_matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
+            use rs_matter::dm::devices::test::{
+                DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET,
+            };
             use rs_matter::sc::case::CaseInitiator;
             use rs_matter::transport::exchange::Exchange;
             use rs_matter::transport::network::{Address, NoNetwork};
             use rs_matter::utils::epoch::sys_epoch;
             use rs_matter::Matter;
+            use rand_core::OsRng;
             use std::num::NonZeroU8;
 
-            let crypto = test_only_crypto();
+            // OsRng — not test_only_crypto's deterministic xor-shift.
+            // Eve/Meross silently drop the second CASE Sigma1 if the
+            // InitiatorRandom + ECDH ephemeral key are bit-identical to
+            // the first (replay protection).
+            let crypto = default_crypto(OsRng, DAC_PRIVKEY);
             let matter = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, sys_epoch, 0);
             matter
                 .initialize_transport_buffers()
@@ -280,9 +287,11 @@ fn mint_fresh_controller_noc(
 ) -> Result<(Vec<u8>, [u8; 32]), MatterFabricError> {
     use rs_matter::commissioner::NocGenerator;
     use rs_matter::crypto::Crypto;
-    use rs_matter::crypto::{test_only_crypto, CanonPkcSecretKey, SecretKey, SigningSecretKey};
+    use rs_matter::crypto::{default_crypto, CanonPkcSecretKey, SecretKey, SigningSecretKey};
+    use rs_matter::dm::devices::test::DAC_PRIVKEY;
+    use rand_core::OsRng;
 
-    let crypto = test_only_crypto();
+    let crypto = default_crypto(OsRng, DAC_PRIVKEY);
     let controller_secret_key = crypto
         .generate_secret_key()
         .map_err(|e| MatterFabricError::Matter(format!("generate controller key: {e:?}")))?;

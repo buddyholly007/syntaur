@@ -8306,6 +8306,7 @@ dependencies = [
  "hex",
  "log",
  "mdns-sd",
+ "rand_core 0.6.4",
  "rs-matter",
  "serde",
  "serde_json",
