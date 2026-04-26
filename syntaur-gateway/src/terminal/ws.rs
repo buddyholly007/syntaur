@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use axum::extract::{Path, Query, State, WebSocketUpgrade};
 use axum::extract::ws::{Message, WebSocket};
+use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use base64::Engine;
 use bytes::Bytes;
@@ -12,16 +13,27 @@ use log::{info, warn};
 use serde_json::json;
 
 use crate::AppState;
+use crate::security::extract_session_token;
 
 /// GET /ws/terminal/{session_id}?token=...
+///
+/// Auth resolution order: `?token=` query param → `Authorization: Bearer …`
+/// → `syntaur_token` HttpOnly cookie. Cookie fallback matters here:
+/// post-cookie-auth migration, sessionStorage is empty for many users
+/// and the JS-side `S.token` is `""` — without the cookie path this
+/// 401s the WS upgrade and the terminal renders "Connection closed"
+/// the instant it opens.
 pub async fn ws_terminal_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
     Query(params): Query<std::collections::HashMap<String, String>>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
-    // Auth check
-    let token = params.get("token").cloned().unwrap_or_default();
+    let mut token = params.get("token").cloned().unwrap_or_default();
+    if token.is_empty() {
+        token = extract_session_token(&headers);
+    }
     if token.is_empty() {
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     }
