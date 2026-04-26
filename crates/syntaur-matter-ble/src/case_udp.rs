@@ -93,12 +93,20 @@ pub fn discover_operational(
 ///
 /// Caller passes raw key material from the persisted fabric handle so we
 /// avoid coupling this helper to FabricHandle's on-disk format.
-pub async fn with_case_op<F, R>(
+/// `with_case_op_persisted` — preferred entry point. Caller passes a
+/// pre-signed controller NOC + secret key (loaded from the persisted
+/// fabric handle). The same controller identity is used every call,
+/// which is what Eve / Meross / Aqara devices expect after the first
+/// CASE handshake at CommissioningComplete time. If you don't have a
+/// persisted controller NOC, use [`with_case_op`] which mints one
+/// fresh per call (only valid the first time the device sees us).
+pub async fn with_case_op_persisted<F, R>(
     eve_addr: SocketAddr,
     fabric_id: u64,
     peer_node_id: u64,
     rcac: Vec<u8>,
-    ca_secret_key_scalar: [u8; 32],
+    controller_noc: Vec<u8>,
+    controller_secret_key_scalar: [u8; 32],
     ipk: [u8; 16],
     vendor_id: u16,
     op: F,
@@ -114,11 +122,8 @@ where
 {
     tokio::task::spawn_blocking(move || -> Result<R, MatterFabricError> {
         futures_lite::future::block_on(async move {
-            use rs_matter::commissioner::NocGenerator;
-            use rs_matter::crypto::Crypto;
             use rs_matter::crypto::{
-                test_only_crypto, CanonAeadKey, CanonPkcSecretKey, SecretKey,
-                SigningSecretKey, AEAD_CANON_KEY_LEN,
+                test_only_crypto, CanonAeadKey, CanonPkcSecretKey, AEAD_CANON_KEY_LEN,
             };
             use rs_matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
             use rs_matter::sc::case::CaseInitiator;
@@ -134,25 +139,12 @@ where
                 .initialize_transport_buffers()
                 .map_err(|e| MatterFabricError::Matter(format!("initialize_transport_buffers: {e:?}")))?;
 
-            // Sign a fresh controller NOC against the persisted CA.
-            let controller_secret_key = crypto
-                .generate_secret_key()
-                .map_err(|e| MatterFabricError::Matter(format!("generate controller key: {e:?}")))?;
-            let mut controller_csr_buf = [0u8; 256];
-            let controller_csr = controller_secret_key
-                .csr(&mut controller_csr_buf)
-                .map_err(|e| MatterFabricError::Matter(format!("controller csr: {e:?}")))?;
-            let mut controller_secret_canon = CanonPkcSecretKey::new();
-            controller_secret_key
-                .write_canon(&mut controller_secret_canon)
-                .map_err(|e| MatterFabricError::Matter(format!("write canon: {e:?}")))?;
-
-            let ca_secret = CanonPkcSecretKey::from(&ca_secret_key_scalar);
-            let mut gen = NocGenerator::from_root_ca(&crypto, ca_secret, &rcac, fabric_id, 1)
-                .map_err(|e| MatterFabricError::Matter(format!("NocGenerator::from_root_ca: {e:?}")))?;
-            let controller_creds = gen
-                .generate_noc(&crypto, controller_csr, 1, &[])
-                .map_err(|e| MatterFabricError::Matter(format!("generate controller noc: {e:?}")))?;
+            // Reuse the persisted controller NOC + secret. Loading the
+            // signing key from the pre-supplied scalar means our
+            // controller identity (NOC bytes + ECDSA pubkey) is stable
+            // across binary invocations — Eve/Meross/Aqara accept any
+            // CASE handshake from this same identity after the first.
+            let controller_secret_canon = CanonPkcSecretKey::from(&controller_secret_key_scalar);
 
             let mut ipk_canon = CanonAeadKey::new();
             let mut ipk_arr = [0u8; AEAD_CANON_KEY_LEN];
@@ -168,7 +160,7 @@ where
                             &crypto,
                             controller_secret_canon.reference(),
                             &rcac,
-                            &controller_creds.noc,
+                            &controller_noc,
                             &[],
                             Some(ipk_canon.reference()),
                             vendor_id,
@@ -177,9 +169,6 @@ where
                         .map(|f| f.fab_idx())
                         .map_err(|e| MatterFabricError::Matter(format!("fabrics.add: {e:?}")))
                 })?;
-
-            drop(controller_secret_key);
-            drop(gen);
 
             let bind_local: SocketAddr = match eve_addr {
                 SocketAddr::V6(_) => "[::]:0".parse().unwrap(),
@@ -231,6 +220,91 @@ where
     })
     .await
     .map_err(|e| MatterFabricError::Matter(format!("spawn_blocking join: {e}")))?
+}
+
+
+
+/// `with_case_op` — backward-compat wrapper that mints a fresh controller
+/// NOC inside the spawn_blocking task and forwards to
+/// [`with_case_op_persisted`]. Use this only when the device hasn't yet
+/// recorded a controller identity (i.e. during initial commissioning's
+/// CommissioningComplete step). After that, use the `_persisted` variant.
+pub async fn with_case_op<F, R>(
+    eve_addr: SocketAddr,
+    fabric_id: u64,
+    peer_node_id: u64,
+    rcac: Vec<u8>,
+    ca_secret_key_scalar: [u8; 32],
+    ipk: [u8; 16],
+    vendor_id: u16,
+    op: F,
+) -> Result<R, MatterFabricError>
+where
+    F: for<'e> FnOnce(
+            &'e mut rs_matter::transport::exchange::Exchange<'_>,
+        )
+            -> Pin<Box<dyn std::future::Future<Output = Result<R, MatterFabricError>> + 'e>>
+        + Send
+        + 'static,
+    R: Send + 'static,
+{
+    // Mint controller NOC + secret in a sub-scope so the non-Send rs-matter
+    // SecretKey/Crypto types don't cross the .await on with_case_op_persisted.
+    let (controller_noc, controller_secret_scalar) = mint_fresh_controller_noc(
+        &rcac,
+        &ca_secret_key_scalar,
+        fabric_id,
+    )?;
+
+    with_case_op_persisted(
+        eve_addr,
+        fabric_id,
+        peer_node_id,
+        rcac,
+        controller_noc,
+        controller_secret_scalar,
+        ipk,
+        vendor_id,
+        op,
+    )
+    .await
+}
+
+/// Helper for the backward-compat path: mints a controller NOC inside a
+/// scope so the (non-Send) rs-matter crypto types are dropped before any
+/// `.await`. Returns owned NOC bytes + scalar.
+fn mint_fresh_controller_noc(
+    rcac: &[u8],
+    ca_secret_key_scalar: &[u8; 32],
+    fabric_id: u64,
+) -> Result<(Vec<u8>, [u8; 32]), MatterFabricError> {
+    use rs_matter::commissioner::NocGenerator;
+    use rs_matter::crypto::Crypto;
+    use rs_matter::crypto::{test_only_crypto, CanonPkcSecretKey, SecretKey, SigningSecretKey};
+
+    let crypto = test_only_crypto();
+    let controller_secret_key = crypto
+        .generate_secret_key()
+        .map_err(|e| MatterFabricError::Matter(format!("generate controller key: {e:?}")))?;
+    let mut controller_csr_buf = [0u8; 256];
+    let controller_csr = controller_secret_key
+        .csr(&mut controller_csr_buf)
+        .map_err(|e| MatterFabricError::Matter(format!("controller csr: {e:?}")))?;
+    let mut controller_secret_canon = CanonPkcSecretKey::new();
+    controller_secret_key
+        .write_canon(&mut controller_secret_canon)
+        .map_err(|e| MatterFabricError::Matter(format!("write canon: {e:?}")))?;
+    let mut controller_secret_scalar = [0u8; 32];
+    controller_secret_scalar.copy_from_slice(controller_secret_canon.access());
+
+    let ca_secret = CanonPkcSecretKey::from(ca_secret_key_scalar);
+    let mut gen = NocGenerator::from_root_ca(&crypto, ca_secret, rcac, fabric_id, 1)
+        .map_err(|e| MatterFabricError::Matter(format!("NocGenerator::from_root_ca: {e:?}")))?;
+    let controller_creds = gen
+        .generate_noc(&crypto, controller_csr, 1, &[])
+        .map_err(|e| MatterFabricError::Matter(format!("generate controller noc: {e:?}")))?;
+
+    Ok((controller_creds.noc.to_vec(), controller_secret_scalar))
 }
 
 /// Specific concrete op: CommissioningComplete on a CASE-secured exchange.

@@ -200,6 +200,11 @@ async fn run(args: Args) -> Result<(), String> {
         device.rssi
     );
 
+    let device_address = device.address.clone();
+    let device_vendor_id = device.vendor_id;
+    let device_product_id = device.product_id;
+    let device_discriminator = device.discriminator;
+    let device_local_name = device.local_name.clone();
     let mut exchange = BleCommissionExchange::connect(device, payload.passcode)
         .await
         .map_err(|e| format!("BTP session open: {e}"))?;
@@ -233,6 +238,82 @@ async fn run(args: Args) -> Result<(), String> {
         commissioned.fabric_label,
         commissioned.add_noc_response.len()
     );
+
+    let captured_device = CapturedDevice {
+        address: device_address,
+        vendor_id: device_vendor_id,
+        product_id: device_product_id,
+        discriminator: device_discriminator,
+        local_name: device_local_name,
+    };
+    if let Err(e) = persist_pairing_record(&args, &fabric, &commissioned, &captured_device) {
+        log::warn!("[commission] failed to persist pairing record: {e}. Phase 7 auto-recommission won\'t catch this device until next manual commission.");
+    } else {
+        log::info!("[commission] pairing record saved to ~/.syntaur/matter_pairings/{:016x}.json", commissioned.node_id);
+    }
+
+    Ok(())
+}
+
+/// Write a minimal pairing record so the Phase 7 auto-recommission daemon
+/// (and any future "list my commissioned devices" UX) has a stable on-disk
+/// inventory keyed by node_id.
+///
+/// Stored at `~/.syntaur/matter_pairings/<node_id_hex16>.json`. Schema is
+/// intentionally small + JSON for easy reading by other tools (HA bridge,
+/// dashboard inventory, etc.).
+struct CapturedDevice {
+    address: String,
+    vendor_id: u16,
+    product_id: u16,
+    discriminator: u16,
+    local_name: Option<String>,
+}
+
+fn persist_pairing_record(
+    args: &Args,
+    fabric: &syntaur_matter::FabricHandle,
+    commissioned: &syntaur_matter::commission::CommissionedDevice,
+    device: &CapturedDevice,
+) -> Result<(), String> {
+    use serde_json::json;
+    use std::fs;
+
+    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    let dir = std::path::PathBuf::from(home).join(".syntaur").join("matter_pairings");
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+
+    let network_kind = if args.thread_dataset_hex.is_some() || args.thread_dataset_file.is_some() {
+        "thread"
+    } else if args.wifi_ssid.is_some() {
+        "wifi"
+    } else {
+        "unknown"
+    };
+
+    let record = json!({
+        "schema_version": 1,
+        "node_id": commissioned.node_id,
+        "node_id_hex": format!("{:016x}", commissioned.node_id),
+        "fabric_label": commissioned.fabric_label.clone(),
+        "fabric_id": fabric.fabric_id,
+        "fabric_id_hex": format!("{:016x}", fabric.fabric_id),
+        "controller_node_id": fabric.controller_node_id,
+        "vendor_id": device.vendor_id,
+        "product_id": device.product_id,
+        "discriminator": device.discriminator,
+        "ble_name": device.local_name.clone(),
+        "ble_address": device.address.clone(),
+        "setup_code": args.code.clone(),
+        "qr_string": args.qr.clone(),
+        "network_kind": network_kind,
+        "assigned_at": chrono::Utc::now().to_rfc3339(),
+        "last_commissioned_at": chrono::Utc::now().to_rfc3339(),
+    });
+
+    let path = dir.join(format!("{:016x}.json", commissioned.node_id));
+    let body = serde_json::to_string_pretty(&record).map_err(|e| format!("json: {e}"))?;
+    fs::write(&path, body).map_err(|e| format!("write {}: {e}", path.display()))?;
     Ok(())
 }
 

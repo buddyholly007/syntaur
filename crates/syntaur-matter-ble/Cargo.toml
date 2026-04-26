@@ -40,6 +40,7 @@ futures-lite = "2"
 hex = "0.4"
 mdns-sd = "0.13"
 async-io = "2"
+chrono = { version = "0.4" }
 
 [[bin]]
 name = "matter-op"

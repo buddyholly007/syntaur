@@ -17,7 +17,7 @@
 
 use std::time::Duration;
 
-use syntaur_matter_ble::case_udp::{discover_operational, with_case_op};
+use syntaur_matter_ble::case_udp::{discover_operational, with_case_op_persisted};
 
 #[derive(Debug)]
 struct Args {
@@ -130,16 +130,37 @@ async fn main() -> Result<(), String> {
     if ipk_decoded.len() != 16 { return Err(format!("ipk wrong length: {}", ipk_decoded.len())); }
     ipk.copy_from_slice(&ipk_decoded);
 
+    let controller_noc_hex = fabric.controller_noc_hex.as_ref().ok_or_else(|| {
+        format!(
+            "fabric {} has no persisted controller NOC. Re-mint the fabric              (matter-fabric delete {} && matter-fabric new {}) and re-commission              devices. The post-commissioning CASE handshake needs a stable              controller identity that this fabric format provides.",
+            fabric.label, fabric.label, fabric.label
+        )
+    })?;
+    let controller_secret_key_hex = fabric.controller_secret_key_hex.as_ref().ok_or_else(|| {
+        format!("fabric {} missing controller_secret_key_hex (paired field)", fabric.label)
+    })?;
+    let controller_noc = hex::decode(controller_noc_hex)
+        .map_err(|e| format!("controller_noc hex decode: {e}"))?;
+    let controller_secret_decoded = hex::decode(controller_secret_key_hex)
+        .map_err(|e| format!("controller_secret hex decode: {e}"))?;
+    if controller_secret_decoded.len() != 32 {
+        return Err(format!("controller_secret wrong length: {}", controller_secret_decoded.len()));
+    }
+    let mut controller_secret_scalar = [0u8; 32];
+    controller_secret_scalar.copy_from_slice(&controller_secret_decoded);
+
     let op = args.op;
     let endpoint = args.endpoint;
     let node_id = args.node_id;
 
-    with_case_op(
+    let _ = ca_secret_key_scalar; // not needed for persisted-NOC path
+    with_case_op_persisted(
         addr,
         fabric.fabric_id,
         node_id,
         rcac,
-        ca_secret_key_scalar,
+        controller_noc,
+        controller_secret_scalar,
         ipk,
         fabric.vendor_id,
         move |ex| {

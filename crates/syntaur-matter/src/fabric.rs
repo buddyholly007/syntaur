@@ -2,10 +2,9 @@
 //!
 //! A `FabricHandle` is the minimum a future commissioner needs to:
 //! 1. Sign NOCs for devices we're commissioning (via [`sign_device_noc`])
-//! 2. Establish CASE sessions with already-commissioned devices (via
-//!    the existing `syntaur-gateway::matter_direct` runtime — the
-//!    serialized `SyntaurFabricFile` shape is a strict superset of
-//!    what that code already reads)
+//! 2. Establish CASE sessions with already-commissioned devices using
+//!    a stable controller identity (the persisted controller NOC +
+//!    secret key, added 2026-04-26 for plug control after commission).
 
 use chrono::{DateTime, Utc};
 use rs_matter::commissioner::FabricCredentials;
@@ -17,6 +16,16 @@ use crate::MatterFabricError;
 /// Serializable representation of a Syntaur-owned Matter fabric. Kept
 /// plaintext-small so the whole thing fits in one AEAD envelope at
 /// rest.
+///
+/// **Field history**:
+/// - v1 (2026-04-22): label/fabric_id/controller_node_id/vendor_id +
+///   root_cert_hex/ca_secret_key_hex/ipk_hex
+/// - v2 (2026-04-26): controller_noc_hex + controller_secret_key_hex
+///   added so post-commissioning CASE handshakes use a stable controller
+///   identity. Older fabrics that lack these will need to be re-minted +
+///   devices re-commissioned (the per-device fabric record on each device
+///   was written under the old ephemeral controller NOC, which we can't
+///   reconstitute).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FabricHandle {
     /// User-facing label (also the filename stem). `[a-zA-Z0-9_-]+`.
@@ -43,6 +52,19 @@ pub struct FabricHandle {
     /// Hex-encoded 16-byte IPK epoch key 0. Used as the key-derivation
     /// input when computing CASE destination_ids + operational keys.
     pub ipk_hex: String,
+    /// Hex-encoded Matter-TLV NOC for the *controller* (= our admin
+    /// node identity on this fabric, controller_node_id=1). Persisted
+    /// so post-commissioning CASE handshakes present the same NOC the
+    /// device first saw at CommissioningComplete time. Without this
+    /// the device silently drops Sigma1 from a fresh-controller-NOC
+    /// initiator. Optional for backward-compat with v1 fabric files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller_noc_hex: Option<String>,
+    /// Hex-encoded raw 32-byte P-256 scalar for the controller's signing
+    /// key (the keypair embedded in `controller_noc_hex`). Used to sign
+    /// CASE Sigma3. Pairs with `controller_noc_hex`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller_secret_key_hex: Option<String>,
     /// When the fabric was created.
     pub created_at: DateTime<Utc>,
 }
@@ -58,14 +80,24 @@ pub struct FabricSummary {
     /// First 16 hex chars of sha256(RCAC) — useful for visual
     /// "are these the same fabric?" comparisons.
     pub rcac_fingerprint: String,
+    /// Whether the fabric file has a persisted controller NOC. Old
+    /// (v1) fabrics show `false`; their devices can't be controlled
+    /// post-commission and need re-commissioning under a v2 fabric.
+    pub has_controller_noc: bool,
 }
 
 impl FabricHandle {
     /// Generate a fresh fabric. Uses rs-matter's `FabricCredentials`
     /// plus a direct read of the CA secret key + IPK so we can
     /// serialize both back out for persistence.
+    ///
+    /// Also signs and persists the controller's own NOC at mint time
+    /// (controller_node_id=1, our admin identity on this fabric). This
+    /// is what lets post-commissioning CASE handshakes work — the
+    /// controller's NOC + secret stays stable across binary invocations.
     pub fn new(label: impl Into<String>) -> Result<Self, MatterFabricError> {
         use rs_matter::cert::builder::{RcacBuilder, SubjectDN, Validity};
+        use rs_matter::commissioner::NocGenerator;
         use rs_matter::crypto::{
             test_only_crypto, CanonPkcPublicKey, CanonPkcSecretKey, RngCore,
         };
@@ -135,6 +167,34 @@ impl FabricHandle {
         };
         let rcac = cert_buf[..cert_len].to_vec();
 
+        // ── Sign the controller's own NOC at mint time ──
+        // controller_node_id = 1. The key here will be persisted and
+        // reused for every CASE handshake (commissioning + control).
+        // Eve/Meross record the controller NOC's identity at first CASE
+        // handshake; subsequent handshakes must present the same NOC
+        // or they're silently dropped.
+        let controller_secret = crypto
+            .generate_secret_key()
+            .map_err(|e| MatterFabricError::Matter(format!("controller secret: {e:?}")))?;
+        let mut controller_csr_buf = [0u8; 256];
+        let controller_csr = controller_secret
+            .csr(&mut controller_csr_buf)
+            .map_err(|e| MatterFabricError::Matter(format!("controller csr: {e:?}")))?;
+        let mut controller_secret_canon = CanonPkcSecretKey::new();
+        controller_secret
+            .write_canon(&mut controller_secret_canon)
+            .map_err(|e| MatterFabricError::Matter(format!("write_canon controller: {e:?}")))?;
+        let mut controller_secret_scalar = [0u8; 32];
+        controller_secret_scalar.copy_from_slice(controller_secret_canon.access());
+
+        // Use the same CA scalar to sign the controller NOC.
+        let ca_secret_for_noc = CanonPkcSecretKey::from(&ca_scalar);
+        let mut noc_gen = NocGenerator::from_root_ca(&crypto, ca_secret_for_noc, &rcac, fabric_id, 1)
+            .map_err(|e| MatterFabricError::Matter(format!("NocGenerator::from_root_ca: {e:?}")))?;
+        let controller_creds = noc_gen
+            .generate_noc(&crypto, controller_csr, /* node_id */ 1, /* cat_ids */ &[])
+            .map_err(|e| MatterFabricError::Matter(format!("generate controller NOC: {e:?}")))?;
+
         Ok(FabricHandle {
             label,
             fabric_id,
@@ -143,6 +203,8 @@ impl FabricHandle {
             root_cert_hex: hex::encode(&rcac),
             ca_secret_key_hex: hex::encode(ca_scalar),
             ipk_hex: hex::encode(ipk_bytes),
+            controller_noc_hex: Some(hex::encode(&controller_creds.noc)),
+            controller_secret_key_hex: Some(hex::encode(controller_secret_scalar)),
             created_at: Utc::now(),
         })
     }
@@ -158,6 +220,8 @@ impl FabricHandle {
             vendor_id: self.vendor_id,
             created_at: self.created_at,
             rcac_fingerprint: hex::encode(&d[..8]),
+            has_controller_noc: self.controller_noc_hex.is_some()
+                && self.controller_secret_key_hex.is_some(),
         }
     }
 }

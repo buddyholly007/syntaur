@@ -8297,6 +8297,7 @@ dependencies = [
  "anyhow",
  "async-io",
  "btleplug",
+ "chrono",
  "embassy-time-queue-utils",
  "env_logger",
  "flume",
