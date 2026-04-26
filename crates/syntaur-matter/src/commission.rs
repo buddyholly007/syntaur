@@ -168,7 +168,7 @@ impl<'a> Commissioner<'a> {
             admin_cat: 0x0001_0001,
             regulatory_config: RegulatoryConfig::Outdoor,
             country_code: "US".into(),
-            fail_safe_seconds: 60,
+            fail_safe_seconds: 900,
         }
     }
 
@@ -227,6 +227,11 @@ impl<'a> Commissioner<'a> {
             assigned_node_id,
             &[self.admin_cat],
         )?;
+        log::info!(
+            "[commission] device NOC ({} bytes): {}",
+            noc_tlv.len(),
+            noc_tlv.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join("")
+        );
 
         // Step 5 — AddTrustedRootCertificate (spec §11.18.6.14). Must
         // precede AddNOC in the same failsafe.
@@ -273,6 +278,20 @@ impl<'a> Commissioner<'a> {
                 ),
             )
             .await?;
+        log::info!(
+            "[commission] AddNOC returned {} bytes: first 32 = {:02x?}",
+            add_noc_response.len(),
+            &add_noc_response[..add_noc_response.len().min(32)]
+        );
+        if let Some(status) = parse_noc_response_status(&add_noc_response) {
+            log::info!("[commission] AddNOC NOCResponse.StatusCode = {status:#x} ({})", noc_status_name(status));
+            if status != 0 {
+                return Err(MatterFabricError::Matter(format!(
+                    "AddNOC rejected: NOCResponse.StatusCode={status:#x} ({})",
+                    noc_status_name(status)
+                )));
+            }
+        }
 
         // Step 7 — network handoff (if applicable). The NetworkID passed
         // to ConnectNetwork is the SSID for WiFi and the 8-byte
@@ -297,20 +316,48 @@ impl<'a> Commissioner<'a> {
             Some(NetworkCredentials::Thread(thread)) => {
                 let extpanid = extract_thread_extpanid(&thread.operational_dataset)
                     .map_err(MatterFabricError::Matter)?;
-                let _ = ex
+                let aou_resp = ex
                     .invoke(
                         CLUSTER_NETWORK_COMMISSIONING,
                         CMD_ADD_OR_UPDATE_THREAD_NETWORK,
                         add_or_update_thread_network(&thread.operational_dataset, 3),
                     )
                     .await?;
-                let _ = ex
+                log::info!(
+                    "[commission] AddOrUpdateThreadNetwork returned {} bytes: first 32 = {:02x?}",
+                    aou_resp.len(),
+                    &aou_resp[..aou_resp.len().min(32)]
+                );
+                if let Some(status) = parse_network_config_status(&aou_resp) {
+                    log::info!("[commission] AddOrUpdateThreadNetwork NetworkingStatus = {status:#x} ({})", networking_status_name(status));
+                    if status != 0 {
+                        return Err(MatterFabricError::Matter(format!(
+                            "AddOrUpdateThreadNetwork rejected: status={status:#x} ({})",
+                            networking_status_name(status)
+                        )));
+                    }
+                }
+                let cn_resp = ex
                     .invoke(
                         CLUSTER_NETWORK_COMMISSIONING,
                         CMD_CONNECT_NETWORK,
                         connect_network(&extpanid, 4),
                     )
                     .await?;
+                log::info!(
+                    "[commission] ConnectNetwork returned {} bytes: first 32 = {:02x?}",
+                    cn_resp.len(),
+                    &cn_resp[..cn_resp.len().min(32)]
+                );
+                if let Some(status) = parse_network_config_status(&cn_resp) {
+                    log::info!("[commission] ConnectNetwork NetworkingStatus = {status:#x} ({})", networking_status_name(status));
+                    if status != 0 {
+                        return Err(MatterFabricError::Matter(format!(
+                            "ConnectNetwork rejected: status={status:#x} ({})",
+                            networking_status_name(status)
+                        )));
+                    }
+                }
             }
             None => {}
         }
@@ -533,3 +580,78 @@ fn _exchange_trait_is_object_safe(_e: &dyn CommissionExchange) {}
 // the BLE-backed implementation.
 #[allow(dead_code)]
 fn _phase4_will_use_exchange<'a>(_: &'a mut Exchange<'a>) {}
+
+
+// ── Response parsers (best-effort) ─────────────────────────────────────────
+//
+// The Matter IM `InvokeResponse` we surface above is a raw TLV blob — the
+// device's struct-shaped response after `CmdResp::Cmd` unwrap. We pull the
+// first context-tagged u8 field which is the StatusCode for both
+// NOCResponse (cluster 0x3E cmd 0x08 reply) and NetworkConfigResponse
+// (cluster 0x31 cmd 0x05 reply). If the TLV doesn't parse (unexpected
+// shape), we return None and let the caller continue rather than blocking
+// commissioning on a parser limitation.
+
+fn parse_noc_response_status(buf: &[u8]) -> Option<u8> {
+    parse_first_context_u8(buf)
+}
+
+fn parse_network_config_status(buf: &[u8]) -> Option<u8> {
+    parse_first_context_u8(buf)
+}
+
+/// Find the first context-tagged u8 element inside a TLV struct.
+/// Matter struct begins with 0x15. Context-tagged u8 element control
+/// byte = 0x24 (type=04 unsigned int 1B, tag form=01 context-1B).
+fn parse_first_context_u8(buf: &[u8]) -> Option<u8> {
+    let mut i = 0;
+    if buf.first()? != &0x15 { return None; } // expected struct begin
+    i += 1;
+    while i < buf.len() {
+        let cb = buf[i];
+        if cb == 0x18 { return None; } // end of struct, no u8 found
+        if cb == 0x24 && i + 2 < buf.len() {
+            // 0x24 = (type=04 u8, tag=01 ctx-1B). Skip tag byte at i+1, value at i+2.
+            return Some(buf[i + 2]);
+        }
+        // Skip element. We only handle a few common forms enough to walk past
+        // them; if we hit anything more complex we bail.
+        i += 1;
+    }
+    None
+}
+
+fn noc_status_name(s: u8) -> &'static str {
+    match s {
+        0x00 => "OK",
+        0x01 => "InvalidPublicKey",
+        0x02 => "InvalidNodeOpId",
+        0x03 => "InvalidNOC",
+        0x04 => "MissingCsr",
+        0x05 => "TableFull",
+        0x06 => "InvalidAdminSubject",
+        0x09 => "FabricConflict",
+        0x0a => "LabelConflict",
+        0x0b => "InvalidFabricIndex",
+        _ => "?",
+    }
+}
+
+fn networking_status_name(s: u8) -> &'static str {
+    match s {
+        0x00 => "Success",
+        0x01 => "OutOfRange",
+        0x02 => "BoundsExceeded",
+        0x03 => "NetworkIDNotFound",
+        0x04 => "DuplicateNetworkID",
+        0x05 => "NetworkNotFound",
+        0x06 => "RegulatoryError",
+        0x07 => "AuthFailure",
+        0x08 => "UnsupportedSecurity",
+        0x09 => "OtherConnectionFailure",
+        0x0a => "IPV6Failed",
+        0x0b => "IPBindFailed",
+        0x0c => "UnknownError",
+        _ => "?",
+    }
+}

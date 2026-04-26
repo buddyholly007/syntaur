@@ -123,7 +123,7 @@ impl NocGenerator {
             ca_id: Some(rcac_id),
         };
 
-        let validity = crate::cert::builder::Validity::new(762624000, 0xFFFFFFFE);
+        let validity = crate::cert::builder::Validity::new(0x10000, 0xFFFFFFFF);
 
         let cert_len = RcacBuilder::new(&mut cert_buf).build(
             crypto,
@@ -231,7 +231,7 @@ impl NocGenerator {
             ca_id: Some(icac_id),
         };
 
-        let validity = crate::cert::builder::Validity::new(762624000, 0xFFFFFFFE);
+        let validity = crate::cert::builder::Validity::new(0x10000, 0xFFFFFFFF);
 
         let issuer = crate::cert::builder::IssuerDN {
             ca_id: Some(self.rcac_id),
@@ -324,7 +324,7 @@ impl NocGenerator {
             ca_id: None,
         };
 
-        let validity = crate::cert::builder::Validity::new(762624000, 0xFFFFFFFE);
+        let validity = crate::cert::builder::Validity::new(0x10000, 0xFFFFFFFF);
 
         let cert_len = NocBuilder::new(&mut cert_buf).build(
             crypto,

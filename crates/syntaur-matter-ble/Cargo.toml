@@ -38,3 +38,9 @@ embassy-time-queue-utils = { version = "0.3", features = ["generic-queue-64"] }
 flume = { version = "0.11", default-features = false, features = ["async"] }
 futures-lite = "2"
 hex = "0.4"
+mdns-sd = "0.13"
+async-io = "2"
+
+[[bin]]
+name = "matter-op"
+path = "src/bin/matter_op.rs"

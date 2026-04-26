@@ -16,6 +16,7 @@ name = "matter-pair"
 path = "src/bin/matter_pair.rs"
 
 [dependencies]
+log = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

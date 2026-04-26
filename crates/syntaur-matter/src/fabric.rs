@@ -107,10 +107,10 @@ impl FabricHandle {
         let mut ca_scalar = [0u8; 32];
         ca_scalar.copy_from_slice(ca_secret_canon.access());
 
-        // Random rcac_id and serial.
-        let mut rcac_id_bytes = [0u8; 8];
-        rand.fill_bytes(&mut rcac_id_bytes);
-        let rcac_id = u64::from_be_bytes(rcac_id_bytes) | 1; // ensure non-zero
+        // rcac_id is hardcoded to 1 to match NocGenerator::from_root_ca
+        // which always stamps NOC.Issuer.MatterRcacId = 1. Eve verifies
+        // NOC.Issuer == RCAC.Subject byte-for-byte, so they MUST match.
+        let rcac_id: u64 = 1;
         let mut serial = [0u8; 8];
         rand.fill_bytes(&mut serial);
 
@@ -126,7 +126,7 @@ impl FabricHandle {
                 .build(
                     &crypto,
                     SubjectDN::rcac(fabric_id, rcac_id),
-                    Validity::new(762624000, 0xFFFFFFFE),
+                    Validity::new(0x10000, 0xFFFFFFFF),
                     &ca_public,
                     &ca_secret,
                     &serial,

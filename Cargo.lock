@@ -8280,6 +8280,7 @@ dependencies = [
  "chrono",
  "embassy-time-queue-utils",
  "hex",
+ "log",
  "rand 0.8.6",
  "rs-matter",
  "serde",
@@ -8294,6 +8295,7 @@ name = "syntaur-matter-ble"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-io",
  "btleplug",
  "embassy-time-queue-utils",
  "env_logger",
@@ -8302,6 +8304,7 @@ dependencies = [
  "futures-lite",
  "hex",
  "log",
+ "mdns-sd",
  "rs-matter",
  "serde",
  "serde_json",

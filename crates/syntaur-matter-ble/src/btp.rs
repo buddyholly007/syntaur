@@ -806,27 +806,44 @@ impl syntaur_matter::commission::CommissionExchange for BleCommissionExchange {
             let mut ipk = [0u8; 16];
             ipk.copy_from_slice(&ipk_decoded);
 
-            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-            cmd_tx
-                .send_async(InvokeCmd::CaseAndComplete {
-                    fabric_id: fabric.fabric_id,
-                    controller_node_id: fabric.controller_node_id,
-                    peer_node_id,
-                    rcac,
-                    ca_secret_key_scalar,
-                    ipk,
-                    vendor_id: fabric.vendor_id,
-                    response_tx,
-                })
-                .await
-                .map_err(|e| {
-                    MatterFabricError::Matter(format!("case cmd queue closed: {e}"))
-                })?;
-            response_rx.await.map_err(|e| {
-                MatterFabricError::Matter(format!(
-                    "case response channel dropped: {e}"
-                ))
-            })?
+            // Per Matter Core §11.10.6.6: after ConnectNetwork, the device
+            // transitions to operational mode and CommissioningComplete must
+            // run on a CASE session over the operational network. Eve Energy
+            // Thread variant rejects CASE-over-BTP (Sigma1 Failure
+            // proto_code=1) once it's joined Thread. Spec-canonical path is
+            // CASE-over-IP via mDNS-discovered operational endpoint.
+            //
+            // We keep `cmd_tx` (the BTP control channel) alive for now even
+            // though we don't use it here — dropping it tears down the BTP
+            // GATT subscription which might race Eve's transition.
+            let _ = cmd_tx;
+
+            // Give Eve time to join Thread + SRP-register with the BR so
+            // its `_matter._tcp` record is advertised on the LAN.
+            log::info!(
+                "[case] BLE 7/8 done — sleeping 5s for SRP/mDNS propagation, then CASE-over-UDP"
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+            log::info!(
+                "[case] discovering operational mDNS for node {peer_node_id:#x}"
+            );
+            let eve_addr = crate::case_udp::discover_operational(
+                peer_node_id,
+                std::time::Duration::from_secs(90),
+            )?;
+            log::info!("[case] resolved {eve_addr} — handing off to CASE-over-UDP");
+
+            crate::case_udp::case_and_commissioning_complete_via_udp(
+                eve_addr,
+                fabric.fabric_id,
+                peer_node_id,
+                rcac,
+                ca_secret_key_scalar,
+                ipk,
+                fabric.vendor_id,
+            )
+            .await
         })
     }
 }

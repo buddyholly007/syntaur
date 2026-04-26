@@ -242,6 +242,24 @@ impl CommissionExchange for IpCommissionExchange {
                 .map_err(|_| MatterFabricError::Matter("driver task closed mid-response".into()))?
         })
     }
+
+    fn case_and_commissioning_complete<'a>(
+        &'a mut self,
+        _fabric: &'a syntaur_matter::FabricHandle,
+        _peer_node_id: u64,
+    ) -> Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(), MatterFabricError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            Err(MatterFabricError::Matter(
+                "IpCommissionExchange::case_and_commissioning_complete: not implemented; use syntaur-gateway::tools::matter_direct for CASE-over-UDP".into(),
+            ))
+        })
+    }
 }
 
 impl Drop for IpCommissionExchange {

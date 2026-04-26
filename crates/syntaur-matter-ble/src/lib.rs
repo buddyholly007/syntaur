@@ -12,6 +12,7 @@
 //! factory-fresh device end-to-end over BLE.
 
 pub mod btp;
+pub mod case_udp;
 pub mod scan;
 
 pub use scan::{scan_for_discriminator, CommissionableDevice, MATTER_SERVICE_UUID};

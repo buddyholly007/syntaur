@@ -70,11 +70,11 @@ pub async fn scan_for_discriminator_ext(
         .next()
         .ok_or_else(|| btleplug::Error::DeviceNotFound)?;
 
-    central
-        .start_scan(ScanFilter {
-            services: vec![MATTER_SERVICE_UUID],
-        })
-        .await?;
+    // 2026-04-26: Drop BlueZ UUID filter — BlueZ"s SetDiscoveryFilter UUID list
+    // checks only the device"s Service Class UUID advertising field, NOT entries
+    // in ServiceData. Eve Energy advertises 0xFFF6 only via ServiceData, so the
+    // filtered scan never returns it. We post-filter on service_data.get below.
+    central.start_scan(ScanFilter::default()).await?;
 
     let mut events = central.events().await?;
     let mut hits: Vec<CommissionableDevice> = Vec::new();
