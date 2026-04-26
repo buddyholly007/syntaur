@@ -2433,6 +2433,120 @@ const MIGRATIONS: &[&str] = &[
         updated_at              INTEGER NOT NULL DEFAULT 0
     );
     "#,
+
+    // v69: per-chat agent settings cog — backs the card-flip settings panel
+    // mounted on every chat surface (see vault/projects/syntaur_per_chat_settings.md).
+    //
+    // Resolution rule: NULL columns fall back to the persona defaults baked
+    // into agents/defaults.rs, so existing users see no change on rollout.
+    // Only fields the user explicitly edits become non-NULL.
+    //
+    // model_footprint backs the Resource Budget bar's "does this fit on my
+    // hardware" check. Seeded with known models on first migration; unknown
+    // models get inserted with measured values on first load (source='measured').
+    r#"
+    CREATE TABLE IF NOT EXISTS agent_settings (
+        user_id                 INTEGER NOT NULL,
+        agent_id                TEXT    NOT NULL,
+        -- Identity (Phase 1)
+        display_name            TEXT,
+        icon_blob_id            INTEGER,
+        accent_color            TEXT,
+        wake_phrase             TEXT,
+        shortcut                TEXT,
+        -- Brain (Phase 2). JSON: [{"provider":"x","model":"y","wait_seconds":30}, ...]
+        llm_chain_json          TEXT,
+        -- Voice (Phase 3)
+        tts_chain_json          TEXT,
+        stt_chain_json          TEXT,
+        voice_id                TEXT,
+        speaking_rate           REAL,
+        pitch_shift             REAL,
+        -- Persona (Phase 4)
+        persona_prompt_override TEXT,
+        -- Tools (Phase 5). JSON array of tool names allowed; NULL = persona default.
+        tool_allowlist_json     TEXT,
+        -- Memory + behavior (Phase 6)
+        memory_mode             TEXT,    -- 'persistent' | 'incognito'
+        context_budget          INTEGER,
+        temperature             REAL,
+        streaming               INTEGER, -- 0/1
+        show_thinking           INTEGER, -- 0/1
+        handoff_threshold       TEXT,    -- 'never' | 'loose' | 'strict'
+        -- Limits (Phase 6)
+        daily_cost_cap_cents    INTEGER,
+        rounds_cap              INTEGER,
+        per_turn_timeout_secs   INTEGER,
+        -- Cloud-vs-local preference (Phase 0 toggle that re-orders chains).
+        -- 'auto' (use chain as-is) | 'prefer_local' | 'prefer_cloud'.
+        compute_preference      TEXT,
+        -- Pinned conversations strip (Phase 7). JSON array of conversation_id.
+        pinned_convs_json       TEXT,
+        -- Show on /dashboard widget grid? (Phase 7)
+        dashboard_widget        INTEGER,
+        updated_at              INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (user_id, agent_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_agent_settings_agent
+        ON agent_settings(agent_id);
+
+    CREATE TABLE IF NOT EXISTS model_footprint (
+        provider     TEXT NOT NULL,
+        model_id     TEXT NOT NULL,
+        -- Approx VRAM cost on a single GPU when this model is loaded.
+        -- 0 means "no VRAM" (cloud / CPU-only model).
+        vram_mb      INTEGER NOT NULL DEFAULT 0,
+        -- Approx RAM cost; 0 means "trivial" (cloud) or "depends" (large LLMs
+        -- with KV cache; the chain reports actual usage at runtime via
+        -- /api/compute/state).
+        ram_mb       INTEGER NOT NULL DEFAULT 0,
+        -- 'seeded' (curated default), 'measured' (filled in on first load),
+        -- 'estimated' (read from GGUF metadata), 'manual' (user override).
+        source       TEXT NOT NULL DEFAULT 'seeded',
+        updated_at   INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (provider, model_id)
+    );
+
+    -- Per-agent icon storage. Stored in the index DB rather than the
+    -- filesystem because /data is bind-mounted on the TrueNAS container
+    -- and we want icons to survive container recreation without an
+    -- explicit mount. Cap is enforced server-side at 256 KB / 256x256
+    -- before INSERT — the column type is BLOB, no length limit at SQL.
+    CREATE TABLE IF NOT EXISTS agent_icons (
+        user_id      INTEGER NOT NULL,
+        agent_id     TEXT    NOT NULL,
+        content_type TEXT    NOT NULL,
+        bytes        BLOB    NOT NULL,
+        updated_at   INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (user_id, agent_id)
+    );
+
+    -- Seeded footprints for the chains we ship. Users with different models
+    -- get 'estimated' rows added on first load.
+    INSERT OR IGNORE INTO model_footprint (provider, model_id, vram_mb, ram_mb, source, updated_at) VALUES
+        -- Local LLMs the gateway ships with
+        ('turboquant',  'Qwen3.5-27B-Q4_K_M',     17000, 2000, 'seeded', 0),
+        ('turboquant',  'Qwen3.5-14B-Q4_K_M',      9000, 1500, 'seeded', 0),
+        ('lmstudio',    'qwen2.5-coder-32b',      19000, 2000, 'seeded', 0),
+        -- Local TTS / STT
+        ('orpheus',     'orpheus-3b',              2000,  500, 'seeded', 0),
+        ('fish-audio',  's2-pro',                  2500,  500, 'seeded', 0),
+        ('piper',       'en_US-amy-medium',           0,  150, 'seeded', 0),
+        ('whisper',     'base.en',                    0,  500, 'seeded', 0),
+        ('whisper',     'small.en',                   0, 1100, 'seeded', 0),
+        ('parakeet',    'en-150ms',                   0,  300, 'seeded', 0),
+        ('edge-tts',    'cloud',                      0,    0, 'seeded', 0),
+        -- Cloud-only entries are 0/0 — they never touch local hardware.
+        ('openrouter',  'cloud',                      0,    0, 'seeded', 0),
+        ('cerebras',    'cloud',                      0,    0, 'seeded', 0),
+        ('groq',        'cloud',                      0,    0, 'seeded', 0),
+        ('openai',      'cloud',                      0,    0, 'seeded', 0),
+        ('anthropic',   'cloud',                      0,    0, 'seeded', 0),
+        ('elevenlabs',  'cloud',                      0,    0, 'seeded', 0),
+        ('deepgram',    'cloud',                      0,    0, 'seeded', 0)
+    ;
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

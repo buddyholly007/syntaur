@@ -51,3 +51,4 @@ pub mod social;
 pub mod tax;
 pub mod voice_setup;
 pub mod tailscale_setup;
+pub mod agent_settings_card;

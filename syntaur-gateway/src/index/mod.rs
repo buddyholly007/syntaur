@@ -553,6 +553,24 @@ impl Indexer {
         &self.db_path
     }
 
+    /// Run a synchronous closure against the index DB connection on a
+    /// blocking thread. Used by modules that need direct CRUD against
+    /// non-Indexer-owned tables (agent_settings, model_footprint, etc.)
+    /// while still going through the same WAL-mode connection.
+    pub async fn with_conn<F, R>(&self, f: F) -> Result<R, String>
+    where
+        F: FnOnce(&Connection) -> Result<R, rusqlite::Error> + Send + 'static,
+        R: Send + 'static,
+    {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || -> Result<R, String> {
+            let conn = db.blocking_lock();
+            f(&conn).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking: {}", e))?
+    }
+
     /// Get / set the per-connector cursor blob. Used for incremental polling.
     pub async fn get_connector_cursor(&self, source: &str) -> Option<String> {
         let db = Arc::clone(&self.db);

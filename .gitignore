@@ -7,3 +7,4 @@ release/
 /tmp/
 /.cargo/
 /.fastembed_cache/
+**/.fastembed_cache/

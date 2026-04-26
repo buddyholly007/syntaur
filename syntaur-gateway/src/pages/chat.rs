@@ -5,6 +5,9 @@
 use axum::response::Html;
 use maud::{html, PreEscaped};
 
+use super::agent_settings_card::{
+    agent_settings_back, chat_card_flip, resource_budget_script, resource_budget_styles,
+};
 use super::shared::{shell, top_bar, Page};
 
 pub async fn render() -> Html<String> {
@@ -17,8 +20,21 @@ pub async fn render() -> Html<String> {
         crumb: None,
         topbar_status: None,
     };
-    let body = html! {
+    // Phase 8 of vault/projects/syntaur_per_chat_settings.md: wrap the
+    // chat surface in chat_card_flip so the cog at top-right reveals the
+    // settings back-of-card. The chat content (BODY_HTML) stays
+    // server-rendered as today; only the wrapper changes. The agent ID
+    // is "main" because /chat is the dashboard chat surface — settings
+    // are scoped to whichever main-thread agent is currently active
+    // (the back's hydrate-on-flip fetch reads window.currentAgent).
+    let front = html! {
         (PreEscaped(BODY_HTML))
+    };
+    let back = agent_settings_back("main");
+    let body = html! {
+        (resource_budget_styles())
+        (chat_card_flip("main", front, back))
+        (resource_budget_script())
     };
     Html(shell(page, body).into_string())
 }
@@ -352,6 +368,11 @@ async function pollForResponse(convId, lastCount) {
                 <div class="text-gray-300 leading-relaxed text-sm chat-md">${md(msg.content)}</div>
               </div>`;
             container.appendChild(el);
+            // Speak the reply if the per-agent mic toggle is on (lives
+            // on the chat-card-flip's top-right). No-op when off.
+            if (typeof window.syntaurMaybeSpeak === 'function') {
+              window.syntaurMaybeSpeak(msg.content, getAgentId(currentAgent));
+            }
           }
         }
         const scroll = document.getElementById('messages-scroll');

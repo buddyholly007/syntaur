@@ -7113,6 +7113,28 @@ async fn main() {
         .route("/api/agents/create", post(handle_api_agent_create))
         .route("/api/agents/import", post(handle_api_agent_import))
         .route("/api/agents/{agent_id}", axum::routing::delete(handle_api_agent_delete))
+        // Per-chat agent settings cog (vault/projects/syntaur_per_chat_settings.md).
+        // GET resolves stored row + persona defaults; PUT does a partial JSON merge so
+        // single-field saves (e.g. {"temperature": 0.5}) don't clobber other columns.
+        .route(
+            "/api/agents/{agent_id}/settings",
+            get(handle_api_agent_settings_get)
+                .put(handle_api_agent_settings_put)
+                .delete(handle_api_agent_settings_reset),
+        )
+        .route(
+            "/api/agents/{agent_id}/icon",
+            get(handle_api_agent_icon_get)
+                .post(handle_api_agent_icon_put)
+                .delete(handle_api_agent_icon_delete),
+        )
+        // HTML fragment for side-panel chat surfaces (knowledge, scheduler,
+        // journal, music, coders) that auto-mount the cog at runtime —
+        // they fetch the back-of-card markup on first flip rather than
+        // rendering it server-side at every page load.
+        .route("/api/agents/{agent_id}/settings_back", get(handle_api_agent_settings_back))
+        // Resource Budget bar — pinned at the top of the settings card flip.
+        .route("/api/compute/state", get(crate::agents::compute::handle_compute_state))
         .route("/api/settings/preferences", get(handle_api_settings_prefs_get).put(handle_api_settings_prefs_put))
         .route("/api/settings/export", get(handle_api_settings_export))
         .route("/api/settings/wipe_memories", post(handle_api_settings_wipe_memories))
@@ -11139,6 +11161,201 @@ async fn handle_api_agent_delete(
     state.users.delete_user_agent(uid, &agent_id).await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(serde_json::json!({ "deleted": true, "agent_id": agent_id })))
+}
+
+// ── Per-chat agent settings cog ────────────────────────────────────────
+//
+// GET / PUT / DELETE /api/agents/{agent_id}/settings
+//
+// GET resolves the stored row + persona defaults, returning a single flat
+// JSON payload the front-end card-flip renders. Missing fields fall back
+// to the persona's `agents/defaults.rs` baseline.
+//
+// PUT is partial — `{"temperature": 0.5}` only writes `temperature`. This
+// lets the front-end auto-save on blur per-field instead of round-tripping
+// the whole record on every keystroke.
+//
+// DELETE wipes all overrides for (user, agent) so the agent reverts to
+// pristine. Used by the "Reset persona to defaults" button in Maintenance.
+
+async fn handle_api_agent_settings_get(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(agent_id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = crate::security::extract_session_token(&headers);
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
+    let principal = resolve_principal(&state, &token).await?;
+    let uid = principal.user_id();
+    let indexer = state.indexer.as_ref()
+        .ok_or(axum::http::StatusCode::SERVICE_UNAVAILABLE)?;
+    let agent = agent_id.clone();
+    let row = indexer.with_conn(move |conn| Ok(crate::agents::settings::get(conn, uid, &agent)?))
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    // Phase 0 returns the raw stored row — Phase 1+ will fill in resolved
+    // defaults so the front-end never has to know which fields are set vs
+    // inherited. Keeping this stub small means we can ship the schema +
+    // resource bar today and bolt on the resolution layer alongside the
+    // Identity section UI.
+    Ok(Json(serde_json::to_value(row).unwrap_or(serde_json::json!({}))))
+}
+
+async fn handle_api_agent_settings_put(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(agent_id): axum::extract::Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = crate::security::extract_session_token(&headers);
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
+    let principal = resolve_principal(&state, &token).await?;
+    let uid = principal.user_id();
+    let indexer = state.indexer.as_ref()
+        .ok_or(axum::http::StatusCode::SERVICE_UNAVAILABLE)?;
+    let agent = agent_id.clone();
+    let row = indexer
+        .with_conn(move |conn| Ok(crate::agents::settings::patch(conn, uid, &agent, &body)?))
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::to_value(row).unwrap_or(serde_json::json!({}))))
+}
+
+async fn handle_api_agent_settings_reset(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(agent_id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = crate::security::extract_session_token(&headers);
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
+    let principal = resolve_principal(&state, &token).await?;
+    let uid = principal.user_id();
+    let indexer = state.indexer.as_ref()
+        .ok_or(axum::http::StatusCode::SERVICE_UNAVAILABLE)?;
+    let agent = agent_id.clone();
+    let n = indexer
+        .with_conn(move |conn| Ok(crate::agents::settings::delete(conn, uid, &agent)?))
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({ "reset": true, "rows_deleted": n })))
+}
+
+/// GET /api/agents/{id}/icon — stream the user's per-agent icon. Falls back
+/// to 404 if no upload exists; client renders a letter-avatar in that case.
+async fn handle_api_agent_icon_get(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(agent_id): axum::extract::Path<String>,
+) -> Result<axum::response::Response, axum::http::StatusCode> {
+    let token = crate::security::extract_session_token(&headers);
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
+    let principal = resolve_principal(&state, &token).await?;
+    let uid = principal.user_id();
+    let indexer = state.indexer.as_ref()
+        .ok_or(axum::http::StatusCode::SERVICE_UNAVAILABLE)?;
+    let agent = agent_id.clone();
+    let row = indexer
+        .with_conn(move |conn| Ok(crate::agents::settings::get_icon(conn, uid, &agent)?))
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    use axum::response::IntoResponse;
+    match row {
+        Some((ct, bytes)) => Ok((
+            axum::http::StatusCode::OK,
+            [
+                (axum::http::header::CONTENT_TYPE, ct),
+                (axum::http::header::CACHE_CONTROL, "private, max-age=60".to_string()),
+            ],
+            bytes,
+        ).into_response()),
+        None => Err(axum::http::StatusCode::NOT_FOUND),
+    }
+}
+
+/// POST /api/agents/{id}/icon — multipart upload, single field `icon`.
+/// Caps at 256 KB. Returns the new icon URL the client can hot-swap into
+/// the preview without an extra GET (the cache-bust suffix forces reload).
+async fn handle_api_agent_icon_put(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(agent_id): axum::extract::Path<String>,
+    mut multipart: axum::extract::Multipart,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = crate::security::extract_session_token(&headers);
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
+    let principal = resolve_principal(&state, &token).await?;
+    let uid = principal.user_id();
+    let indexer = state.indexer.as_ref()
+        .ok_or(axum::http::StatusCode::SERVICE_UNAVAILABLE)?;
+
+    let mut content_type = String::new();
+    let mut bytes: Vec<u8> = Vec::new();
+    while let Ok(Some(field)) = multipart.next_field().await {
+        if field.name() != Some("icon") { continue; }
+        content_type = field.content_type().unwrap_or("image/png").to_string();
+        bytes = field.bytes().await
+            .map_err(|_| axum::http::StatusCode::BAD_REQUEST)?
+            .to_vec();
+        break;
+    }
+    if bytes.is_empty() {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+    if bytes.len() > 256 * 1024 {
+        return Err(axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    if !matches!(content_type.as_str(),
+        "image/png" | "image/jpeg" | "image/webp" | "image/gif") {
+        return Err(axum::http::StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    let agent = agent_id.clone();
+    indexer
+        .with_conn(move |conn| Ok(crate::agents::settings::put_icon(conn, uid, &agent, &content_type, &bytes)?))
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({
+        "blob_id": 1,
+        "url": format!("/api/agents/{}/icon?v={}", agent_id, std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)),
+    })))
+}
+
+async fn handle_api_agent_icon_delete(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(agent_id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let token = crate::security::extract_session_token(&headers);
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
+    let principal = resolve_principal(&state, &token).await?;
+    let uid = principal.user_id();
+    let indexer = state.indexer.as_ref()
+        .ok_or(axum::http::StatusCode::SERVICE_UNAVAILABLE)?;
+    let agent = agent_id.clone();
+    let n = indexer
+        .with_conn(move |conn| Ok(crate::agents::settings::delete_icon(conn, uid, &agent)?))
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({ "deleted": n })))
+}
+
+/// GET /api/agents/{id}/settings_back — HTML fragment of the back-of-card.
+/// Side-panel surfaces (knowledge, scheduler, journal, music, coders) lazy-fetch
+/// this on first flip rather than embedding the full ~10 KB markup
+/// server-side at every page load.
+async fn handle_api_agent_settings_back(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(agent_id): axum::extract::Path<String>,
+) -> Result<axum::response::Html<String>, axum::http::StatusCode> {
+    let token = crate::security::extract_session_token(&headers);
+    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
+    if matches!(state.users.resolve_token(&token).await, Ok(None) | Err(_)) {
+        return Err(axum::http::StatusCode::UNAUTHORIZED);
+    }
+    let markup = crate::pages::agent_settings_card::agent_settings_back(&agent_id);
+    Ok(axum::response::Html(markup.into_string()))
 }
 
 /// GET /api/settings/preferences — return all per-user prefs as a {key: value} map.

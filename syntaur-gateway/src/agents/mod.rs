@@ -16,3 +16,5 @@ pub mod tasks;
 pub mod context_budget;
 pub mod templates;
 pub mod import;
+pub mod settings;
+pub mod compute;
