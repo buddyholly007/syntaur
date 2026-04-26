@@ -4,12 +4,14 @@
 //!   matter-op <subcommand> --fabric-label LABEL --node-id N [--endpoint EP]
 //!
 //! Subcommands:
-//!   on        invoke OnOff::On (cluster 0x0006, cmd 0x01) on EP (default 1)
-//!   off       invoke OnOff::Off  (cluster 0x0006, cmd 0x00)
-//!   toggle    invoke OnOff::Toggle (cluster 0x0006, cmd 0x02)
-//!   state     read   OnOff::OnOff (attr 0x0000) bool
-//!   power     read   ElectricalPowerMeasurement::ActivePower (cluster 0x0090, attr 0x0008) i64 mW
-//!   energy    read   ElectricalEnergyMeasurement::CumulativeEnergyImported (cluster 0x0091, attr 0x0001) struct
+//!   on          invoke OnOff::On (cluster 0x0006, cmd 0x01) on EP (default 1)
+//!   off         invoke OnOff::Off  (cluster 0x0006, cmd 0x00)
+//!   toggle      invoke OnOff::Toggle (cluster 0x0006, cmd 0x02)
+//!   state       read   OnOff::OnOff (attr 0x0000) bool
+//!   power       read   ElectricalPowerMeasurement::ActivePower (cluster 0x0090, attr 0x0008) i64 mW
+//!   energy      read   ElectricalEnergyMeasurement::CumulativeEnergyImported (cluster 0x0091, attr 0x0001) struct
+//!   info        read   BasicInformation cluster (0x0028) ep0 — vendor/product/HW/SW versions
+//!   ota-status  read   OtaSoftwareUpdateRequestor (0x0029) ep0 — UpdatePossible + UpdateState
 //!
 //! Discovers device IPv6 via mDNS, runs CASE-over-UDP, performs the op,
 //! prints result. Same fabric-loading + UDP handshake machinery the BLE
@@ -25,6 +27,12 @@ struct Args {
     fabric_label: String,
     node_id: u64,
     endpoint: u16,
+    /// Number of full off→on cycles to send (rapid-cycle only).
+    cycles: u32,
+    /// Time to hold OFF between off-command and on-command, in milliseconds.
+    off_ms: u64,
+    /// Time to hold ON between on-command and the next off-command, in milliseconds.
+    on_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -35,6 +43,12 @@ enum Op {
     State,
     Power,
     Energy,
+    /// Issue N rapid off/on cycles over a single CASE session. Used to
+    /// trigger AiDot-class smart-bulb factory-reset (typically 5+ cycles
+    /// each <2 s) without paying CASE handshake overhead per command —
+    /// matter-op's normal one-command-per-invocation costs ~5 s of CASE
+    /// every shot, far too slow to drive a vendor-defined reset pattern.
+    RapidCycle,
     /// CommissioningComplete on the GeneralCommissioning cluster. Used to
     /// rescue a device whose commissioning's final CASE handshake timed
     /// out: AddNOC + AddOrUpdateNetwork + ConnectNetwork have all
@@ -42,9 +56,23 @@ enum Op {
     /// roll those changes back at expiry. Running this within the
     /// failsafe window finalizes commissioning.
     Complete,
+    /// Read BasicInformation cluster on endpoint 0 — the canonical
+    /// nameplate that identifies a Matter device. Used by the firmware
+    /// advisor to map (VendorID, ProductID) → known-latest version and
+    /// surface "your plug needs an update" UX.
+    Info,
+    /// Read OtaSoftwareUpdateRequestor cluster on endpoint 0. Tells us
+    /// whether the device implements standard Matter OTA at all
+    /// (UpdatePossible) and what state its updater is in. If it
+    /// reports UnsupportedCluster, the vendor uses a proprietary
+    /// channel (Meross app, Tapo app, etc.) and Syntaur cannot push
+    /// firmware directly.
+    OtaStatus,
 }
 
 const CLUSTER_ON_OFF: u32 = 0x0006;
+const CLUSTER_BASIC_INFO: u32 = 0x0028;
+const CLUSTER_OTA_REQUESTOR: u32 = 0x0029;
 const CLUSTER_GENERAL_COMMISSIONING: u32 = 0x0030;
 const CLUSTER_ELEC_POWER: u32 = 0x0090;
 const CLUSTER_ELEC_ENERGY: u32 = 0x0091;
@@ -55,6 +83,22 @@ const CMD_COMMISSIONING_COMPLETE: u32 = 0x04;
 const ATTR_ONOFF: u32 = 0x0000;
 const ATTR_ACTIVE_POWER: u32 = 0x0008;
 const ATTR_CUM_ENERGY_IMPORTED: u32 = 0x0001;
+
+// BasicInformation cluster (0x0028) attribute IDs — Matter Core 1.5 §11.1.5.
+const ATTR_BASIC_VENDOR_NAME: u32 = 0x0001;
+const ATTR_BASIC_VENDOR_ID: u32 = 0x0002;
+const ATTR_BASIC_PRODUCT_NAME: u32 = 0x0003;
+const ATTR_BASIC_PRODUCT_ID: u32 = 0x0004;
+const ATTR_BASIC_HARDWARE_VERSION: u32 = 0x0007;
+const ATTR_BASIC_HARDWARE_VERSION_STRING: u32 = 0x0008;
+const ATTR_BASIC_SOFTWARE_VERSION: u32 = 0x0009;
+const ATTR_BASIC_SOFTWARE_VERSION_STRING: u32 = 0x000A;
+const ATTR_BASIC_SERIAL_NUMBER: u32 = 0x000F;
+
+// OtaSoftwareUpdateRequestor cluster (0x0029) attribute IDs.
+const ATTR_OTA_UPDATE_POSSIBLE: u32 = 0x0001;
+const ATTR_OTA_UPDATE_STATE: u32 = 0x0002;
+const ATTR_OTA_UPDATE_STATE_PROGRESS: u32 = 0x0003;
 
 fn parse_args() -> Result<Args, String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -69,12 +113,18 @@ fn parse_args() -> Result<Args, String> {
         "power" => Op::Power,
         "energy" => Op::Energy,
         "complete" => Op::Complete,
+        "info" => Op::Info,
+        "ota-status" => Op::OtaStatus,
+        "rapid-cycle" => Op::RapidCycle,
         "-h" | "--help" => return Err(usage()),
         other => return Err(format!("unknown subcommand: {other}\n{}", usage())),
     };
     let mut fabric_label: Option<String> = None;
     let mut node_id: Option<u64> = None;
     let mut endpoint: u16 = 1;
+    let mut cycles: u32 = 5;
+    let mut off_ms: u64 = 600;
+    let mut on_ms: u64 = 600;
     let mut i = 1;
     while i < argv.len() {
         match argv[i].as_str() {
@@ -100,6 +150,21 @@ fn parse_args() -> Result<Args, String> {
                     .parse().map_err(|e| format!("--endpoint: {e}"))?;
                 i += 2;
             }
+            "--cycles" => {
+                cycles = argv.get(i + 1).ok_or("--cycles needs a value")?
+                    .parse().map_err(|e| format!("--cycles: {e}"))?;
+                i += 2;
+            }
+            "--off-ms" => {
+                off_ms = argv.get(i + 1).ok_or("--off-ms needs a value")?
+                    .parse().map_err(|e| format!("--off-ms: {e}"))?;
+                i += 2;
+            }
+            "--on-ms" => {
+                on_ms = argv.get(i + 1).ok_or("--on-ms needs a value")?
+                    .parse().map_err(|e| format!("--on-ms: {e}"))?;
+                i += 2;
+            }
             other => return Err(format!("unknown flag: {other}\n{}", usage())),
         }
     }
@@ -108,12 +173,16 @@ fn parse_args() -> Result<Args, String> {
         fabric_label: fabric_label.ok_or("--fabric-label is required")?,
         node_id: node_id.ok_or("--node-id is required")?,
         endpoint,
+        cycles,
+        off_ms,
+        on_ms,
     })
 }
 
 fn usage() -> String {
-    "usage: matter-op <on|off|toggle|state|power|energy|complete> \
-        --fabric-label LABEL --node-id N [--endpoint EP]".to_string()
+    "usage: matter-op <on|off|toggle|state|power|energy|complete|info|ota-status|rapid-cycle> \
+        --fabric-label LABEL --node-id N [--endpoint EP] \
+        [--cycles N --off-ms MS --on-ms MS  (rapid-cycle only)]".to_string()
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
@@ -164,6 +233,9 @@ async fn main() -> Result<(), String> {
     let op = args.op;
     let endpoint = args.endpoint;
     let node_id = args.node_id;
+    let rapid_cycles = args.cycles;
+    let rapid_off_ms = args.off_ms;
+    let rapid_on_ms = args.on_ms;
 
     // Auto-retry on CASE Sigma1→2 hang. Meross MSS315 over WiFi shows
     // ~1-in-5 timeouts where Sigma1 is acked (MRPStandAloneAck) but no
@@ -389,6 +461,184 @@ async fn main() -> Result<(), String> {
                             println!("energy: no endpoint exposes ElectricalEnergyMeasurement (tried {:?})", candidates);
                         }
                     }
+                    Op::Info => {
+                        // BasicInformation lives on endpoint 0 only.
+                        let _ = endpoint;
+                        async fn read_str(
+                            ex: &mut rs_matter::transport::exchange::Exchange<'_>,
+                            attr: u32,
+                            label: &str,
+                        ) {
+                            match ImClient::read_single_attr(ex, 0, CLUSTER_BASIC_INFO, attr, false).await {
+                                Ok(AttrResp::Data(d)) => match d.data.utf8() {
+                                    Ok(s) => println!("  {label}: {s}"),
+                                    Err(e) => println!("  {label}: <decode error {e:?}>"),
+                                },
+                                Ok(AttrResp::Status(s)) => println!("  {label}: <status {:?}>", s.status.status),
+                                Err(e) => println!("  {label}: <read error {e:?}>"),
+                            }
+                        }
+                        async fn read_u16(
+                            ex: &mut rs_matter::transport::exchange::Exchange<'_>,
+                            attr: u32,
+                            label: &str,
+                        ) {
+                            match ImClient::read_single_attr(ex, 0, CLUSTER_BASIC_INFO, attr, false).await {
+                                Ok(AttrResp::Data(d)) => match d.data.u16() {
+                                    Ok(v) => println!("  {label}: {v} ({v:#06x})"),
+                                    Err(e) => println!("  {label}: <decode error {e:?}>"),
+                                },
+                                Ok(AttrResp::Status(s)) => println!("  {label}: <status {:?}>", s.status.status),
+                                Err(e) => println!("  {label}: <read error {e:?}>"),
+                            }
+                        }
+                        async fn read_u32(
+                            ex: &mut rs_matter::transport::exchange::Exchange<'_>,
+                            attr: u32,
+                            label: &str,
+                        ) {
+                            match ImClient::read_single_attr(ex, 0, CLUSTER_BASIC_INFO, attr, false).await {
+                                Ok(AttrResp::Data(d)) => match d.data.u32() {
+                                    Ok(v) => println!("  {label}: {v} ({v:#010x})"),
+                                    Err(e) => println!("  {label}: <decode error {e:?}>"),
+                                },
+                                Ok(AttrResp::Status(s)) => println!("  {label}: <status {:?}>", s.status.status),
+                                Err(e) => println!("  {label}: <read error {e:?}>"),
+                            }
+                        }
+
+                        println!("device info (BasicInformation cluster, ep 0):");
+                        read_str(ex, ATTR_BASIC_VENDOR_NAME, "VendorName").await;
+                        read_u16(ex, ATTR_BASIC_VENDOR_ID, "VendorID").await;
+                        read_str(ex, ATTR_BASIC_PRODUCT_NAME, "ProductName").await;
+                        read_u16(ex, ATTR_BASIC_PRODUCT_ID, "ProductID").await;
+                        read_u16(ex, ATTR_BASIC_HARDWARE_VERSION, "HardwareVersion").await;
+                        read_str(ex, ATTR_BASIC_HARDWARE_VERSION_STRING, "HardwareVersionString").await;
+                        read_u32(ex, ATTR_BASIC_SOFTWARE_VERSION, "SoftwareVersion").await;
+                        read_str(ex, ATTR_BASIC_SOFTWARE_VERSION_STRING, "SoftwareVersionString").await;
+                        read_str(ex, ATTR_BASIC_SERIAL_NUMBER, "SerialNumber").await;
+                    }
+                    Op::OtaStatus => {
+                        // OtaSoftwareUpdateRequestor lives on endpoint 0.
+                        let _ = endpoint;
+
+                        // UpdatePossible (bool, attr 1)
+                        match ImClient::read_single_attr(ex, 0, CLUSTER_OTA_REQUESTOR, ATTR_OTA_UPDATE_POSSIBLE, false).await {
+                            Ok(AttrResp::Data(d)) => match d.data.bool() {
+                                Ok(b) => println!("UpdatePossible: {b}"),
+                                Err(e) => println!("UpdatePossible: <decode error {e:?}>"),
+                            },
+                            Ok(AttrResp::Status(s)) => {
+                                if matches!(
+                                    s.status.status,
+                                    IMStatusCode::UnsupportedCluster | IMStatusCode::UnsupportedEndpoint
+                                ) {
+                                    println!("OTA cluster not supported by device — vendor uses a proprietary update channel (no Matter OTA).");
+                                    return Ok::<(), MatterFabricError>(());
+                                }
+                                println!("UpdatePossible: <status {:?}>", s.status.status);
+                            }
+                            Err(e) => println!("UpdatePossible: <read error {e:?}>"),
+                        }
+
+                        // UpdateState (enum8, attr 2)
+                        match ImClient::read_single_attr(ex, 0, CLUSTER_OTA_REQUESTOR, ATTR_OTA_UPDATE_STATE, false).await {
+                            Ok(AttrResp::Data(d)) => match d.data.u8() {
+                                Ok(v) => {
+                                    let label = match v {
+                                        0 => "Unknown",
+                                        1 => "Idle",
+                                        2 => "Querying",
+                                        3 => "DelayedOnQuery",
+                                        4 => "Downloading",
+                                        5 => "Applying",
+                                        6 => "DelayedOnApply",
+                                        7 => "RollingBack",
+                                        8 => "DelayedOnUserConsent",
+                                        _ => "?",
+                                    };
+                                    println!("UpdateState: {v} ({label})");
+                                }
+                                Err(e) => println!("UpdateState: <decode error {e:?}>"),
+                            },
+                            Ok(AttrResp::Status(s)) => println!("UpdateState: <status {:?}>", s.status.status),
+                            Err(e) => println!("UpdateState: <read error {e:?}>"),
+                        }
+
+                        // UpdateStateProgress (u8 percent, attr 3, optional)
+                        match ImClient::read_single_attr(ex, 0, CLUSTER_OTA_REQUESTOR, ATTR_OTA_UPDATE_STATE_PROGRESS, false).await {
+                            Ok(AttrResp::Data(d)) => match d.data.u8() {
+                                Ok(v) => println!("UpdateStateProgress: {v}%"),
+                                Err(_) => println!("UpdateStateProgress: <null/unset>"),
+                            },
+                            Ok(AttrResp::Status(s)) => {
+                                if matches!(s.status.status, IMStatusCode::UnsupportedAttribute) {
+                                    println!("UpdateStateProgress: <attr not supported>");
+                                } else {
+                                    println!("UpdateStateProgress: <status {:?}>", s.status.status);
+                                }
+                            }
+                            Err(e) => println!("UpdateStateProgress: <read error {e:?}>"),
+                        }
+                    }
+                    Op::RapidCycle => {
+                        // Drive an AiDot-class smart bulb's reset pattern by
+                        // toggling the upstream plug rapidly over a single
+                        // CASE session. Each invoke_single_cmd reuses the
+                        // same secure session, so the only round-trip cost
+                        // per command is the IM exchange — no fresh CASE.
+                        // Default 5 cycles × 600 ms off / 600 ms on matches
+                        // the AiDot factory-reset window most closely.
+                        let empty_payload: Vec<u8> = vec![0x15, 0x18];
+                        for cycle in 1..=rapid_cycles {
+                            // OFF
+                            let resp = ImClient::invoke_single_cmd(
+                                ex,
+                                endpoint,
+                                CLUSTER_ON_OFF,
+                                CMD_OFF,
+                                TLVElement::new(&empty_payload),
+                                None,
+                            )
+                            .await
+                            .map_err(|e| MatterFabricError::Matter(format!(
+                                "rapid-cycle off ({cycle}/{rapid_cycles}): {e:?}"
+                            )))?;
+                            match resp {
+                                CmdResp::Status(s) if s.status.status != IMStatusCode::Success => {
+                                    println!("✗ cycle {cycle} OFF returned {:?}", s.status);
+                                }
+                                _ => {}
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(rapid_off_ms)).await;
+
+                            // ON
+                            let resp = ImClient::invoke_single_cmd(
+                                ex,
+                                endpoint,
+                                CLUSTER_ON_OFF,
+                                CMD_ON,
+                                TLVElement::new(&empty_payload),
+                                None,
+                            )
+                            .await
+                            .map_err(|e| MatterFabricError::Matter(format!(
+                                "rapid-cycle on ({cycle}/{rapid_cycles}): {e:?}"
+                            )))?;
+                            match resp {
+                                CmdResp::Status(s) if s.status.status != IMStatusCode::Success => {
+                                    println!("✗ cycle {cycle} ON returned {:?}", s.status);
+                                }
+                                _ => {}
+                            }
+                            println!("✓ cycle {cycle}/{rapid_cycles} (off {rapid_off_ms}ms, on {rapid_on_ms}ms)");
+                            // Hold the ON state before next OFF (skip on the
+                            // last cycle — caller wants the device powered on).
+                            if cycle < rapid_cycles {
+                                tokio::time::sleep(std::time::Duration::from_millis(rapid_on_ms)).await;
+                            }
+                        }
+                    }
                 }
                     Ok::<(), MatterFabricError>(())
                 })
@@ -399,8 +649,18 @@ async fn main() -> Result<(), String> {
         match result {
             Ok(()) => { last_err = None; break; }
             Err(syntaur_matter::error::MatterFabricError::Matter(ref msg))
-                if msg.contains("timed out") && attempt < max_attempts =>
+                if (msg.contains("timed out") || msg.contains("Error::Invalid"))
+                    && attempt < max_attempts =>
             {
+                // Retry on:
+                //   - "timed out": pre-9.5.33 Meross Sigma1→2 silent-drop
+                //     bug. Acked Sigma1, never sends Sigma2.
+                //   - "Error::Invalid": post-9.5.33 Meross transient where
+                //     a delayed Sigma3 ack triggers our retransmit, then
+                //     Meross's CASE responder replies with a Status Report
+                //     code 2 (NoSharedTrustRoots). Looks like a session-
+                //     table eviction collision while Meross is also
+                //     handling its cloud session. Recoverable on retry.
                 last_err = Some(format!("CASE op: {msg}"));
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 continue;
