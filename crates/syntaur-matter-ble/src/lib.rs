@@ -12,7 +12,9 @@
 //! factory-fresh device end-to-end over BLE.
 
 pub mod btp;
+pub mod caps;
 pub mod case_udp;
 pub mod scan;
 
+pub use caps::{discover_capabilities, Control, DeviceCapabilities, EndpointCaps, SensorKind};
 pub use scan::{scan_for_discriminator, CommissionableDevice, MATTER_SERVICE_UUID};
