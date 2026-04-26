@@ -162,3 +162,51 @@ pub fn get(conn: &Connection, user_id: i64, id: i64) -> rusqlite::Result<Option<
     )
     .optional()
 }
+
+/// Persist a fresh capability profile for a device. Caller passes the
+/// `DeviceCapabilities` produced by `syntaur_matter_ble::discover_capabilities`
+/// (or any other producer); we serialize as JSON and store it in
+/// `smart_home_devices.capabilities_json`. The Smart Home tile UI and
+/// the agent tool surface read this column to scope what controls are
+/// shown / which tools are offered for the device.
+pub fn set_capabilities(
+    conn: &Connection,
+    user_id: i64,
+    device_id: i64,
+    caps: &syntaur_matter_ble::DeviceCapabilities,
+) -> rusqlite::Result<usize> {
+    let json = serde_json::to_string(caps)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    conn.execute(
+        "UPDATE smart_home_devices
+            SET capabilities_json = ?
+          WHERE user_id = ? AND id = ?",
+        params![json, user_id, device_id],
+    )
+}
+
+/// Retrieve the parsed capability profile for a device, if one has been
+/// discovered. Returns `Ok(None)` if the row is missing or the JSON is
+/// the default `'{}'` placeholder (i.e. discovery hasn't run yet).
+/// Returns `Ok(Some(_))` on a valid persisted profile, `Err` only if
+/// JSON parsing of a non-empty payload fails.
+pub fn get_capabilities(
+    conn: &Connection,
+    user_id: i64,
+    device_id: i64,
+) -> rusqlite::Result<Option<syntaur_matter_ble::DeviceCapabilities>> {
+    let json: Option<String> = conn
+        .query_row(
+            "SELECT capabilities_json FROM smart_home_devices
+              WHERE user_id = ? AND id = ?",
+            params![user_id, device_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match json.as_deref() {
+        None | Some("") | Some("{}") => Ok(None),
+        Some(s) => serde_json::from_str(s)
+            .map(Some)
+            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))),
+    }
+}
