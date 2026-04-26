@@ -35,14 +35,23 @@ enum Op {
     State,
     Power,
     Energy,
+    /// CommissioningComplete on the GeneralCommissioning cluster. Used to
+    /// rescue a device whose commissioning's final CASE handshake timed
+    /// out: AddNOC + AddOrUpdateNetwork + ConnectNetwork have all
+    /// succeeded server-side, but the failsafe is still armed and will
+    /// roll those changes back at expiry. Running this within the
+    /// failsafe window finalizes commissioning.
+    Complete,
 }
 
 const CLUSTER_ON_OFF: u32 = 0x0006;
+const CLUSTER_GENERAL_COMMISSIONING: u32 = 0x0030;
 const CLUSTER_ELEC_POWER: u32 = 0x0090;
 const CLUSTER_ELEC_ENERGY: u32 = 0x0091;
 const CMD_OFF: u32 = 0x00;
 const CMD_ON: u32 = 0x01;
 const CMD_TOGGLE: u32 = 0x02;
+const CMD_COMMISSIONING_COMPLETE: u32 = 0x04;
 const ATTR_ONOFF: u32 = 0x0000;
 const ATTR_ACTIVE_POWER: u32 = 0x0008;
 const ATTR_CUM_ENERGY_IMPORTED: u32 = 0x0001;
@@ -59,6 +68,7 @@ fn parse_args() -> Result<Args, String> {
         "state" => Op::State,
         "power" => Op::Power,
         "energy" => Op::Energy,
+        "complete" => Op::Complete,
         "-h" | "--help" => return Err(usage()),
         other => return Err(format!("unknown subcommand: {other}\n{}", usage())),
     };
@@ -99,7 +109,7 @@ fn parse_args() -> Result<Args, String> {
 }
 
 fn usage() -> String {
-    "usage: matter-op <on|off|toggle|state|power|energy> \
+    "usage: matter-op <on|off|toggle|state|power|energy|complete> \
         --fabric-label LABEL --node-id N [--endpoint EP]".to_string()
 }
 
@@ -171,6 +181,37 @@ async fn main() -> Result<(), String> {
                 use syntaur_matter::error::MatterFabricError;
 
                 match op {
+                    Op::Complete => {
+                        // CommissioningComplete is empty payload per Matter
+                        // Core 11.10.6.6 — same TLV bytes we send during
+                        // BTP-side commissioning's step 8.
+                        let empty_payload: Vec<u8> = vec![0x15, 0x18];
+                        let tlv = TLVElement::new(&empty_payload);
+                        let resp = ImClient::invoke_single_cmd(
+                            ex,
+                            0,
+                            CLUSTER_GENERAL_COMMISSIONING,
+                            CMD_COMMISSIONING_COMPLETE,
+                            tlv,
+                            None,
+                        )
+                        .await
+                        .map_err(|e| MatterFabricError::Matter(format!(
+                            "CommissioningComplete: {e:?}"
+                        )))?;
+                        match resp {
+                            CmdResp::Cmd(_) => {
+                                println!("✓ CommissioningComplete (InvokeResponse) — failsafe disarmed");
+                            }
+                            CmdResp::Status(s) => {
+                                if s.status.status == rs_matter::im::IMStatusCode::Success {
+                                    println!("✓ CommissioningComplete (Success) — failsafe disarmed");
+                                } else {
+                                    println!("✗ CommissioningComplete returned {:?}", s.status);
+                                }
+                            }
+                        }
+                    }
                     Op::On | Op::Off | Op::Toggle => {
                         let (cluster, cmd) = match op {
                             Op::On => (CLUSTER_ON_OFF, CMD_ON),
