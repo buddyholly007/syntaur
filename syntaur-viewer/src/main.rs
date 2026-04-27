@@ -376,6 +376,17 @@ fn is_external_url(url: &str, gateway_origin: &str) -> bool {
 /// page. Returns the empty string if `url` doesn't look like an absolute
 /// http(s) URL, which makes `is_external_url`'s caller treat malformed
 /// inputs as external (the safer side for an intercept).
+/// True if `url` and `trusted` are same-origin (scheme + host + port match).
+/// Used to gate auto-grant of permission-requests in the embedded webview.
+/// Empty/malformed URIs default to false — the WebKit signal can fire
+/// before navigation is committed (uri() returns "") and we don't want a
+/// blank page to inherit the trust that the configured Syntaur URL has.
+fn same_origin(url: &str, trusted: &str) -> bool {
+    let a = extract_origin(url);
+    let b = extract_origin(trusted);
+    !a.is_empty() && a == b
+}
+
 fn extract_origin(url: &str) -> String {
     let scheme_end = match url.find("://") {
         Some(i) => i,
@@ -440,6 +451,34 @@ fn run_viewer(url: &str) -> Result<(), String> {
         webview.set_vexpand(true);
         webview.set_hexpand(true);
         paned.set_start_child(Some(&webview));
+
+        // Permission-request handler. WebKitGTK 6's default behaviour
+        // for an UNHANDLED permission-request is to DENY. That breaks
+        // any Syntaur feature that needs getUserMedia (chat mic, voice
+        // journal), Notifications, or Geolocation — Sean reported a
+        // bare `NotAllowedError: request is not allowed by the user
+        // agent or the platform` from the chat-mic button after we
+        // moved the gateway behind tailnet HTTPS, even though the
+        // origin was now a secure context. The fix is to handle the
+        // signal explicitly: auto-allow on our own origin (the viewer
+        // is purpose-built for Syntaur — same-origin permissions are
+        // by definition trusted), default-deny everything else so the
+        // companion panel for external links keeps the safe default.
+        {
+            // PermissionRequestExt + connect_permission_request are
+            // re-exported via webkit6::prelude::*, already in scope.
+            let trusted_origin = url_owned.clone();
+            webview.connect_permission_request(move |wv, req| {
+                let page_uri = wv.uri().map(|s| s.to_string()).unwrap_or_default();
+                let same_origin = same_origin(&page_uri, &trusted_origin);
+                if same_origin {
+                    req.allow();
+                } else {
+                    req.deny();
+                }
+                true
+            });
+        }
 
         // Right: companion panel (starts hidden)
         let companion_box = GtkBox::new(Orientation::Vertical, 0);
