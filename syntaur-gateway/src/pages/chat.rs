@@ -1475,9 +1475,25 @@ function handleVmAudio(e) {
 async function handleVmTranscript(e) {
   try {
     const msg = JSON.parse(e.data);
-    if (msg.type !== 'transcript' || !msg.text) return;
-    const text = msg.text.trim();
-    if (!text) { setVmState('listening'); return; }
+    // Server may also emit {type:'error',message:'...'} when STT fails or
+    // when no speech was captured. Both should drop us back to listening
+    // instead of leaving the overlay stuck on "Thinking..." until the 30s
+    // idle timer hides it (the "I speak and the circle disappears" bug).
+    if (msg.type === 'error') {
+      if (vmActive) {
+        document.getElementById('vm-transcript').textContent =
+          '(no speech captured — try a different mic from the dropdown)';
+        setVmState('listening');
+        resetVmIdle();
+      }
+      return;
+    }
+    if (msg.type !== 'transcript') return;
+    const text = (msg.text || '').trim();
+    if (!text) {
+      if (vmActive) { setVmState('listening'); resetVmIdle(); }
+      return;
+    }
 
     // Echo filter
     const lower = text.toLowerCase().replace(/[^a-z ]/g, '').trim();
