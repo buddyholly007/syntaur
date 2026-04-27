@@ -841,6 +841,246 @@ const SMART_HOME_JS: &str = r#"
   }
   loadRooms();
 
+  // ── climate ring (Nexia today; multi-driver later) ─
+  // The arc covers 270° (gap at bottom). At local 0° (which the
+  // wrapping `transform: rotate(-90deg)` maps to 12 o'clock visually,
+  // i.e. straight up), the knob sits at the top. The track is rotated
+  // by 45° so the gap centers on the bottom — meaning the visible arc
+  // starts at 7:30 (135° on the clock face) and wraps clockwise to
+  // 4:30 (-135° / 225°). We map the user's setpoint range linearly
+  // onto that arc.
+  const RING = {
+    minF: 50, maxF: 90,            // visible setpoint range, °F
+    arcDeg: 270,                   // sweep
+    arcStartCwFromTop: 135,        // visible start (clockwise from 12 o'clock)
+    radius: 88,
+    cx: 100, cy: 100,
+    circumference: 2 * Math.PI * 88,
+    state: {
+      zone: null,
+      mode: 'OFF',
+      heat: null, cool: null,
+      currentSetpoint: null,
+      currentTemp: null,
+      scale: 'F',
+      pollTimer: null,
+      pendingSet: null,
+    },
+  };
+
+  function setpointToFraction(sp) {
+    const f = (sp - RING.minF) / (RING.maxF - RING.minF);
+    return Math.max(0, Math.min(1, f));
+  }
+  function fractionToAngleCw(f) {
+    // 0 → 135° clockwise from top. 1 → 135° + 270° = 405° (≡ 45°).
+    return RING.arcStartCwFromTop + f * RING.arcDeg;
+  }
+  // Knob position in the SVG's local frame. The SVG itself is wrapped
+  // in `transform: rotate(-90deg)`, so to put the knob at clock-face
+  // angle θ we map (cx + r·cos(θ-90°), cy + r·sin(θ-90°)).
+  function knobXY(angleCwFromTop) {
+    const rad = ((angleCwFromTop - 90) * Math.PI) / 180;
+    return {
+      x: RING.cx + RING.radius * Math.cos(rad),
+      y: RING.cy + RING.radius * Math.sin(rad),
+    };
+  }
+
+  function renderRing() {
+    const fill = $('sh-ring-fill');
+    const knob = $('sh-ring-knob');
+    const setpointEl = $('sh-ring-setpoint');
+    const currentEl = $('sh-ring-current');
+    if (!fill || !knob || !setpointEl || !currentEl) return;
+
+    const sp = RING.state.currentSetpoint;
+    if (sp == null) {
+      setpointEl.innerHTML = '—<span class="sh-ring-deg">°</span>';
+      currentEl.textContent = '—°';
+      fill.setAttribute('stroke-dasharray', '0 ' + RING.circumference.toFixed(2));
+      const top = knobXY(RING.arcStartCwFromTop);
+      knob.setAttribute('cx', top.x.toFixed(2));
+      knob.setAttribute('cy', top.y.toFixed(2));
+      return;
+    }
+    const frac = setpointToFraction(sp);
+    const dashLen = (RING.circumference * RING.arcDeg / 360) * frac;
+    fill.setAttribute(
+      'stroke-dasharray',
+      dashLen.toFixed(2) + ' ' + RING.circumference.toFixed(2)
+    );
+    const angle = fractionToAngleCw(frac);
+    const xy = knobXY(angle);
+    knob.setAttribute('cx', xy.x.toFixed(2));
+    knob.setAttribute('cy', xy.y.toFixed(2));
+    setpointEl.innerHTML =
+      Math.round(sp) + '<span class="sh-ring-deg">°</span>';
+    if (RING.state.currentTemp != null) {
+      currentEl.textContent = Math.round(RING.state.currentTemp) + '°';
+    }
+  }
+
+  function updateModePill() {
+    const pill = $('sh-climate-mode');
+    if (!pill) return;
+    const m = (RING.state.mode || '').toUpperCase();
+    let label = 'Off', color = 'var(--sh-text-faint)';
+    if (m === 'COOL') { label = 'Cooling'; color = 'var(--sh-accent-cool)'; }
+    else if (m === 'HEAT') { label = 'Heating'; color = 'var(--sh-accent-warm)'; }
+    else if (m === 'AUTO') { label = 'Auto'; color = 'var(--sh-accent-cyan)'; }
+    pill.innerHTML = '<span class="sh-dot"></span>' + label;
+    pill.style.color = color;
+    pill.style.borderColor = 'rgba(98, 168, 255, 0.22)';
+    document.querySelectorAll('.sh-ctrl-btn').forEach((b) => {
+      b.classList.toggle('sh-active', (b.dataset.mode || '').toUpperCase() === m);
+    });
+  }
+
+  async function loadClimate() {
+    try {
+      const data = await shFetch('/api/smart-home/nexia/thermostats');
+      const list = (data && data.thermostats) || [];
+      if (!list.length) return;
+      const t = list[0];
+      const z = t.zone || {};
+      RING.state.zone = z.id || null;
+      RING.state.mode = (t.mode || 'OFF').toUpperCase();
+      RING.state.heat = z.heat_setpoint;
+      RING.state.cool = z.cool_setpoint;
+      RING.state.currentTemp = z.temperature;
+      RING.state.scale = z.scale || 'F';
+      // Pick which setpoint to track on the ring based on mode.
+      // AUTO shows cool (the Nexia UX convention is to drag cool then
+      // auto-shift heat — out of scope for v1; a long-press toggle
+      // between heat/cool is the v1.1 plan).
+      RING.state.currentSetpoint =
+        RING.state.mode === 'HEAT' ? z.heat_setpoint : z.cool_setpoint;
+      // Outdoor temp + humidity bubble up if Nexia returns them.
+      const out = $('sh-env-outdoor');
+      const hum = $('sh-env-humidity');
+      if (out && t.outdoor_temperature != null) out.textContent = Math.round(t.outdoor_temperature) + '°';
+      if (hum && t.indoor_humidity != null) hum.textContent = Math.round(t.indoor_humidity) + '%';
+      renderRing();
+      updateModePill();
+    } catch (e) {
+      // 424 = no creds yet. Quietly leave the ring in placeholder state.
+      console.info('[smart-home] climate load skipped:', e.message || e);
+    }
+  }
+
+  // Poll every 30s for current temp drift. Drag-set updates fire
+  // their own optimistic render so the user doesn't wait on the loop.
+  function startClimatePoll() {
+    if (RING.state.pollTimer) clearInterval(RING.state.pollTimer);
+    RING.state.pollTimer = setInterval(loadClimate, 30000);
+  }
+  loadClimate().then(startClimatePoll);
+
+  // Drag handler.
+  function pointerToSetpoint(ev, ringSvg) {
+    const rect = ringSvg.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const dx = ev.clientX - cx;
+    const dy = ev.clientY - cy;
+    // atan2: 0 = 3 o'clock, π/2 = 6 o'clock. Convert to clockwise-from-top.
+    let deg = (Math.atan2(dy, dx) * 180) / Math.PI + 90;
+    if (deg < 0) deg += 360;
+    // Map the visible arc (135°..405°) to fraction 0..1.
+    const start = RING.arcStartCwFromTop;
+    const end = start + RING.arcDeg;
+    let f;
+    if (deg >= start && deg <= end) {
+      f = (deg - start) / RING.arcDeg;
+    } else if (deg < start) {
+      f = (deg + 360 - start) / RING.arcDeg;
+      if (f > 1) {
+        // Inside the bottom gap — clamp to nearer end.
+        f = (deg + 180) / 180 < 1 ? 0 : 1;
+      }
+    } else {
+      f = 1;
+    }
+    f = Math.max(0, Math.min(1, f));
+    const sp = RING.minF + f * (RING.maxF - RING.minF);
+    return Math.round(sp);
+  }
+
+  function bindRingDrag() {
+    const knob = $('sh-ring-knob');
+    const wrap = document.querySelector('.sh-ring-wrap svg');
+    if (!knob || !wrap) return;
+    let dragging = false;
+    function onMove(ev) {
+      if (!dragging) return;
+      const sp = pointerToSetpoint(ev, wrap);
+      RING.state.currentSetpoint = sp;
+      renderRing();
+      // Debounced POST.
+      if (RING.state.pendingSet) clearTimeout(RING.state.pendingSet);
+      RING.state.pendingSet = setTimeout(() => commitSetpoint(sp), 400);
+    }
+    function onUp() {
+      if (!dragging) return;
+      dragging = false;
+      knob.classList.remove('sh-dragging');
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    }
+    knob.addEventListener('pointerdown', (ev) => {
+      ev.preventDefault();
+      if (RING.state.zone == null) {
+        console.info('[smart-home] climate: no thermostat configured');
+        return;
+      }
+      dragging = true;
+      knob.classList.add('sh-dragging');
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+    });
+  }
+  bindRingDrag();
+
+  async function commitSetpoint(sp) {
+    if (RING.state.zone == null) return;
+    const body = { zone_id: RING.state.zone };
+    if (RING.state.mode === 'HEAT') body.heat = sp;
+    else body.cool = sp;
+    try {
+      await shFetch('/api/smart-home/nexia/setpoint', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch (e) {
+      console.warn('[smart-home] setpoint POST failed:', e.message || e);
+    }
+  }
+
+  // Mode buttons.
+  document.querySelectorAll('.sh-ctrl-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const mode = (btn.dataset.mode || '').toUpperCase();
+      if (!mode || RING.state.zone == null) return;
+      RING.state.mode = mode;
+      updateModePill();
+      // Re-pick which setpoint the ring drives now.
+      RING.state.currentSetpoint =
+        mode === 'HEAT' ? RING.state.heat : RING.state.cool;
+      renderRing();
+      try {
+        await shFetch('/api/smart-home/nexia/mode', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ zone_id: RING.state.zone, mode }),
+        });
+      } catch (e) {
+        console.warn('[smart-home] mode POST failed:', e.message || e);
+      }
+    });
+  });
+
   // ── drawer (placeholder bodies for tiles) ──────────
   const DRAWER_BODIES = {
     lights:    'Lights drawer lands in Phase 2F. It will show every room × every bulb with capability-aware controls.',
