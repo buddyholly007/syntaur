@@ -437,6 +437,53 @@ pub fn day_for_user(
     Ok(DayPayload { date, hourly, leaderboard })
 }
 
+/// Currently active $/kWh rate for a user, if one is configured.
+/// Returns the cost_per_kwh for the rate row whose [starts_at, ends_at) covers "now".
+/// Powers Settings -> Smart Home -> Energy (Phase 2J).
+pub fn current_rate_for_user(
+    conn: &Connection,
+    user_id: i64,
+) -> rusqlite::Result<Option<f64>> {
+    let now = chrono::Utc::now().timestamp();
+    let row: rusqlite::Result<f64> = conn.query_row(
+        "SELECT cost_per_kwh FROM smart_home_energy_rates
+          WHERE user_id = ? AND starts_at <= ? AND (ends_at IS NULL OR ends_at > ?)
+          ORDER BY starts_at DESC LIMIT 1",
+        rusqlite::params![user_id, now, now],
+        |r| r.get(0),
+    );
+    match row {
+        Ok(v) => Ok(Some(v)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Set the user's flat $/kWh rate. Closes any open rate (ends_at = now)
+/// and inserts a new active rate. Pass  to clear (just close current
+/// without inserting a new one).
+pub fn set_rate_for_user(
+    conn: &Connection,
+    user_id: i64,
+    cost_per_kwh: Option<f64>,
+) -> rusqlite::Result<()> {
+    let now = chrono::Utc::now().timestamp();
+    conn.execute(
+        "UPDATE smart_home_energy_rates SET ends_at = ?
+          WHERE user_id = ? AND ends_at IS NULL",
+        rusqlite::params![now, user_id],
+    )?;
+    if let Some(cost) = cost_per_kwh {
+        conn.execute(
+            "INSERT INTO smart_home_energy_rates
+                (user_id, starts_at, ends_at, cost_per_kwh, carbon_g_per_kwh)
+             VALUES (?, ?, NULL, ?, NULL)",
+            rusqlite::params![user_id, now, cost],
+        )?;
+    }
+    Ok(())
+}
+
 /// Today's roll-up for a user. If cumulative readings exist, uses the
 /// max−min per device; otherwise integrates watts×Δt (trapezoidal).
 pub fn summary_for_user(conn: &Connection, user_id: i64) -> rusqlite::Result<EnergySummary> {

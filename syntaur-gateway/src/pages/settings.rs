@@ -250,6 +250,11 @@ fn content_area() -> Markup {
         (page_wrap("advanced", "about", "About Syntaur",
             "Version, uptime, tool count, and credits.",
             about_body()))
+
+        // ── SMART HOME ─────────────────────────────────────
+        (page_wrap("smart_home", "energy", "Energy rate",
+            "Optional cost-per-kWh to convert kilowatt-hours into dollars on the smart-home dashboard.",
+            smart_home_energy_body()))
     }
 }
 
@@ -1083,6 +1088,125 @@ const APPEARANCE_SCRIPT: &str = r##"
 "##;
 
 // ── Privacy & data ─────────────────────────────────────────
+// === Smart Home -> Energy ===
+fn smart_home_energy_body() -> Markup {
+    html! {
+        div class="ss-card" {
+            div class="ss-card-head" {
+                h3 class="ss-card-title" { "Cost per kilowatt-hour" }
+            }
+            p class="ss-help" {
+                "By default the Smart Home dashboard shows energy use in kWh. Enter your utility rate "
+                "to also see the cost in dollars on summary tiles and the Energy drawer."
+            }
+
+            div class="ss-field" {
+                label class="ss-label" for="sh-rate-input" { "Rate (USD per kWh)" }
+                div style="display: flex; align-items: center; gap: 8px;" {
+                    span style="font-size: 14px; color: var(--ss-ink-mute);" { "$" }
+                    input type="number"
+                          id="sh-rate-input"
+                          class="ss-input"
+                          step="0.001"
+                          min="0"
+                          max="100"
+                          placeholder="0.150"
+                          style="max-width: 140px;";
+                    span style="font-size: 13px; color: var(--ss-ink-mute);" { "per kWh" }
+                }
+                p class="ss-help" { "Leave blank to show kWh only. Typical US residential rates are $0.10â€“$0.40/kWh." }
+            }
+
+            div class="ss-field" {
+                div style="display: flex; gap: 8px; align-items: center;" {
+                    button type="button" id="sh-rate-save" class="ss-btn ss-btn-primary" { "Save rate" }
+                    button type="button" id="sh-rate-clear" class="ss-btn" { "Clear" }
+                    span id="sh-rate-status" style="font-size: 13px; color: var(--ss-ink-mute);" {}
+                }
+            }
+        }
+
+        div class="ss-card" {
+            div class="ss-card-head" {
+                h3 class="ss-card-title" { "Tiered Â· Time-of-use Â· Solar (coming later)" }
+                span class="ss-pill" style="background: var(--ss-panel-2); color: var(--ss-ink-mute);" { "Planned" }
+            }
+            p class="ss-help" {
+                "Multi-tier rates, peak/off-peak windows, NEM credits, and per-circuit metering are not in v1. "
+                "Today the dashboard treats your one rate as flat across the whole day."
+            }
+        }
+
+        script {
+            (PreEscaped(r#"
+(function() {
+  const input  = document.getElementById('sh-rate-input');
+  const save   = document.getElementById('sh-rate-save');
+  const clear  = document.getElementById('sh-rate-clear');
+  const status = document.getElementById('sh-rate-status');
+  if (!input || !save || !clear || !status) return;
+
+  function setStatus(text, kind) {
+    status.textContent = text;
+    status.style.color = kind === 'ok' ? '#71e8a3' : (kind === 'err' ? '#ff8a8a' : 'var(--ss-ink-mute)');
+  }
+
+  async function load() {
+    try {
+      const r = await fetch('/api/smart-home/energy/rate', { credentials: 'same-origin' });
+      if (!r.ok) throw new Error('fetch failed');
+      const data = await r.json();
+      input.value = (data.rate == null) ? '' : Number(data.rate).toFixed(3);
+      setStatus(data.rate == null ? 'No rate set â€” dashboard shows kWh only.' : 'Active.', '');
+    } catch (e) {
+      setStatus('Could not load rate.', 'err');
+    }
+  }
+
+  async function commit(rate) {
+    setStatus('Savingâ€¦', '');
+    try {
+      const r = await fetch('/api/smart-home/energy/rate', {
+        method: 'PUT',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ rate: rate })
+      });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        setStatus(body.error || 'Save failed.', 'err');
+        return false;
+      }
+      setStatus(rate == null ? 'Cleared.' : 'Saved.', 'ok');
+      return true;
+    } catch (e) {
+      setStatus('Save failed.', 'err');
+      return false;
+    }
+  }
+
+  save.addEventListener('click', async () => {
+    const raw = input.value.trim();
+    if (raw === '') { await commit(null); return; }
+    const v = Number(raw);
+    if (!isFinite(v) || v < 0 || v > 100) {
+      setStatus('Enter a number between 0 and 100.', 'err');
+      return;
+    }
+    if (await commit(v)) input.value = v.toFixed(3);
+  });
+
+  clear.addEventListener('click', async () => {
+    if (await commit(null)) input.value = '';
+  });
+
+  load();
+})();
+"#))
+        }
+    }
+}
+
 fn privacy_data_body() -> Markup {
     html! {
         div class="ss-card" {
@@ -1320,7 +1444,10 @@ const SECTIONS: &[SectionDef] = &[
     SectionDef { slug: "privacy", title: "Privacy & data", pages: &[
         PageDef { slug: "data", title: "What Syntaur stores", badge: None, scope: "per-user", keywords: "privacy data retention telemetry logging export import", description: "What's stored, where, for how long" },
     ]},
-    SectionDef { slug: "system", title: "System", pages: &[
+    SectionDef { slug: "smart_home", title: "Smart Home", pages: &[
+        PageDef { slug: "energy", title: "Energy", badge: None, scope: "per-user", keywords: "energy electricity rate cost kwh tariff utility tou solar carbon", description: "Set your $/kWh rate so the smart-home dashboard can show cost alongside kWh" },
+    ]},
+        SectionDef { slug: "system", title: "System", pages: &[
         PageDef { slug: "gateway", title: "Gateway & ports", badge: None, scope: "admin", keywords: "gateway port bind network restart system config", description: "Gateway network + runtime settings" },
         PageDef { slug: "danger", title: "Danger zone", badge: None, scope: "admin", keywords: "reset wipe factory delete danger", description: "Destructive actions" },
     ]},

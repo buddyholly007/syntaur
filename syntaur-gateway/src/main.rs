@@ -7027,6 +7027,11 @@ async fn main() {
             post(smart_home::api::handle_energy_ingest),
         )
         .route(
+            "/api/smart-home/energy/rate",
+            get(smart_home::api::handle_energy_rate_get)
+                .put(smart_home::api::handle_energy_rate_put),
+        )
+        .route(
             "/api/smart-home/scenes",
             get(smart_home::api::handle_list_scenes)
                 .post(smart_home::api::handle_create_scene),

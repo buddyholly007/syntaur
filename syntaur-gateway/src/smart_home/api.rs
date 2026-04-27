@@ -1548,6 +1548,57 @@ fn parse_year_month_day(s: Option<&str>) -> Option<(i32, u32, u32)> {
     }
 }
 
+/// GET /api/smart-home/energy/rate — current active $/kWh rate.
+/// Returns { rate: Option<f64> }. Powers Settings -> Smart Home -> Energy (Phase 2J).
+pub async fn handle_energy_rate_get(
+    State(state): State<std::sync::Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let user_id = current_user_id(&state);
+    let db = state.db_path.clone();
+    let rate = tokio::task::spawn_blocking(move || -> rusqlite::Result<Option<f64>> {
+        let conn = rusqlite::Connection::open(&db)?;
+        energy::current_rate_for_user(&conn, user_id)
+    })
+    .await
+    .map_err(|e| err_500(format!("join error: {e}")))?
+    .map_err(|e| err_500(format!("db error: {e}")))?;
+    Ok(Json(json!({ "rate": rate })))
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct EnergyRateBody {
+    /// Cost per kWh in dollars. Pass null or omit to clear.
+    pub rate: Option<f64>,
+}
+
+/// PUT /api/smart-home/energy/rate — set or clear the active $/kWh rate.
+/// Body: { rate: f64? }. Closes any open rate row, inserts a new active row
+/// when  is provided.
+pub async fn handle_energy_rate_put(
+    State(state): State<std::sync::Arc<AppState>>,
+    Json(body): Json<EnergyRateBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if let Some(r) = body.rate {
+        if !r.is_finite() || r < 0.0 || r > 100.0 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "rate must be between 0 and 100 USD/kWh" })),
+            ));
+        }
+    }
+    let user_id = current_user_id(&state);
+    let db = state.db_path.clone();
+    let rate = body.rate;
+    tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
+        let conn = rusqlite::Connection::open(&db)?;
+        energy::set_rate_for_user(&conn, user_id, rate)
+    })
+    .await
+    .map_err(|e| err_500(format!("join error: {e}")))?
+    .map_err(|e| err_500(format!("db error: {e}")))?;
+    Ok(Json(json!({ "rate": rate })))
+}
+
 /// POST /api/smart-home/energy/ingest — force an immediate ingest pass.
 /// Useful for the "Refresh" button on the energy dashboard.
 pub async fn handle_energy_ingest(
