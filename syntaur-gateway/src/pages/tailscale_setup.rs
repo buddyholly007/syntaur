@@ -28,8 +28,27 @@ pub async fn render() -> Html<String> {
                 div class="max-w-2xl mx-auto px-4 py-12" {
                     div class="mb-10" {
                         h1 class="text-2xl font-semibold mb-2" { "Connect Syntaur to your Tailscale network" }
-                        p class="text-gray-400 text-sm leading-relaxed" {
-                            "One paste gives your Syntaur a trusted HTTPS URL you can open from any device on your Tailscale network — including your phone on cellular. No port forwarding, no cert warnings, no red padlocks."
+                        p class="text-gray-400 text-sm leading-relaxed mb-3" {
+                            "One paste gives your Syntaur a trusted HTTPS URL on a private network only you control — no port forwarding, no cert warnings, no public exposure of a server full of personal data."
+                        }
+                        div class="p-4 rounded-lg border border-amber-600/40 bg-amber-900/10 text-sm text-amber-100/90 leading-relaxed" {
+                            p class="font-medium text-amber-200 mb-1" { "Every device that uses Syntaur joins the same Tailscale network — even on home Wi-Fi." }
+                            p class="text-amber-100/80" {
+                                "Browsers refuse to share the microphone, camera, or location with any page that isn't on a secure HTTPS origin. That isn't a Syntaur policy — it's how Chrome, Safari, and Firefox enforce user safety. Syntaur does not run a public HTTPS endpoint on purpose, so the only way the chat-mic, voice journal, smart-home camera tiles, and pendant pairing work is to reach Syntaur over its tailnet HTTPS URL. Install Tailscale on every laptop, phone, or kiosk you'll use Syntaur from — yes, including the ones sitting next to the server."
+                            }
+                            p class="mt-2 text-xs text-amber-300/70" {
+                                "Tailscale clients: "
+                                a class="underline" href="https://tailscale.com/download/windows" target="_blank" { "Windows" }
+                                " · "
+                                a class="underline" href="https://tailscale.com/download/macos" target="_blank" { "macOS" }
+                                " · "
+                                a class="underline" href="https://tailscale.com/download/linux" target="_blank" { "Linux" }
+                                " · "
+                                a class="underline" href="https://tailscale.com/download/ios" target="_blank" { "iOS" }
+                                " · "
+                                a class="underline" href="https://tailscale.com/download/android" target="_blank" { "Android" }
+                                ". Sign each one into the same Tailscale account you'll use below."
+                            }
                         }
                     }
 
@@ -136,6 +155,11 @@ function renderStatus(s) {
     ? '<a class="text-emerald-400 underline break-all" href="' + s.tailnet_url + '" target="_blank">' + s.tailnet_url + '</a>'
     : '<span class="text-gray-500">(URL appears once the sidecar finishes registering)</span>';
   let html = status + ' via ' + mode + '<br><span class="text-xs text-gray-500">Access at: </span>' + url;
+  if (s.connected && s.tailnet_url) {
+    html += '<div class="mt-2 text-xs text-gray-500">'
+         +    'Open this URL on every device you want to use Syntaur from — your laptop, your phone, the kitchen tablet, anything. Each device must have Tailscale installed and signed into the same account, even on home Wi-Fi.'
+         + '</div>';
+  }
 
   // Phase 4.1 polish: if the sidecar reported a one-click-fix error, show
   // the action URL as a prominent button the user can click to finish
