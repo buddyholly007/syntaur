@@ -1118,6 +1118,43 @@ pub struct SceneCreateBody {
     pub room_id: Option<i64>,
 }
 
+// Phase 2H: pre-seed the four default scenes (Good Morning / Away / Movie
+// Mode / Night) for a user on first /api/smart-home/scenes call. Idempotent
+// — a scene already matching a default name is left alone so the user can
+// edit its actions/icon without us clobbering. actions_json starts as an
+// empty list; the user wires real device actions via the scene editor.
+const DEFAULT_SCENES: &[(&str, &str)] = &[
+    ("Good Morning", "\u{2600}"),
+    ("Away",         "\u{2302}"),
+    ("Movie Mode",   "\u{25B7}"),
+    ("Night",        "\u{263E}"),
+];
+
+fn seed_default_scenes_if_missing(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+) -> rusqlite::Result<()> {
+    let now = chrono::Utc::now().timestamp();
+    for (name, icon) in DEFAULT_SCENES {
+        let exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM smart_home_scenes WHERE user_id = ? AND name = ? LIMIT 1",
+                rusqlite::params![user_id, name],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        if !exists {
+            conn.execute(
+                "INSERT INTO smart_home_scenes
+                    (user_id, name, icon, actions_json, room_id, created_at)
+                 VALUES (?, ?, ?, '[]', NULL, ?)",
+                rusqlite::params![user_id, name, icon, now],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 pub async fn handle_list_scenes(
     State(state): State<std::sync::Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
@@ -1125,6 +1162,9 @@ pub async fn handle_list_scenes(
     let db = state.db_path.clone();
     let scenes = tokio::task::spawn_blocking(move || -> rusqlite::Result<serde_json::Value> {
         let conn = rusqlite::Connection::open(&db)?;
+        if let Err(e) = seed_default_scenes_if_missing(&conn, user_id) {
+            log::warn!("[smart-home] failed to seed default scenes for user {user_id}: {e:?}");
+        }
         let mut stmt = conn.prepare(
             "SELECT id, name, icon, actions_json, room_id, created_at
                FROM smart_home_scenes
