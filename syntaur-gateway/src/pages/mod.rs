@@ -32,7 +32,6 @@ pub mod history;
 pub mod journal;
 pub mod knowledge;
 pub mod landing;
-pub mod library;
 pub mod modules;
 pub mod music;
 pub mod research;

@@ -137,7 +137,7 @@ body.bg-gray-950 { overflow: hidden; }
 .crt-bezel { background-color: transparent; }
 
 /* Main layout sits above the rain, below the overlays, inside the bezel */
-.workshop-root { position: relative; z-index: 5; padding: 32px 38px 62px 38px; box-sizing: border-box; height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
+.workshop-root { position: relative; z-index: 5; padding: 32px 38px 62px 38px; box-sizing: border-box; height: 100%; min-height: calc(100vh - 48px); overflow: hidden; display: flex; flex-direction: column; }
 .workshop-root .workshop-body { flex: 1; display: flex; min-height: 0; overflow: hidden; }
 
 /* ======== Top bar override — phosphor/rust treatment ======== */

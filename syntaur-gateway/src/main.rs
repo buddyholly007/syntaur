@@ -6930,7 +6930,6 @@ async fn main() {
         .route("/setup/tailscale", get(pages::tailscale_setup::render))
         .route("/modules", get(pages::modules::render))
         .route("/journal", get(pages::journal::render))
-        .route("/library", get(pages::library::render))
         .route("/music", get(pages::music::render))
         .route("/voice-setup", get(pages::voice_setup::render))
         .route("/settings", get(pages::settings::render))

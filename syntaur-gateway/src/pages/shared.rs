@@ -583,7 +583,6 @@ const TOP_BAR_SCRIPT: &str = r##"
     { path: '/knowledge',  name: 'Knowledge', sub: 'Cortex' },
     { path: '/music',      name: 'Music',     sub: 'Silvr' },
     { path: '/journal',    name: 'Journal',   sub: 'Mushi' },
-    { path: '/library',    name: 'Library',   sub: 'Maxine' },
     { path: '/social',     name: 'Social',    sub: 'Nyota' },
     { path: '/dashboard',  name: 'Dashboard', sub: 'Overview' },
     { path: '/settings',   name: 'Settings',  sub: null },

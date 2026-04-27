@@ -484,7 +484,12 @@ body { background: var(--sch-bg); color: var(--sch-ink); font-family: var(--sch-
 .sch-subbar {
   border-bottom: 1px solid var(--sch-border);
   background: color-mix(in srgb, var(--sch-paper) 80%, transparent);
-  position: sticky; top: 48px; z-index: 30;
+  /* SPA shell refactor (5911aff) lifted .syntaur-topbar OUT of the
+     scroll container and made #syntaur-app-content the scroller, so
+     sticky offsets in this module are now relative to main, not body.
+     Was top:48 (top-bar height) — that left a 48px hole above the
+     subbar inside main. */
+  position: sticky; top: 0; z-index: 30;
 }
 .sch-subbar-inner {
   max-width: 1800px; margin: 0 auto; padding: 8px 16px;
@@ -519,7 +524,11 @@ body { background: var(--sch-bg); color: var(--sch-ink); font-family: var(--sch-
   gap: 0;
   max-width: 1800px;
   margin: 0 auto;
-  min-height: calc(100vh - 160px);
+  /* Scroll container is now #syntaur-app-content (height 100vh - 48px
+     after the shell refactor); the shell only needs to fill what's
+     left after subbar (~48px) and timeline (~36px). Was -160px which
+     overflowed and pushed the timeline off-screen. */
+  min-height: calc(100vh - 48px - 48px - 36px);
 }
 .sch-left  { border-right: 1px solid var(--sch-border); background: var(--sch-paper); padding: 14px; overflow-y: auto; }
 .sch-main  { background: var(--sch-bg); padding: 14px 18px; }
@@ -681,7 +690,10 @@ body { background: var(--sch-bg); color: var(--sch-ink); font-family: var(--sch-
 .sch-week-head {
   display: grid; grid-template-columns: 56px repeat(7, 1fr);
   border-bottom: 1px solid var(--sch-border);
-  position: sticky; top: 96px; z-index: 10; background: var(--sch-bg);
+  /* Sticky relative to #syntaur-app-content; subbar is now at top:0,
+     so the day-of-week strip stacks at subbar's bottom edge. Was
+     top:96 (top-bar 48 + subbar 48) which left a gap below subbar. */
+  position: sticky; top: 48px; z-index: 10; background: var(--sch-bg);
 }
 .sch-week-dow { padding: 8px 10px; border-right: 1px solid var(--sch-border); }
 .sch-week-dow:last-child { border-right: none; }

@@ -39,6 +39,11 @@ pub fn chat_card_flip(agent_id: &str, front: Markup, _back: Markup) -> Markup {
 /// The cog button itself — same markup whether emitted server-side or
 /// JS-injected onto a side panel. Click is delegated globally; the
 /// data-agent attribute identifies which agent's settings to load.
+///
+/// Sean's directive (2026-04-26): no "Settings" label, small icon
+/// only, theme-matching. Style inherits via `currentColor` so a
+/// scheduler-sage cog stays sage and a coders-phosphor cog stays
+/// phosphor without per-module CSS.
 pub fn cog_button(agent_id: &str) -> Markup {
     html! {
         button
@@ -50,12 +55,11 @@ pub fn cog_button(agent_id: &str) -> Markup {
             title="Agent settings"
         {
             svg
-                width="18" height="18" viewBox="0 0 24 24"
+                width="14" height="14" viewBox="0 0 24 24"
                 fill="currentColor"
             {
                 path d="M19.43 12.98c.04-.32.07-.64.07-.98s-.03-.66-.07-.98l2.11-1.65c.19-.15.24-.42.12-.64l-2-3.46c-.12-.22-.39-.3-.61-.22l-2.49 1c-.52-.4-1.08-.73-1.69-.98l-.38-2.65C14.46 2.18 14.25 2 14 2h-4c-.25 0-.46.18-.49.42l-.38 2.65c-.61.25-1.17.59-1.69.98l-2.49-1c-.23-.09-.49 0-.61.22l-2 3.46c-.13.22-.07.49.12.64l2.11 1.65c-.04.32-.07.65-.07.98s.03.66.07.98l-2.11 1.65c-.19.15-.24.42-.12.64l2 3.46c.12.22.39.3.61.22l2.49-1c.52.4 1.08.73 1.69.98l.38 2.65c.03.24.24.42.49.42h4c.25 0 .46-.18.49-.42l.38-2.65c.61-.25 1.17-.59 1.69-.98l2.49 1c.23.09.49 0 .61-.22l2-3.46c.12-.22.07-.49-.12-.64l-2.11-1.65zM12 15.5c-1.93 0-3.5-1.57-3.5-3.5s1.57-3.5 3.5-3.5 3.5 1.57 3.5 3.5-1.57 3.5-3.5 3.5z" {}
             }
-            span class="cf-cog-label" { "Settings" }
         }
     }
 }
@@ -756,43 +760,41 @@ const STYLES: &str = r#"
   .syntaur-agent-overlay .sao-scrim { transition: none; }
 }
 
+/* Small, theme-matching gear that lives next to the agent name in each
+   chat surface's header. Default styling is intentionally chrome-free
+   so the host header's color/background dominates — `currentColor` lets
+   each module (scheduler-sage, coders-phosphor, knowledge-sepia, etc.)
+   tint the gear without per-module CSS overrides. */
 .cf-cog {
-  position: absolute;
-  top: 10px;
-  left: 12px;
-  z-index: 6;
-  background: rgba(99, 102, 241, 0.18);
-  color: #c7d2fe;
-  border: 1px solid rgba(99, 102, 241, 0.45);
-  border-radius: 999px;
-  height: 30px;
-  padding: 0 10px 0 8px;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  justify-content: center;
+  width: 22px; height: 22px;
+  padding: 0; margin: 0;
+  background: transparent;
+  color: currentColor;
+  opacity: 0.55;
+  border: none;
+  border-radius: 6px;
   cursor: pointer;
-  transition: color 120ms, background 120ms;
-  font: 500 11px/1 system-ui, -apple-system, "Segoe UI", sans-serif;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.2), 0 2px 6px rgba(0,0,0,0.4);
+  flex-shrink: 0;
+  transition: opacity 120ms, background 120ms;
+  vertical-align: middle;
 }
-.cf-cog:hover {
-  color: #fff;
-  background: rgba(99, 102, 241, 0.32);
-  border-color: rgba(99, 102, 241, 0.7);
-}
+.cf-cog:hover { opacity: 1; background: rgba(127,127,127,0.14); }
+.cf-cog:focus-visible { opacity: 1; outline: 1.5px solid currentColor; outline-offset: 1px; }
 .cf-cog svg { display: block; flex-shrink: 0; }
-.cf-cog-label { display: inline-block; }
-@media (max-width: 540px) {
-  /* Hide label on narrow surfaces (dashboard widget M, mobile);
-     keep just the gear icon. */
-  .cf-cog { padding: 0; width: 30px; justify-content: center; }
-  .cf-cog-label { display: none; }
+
+/* When the auto-mounter cannot find a header element to tuck the cog
+   into, it lands at the panel's top-RIGHT corner (was top-left, which
+   collided with avatars + agent names in every module). */
+.cf-cog-fallback {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  z-index: 6;
 }
-.chat-card-flip[data-flipped="true"] .cf-cog {
-  opacity: 0;
-}
+.chat-card-flip[data-flipped="true"] .cf-cog { opacity: 0; }
 
 /* Chat-input button row — three buttons (Attach + PTT + Talk-Mode)
    injected next to each surface's send button by the JS SEND_REGISTRY.
@@ -1746,14 +1748,41 @@ const RESOURCE_BUDGET_JS: &str = r#"
     }
   }
 
+  // ── Mic preflight: getUserMedia requires a secure context ───────────
+  // Plain HTTP over LAN (192.168.1.x:18789) silently fails getUserMedia
+  // with NotAllowedError or "Permission denied" — there is no permission
+  // *prompt* the user can accept on insecure origins. We catch this case
+  // BEFORE asking for the mic so the user sees an actionable message
+  // ("you're on http://; reach this gateway over Tailscale or HTTPS")
+  // instead of a useless "Microphone permission denied" alert.
+  function _micSecurityNote() {
+    if (window.isSecureContext) return null;
+    const host = location.hostname;
+    return (
+      'Microphone access needs a secure connection. You\'re on ' +
+      location.protocol + '//' + host + ' — browsers only release the ' +
+      'mic over HTTPS or localhost. Open Syntaur via your Tailscale ' +
+      'name (e.g. https://syntaur.<tailnet>.ts.net) or set up the ' +
+      'gateway\'s self-signed cert (Settings → Privacy → Trust local cert).'
+    );
+  }
+  function _micErrorAlert(e) {
+    const note = _micSecurityNote();
+    if (note) { alert(note); return; }
+    const msg = (e && (e.message || e.name)) ? (e.message || e.name) : String(e);
+    alert('Microphone unavailable: ' + msg);
+  }
+
   // ── Push-to-talk: tap → record → tap-stop → STT → input ─────────────
   async function _pttClick(btn, agent, sendBtn) {
     if (btn._stopFn) { btn._stopFn(); return; }
+    const note = _micSecurityNote();
+    if (note) { alert(note); return; }
     let stream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (e) {
-      alert('Microphone permission denied: ' + (e.message || e));
+      _micErrorAlert(e);
       return;
     }
     const mr = new MediaRecorder(stream, { mimeType: 'audio/webm' });
@@ -1808,6 +1837,8 @@ const RESOURCE_BUDGET_JS: &str = r#"
   }
   function _talkClick(btn, agent, sendBtn) {
     if (_talkActive) { _talkExit(); return; }
+    const note = _micSecurityNote();
+    if (note) { alert(note); return; }
     let overlay = document.getElementById('cf-talk-overlay');
     if (!overlay) {
       overlay = document.createElement('div');
@@ -1837,7 +1868,7 @@ const RESOURCE_BUDGET_JS: &str = r#"
       try {
         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       } catch (e) {
-        alert('Microphone permission denied');
+        _micErrorAlert(e);
         _talkExit();
         return;
       }
@@ -2005,36 +2036,60 @@ const RESOURCE_BUDGET_JS: &str = r#"
   // Earlier guesses (#sch-thad-chat, .mushi-rail, #silvr-chat, #ai-chat-card)
   // matched zero elements — only /knowledge worked. /music has no AI-reply
   // chat surface today (DJ is request-only, no thread), so it's omitted.
+  // PANEL_REGISTRY entry shape:
+  //   panel:  CSS selector for the chat surface (used for right-click,
+  //           data-agent attribution, and idempotency tracking).
+  //   header: CSS selector for the element to tuck the cog INTO so it
+  //           sits next to the agent name. Resolution rule:
+  //             1. panel.querySelector(header)
+  //             2. panel.parentElement.querySelector(header)
+  //             3. document.querySelector(header)
+  //           If none match, the cog lands at the panel's top-right
+  //           corner via .cf-cog-fallback.
+  //   agent:  agent_id used by openAgentOverlay.
+  //
+  // Sean's directive (2026-04-26): cog must sit "in the upper section
+  // corner of the chat next to the AI chat's personality name", not at
+  // panel root. Each module's chat header is different — header
+  // selectors below are verified against the deployed DOM.
   const PANEL_REGISTRY = [
-    { selector: '#lib-cortex',       agent: 'cortex'    },  // /knowledge
-    { selector: '#sch-thad-drawer',  agent: 'thaddeus'  },  // /scheduler
-    { selector: '#j-mushi',          agent: 'mushi'     },  // /journal
-    { selector: '#ai-messages',      agent: 'maurice'   },  // /coders Maurice
-    { selector: '.sd-chat',          agent: 'main'      },  // /dashboard widget
+    { panel: '#lib-cortex',      header: '.cortex-header',     agent: 'cortex'   },
+    { panel: '#sch-thad-drawer', header: '.sch-thad-head',     agent: 'thaddeus' },
+    { panel: '#j-mushi',         header: '.j-mushi-head',      agent: 'mushi'    },
+    { panel: '#ai-messages',     header: '.maurice-header',    agent: 'maurice'  },
+    { panel: '.sd-chat',         header: '.sd-card-head',      agent: 'main'     },
+    { panel: '.positron-panel',  header: '.positron-header',   agent: 'positron' },  // /tax
+    { panel: '#soc-chat-rail',   header: '.soc-chat-head',     agent: 'nyota'    },  // /social
   ];
 
   function autoMountSidePanels() {
     for (const entry of PANEL_REGISTRY) {
-      document.querySelectorAll(entry.selector).forEach(panel => {
-        attachCogToPanel(panel, entry.agent);
+      document.querySelectorAll(entry.panel).forEach(panel => {
+        attachCogToPanel(panel, entry.agent, entry.header);
       });
     }
   }
 
-  function attachCogToPanel(panel, agent) {
-    if (!panel) return;
-    if (panel.dataset.syntaurCogHost === '1') return; // already mounted
-    panel.dataset.syntaurCogHost = '1';
-    panel.setAttribute('data-syntaur-cog-host', ''); // CSS hook
-    panel.dataset.agent = agent;
-    // Promote to relative if statically positioned. The cog is absolute
-    // top:10 left:12 of its nearest positioned ancestor; without this
-    // it would escape into a far-away container and render at the page
-    // origin instead of on the panel.
-    const cs = getComputedStyle(panel);
-    if (cs.position === 'static') {
-      panel.style.position = 'relative';
+  function _findHeader(panel, headerSel) {
+    if (!headerSel) return null;
+    // Inside-first: most modules tuck their header inside the panel.
+    const inner = panel.querySelector(headerSel);
+    if (inner) return inner;
+    // Walk up the ancestor chain; first ancestor whose querySelector
+    // resolves wins. This pins to the OWN card/section rather than
+    // grabbing the first match anywhere in the document — important
+    // for /dashboard where every widget has its own .sd-card-head and
+    // a global lookup would drag the cog onto a different widget.
+    let cur = panel.parentElement;
+    while (cur) {
+      const hit = cur.querySelector(headerSel);
+      if (hit) return hit;
+      cur = cur.parentElement;
     }
+    return null;
+  }
+
+  function _makeCog(agent) {
     const cog = document.createElement('button');
     cog.type = 'button';
     cog.className = 'cf-cog';
@@ -2042,8 +2097,39 @@ const RESOURCE_BUDGET_JS: &str = r#"
     cog.setAttribute('aria-label', 'Agent settings for ' + agent);
     cog.setAttribute('aria-pressed', 'false');
     cog.title = 'Agent settings';
-    cog.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M19.43 12.98c.04-.32.07-.64.07-.98s-.03-.66-.07-.98l2.11-1.65c.19-.15.24-.42.12-.64l-2-3.46c-.12-.22-.39-.3-.61-.22l-2.49 1c-.52-.4-1.08-.73-1.69-.98l-.38-2.65C14.46 2.18 14.25 2 14 2h-4c-.25 0-.46.18-.49.42l-.38 2.65c-.61.25-1.17.59-1.69.98l-2.49-1c-.23-.09-.49 0-.61.22l-2 3.46c-.13.22-.07.49.12.64l2.11 1.65c-.04.32-.07.65-.07.98s.03.66.07.98l-2.11 1.65c-.19.15-.24.42-.12.64l2 3.46c.12.22.39.3.61.22l2.49-1c.52.4 1.08.73 1.69.98l.38 2.65c.03.24.24.42.49.42h4c.25 0 .46-.18.49-.42l.38-2.65c.61-.25 1.17-.59 1.69-.98l2.49 1c.23.09.49 0 .61-.22l2-3.46c.12-.22.07-.49-.12-.64l-2.11-1.65zM12 15.5c-1.93 0-3.5-1.57-3.5-3.5s1.57-3.5 3.5-3.5 3.5 1.57 3.5 3.5-1.57 3.5-3.5 3.5z"/></svg><span class="cf-cog-label">Settings</span>';
-    panel.insertBefore(cog, panel.firstChild);
+    cog.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19.43 12.98c.04-.32.07-.64.07-.98s-.03-.66-.07-.98l2.11-1.65c.19-.15.24-.42.12-.64l-2-3.46c-.12-.22-.39-.3-.61-.22l-2.49 1c-.52-.4-1.08-.73-1.69-.98l-.38-2.65C14.46 2.18 14.25 2 14 2h-4c-.25 0-.46.18-.49.42l-.38 2.65c-.61.25-1.17.59-1.69.98l-2.49-1c-.23-.09-.49 0-.61.22l-2 3.46c-.13.22-.07.49.12.64l2.11 1.65c-.04.32-.07.65-.07.98s.03.66.07.98l-2.11 1.65c-.19.15-.24.42-.12.64l2 3.46c.12.22.39.3.61.22l2.49-1c.52.4 1.08.73 1.69.98l.38 2.65c.03.24.24.42.49.42h4c.25 0 .46-.18.49-.42l.38-2.65c.61-.25 1.17-.59 1.69-.98l2.49 1c.23.09.49 0 .61-.22l2-3.46c.12-.22.07-.49-.12-.64l-2.11-1.65zM12 15.5c-1.93 0-3.5-1.57-3.5-3.5s1.57-3.5 3.5-3.5 3.5 1.57 3.5 3.5-1.57 3.5-3.5 3.5z"/></svg>';
+    return cog;
+  }
+
+  function attachCogToPanel(panel, agent, headerSel) {
+    if (!panel) return;
+    if (panel.dataset.syntaurCogHost === '1') return; // already mounted
+    panel.dataset.syntaurCogHost = '1';
+    panel.setAttribute('data-syntaur-cog-host', ''); // CSS hook for right-click bind
+    panel.dataset.agent = agent;
+    const cog = _makeCog(agent);
+    const header = _findHeader(panel, headerSel);
+    if (header) {
+      // Inline mount: tuck the cog into the header so it sits next to
+      // the agent name. When the header already has a close-x as its
+      // last child, insert the cog BEFORE close so the close button
+      // remains the rightmost affordance (matches conventional
+      // header chrome). Single-child headers (e.g. dashboard widget
+      // title row) just append. Header inherits its module's color
+      // theme; cog uses currentColor so it matches automatically.
+      if (header.children.length > 1) {
+        header.insertBefore(cog, header.lastElementChild);
+      } else {
+        header.appendChild(cog);
+      }
+    } else {
+      // Fallback: top-right corner of the panel. Avoid the legacy
+      // top-LEFT placement that collided with every module's avatar.
+      const cs = getComputedStyle(panel);
+      if (cs.position === 'static') panel.style.position = 'relative';
+      cog.classList.add('cf-cog-fallback');
+      panel.appendChild(cog);
+    }
   }
 
   // Run mount on initial load + after SPA navigations.
