@@ -215,6 +215,228 @@ async fn insert_sample(
 
 // ── Roll-up queries ─────────────────────────────────────────────────────
 
+// ── Phase 2I: arbitrary-window roll-ups for the Energy drawer ──────────
+
+/// One day in the calendar heatmap.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DayKwh {
+    pub day: u32,
+    pub kwh: f64,
+}
+
+/// Per-device kWh for the day-detail leaderboard.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceKwh {
+    pub device_id: i64,
+    pub device_name: String,
+    pub kwh: f64,
+}
+
+/// Day-detail payload: 24 hourly buckets + per-device leaderboard.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DayPayload {
+    pub date: String,
+    pub hourly: Vec<f64>,
+    pub leaderboard: Vec<DeviceKwh>,
+}
+
+/// kWh consumed in [start, end). Sums cumulative-style devices
+/// (max − min per device) plus trapezoidal watts × Δt for devices
+/// without cumulative readings, mirroring summary_for_user.
+fn integrate_window(
+    conn: &Connection,
+    user_id: i64,
+    start: i64,
+    end: i64,
+) -> rusqlite::Result<f64> {
+    let mut stmt = conn.prepare(
+        "SELECT MIN(kwh_cumulative), MAX(kwh_cumulative)
+           FROM smart_home_energy_samples
+          WHERE user_id = ? AND ts >= ? AND ts < ? AND kwh_cumulative IS NOT NULL
+          GROUP BY device_id",
+    )?;
+    let cumulative_kwh: f64 = stmt
+        .query_map(rusqlite::params![user_id, start, end], |row| {
+            let lo: Option<f64> = row.get(0)?;
+            let hi: Option<f64> = row.get(1)?;
+            Ok(match (hi, lo) {
+                (Some(h), Some(l)) if h >= l => h - l,
+                _ => 0.0,
+            })
+        })?
+        .filter_map(Result::ok)
+        .sum();
+    let integrated = integrated_kwh_today(conn, user_id, start, end)?;
+    Ok(cumulative_kwh + integrated)
+}
+
+/// Local-midnight unix timestamp for (y, m, d). Falls back to UTC if
+/// the calendar tuple lands in a DST gap.
+fn local_midnight_ts(year: i32, month: u32, day: u32) -> i64 {
+    Local
+        .with_ymd_and_hms(year, month, day, 0, 0, 0)
+        .single()
+        .map(|dt| dt.timestamp())
+        .unwrap_or_else(|| {
+            chrono::Utc
+                .with_ymd_and_hms(year, month, day, 0, 0, 0)
+                .single()
+                .map(|dt| dt.timestamp())
+                .unwrap_or(0)
+        })
+}
+
+/// Number of days in (year, month). Returns 28..=31.
+fn days_in_month(year: i32, month: u32) -> u32 {
+    let first_next = if month == 12 {
+        chrono::NaiveDate::from_ymd_opt(year + 1, 1, 1)
+    } else {
+        chrono::NaiveDate::from_ymd_opt(year, month + 1, 1)
+    };
+    let first_this = chrono::NaiveDate::from_ymd_opt(year, month, 1);
+    match (first_next, first_this) {
+        (Some(n), Some(t)) => (n - t).num_days() as u32,
+        _ => 30,
+    }
+}
+
+/// Daily kWh for every day in (year, month). Days with no samples
+/// return 0.0 — empty calendar cells render with the same baseline
+/// styling.
+pub fn calendar_for_user(
+    conn: &Connection,
+    user_id: i64,
+    year: i32,
+    month: u32,
+) -> rusqlite::Result<Vec<DayKwh>> {
+    let n = days_in_month(year, month);
+    let mut out = Vec::with_capacity(n as usize);
+    for d in 1..=n {
+        let start = local_midnight_ts(year, month, d);
+        let end = start + 24 * 3600;
+        let kwh = integrate_window(conn, user_id, start, end)?;
+        out.push(DayKwh { day: d, kwh });
+    }
+    Ok(out)
+}
+
+/// Hour-by-hour kWh for one day + per-device leaderboard for that day.
+pub fn day_for_user(
+    conn: &Connection,
+    user_id: i64,
+    year: i32,
+    month: u32,
+    day: u32,
+) -> rusqlite::Result<DayPayload> {
+    let start = local_midnight_ts(year, month, day);
+    let end = start + 24 * 3600;
+
+    let mut hourly = vec![0.0_f64; 24];
+    for h in 0..24 {
+        let h_start = start + (h as i64) * 3600;
+        let h_end = h_start + 3600;
+        hourly[h] = integrate_window(conn, user_id, h_start, h_end)?;
+    }
+
+    // Leaderboard: per-device kWh for the day, cumulative-style first
+    // (max−min) joined with the integrated fallback for devices without
+    // a kwh_cumulative track. Top 10 by kWh, descending.
+    let mut stmt = conn.prepare(
+        "SELECT s.device_id, d.name,
+                MAX(s.kwh_cumulative) AS hi, MIN(s.kwh_cumulative) AS lo
+           FROM smart_home_energy_samples s
+           JOIN smart_home_devices d ON d.id = s.device_id
+          WHERE s.user_id = ? AND s.ts >= ? AND s.ts < ?
+          GROUP BY s.device_id",
+    )?;
+    let mut by_device: std::collections::HashMap<i64, (String, f64)> = std::collections::HashMap::new();
+    for row in stmt
+        .query_map(rusqlite::params![user_id, start, end], |row| {
+            let device_id: i64 = row.get(0)?;
+            let name: String = row.get(1)?;
+            let hi: Option<f64> = row.get(2)?;
+            let lo: Option<f64> = row.get(3)?;
+            let kwh = match (hi, lo) {
+                (Some(h), Some(l)) if h >= l => h - l,
+                _ => 0.0,
+            };
+            Ok((device_id, name, kwh))
+        })?
+        .filter_map(Result::ok)
+    {
+        by_device.insert(row.0, (row.1, row.2));
+    }
+
+    // Add integrated-watts kWh for devices without cumulative readings.
+    let mut watts_stmt = conn.prepare(
+        "SELECT s.device_id, d.name, s.ts, s.watts
+           FROM smart_home_energy_samples s
+           JOIN smart_home_devices d ON d.id = s.device_id
+          WHERE s.user_id = ? AND s.ts >= ? AND s.ts < ?
+            AND s.watts IS NOT NULL
+            AND NOT EXISTS (
+                SELECT 1 FROM smart_home_energy_samples k
+                 WHERE k.device_id = s.device_id AND k.user_id = s.user_id
+                   AND k.ts >= ? AND k.ts < ? AND k.kwh_cumulative IS NOT NULL
+            )
+          ORDER BY s.device_id, s.ts",
+    )?;
+    let mut current_dev: Option<i64> = None;
+    let mut current_name = String::new();
+    let mut prev: Option<(i64, f64)> = None;
+    let mut accum = 0.0_f64;
+    let flush = |dev: Option<i64>, name: &str, accum: f64, by_device: &mut std::collections::HashMap<i64, (String, f64)>| {
+        if let Some(id) = dev {
+            if accum > 0.0 {
+                let entry = by_device.entry(id).or_insert_with(|| (name.to_string(), 0.0));
+                entry.1 += accum;
+                if entry.0.is_empty() { entry.0 = name.to_string(); }
+            }
+        }
+    };
+    for row in watts_stmt
+        .query_map(
+            rusqlite::params![user_id, start, end, start, end],
+            |row| {
+                let dev_id: i64 = row.get(0)?;
+                let name: String = row.get(1)?;
+                let ts: i64 = row.get(2)?;
+                let w: f64 = row.get(3)?;
+                Ok((dev_id, name, ts, w))
+            },
+        )?
+        .filter_map(Result::ok)
+    {
+        let (dev_id, name, ts, w) = row;
+        if Some(dev_id) != current_dev {
+            flush(current_dev, &current_name, accum, &mut by_device);
+            current_dev = Some(dev_id);
+            current_name = name;
+            prev = None;
+            accum = 0.0;
+        }
+        if let Some((t0, w0)) = prev {
+            if ts > t0 {
+                let dt_h = (ts - t0) as f64 / 3600.0;
+                accum += (w0 + w) / 2.0 * dt_h / 1000.0;
+            }
+        }
+        prev = Some((ts, w));
+    }
+    flush(current_dev, &current_name, accum, &mut by_device);
+
+    let mut leaderboard: Vec<DeviceKwh> = by_device
+        .into_iter()
+        .filter(|(_, (_, kwh))| *kwh > 0.0)
+        .map(|(device_id, (device_name, kwh))| DeviceKwh { device_id, device_name, kwh })
+        .collect();
+    leaderboard.sort_by(|a, b| b.kwh.partial_cmp(&a.kwh).unwrap_or(std::cmp::Ordering::Equal));
+    leaderboard.truncate(10);
+
+    let date = format!("{:04}-{:02}-{:02}", year, month, day);
+    Ok(DayPayload { date, hourly, leaderboard })
+}
+
 /// Today's roll-up for a user. If cumulative readings exist, uses the
 /// max−min per device; otherwise integrates watts×Δt (trapezoidal).
 pub fn summary_for_user(conn: &Connection, user_id: i64) -> rusqlite::Result<EnergySummary> {

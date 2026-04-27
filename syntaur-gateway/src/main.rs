@@ -7015,6 +7015,14 @@ async fn main() {
             get(smart_home::api::handle_energy_summary),
         )
         .route(
+            "/api/smart-home/energy/calendar",
+            get(smart_home::api::handle_energy_calendar),
+        )
+        .route(
+            "/api/smart-home/energy/day",
+            get(smart_home::api::handle_energy_day),
+        )
+        .route(
             "/api/smart-home/energy/ingest",
             post(smart_home::api::handle_energy_ingest),
         )

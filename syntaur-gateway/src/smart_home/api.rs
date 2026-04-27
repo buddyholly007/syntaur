@@ -1447,6 +1447,107 @@ pub async fn handle_energy_summary(
     Ok(Json(json!(summary)))
 }
 
+/// GET /api/smart-home/energy/calendar?month=YYYY-MM — daily kWh for
+/// every day in the given month (default = current local month).
+/// Powers the Energy drawer's calendar heatmap (Phase 2I).
+#[derive(Debug, serde::Deserialize)]
+pub struct EnergyCalendarQuery {
+    pub month: Option<String>,
+}
+
+pub async fn handle_energy_calendar(
+    State(state): State<std::sync::Arc<AppState>>,
+    axum::extract::Query(q): axum::extract::Query<EnergyCalendarQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let user_id = current_user_id(&state);
+    let db = state.db_path.clone();
+    let (year, month) = parse_year_month(q.month.as_deref()).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "month must be YYYY-MM" })),
+        )
+    })?;
+    let days = tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<energy::DayKwh>> {
+        let conn = rusqlite::Connection::open(&db)?;
+        energy::calendar_for_user(&conn, user_id, year, month)
+    })
+    .await
+    .map_err(|e| err_500(format!("join error: {e}")))?
+    .map_err(|e| err_500(format!("db error: {e}")))?;
+    let total: f64 = days.iter().map(|d| d.kwh).sum();
+    let peak: f64 = days.iter().map(|d| d.kwh).fold(0.0_f64, f64::max);
+    Ok(Json(json!({
+        "month": format!("{:04}-{:02}", year, month),
+        "days": days,
+        "total_kwh": total,
+        "peak_kwh": peak,
+    })))
+}
+
+/// GET /api/smart-home/energy/day?date=YYYY-MM-DD — 24-hour kWh
+/// breakdown + per-device leaderboard for the given day. Default =
+/// today (local).
+#[derive(Debug, serde::Deserialize)]
+pub struct EnergyDayQuery {
+    pub date: Option<String>,
+}
+
+pub async fn handle_energy_day(
+    State(state): State<std::sync::Arc<AppState>>,
+    axum::extract::Query(q): axum::extract::Query<EnergyDayQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let user_id = current_user_id(&state);
+    let db = state.db_path.clone();
+    let (year, month, day) = parse_year_month_day(q.date.as_deref()).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "date must be YYYY-MM-DD" })),
+        )
+    })?;
+    let payload = tokio::task::spawn_blocking(move || -> rusqlite::Result<energy::DayPayload> {
+        let conn = rusqlite::Connection::open(&db)?;
+        energy::day_for_user(&conn, user_id, year, month, day)
+    })
+    .await
+    .map_err(|e| err_500(format!("join error: {e}")))?
+    .map_err(|e| err_500(format!("db error: {e}")))?;
+    Ok(Json(json!(payload)))
+}
+
+/// Parse YYYY-MM, defaulting to the current local month if None.
+fn parse_year_month(s: Option<&str>) -> Option<(i32, u32)> {
+    use chrono::Datelike;
+    if let Some(s) = s {
+        let parts: Vec<&str> = s.split('-').collect();
+        if parts.len() != 2 { return None; }
+        let y: i32 = parts[0].parse().ok()?;
+        let m: u32 = parts[1].parse().ok()?;
+        if !(1..=12).contains(&m) { return None; }
+        Some((y, m))
+    } else {
+        let now = chrono::Local::now();
+        Some((now.year(), now.month()))
+    }
+}
+
+/// Parse YYYY-MM-DD, defaulting to today (local) if None.
+fn parse_year_month_day(s: Option<&str>) -> Option<(i32, u32, u32)> {
+    use chrono::Datelike;
+    if let Some(s) = s {
+        let parts: Vec<&str> = s.split('-').collect();
+        if parts.len() != 3 { return None; }
+        let y: i32 = parts[0].parse().ok()?;
+        let m: u32 = parts[1].parse().ok()?;
+        let d: u32 = parts[2].parse().ok()?;
+        if !(1..=12).contains(&m) { return None; }
+        if !(1..=31).contains(&d) { return None; }
+        Some((y, m, d))
+    } else {
+        let now = chrono::Local::now();
+        Some((now.year(), now.month(), now.day()))
+    }
+}
+
 /// POST /api/smart-home/energy/ingest — force an immediate ingest pass.
 /// Useful for the "Refresh" button on the energy dashboard.
 pub async fn handle_energy_ingest(

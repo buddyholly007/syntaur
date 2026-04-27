@@ -1386,7 +1386,11 @@ const SMART_HOME_JS: &str = r#"
       lights: 'Lights', security: 'Security', energy: 'Energy',
       'rooms-all': 'All rooms',
     })[key] || 'Detail';
-    body.textContent = DRAWER_BODIES[key] || 'Coming soon.';
+    if (key === 'energy') {
+      renderEnergyDrawer(body);
+    } else {
+      body.textContent = DRAWER_BODIES[key] || 'Coming soon.';
+    }
     root.hidden = false;
   }
   function closeDrawer() {
