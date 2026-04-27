@@ -795,34 +795,184 @@ const SMART_HOME_JS: &str = r#"
   });
 
   // ── room cards ─────────────────────────────────────
-  function renderRoomCard(room) {
-    const li = document.createElement('div');
-    li.className = 'sh-room-card';
-    li.dataset.roomId = room.id;
-    const lightsOnText = '— lights';
-    li.innerHTML =
-      '<div class="sh-room-head">' +
-        '<span class="sh-room-name"></span>' +
-        '<span class="sh-room-on sh-off">' + lightsOnText + '</span>' +
-      '</div>' +
-      '<div class="sh-room-stats">' +
-        '<span class="stat">Climate <strong>—°</strong></span>' +
-        '<span class="stat">Brightness <strong>—%</strong></span>' +
-      '</div>' +
-      '<div class="sh-room-controls">' +
-        '<button type="button" class="sh-toggle" aria-label="Toggle room"></button>' +
-        '<div class="sh-dim-bar"><div class="sh-dim-fill" style="width:0%"></div></div>' +
-      '</div>';
-    li.querySelector('.sh-room-name').textContent = room.name || 'Untitled';
-    return li;
+  // ROOM_STATE caches { rooms, devicesByRoom } so toggle/dim handlers
+  // know which devices to dispatch to without re-fetching. Refreshed
+  // by loadRoomCards on the same 30s cadence as the tiles.
+  const ROOM_STATE = { rooms: [], devicesByRoom: new Map(), pendingDim: new Map() };
+
+  function aggregateRoom(roomId) {
+    const list = ROOM_STATE.devicesByRoom.get(roomId) || [];
+    const lights = list.filter((d) => LIGHT_KINDS.includes(d.kind));
+    const onLights = lights.filter((d) => isOn(parseState(d)));
+    let avgLevelPct = 0;
+    if (onLights.length) {
+      let sum = 0, n = 0;
+      onLights.forEach((d) => {
+        const s = parseState(d);
+        const lvl = (typeof s.level === 'number') ? s.level
+                  : (typeof s.brightness === 'number') ? s.brightness
+                  : null;
+        if (lvl != null) {
+          // Accept either 0..1 fraction or 0..100 percent.
+          sum += lvl <= 1 ? lvl * 100 : lvl;
+          n += 1;
+        }
+      });
+      avgLevelPct = n ? Math.round(sum / n) : 100;
+    }
+    return {
+      lightsTotal: lights.length,
+      lightsOn: onLights.length,
+      avgLevelPct,
+    };
   }
 
-  async function loadRooms() {
+  function renderRoomCard(room) {
+    const card = document.createElement('div');
+    card.className = 'sh-room-card';
+    card.dataset.roomId = room.id;
+    const agg = aggregateRoom(room.id);
+
+    const allOn = agg.lightsOn === agg.lightsTotal && agg.lightsTotal > 0;
+    const onText = agg.lightsTotal === 0
+      ? 'No lights'
+      : agg.lightsOn + ' light' + (agg.lightsOn === 1 ? '' : 's') + (agg.lightsOn > 0 ? ' on' : ' off');
+
+    card.innerHTML =
+      '<div class="sh-room-head">' +
+        '<span class="sh-room-name"></span>' +
+        '<span class="sh-room-on' + (agg.lightsOn === 0 ? ' sh-off' : '') + '"></span>' +
+      '</div>' +
+      '<div class="sh-room-stats">' +
+        '<span class="stat">Brightness <strong>' + agg.avgLevelPct + '%</strong></span>' +
+      '</div>' +
+      '<div class="sh-room-controls">' +
+        '<button type="button" class="sh-toggle' + (allOn ? ' sh-on' : '') + '" aria-label="Toggle room"></button>' +
+        '<div class="sh-dim-bar"><div class="sh-dim-fill" style="width:' + (agg.lightsOn ? agg.avgLevelPct : 0) + '%"></div></div>' +
+      '</div>';
+    card.querySelector('.sh-room-name').textContent = room.name || 'Untitled';
+    card.querySelector('.sh-room-on').textContent = onText;
+
+    // Toggle: send {on: !allOn} to every light in the room.
+    const toggle = card.querySelector('.sh-toggle');
+    toggle.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      const desiredOn = !toggle.classList.contains('sh-on');
+      toggle.classList.toggle('sh-on', desiredOn);
+      const lights = (ROOM_STATE.devicesByRoom.get(room.id) || [])
+        .filter((d) => LIGHT_KINDS.includes(d.kind));
+      await Promise.allSettled(lights.map((d) =>
+        shFetch('/api/smart-home/control', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ device_id: d.id, state: { on: desiredOn } }),
+        })
+      ));
+    });
+
+    // Dim bar: pointer x → percent, debounced POST level.
+    const bar = card.querySelector('.sh-dim-bar');
+    const fill = bar.querySelector('.sh-dim-fill');
+    function pctFromPointer(ev) {
+      const r = bar.getBoundingClientRect();
+      let p = (ev.clientX - r.left) / r.width;
+      p = Math.max(0, Math.min(1, p));
+      return Math.round(p * 100);
+    }
+    function commitLevel(pct) {
+      const lights = (ROOM_STATE.devicesByRoom.get(room.id) || [])
+        .filter((d) => LIGHT_KINDS.includes(d.kind));
+      const level = pct / 100;
+      lights.forEach((d) => {
+        shFetch('/api/smart-home/control', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ device_id: d.id, state: { on: pct > 0, level } }),
+        }).catch((e) => console.warn('[smart-home] dim POST failed:', e.message || e));
+      });
+    }
+    let dimDragging = false;
+    function onDimMove(ev) {
+      if (!dimDragging) return;
+      const pct = pctFromPointer(ev);
+      fill.style.width = pct + '%';
+      const prev = ROOM_STATE.pendingDim.get(room.id);
+      if (prev) clearTimeout(prev);
+      ROOM_STATE.pendingDim.set(room.id, setTimeout(() => commitLevel(pct), 350));
+    }
+    function onDimUp() {
+      dimDragging = false;
+      window.removeEventListener('pointermove', onDimMove);
+      window.removeEventListener('pointerup', onDimUp);
+    }
+    bar.addEventListener('pointerdown', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      dimDragging = true;
+      const pct = pctFromPointer(ev);
+      fill.style.width = pct + '%';
+      const prev = ROOM_STATE.pendingDim.get(room.id);
+      if (prev) clearTimeout(prev);
+      ROOM_STATE.pendingDim.set(room.id, setTimeout(() => commitLevel(pct), 350));
+      window.addEventListener('pointermove', onDimMove);
+      window.addEventListener('pointerup', onDimUp);
+    });
+
+    // Click-expand drawer (Phase 2I will fill the body with per-device controls).
+    card.addEventListener('click', () => openRoomDrawer(room));
+
+    return card;
+  }
+
+  function openRoomDrawer(room) {
+    const root = $('sh-drawer-root');
+    const title = $('sh-drawer-title');
+    const body = $('sh-drawer-body');
+    if (!root || !title || !body) return;
+    title.textContent = room.name || 'Room';
+    const list = (ROOM_STATE.devicesByRoom.get(room.id) || []);
+    if (!list.length) {
+      body.innerHTML =
+        '<p style="color:var(--sh-text-faint)">No devices in this room. ' +
+        'Assign devices to a room from the device list (Phase 2G follow-up wires the per-device controls inside this drawer).</p>';
+    } else {
+      body.innerHTML = '';
+      list.forEach((d) => {
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.06);';
+        const name = document.createElement('span');
+        name.style.cssText = 'flex:1;color:var(--sh-text);';
+        name.textContent = d.name || '(unnamed)';
+        const kind = document.createElement('span');
+        kind.style.cssText = 'font-size:11px;color:var(--sh-text-faint);text-transform:uppercase;letter-spacing:1px;';
+        kind.textContent = d.kind || '';
+        row.appendChild(name);
+        row.appendChild(kind);
+        body.appendChild(row);
+      });
+    }
+    root.hidden = false;
+  }
+
+  async function loadRoomCards() {
     const wrap = $('sh-rooms');
     if (!wrap) return;
     try {
-      const data = await shFetch('/api/smart-home/rooms');
-      const rooms = (data && data.rooms) || [];
+      const [roomsResp, devsResp] = await Promise.all([
+        shFetch('/api/smart-home/rooms'),
+        shFetch('/api/smart-home/devices'),
+      ]);
+      const rooms = (roomsResp && roomsResp.rooms) || [];
+      const devices = (devsResp && devsResp.devices) || [];
+      ROOM_STATE.rooms = rooms;
+      ROOM_STATE.devicesByRoom = new Map();
+      devices.forEach((d) => {
+        if (d.room_id == null) return;
+        const arr = ROOM_STATE.devicesByRoom.get(d.room_id) || [];
+        arr.push(d);
+        ROOM_STATE.devicesByRoom.set(d.room_id, arr);
+      });
+
       wrap.innerHTML = '';
       if (!rooms.length) {
         const empty = document.createElement('div');
@@ -839,7 +989,8 @@ const SMART_HOME_JS: &str = r#"
         '</div>';
     }
   }
-  loadRooms();
+  loadRoomCards();
+  setInterval(loadRoomCards, 30000);
 
   // ── climate ring (Nexia today; multi-driver later) ─
   // The arc covers 270° (gap at bottom). At local 0° (which the
@@ -865,6 +1016,7 @@ const SMART_HOME_JS: &str = r#"
       scale: 'F',
       pollTimer: null,
       pendingSet: null,
+      dragging: false,
     },
   };
 
@@ -950,18 +1102,29 @@ const SMART_HOME_JS: &str = r#"
       RING.state.cool = z.cool_setpoint;
       RING.state.currentTemp = z.temperature;
       RING.state.scale = z.scale || 'F';
-      // Pick which setpoint to track on the ring based on mode.
-      // AUTO shows cool (the Nexia UX convention is to drag cool then
-      // auto-shift heat — out of scope for v1; a long-press toggle
-      // between heat/cool is the v1.1 plan).
-      RING.state.currentSetpoint =
-        RING.state.mode === 'HEAT' ? z.heat_setpoint : z.cool_setpoint;
       // Outdoor temp + humidity bubble up if Nexia returns them.
       const out = $('sh-env-outdoor');
       const hum = $('sh-env-humidity');
       if (out && t.outdoor_temperature != null) out.textContent = Math.round(t.outdoor_temperature) + '°';
       if (hum && t.indoor_humidity != null) hum.textContent = Math.round(t.indoor_humidity) + '%';
-      renderRing();
+      // Don't fight the user — if they're mid-drag, skip the
+      // setpoint snap-back. The poll's job is to surface drift in
+      // current temp + mode + chip data, not to overrule pending
+      // input.
+      if (!RING.state.dragging) {
+        // Pick which setpoint to track on the ring based on mode.
+        // AUTO shows cool (the Nexia UX convention is to drag cool
+        // then auto-shift heat — out of scope for v1; a long-press
+        // toggle between heat/cool is the v1.1 plan).
+        RING.state.currentSetpoint =
+          RING.state.mode === 'HEAT' ? z.heat_setpoint : z.cool_setpoint;
+        renderRing();
+      } else {
+        // Still update the "Currently —°" subline + env chips —
+        // those don't conflict with the drag.
+        const cur = $('sh-ring-current');
+        if (cur && z.temperature != null) cur.textContent = Math.round(z.temperature) + '°';
+      }
       updateModePill();
     } catch (e) {
       // 424 = no creds yet. Quietly leave the ring in placeholder state.
@@ -1028,6 +1191,10 @@ const SMART_HOME_JS: &str = r#"
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
     }
+    function onUpFinal() {
+      onUp();
+      RING.state.dragging = false;
+    }
     knob.addEventListener('pointerdown', (ev) => {
       ev.preventDefault();
       if (RING.state.zone == null) {
@@ -1035,9 +1202,10 @@ const SMART_HOME_JS: &str = r#"
         return;
       }
       dragging = true;
+      RING.state.dragging = true;
       knob.classList.add('sh-dragging');
       window.addEventListener('pointermove', onMove);
-      window.addEventListener('pointerup', onUp);
+      window.addEventListener('pointerup', onUpFinal);
     });
   }
   bindRingDrag();
