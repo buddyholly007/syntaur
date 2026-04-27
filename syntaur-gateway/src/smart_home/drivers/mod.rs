@@ -17,6 +17,7 @@ use crate::smart_home::scan::ScanCandidate;
 pub mod ble;
 pub mod camera;
 pub mod cloud;
+pub mod lan;
 pub mod matter;
 pub mod mqtt;
 pub mod wifi_lan;

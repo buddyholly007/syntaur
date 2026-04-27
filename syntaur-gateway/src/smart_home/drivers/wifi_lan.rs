@@ -84,6 +84,9 @@ pub async fn sweep() -> Vec<ScanCandidate> {
 pub async fn sweep_for(duration: Duration) -> Vec<ScanCandidate> {
     let mdns_task = tokio::spawn(mdns_sweep(duration));
     let ssdp_task = tokio::spawn(ssdp_sweep(duration));
+    // Per-vendor LAN adopters (Govee, WiZ, ...) discovery runs in
+    // parallel — each adopter caps its own window inside discover_all().
+    let lan_task = tokio::spawn(super::lan::discover_all());
 
     let mut results: Vec<ScanCandidate> = Vec::new();
     match mdns_task.await {
@@ -93,6 +96,10 @@ pub async fn sweep_for(duration: Duration) -> Vec<ScanCandidate> {
     match ssdp_task.await {
         Ok(v) => results.extend(v),
         Err(e) => log::warn!("[smart_home::wifi_lan] ssdp task panicked: {}", e),
+    }
+    match lan_task.await {
+        Ok(v) => results.extend(v.into_iter().map(|c| c.into_scan_candidate())),
+        Err(e) => log::warn!("[smart_home::wifi_lan] lan adopter task panicked: {}", e),
     }
     dedupe(results)
 }
