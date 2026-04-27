@@ -446,11 +446,28 @@ fn run_viewer(url: &str) -> Result<(), String> {
         // Main layout: horizontal paned — left=Syntaur, right=companion panel
         let paned = Paned::new(Orientation::Horizontal);
 
-        // Left: main Syntaur webview
-        let webview = WebView::new();
+        // Left: main Syntaur webview.
+        //
+        // Voice mode plays TTS audio after the agent responds — that's after
+        // the user-gesture activation window has lapsed, so autoplay would be
+        // blocked. The viewer is single-purpose; allow audio playback without
+        // a fresh gesture. WebKitGTK 6 needs BOTH levers:
+        //   1. settings.media_playback_requires_user_gesture = false
+        //   2. WebsitePolicies.autoplay = Allow (default is Deny which
+        //      overrides the setting and corks the PulseAudio sink-input).
+        let policies = webkit6::WebsitePolicies::builder()
+            .autoplay(webkit6::AutoplayPolicy::Allow)
+            .build();
+        let webview = WebView::builder()
+            .website_policies(&policies)
+            .build();
         webview.set_vexpand(true);
         webview.set_hexpand(true);
         paned.set_start_child(Some(&webview));
+
+        if let Some(settings) = webkit6::prelude::WebViewExt::settings(&webview) {
+            settings.set_media_playback_requires_user_gesture(false);
+        }
 
         // Permission-request handler. WebKitGTK 6's default behaviour
         // for an UNHANDLED permission-request is to DENY. That breaks
