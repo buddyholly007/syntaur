@@ -307,7 +307,101 @@ pub async fn handle_scan_confirm(
     .await
     .map_err(|e| err_500(format!("join error: {e}")))?
     .map_err(|e| err_500(format!("db error: {e}")))?;
+
+    // Phase 2C: kick off best-effort capability discovery in the
+    // background for freshly-confirmed Matter devices. Doesn't gate
+    // the HTTP response — discovery takes a few seconds (mDNS browse
+    // + CASE handshake + ~30 attribute reads) and the user has
+    // already moved on by the time it lands. Failures log and bail;
+    // the user can re-trigger via POST /api/smart-home/devices/{id}/discover-caps.
+    if device.driver == "matter" {
+        if let Some(node_id) = device
+            .external_id
+            .strip_prefix("node:")
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            spawn_auto_discover_caps(state.db_path.clone(), user_id, device.id, node_id);
+        }
+    }
+
     Ok(Json(json!({ "device": device })))
+}
+
+/// Best-effort background capability discovery for a freshly
+/// commissioned Matter device. Spawned by `handle_scan_confirm` after
+/// the device row lands. Does not block the caller; failures are
+/// logged and silently swallowed so a missing fabric (or a flaky
+/// device) doesn't break the confirm flow. Users can always retry
+/// manually via POST `/api/smart-home/devices/{id}/discover-caps`.
+fn spawn_auto_discover_caps(
+    db_path: std::path::PathBuf,
+    user_id: i64,
+    device_id: i64,
+    node_id: u64,
+) {
+    tokio::spawn(async move {
+        // Brief settle period — newly commissioned devices sometimes
+        // close their PASE side and reopen on operational addresses
+        // a beat later. 2 s is enough to win most races without
+        // making the user wait.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        let fabric = match tokio::task::spawn_blocking(|| {
+            let fabrics = syntaur_matter::list_fabrics()?;
+            match fabrics.as_slice() {
+                [single] => syntaur_matter::load_fabric(&single.label),
+                [] => Err(syntaur_matter::MatterFabricError::Matter(
+                    "no fabric configured".into(),
+                )),
+                _ => Err(syntaur_matter::MatterFabricError::Matter(
+                    "multiple fabrics — auto-discover skipped, use explicit endpoint".into(),
+                )),
+            }
+        })
+        .await
+        {
+            Ok(Ok(f)) => f,
+            Ok(Err(e)) => {
+                log::info!(
+                    "[auto-caps] device {device_id}: skipping (fabric resolve: {e:?})"
+                );
+                return;
+            }
+            Err(e) => {
+                log::warn!("[auto-caps] device {device_id}: join error: {e}");
+                return;
+            }
+        };
+
+        log::info!(
+            "[auto-caps] device {device_id} (node {node_id:#x}) on fabric {} — discovering",
+            fabric.label
+        );
+        let caps = match syntaur_matter_ble::discover_capabilities_for_node(
+            &fabric, node_id, None,
+        )
+        .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!(
+                    "[auto-caps] device {device_id}: discovery failed: {e:?} (user can retry via POST /api/smart-home/devices/{device_id}/discover-caps)"
+                );
+                return;
+            }
+        };
+
+        let persisted = tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
+            let conn = rusqlite::Connection::open(&db_path)?;
+            devices::set_capabilities(&conn, user_id, device_id, &caps)
+        })
+        .await;
+        match persisted {
+            Ok(Ok(_)) => log::info!("[auto-caps] device {device_id}: persisted"),
+            Ok(Err(e)) => log::warn!("[auto-caps] device {device_id}: persist failed: {e}"),
+            Err(e) => log::warn!("[auto-caps] device {device_id}: persist join error: {e}"),
+        }
+    });
 }
 
 // ── control ─────────────────────────────────────────────────────────────
