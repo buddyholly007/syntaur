@@ -38,6 +38,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::smart_home::scan::ScanCandidate;
 
+pub mod dyson;
 pub mod govee;
 pub mod wiz;
 
@@ -156,6 +157,7 @@ pub enum Recipe {
 /// order. New adopters land here.
 pub fn registry() -> Vec<Arc<dyn LanAdopter>> {
     vec![
+        Arc::new(dyson::DysonAdopter::default()),
         Arc::new(govee::GoveeAdopter::default()),
         Arc::new(wiz::WizAdopter::default()),
     ]

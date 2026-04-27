@@ -43,6 +43,11 @@ const MDNS_SERVICES: &[(&str, &str, &str)] = &[
     ("_esphomelib._tcp.local.", "wifi_lan", "unknown"),
     // Shelly Gen1 + Gen2 both advertise this (Gen2 also hits _http).
     ("_shelly._tcp.local.", "wifi_lan_shelly", "plug"),
+    // Dyson air-treatment devices advertise their per-device MQTT
+    // broker. Surfaced here so users on the same L2 segment as their
+    // Dysons get auto-discovery for free (no SYNTAUR_DYSON_PROBE_IPS
+    // env override needed).
+    ("_dyson_mqtt._tcp.local.", "lan_dyson", "air_purifier"),
     // AirPlay receivers — Apple TV, HomePod, AVR, AirPlay speakers.
     ("_airplay._tcp.local.", "wifi_lan", "media_player"),
     ("_raop._tcp.local.", "wifi_lan", "media_player"),
