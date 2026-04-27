@@ -15,6 +15,8 @@ use tokio::sync::oneshot;
 use crate::smart_home::scan::ScanCandidate;
 
 pub mod ble;
+pub mod ble_esphome;
+pub mod ble_host;
 pub mod camera;
 pub mod cloud;
 pub mod lan;

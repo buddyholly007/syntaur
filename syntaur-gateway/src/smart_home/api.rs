@@ -1108,6 +1108,81 @@ pub async fn handle_update_automation(
     Ok(Json(json!({ "updated": n })))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct AutomationRunsQuery {
+    /// How many runs to return. Server-clamped to [1, 200].
+    #[serde(default = "default_runs_limit")]
+    pub limit: i64,
+}
+
+fn default_runs_limit() -> i64 {
+    50
+}
+
+/// GET /api/smart-home/automations/{id}/runs — recent run history for the
+/// "why didn't my automation fire?" panel. Verifies the automation belongs
+/// to the caller before returning rows so a stranger's id can't be probed.
+pub async fn handle_list_automation_runs(
+    State(state): State<std::sync::Arc<AppState>>,
+    Path(id): Path<i64>,
+    axum::extract::Query(q): axum::extract::Query<AutomationRunsQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let user_id = current_user_id(&state);
+    let db = state.db_path.clone();
+    let limit = q.limit.clamp(1, 200);
+
+    let payload = tokio::task::spawn_blocking(move || -> rusqlite::Result<Option<serde_json::Value>> {
+        let conn = rusqlite::Connection::open(&db)?;
+        // Ownership check.
+        let owns: bool = conn
+            .query_row(
+                "SELECT 1 FROM smart_home_automations WHERE id = ? AND user_id = ? LIMIT 1",
+                rusqlite::params![id, user_id],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        if !owns {
+            return Ok(None);
+        }
+        let mut stmt = conn.prepare(
+            "SELECT id, ts, status, details_json
+               FROM smart_home_automation_runs
+              WHERE automation_id = ?
+              ORDER BY ts DESC
+              LIMIT ?",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![id, limit], |row| {
+            let run_id: i64 = row.get(0)?;
+            let ts: i64 = row.get(1)?;
+            let status: String = row.get(2)?;
+            let details: Option<String> = row.get(3)?;
+            let details_v: serde_json::Value = details
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_else(|| json!({}));
+            Ok(json!({
+                "id": run_id,
+                "ts": ts,
+                "status": status,
+                "details": details_v,
+            }))
+        })?;
+        let runs: Vec<serde_json::Value> = rows.filter_map(Result::ok).collect();
+        Ok(Some(json!({ "automation_id": id, "runs": runs })))
+    })
+    .await
+    .map_err(|e| err_500(format!("join error: {e}")))?
+    .map_err(|e| err_500(format!("db error: {e}")))?;
+
+    match payload {
+        Some(v) => Ok(Json(v)),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "automation not found" })),
+        )),
+    }
+}
+
 // ── scenes ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1717,6 +1792,12 @@ pub struct BleAnchorBody {
     pub room_id: i64,
     #[serde(default = "default_rssi_at_1m")]
     pub rssi_at_1m: i16,
+    /// When true, the gateway's local btleplug scanner attributes its
+    /// observations to this anchor. Most users leave this off — it's
+    /// only useful when the gateway hardware itself sits in a useful
+    /// vantage room (e.g. a small apartment with a dedicated host).
+    #[serde(default)]
+    pub host_scanner: bool,
 }
 
 fn default_rssi_at_1m() -> i16 {
@@ -1740,8 +1821,8 @@ pub async fn handle_list_ble_anchors(
             "note": "BLE driver not installed in this build",
         })));
     };
-    let _ = current_user_id(&state);
-    let snapshot = driver.anchors_snapshot().await;
+    let user_id = current_user_id(&state);
+    let snapshot = driver.anchors_snapshot(user_id).await;
     let mut rows: Vec<serde_json::Value> = snapshot
         .into_values()
         .map(|a| {
@@ -1750,6 +1831,7 @@ pub async fn handle_list_ble_anchors(
                 "anchor_label": a.anchor_label,
                 "room_id": a.room_id,
                 "rssi_at_1m": a.rssi_at_1m,
+                "host_scanner": a.host_scanner,
             })
         })
         .collect();
@@ -1840,16 +1922,18 @@ pub async fn handle_put_ble_anchors(
         new_anchors.insert(
             a.anchor_device_id,
             super::drivers::ble::AnchorConfig {
+                user_id,
                 anchor_device_id: a.anchor_device_id,
                 anchor_label: label,
                 room_id: a.room_id,
                 rssi_at_1m: a.rssi_at_1m,
+                host_scanner: a.host_scanner,
             },
         );
     }
 
     let written = driver
-        .persist_anchors(new_anchors)
+        .persist_anchors(user_id, new_anchors)
         .await
         .map_err(|e| err_500(format!("persist: {e}")))?;
     Ok(Json(json!({ "written": written })))

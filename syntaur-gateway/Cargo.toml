@@ -137,6 +137,19 @@ syntaur-matter-ble = { path = "../crates/syntaur-matter-ble" }
 anyhow = { workspace = true }
 syntaur-vault = { path = "../crates/syntaur-vault" }
 
+# BLE host-scanner + ESPHome-native-API ingest for smart_home/drivers/ble.rs.
+# Both are gated behind the `ble-host` feature so headless deployments
+# without a local Bluetooth adapter (claudevm VM, GitHub CI) build clean
+# and the driver stays a no-op there.
+btleplug = { version = "0.11", optional = true }
+esphome-native-api = { version = "2.0.7", optional = true }
+
+[features]
+default = []
+# Operators with a local BT adapter or ESPHome proxies enable this to
+# get the host scanner + native-API ingest paths.
+ble-host = ["dep:btleplug", "dep:esphome-native-api"]
+
 [dev-dependencies]
 # Used by #[cfg(test)] modules (crypto, schema migrations, etc.).
 # Was previously referenced without being declared — `cargo test` failed

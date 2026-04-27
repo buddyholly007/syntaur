@@ -38,10 +38,32 @@ use serde_json::Value;
 
 // ── AST ─────────────────────────────────────────────────────────────────
 
+/// Whether multiple triggers are combined with OR (any) or AND (all).
+/// Default is `Or` — that's the historical behavior and the common case
+/// ("fire when ANY of these things happen").
+///
+/// `And` semantics: when one trigger fires, the engine additionally
+/// checks every OTHER trigger's *current* state. For DeviceState
+/// triggers that means the device's state right now must match the
+/// trigger's `equals`; for Time triggers the wall clock must be inside
+/// the same minute; for Sensor triggers the last-known reading must be
+/// in range; Voice never satisfies AND because voice is event-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TriggerLogic {
+    #[default]
+    Or,
+    And,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutomationSpec {
     #[serde(default)]
     pub triggers: Vec<Trigger>,
+    /// How multiple triggers combine. Absent in older specs → `Or`
+    /// (historical behavior).
+    #[serde(default)]
+    pub trigger_logic: TriggerLogic,
     #[serde(default)]
     pub conditions: Vec<Condition>,
     #[serde(default)]
@@ -324,6 +346,7 @@ impl AutomationEngine {
                 let spec: AutomationSpec =
                     serde_json::from_str(&spec_json).unwrap_or_else(|_| AutomationSpec {
                         triggers: vec![],
+                        trigger_logic: TriggerLogic::default(),
                         conditions: vec![],
                         actions: vec![],
                     });
@@ -335,16 +358,47 @@ impl AutomationEngine {
                 })
             })?;
 
+            // Sibling lookup for AND-mode evaluation. Reads off the same
+            // open connection and respects user_id scoping per row.
+            let lookup_state = |dev_id: i64, scope_user: i64| -> Option<Value> {
+                if dev_id == device_id && scope_user == user_id {
+                    return Some(current_state.clone());
+                }
+                conn.query_row(
+                    "SELECT state_json FROM smart_home_devices WHERE user_id = ? AND id = ?",
+                    rusqlite::params![scope_user, dev_id],
+                    |row| {
+                        let s: String = row.get(0)?;
+                        Ok(serde_json::from_str::<Value>(&s).ok())
+                    },
+                )
+                .ok()
+                .flatten()
+            };
+            let presence_getter = |_room_id: i64, _person: &str| -> Option<String> { None };
+
             let matches: Vec<(LoadedAutomation, Value)> = rows
                 .filter_map(Result::ok)
                 .filter(|a| {
-                    a.spec.triggers.iter().any(|t| {
+                    let fired_index = a.spec.triggers.iter().position(|t| {
                         matches!(t,
                             Trigger::DeviceState { device_id: d, equals }
                                 if *d == device_id
                                     && device_state_matches(&current_state, equals)
                         )
-                    })
+                    });
+                    let Some(fired_index) = fired_index else {
+                        return false;
+                    };
+                    let scope_user = a.user_id;
+                    let getter = |id: i64| lookup_state(id, scope_user);
+                    and_mode_gate(
+                        &a.spec,
+                        Some(fired_index),
+                        minute_of_day,
+                        &getter,
+                        &presence_getter,
+                    )
                 })
                 .map(|a| (a, current_state.clone()))
                 .collect();
@@ -387,6 +441,7 @@ impl AutomationEngine {
                 let spec_json: String = row.get(3)?;
                 let spec: AutomationSpec = serde_json::from_str(&spec_json).unwrap_or(AutomationSpec {
                     triggers: vec![],
+                    trigger_logic: TriggerLogic::default(),
                     conditions: vec![],
                     actions: vec![],
                 });
@@ -398,9 +453,37 @@ impl AutomationEngine {
                 })
             })?;
             let automations: Vec<LoadedAutomation> = rows.filter_map(Result::ok).collect();
+            // For AND-mode gates we read sibling triggers' current state
+            // off the same connection. Defining the getter here keeps the
+            // borrow inside the spawn_blocking closure.
+            let device_state_getter = |device_id: i64, user_id: i64| -> Option<Value> {
+                conn.query_row(
+                    "SELECT state_json FROM smart_home_devices WHERE user_id = ? AND id = ?",
+                    rusqlite::params![user_id, device_id],
+                    |row| {
+                        let s: String = row.get(0)?;
+                        Ok(serde_json::from_str::<Value>(&s).ok())
+                    },
+                )
+                .ok()
+                .flatten()
+            };
+            let presence_getter = |_room_id: i64, _person: &str| -> Option<String> {
+                // Real presence ingestion is wired in the BLE driver; for
+                // AND-mode we fail closed until presence_getter has a
+                // queryable backend (follow-up).
+                None
+            };
             Ok(automations
                 .into_iter()
-                .filter(|a| triggers_match_time(&a.spec.triggers, minute_of_day))
+                .filter(|a| {
+                    if !triggers_match_time(&a.spec.triggers, minute_of_day) {
+                        return false;
+                    }
+                    let user_id = a.user_id;
+                    let getter = |id: i64| device_state_getter(id, user_id);
+                    and_mode_gate(&a.spec, None, minute_of_day, &getter, &presence_getter)
+                })
                 .collect())
         })
         .await
@@ -660,6 +743,123 @@ fn triggers_match_time(triggers: &[Trigger], minute_of_day: i32) -> bool {
     })
 }
 
+/// Sensor JSON keys we treat as "the value" for numeric matching. Order
+/// matters — we pick the first one present.
+const SENSOR_KEYS: &[&str] = &[
+    "value",
+    "state",
+    "temperature",
+    "humidity",
+    "battery",
+    "battery_level",
+    "power",
+    "energy",
+    "illuminance",
+    "lux",
+    "pressure",
+    "co2",
+    "voc",
+    "pm2_5",
+    "pm10",
+];
+
+/// Is this trigger currently active *right now*, independent of which
+/// trigger just fired? Used by the AND-mode gate so a fired trigger
+/// can verify its siblings are also live.
+///
+/// Time → exact minute match (the supervisor only calls this on tick
+/// boundaries so "exact minute" is the right granularity).
+/// DeviceState → device's current `state_json` matches `equals`.
+/// Sensor → device's current numeric reading is in the configured range.
+/// Presence → presence signal currently in the requested state.
+/// Voice → always false (event-only; AND with voice is undefined).
+pub fn trigger_currently_matches<F, P>(
+    trigger: &Trigger,
+    minute_of_day: i32,
+    device_state_getter: &F,
+    presence_getter: &P,
+) -> bool
+where
+    F: Fn(i64) -> Option<Value>,
+    P: Fn(i64, &str) -> Option<String>,
+{
+    match trigger {
+        Trigger::Time { at, offset_min } => {
+            time_trigger_matches(at, *offset_min, minute_of_day).unwrap_or(false)
+        }
+        Trigger::DeviceState { device_id, equals } => {
+            match device_state_getter(*device_id) {
+                Some(v) => device_state_matches(&v, equals),
+                None => false,
+            }
+        }
+        Trigger::Sensor { device_id, above, below } => {
+            let Some(v) = device_state_getter(*device_id) else {
+                return false;
+            };
+            // Numeric pull: scalar numbers, OR the first numeric value
+            // we find under a known sensor key. Covers the common shapes
+            // we see across Matter, ESPHome, MQTT and HA-Discovery
+            // dialects without locking us into one of them.
+            let n = match &v {
+                Value::Number(n) => n.as_f64(),
+                Value::Object(o) => SENSOR_KEYS
+                    .iter()
+                    .find_map(|k| o.get(*k).and_then(|x| x.as_f64()))
+                    .or_else(|| {
+                        // Last-ditch: the first numeric value in the object,
+                        // so a one-key payload like {"battery": 87} works
+                        // even if the key isn't in our list.
+                        o.values().find_map(|x| x.as_f64())
+                    }),
+                _ => None,
+            };
+            let Some(n) = n else { return false };
+            let above_ok = above.map(|t| n > t).unwrap_or(true);
+            let below_ok = below.map(|t| n < t).unwrap_or(true);
+            above_ok && below_ok
+        }
+        Trigger::Presence { room_id, person, state } => {
+            // presence_getter returns the last-known state for (room, person).
+            // "home"/"away"/<room name> are caller-side conventions.
+            match presence_getter(*room_id, person) {
+                Some(s) => s == *state,
+                None => false,
+            }
+        }
+        // Voice triggers are inherently event-only. Treat as not-currently-
+        // active so AND-mode with a voice sibling never fires from a
+        // non-voice path (matches the "voice never satisfies AND" doc).
+        Trigger::Voice { .. } => false,
+    }
+}
+
+/// AND-mode gate: given the trigger that just fired and the full list,
+/// verify every OTHER trigger is currently active. Returns true in OR
+/// mode without checking siblings.
+pub fn and_mode_gate<F, P>(
+    spec: &AutomationSpec,
+    fired_index: Option<usize>,
+    minute_of_day: i32,
+    device_state_getter: &F,
+    presence_getter: &P,
+) -> bool
+where
+    F: Fn(i64) -> Option<Value>,
+    P: Fn(i64, &str) -> Option<String>,
+{
+    if spec.trigger_logic == TriggerLogic::Or {
+        return true;
+    }
+    spec.triggers
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| Some(*i) != fired_index)
+        .all(|(_, t)| {
+            trigger_currently_matches(t, minute_of_day, device_state_getter, presence_getter)
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -768,5 +968,107 @@ mod tests {
         ];
         assert!(triggers_match_time(&triggers, 21 * 60));
         assert!(!triggers_match_time(&triggers, 19 * 60));
+    }
+
+    // ── AND/OR trigger logic ────────────────────────────────────────────
+
+    fn no_presence(_: i64, _: &str) -> Option<String> { None }
+
+    #[test]
+    fn trigger_logic_default_is_or_for_back_compat() {
+        // A spec deserialized from older JSON missing trigger_logic.
+        let spec: AutomationSpec = serde_json::from_str(
+            r#"{"triggers":[{"kind":"time","at":"18:00"}],"actions":[]}"#,
+        ).unwrap();
+        assert_eq!(spec.trigger_logic, TriggerLogic::Or);
+    }
+
+    #[test]
+    fn and_mode_gate_passes_when_all_siblings_match() {
+        // Sibling DeviceState trigger; device 7 currently in matching state.
+        let spec = AutomationSpec {
+            triggers: vec![
+                Trigger::Time { at: "18:00".into(), offset_min: 0 },
+                Trigger::DeviceState { device_id: 7, equals: json!(true) },
+            ],
+            trigger_logic: TriggerLogic::And,
+            conditions: vec![],
+            actions: vec![],
+        };
+        let getter = |id: i64| if id == 7 { Some(json!({"on": true})) } else { None };
+        assert!(and_mode_gate(&spec, Some(0), 18 * 60, &getter, &no_presence));
+    }
+
+    #[test]
+    fn and_mode_gate_fails_when_sibling_state_does_not_match() {
+        let spec = AutomationSpec {
+            triggers: vec![
+                Trigger::Time { at: "18:00".into(), offset_min: 0 },
+                Trigger::DeviceState { device_id: 7, equals: json!(true) },
+            ],
+            trigger_logic: TriggerLogic::And,
+            conditions: vec![],
+            actions: vec![],
+        };
+        // Device 7 is currently OFF → sibling fails → AND gate fails.
+        let getter = |id: i64| if id == 7 { Some(json!({"on": false})) } else { None };
+        assert!(!and_mode_gate(&spec, Some(0), 18 * 60, &getter, &no_presence));
+    }
+
+    #[test]
+    fn or_mode_gate_always_passes() {
+        let spec = AutomationSpec {
+            triggers: vec![
+                Trigger::Time { at: "18:00".into(), offset_min: 0 },
+                Trigger::DeviceState { device_id: 7, equals: json!(true) },
+            ],
+            trigger_logic: TriggerLogic::Or,
+            conditions: vec![],
+            actions: vec![],
+        };
+        // Even with a missing sibling state, OR gate doesn't care.
+        let getter = |_id: i64| None;
+        assert!(and_mode_gate(&spec, Some(0), 18 * 60, &getter, &no_presence));
+    }
+
+    #[test]
+    fn and_mode_voice_trigger_never_satisfies_sibling() {
+        // Voice + Time in AND; firing trigger is Time, sibling is Voice.
+        // Voice is event-only and never "currently active" — AND fails.
+        let spec = AutomationSpec {
+            triggers: vec![
+                Trigger::Time { at: "18:00".into(), offset_min: 0 },
+                Trigger::Voice { phrase: "movie time".into() },
+            ],
+            trigger_logic: TriggerLogic::And,
+            conditions: vec![],
+            actions: vec![],
+        };
+        let getter = |_: i64| None;
+        assert!(!and_mode_gate(&spec, Some(0), 18 * 60, &getter, &no_presence));
+    }
+
+    #[test]
+    fn trigger_currently_matches_sensor_in_range() {
+        let above = Trigger::Sensor { device_id: 9, above: Some(20.0), below: None };
+        let below = Trigger::Sensor { device_id: 9, above: None, below: Some(80.0) };
+        let getter = |_: i64| Some(json!({"temperature": 22.5}));
+        assert!(trigger_currently_matches(&above, 0, &getter, &no_presence));
+        assert!(trigger_currently_matches(&below, 0, &getter, &no_presence));
+    }
+
+    #[test]
+    fn trigger_currently_matches_sensor_out_of_range() {
+        let t = Trigger::Sensor { device_id: 9, above: Some(30.0), below: None };
+        let getter = |_: i64| Some(json!({"temperature": 22.5}));
+        assert!(!trigger_currently_matches(&t, 0, &getter, &no_presence));
+    }
+
+    #[test]
+    fn trigger_currently_matches_sensor_finds_battery_key() {
+        // Battery key isn't first in SENSOR_KEYS, but is in the list.
+        let t = Trigger::Sensor { device_id: 9, above: Some(50.0), below: None };
+        let getter = |_: i64| Some(json!({"battery": 87}));
+        assert!(trigger_currently_matches(&t, 0, &getter, &no_presence));
     }
 }

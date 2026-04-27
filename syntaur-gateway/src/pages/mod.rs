@@ -47,6 +47,7 @@ pub mod onboarding;
 pub mod profile;
 pub mod register;
 pub mod smart_home;
+pub mod smart_home_ble;
 pub mod social;
 pub mod tax;
 pub mod voice_setup;

@@ -105,14 +105,14 @@ pub async fn init(db_path: std::path::PathBuf) -> Result<(), String> {
     )
     .spawn();
 
-    // Week 7 BLE driver — subscribes to the event bus, filters MQTT
-    // events coming from anchor devices the user has configured, and
-    // writes `smart_home_presence_signals` rows on a 15s tick. Single-
-    // user v1: anchors + presence writes are scoped to user_id=1
-    // (admin). Per-tenant anchors ride on the same pattern
-    // MqttSupervisor uses (credential-row-per-user) and wire in when
-    // the "Add BLE anchor" settings page lands.
-    let ble = std::sync::Arc::new(drivers::ble::BleDriver::new(1, db_path));
+    // BLE driver — multi-tenant. Subscribes to the event bus, filters
+    // MQTT events coming from any user's configured anchor devices,
+    // and writes `smart_home_presence_signals` rows on a 15s tick
+    // attributed per-tenant. Anchors live in
+    // `smart_home_devices.state_json->ble_anchor`; a single driver
+    // instance services every tenant by composite key
+    // `(user_id, anchor_device_id)`.
+    let ble = std::sync::Arc::new(drivers::ble::BleDriver::new(db_path));
     // Hydrate the anchor set from smart_home_devices.state_json->ble_anchor
     // before the ingest loop starts subscribing. If the DB has no
     // anchor rows (fresh install), this is a no-op — users seed anchors
@@ -122,6 +122,14 @@ pub async fn init(db_path: std::path::PathBuf) -> Result<(), String> {
         log::warn!("[smart_home] ble anchor hydrate failed (non-fatal): {e}");
     }
     let _ble_handle = ble.clone().spawn();
+    // Local btleplug host scanner — third RSSI source. No-op at runtime
+    // when the `ble-host` feature is off OR when the host has no BT
+    // adapter, so this call is safe on every deployment target.
+    let _host_handle = drivers::ble_host::start_host_scanner(ble.clone());
+    // ESPHome native-API ingest is currently a feature-gated scaffold —
+    // see drivers/ble_esphome.rs for the rationale and TODO list. The
+    // call is safe to leave in `init` so the wiring is permanent.
+    let _esphome_handle = drivers::ble_esphome::start_esphome_ingest(ble.clone());
     drivers::ble::install(ble);
 
     log::info!(

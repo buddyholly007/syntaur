@@ -6946,6 +6946,7 @@ async fn main() {
         // see plans/we-need-to-work-floofy-haven.md). UI route + the
         // /api/smart-home/* CRUD + scan/control/automation surface.
         .route("/smart-home", get(pages::smart_home::render))
+        .route("/smart-home/ble", get(pages::smart_home_ble::render))
         .route(
             "/api/smart-home/rooms",
             get(smart_home::api::handle_list_rooms).post(smart_home::api::handle_create_room),
@@ -6988,6 +6989,10 @@ async fn main() {
         .route(
             "/api/smart-home/automations/{id}/toggle",
             post(smart_home::api::handle_toggle_automation),
+        )
+        .route(
+            "/api/smart-home/automations/{id}/runs",
+            get(smart_home::api::handle_list_automation_runs),
         )
         .route(
             "/api/smart-home/automation/compile",

@@ -85,11 +85,13 @@ pub fn installed() -> Option<Arc<BleDriver>> {
     DRIVER.get().cloned()
 }
 
-/// Per-anchor calibration. Keyed in the driver's HashMap by
-/// `anchor_device_id` so we can look up an anchor directly from a
-/// `DeviceStateChanged` event without a DB round-trip.
+/// Per-anchor calibration. Keyed in the driver's HashMap by the tuple
+/// `(user_id, anchor_device_id)` so multiple tenants can each manage
+/// their own anchors without colliding.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnchorConfig {
+    /// Owning user — anchors and presence signals are per-tenant.
+    pub user_id: i64,
     /// `smart_home_devices.id` of the proxy/scanner itself.
     pub anchor_device_id: i64,
     /// Human-readable tag carried through to logs + presence rows
@@ -103,17 +105,29 @@ pub struct AnchorConfig {
     /// monotonic with RSSI so "closest wins" stays correct even with
     /// default calibration.
     pub rssi_at_1m: i16,
+    /// When true, the gateway's local btleplug scanner attributes its
+    /// observations to this anchor. Each tenant can flag at most one
+    /// anchor as the host scanner; if flagged for multiple, the first
+    /// one returned by `anchors_snapshot()` wins (HashMap iteration is
+    /// undefined, so don't do that).
+    #[serde(default)]
+    pub host_scanner: bool,
 }
 
 /// One RSSI observation: anchor X heard target MAC Y at RSSI Z at
-/// unix-second T.
+/// unix-second T. Carries `user_id` so the multiplexed buffer can be
+/// classified per-tenant at tick time.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RssiObservation {
+    pub user_id: i64,
     pub anchor_device_id: i64,
     pub target_mac: String,
     pub rssi: i16,
     pub ts: i64,
 }
+
+/// Composite anchor key: `(user_id, anchor_device_id)`.
+pub type AnchorKey = (i64, i64);
 
 /// Result of classifying one target across current observations.
 #[derive(Debug, Clone, PartialEq)]
@@ -140,9 +154,13 @@ pub const DEFAULT_N: f64 = 2.5;
 /// anchor map, pick the anchor with the smallest estimated distance
 /// among fresh-enough observations. Returns `None` if no observation
 /// matches a known anchor within `staleness_window_secs`.
+///
+/// `anchors` is keyed by `(user_id, anchor_device_id)` so observations
+/// from one tenant never resolve against another tenant's anchors —
+/// even if both happen to use the same `anchor_device_id` value.
 pub fn estimate_room(
     obs: &[RssiObservation],
-    anchors: &HashMap<i64, AnchorConfig>,
+    anchors: &HashMap<AnchorKey, AnchorConfig>,
     now_ts: i64,
     staleness_window_secs: i64,
 ) -> Option<RoomEstimate> {
@@ -151,7 +169,7 @@ pub fn estimate_room(
         if now_ts.saturating_sub(o.ts) > staleness_window_secs {
             continue;
         }
-        let Some(anchor) = anchors.get(&o.anchor_device_id) else {
+        let Some(anchor) = anchors.get(&(o.user_id, o.anchor_device_id)) else {
             continue;
         };
         let d = rssi_to_distance(o.rssi, anchor.rssi_at_1m, DEFAULT_N);
@@ -186,13 +204,19 @@ pub fn estimate_room(
 /// MAC canonicalization: the parser emits lowercase, colon-separated
 /// MACs regardless of input casing or separator style. Downstream
 /// dedupe + DB storage can rely on that invariant.
-pub fn parse_ble_rssi(anchor_device_id: i64, state: &Value, ts: i64) -> Vec<RssiObservation> {
+pub fn parse_ble_rssi(
+    user_id: i64,
+    anchor_device_id: i64,
+    state: &Value,
+    ts: i64,
+) -> Vec<RssiObservation> {
     let mut out = Vec::new();
     // Shape A: flat {rssi, target_mac}
     if let (Some(rssi_v), Some(mac_v)) = (state.get("rssi"), state.get("target_mac")) {
         if let (Some(rssi), Some(mac)) = (rssi_v.as_i64(), mac_v.as_str()) {
             if let Some(mac) = canonicalize_mac(mac) {
                 out.push(RssiObservation {
+                    user_id,
                     anchor_device_id,
                     target_mac: mac,
                     rssi: clamp_rssi(rssi),
@@ -210,6 +234,7 @@ pub fn parse_ble_rssi(anchor_device_id: i64, state: &Value, ts: i64) -> Vec<Rssi
             let Some(rssi) = v.as_i64() else { continue };
             let Some(mac) = canonicalize_mac(tail) else { continue };
             out.push(RssiObservation {
+                user_id,
                 anchor_device_id,
                 target_mac: mac,
                 rssi: clamp_rssi(rssi),
@@ -255,20 +280,21 @@ fn now_ts() -> i64 {
 }
 
 /// Driver runtime. Owns the anchor config + per-target observation
-/// buffer + the two long-running tasks (ingest + tick).
+/// buffer + the long-running tasks (MQTT ingest + classifier tick +
+/// optional btleplug host scanner). Multi-tenant: anchors are keyed
+/// by `(user_id, anchor_device_id)` so a single driver instance
+/// services every tenant.
 pub struct BleDriver {
-    user_id: i64,
     db_path: PathBuf,
-    anchors: Arc<Mutex<HashMap<i64, AnchorConfig>>>,
+    anchors: Arc<Mutex<HashMap<AnchorKey, AnchorConfig>>>,
     buffer: Arc<Mutex<HashMap<String, Vec<RssiObservation>>>>,
     tick_interval: Duration,
     staleness_window_secs: i64,
 }
 
 impl BleDriver {
-    pub fn new(user_id: i64, db_path: PathBuf) -> Self {
+    pub fn new(db_path: PathBuf) -> Self {
         Self {
-            user_id,
             db_path,
             anchors: Arc::new(Mutex::new(HashMap::new())),
             buffer: Arc::new(Mutex::new(HashMap::new())),
@@ -277,11 +303,10 @@ impl BleDriver {
         }
     }
 
-    /// Replace the anchor config. Safe to call at runtime — the next
-    /// tick picks up the new map. Observations already buffered for
-    /// removed anchors are discarded by `tick_once` (they no longer
-    /// match any anchor so `estimate_room` returns `None`).
-    pub async fn set_anchors(&self, anchors: HashMap<i64, AnchorConfig>) {
+    /// Replace the entire multi-tenant anchor map. Tests and callers
+    /// that construct a fresh map across all users use this; the
+    /// per-tenant `persist_anchors(user_id, ...)` is the API path.
+    pub async fn set_anchors(&self, anchors: HashMap<AnchorKey, AnchorConfig>) {
         let mut g = self.anchors.lock().await;
         *g = anchors;
     }
@@ -290,40 +315,66 @@ impl BleDriver {
         self.anchors.lock().await.len()
     }
 
-    /// Snapshot the current anchor config — GET /api/smart-home/ble/anchors
-    /// hands this straight to the client.
-    pub async fn anchors_snapshot(&self) -> HashMap<i64, AnchorConfig> {
+    /// Snapshot of one tenant's anchors keyed by `anchor_device_id` —
+    /// GET /api/smart-home/ble/anchors hands this to the caller.
+    pub async fn anchors_snapshot(&self, user_id: i64) -> HashMap<i64, AnchorConfig> {
+        let g = self.anchors.lock().await;
+        g.iter()
+            .filter(|((u, _), _)| *u == user_id)
+            .map(|((_, dev), cfg)| (*dev, cfg.clone()))
+            .collect()
+    }
+
+    /// Snapshot of every anchor across every tenant. Used by the host
+    /// scanner so a single inbound RSSI hit can be attributed to any
+    /// matching anchor without locking the API path.
+    pub async fn all_anchors_snapshot(&self) -> HashMap<AnchorKey, AnchorConfig> {
         self.anchors.lock().await.clone()
     }
 
-    /// Hydrate the anchor config from SQLite on startup. Reads any
-    /// `smart_home_devices` row whose `state_json` contains a
-    /// `ble_anchor` key. The JSON shape is `{ "ble_anchor": { "room_id":
-    /// N, "rssi_at_1m": -50 } }` — a flat object we merge into the
-    /// device's runtime state.
+    /// Anchors flagged as host scanners. Each entry tells the local
+    /// btleplug task "fan inbound RSSI for any MAC into this anchor."
+    /// Returns one anchor per tenant — the host scanner runs once and
+    /// emits N observations per inbound advertisement (one for each
+    /// configured tenant).
+    pub async fn host_anchors_snapshot(&self) -> Vec<AnchorConfig> {
+        self.anchors
+            .lock()
+            .await
+            .values()
+            .filter(|a| a.host_scanner)
+            .cloned()
+            .collect()
+    }
+
+    /// Hydrate the anchor config from SQLite on startup. Reads every
+    /// `smart_home_devices` row across all tenants whose `state_json`
+    /// contains a `ble_anchor` key. The JSON shape is
+    /// `{ "ble_anchor": { "room_id": N, "rssi_at_1m": -50 } }` — a flat
+    /// object we merge into the device's runtime state.
     ///
     /// Called once from `smart_home::init` after the DB is ready, so
     /// restarts recover the anchor set without user intervention.
     pub async fn hydrate_from_db(&self) -> Result<usize, String> {
         let db = self.db_path.clone();
-        let user_id = self.user_id;
         let anchors = tokio::task::spawn_blocking(
-            move || -> rusqlite::Result<HashMap<i64, AnchorConfig>> {
+            move || -> rusqlite::Result<HashMap<AnchorKey, AnchorConfig>> {
                 let conn = Connection::open(&db)?;
                 let mut stmt = conn.prepare(
-                    "SELECT id, name, state_json FROM smart_home_devices
-                      WHERE user_id = ? AND state_json IS NOT NULL",
+                    "SELECT id, user_id, name, state_json FROM smart_home_devices
+                      WHERE state_json IS NOT NULL",
                 )?;
-                let rows = stmt.query_map(rusqlite::params![user_id], |r| {
+                let rows = stmt.query_map([], |r| {
                     Ok((
                         r.get::<_, i64>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, Option<String>>(3)?.unwrap_or_default(),
                     ))
                 })?;
                 let mut out = HashMap::new();
                 for row in rows.filter_map(Result::ok) {
-                    let (id, name, state_json) = row;
+                    let (id, user_id, name, state_json) = row;
                     let Ok(v) = serde_json::from_str::<Value>(&state_json) else {
                         continue;
                     };
@@ -336,13 +387,19 @@ impl BleDriver {
                         .and_then(|r| r.as_i64())
                         .map(|r| r.clamp(i16::MIN as i64, i16::MAX as i64) as i16)
                         .unwrap_or(-50);
+                    let host_scanner = a
+                        .get("host_scanner")
+                        .and_then(|b| b.as_bool())
+                        .unwrap_or(false);
                     out.insert(
-                        id,
+                        (user_id, id),
                         AnchorConfig {
+                            user_id,
                             anchor_device_id: id,
                             anchor_label: name,
                             room_id,
                             rssi_at_1m,
+                            host_scanner,
                         },
                     );
                 }
@@ -354,22 +411,23 @@ impl BleDriver {
         .map_err(|e| format!("db: {e}"))?;
         let n = anchors.len();
         self.set_anchors(anchors).await;
-        log::info!("[smart_home::ble] hydrated {} anchor(s) from DB", n);
+        log::info!("[smart_home::ble] hydrated {} anchor(s) from DB across all tenants", n);
         Ok(n)
     }
 
-    /// Persist a replacement anchor set and refresh runtime. Writes
-    /// `state_json->ble_anchor` into each target device row. Any anchor
-    /// device that USED to be configured but isn't in `new_anchors`
-    /// gets its `ble_anchor` key stripped — equivalent to "un-anchor".
-    /// Atomic per row via rusqlite transaction.
+    /// Persist a replacement anchor set for ONE tenant and refresh
+    /// runtime. Writes `state_json->ble_anchor` into each target device
+    /// row. Any anchor device that USED to be configured for this user
+    /// but isn't in `new_anchors` gets its `ble_anchor` key stripped.
+    /// Other tenants' anchors are untouched. Atomic per-row via
+    /// rusqlite transaction.
     pub async fn persist_anchors(
         &self,
+        user_id: i64,
         new_anchors: HashMap<i64, AnchorConfig>,
     ) -> Result<usize, String> {
-        let previous = self.anchors_snapshot().await;
+        let previous = self.anchors_snapshot(user_id).await;
         let db = self.db_path.clone();
-        let user_id = self.user_id;
         let to_write = new_anchors.clone();
         let previous_ids: Vec<i64> = previous.keys().copied().collect();
 
@@ -390,16 +448,23 @@ impl BleDriver {
                         .as_deref()
                         .and_then(|s| serde_json::from_str(s).ok())
                         .unwrap_or_else(|| serde_json::json!({}));
-                    let obj = existing_val
-                        .as_object_mut()
-                        .expect("object");
-                    obj.insert(
-                        "ble_anchor".to_string(),
-                        serde_json::json!({
-                            "room_id": cfg.room_id,
-                            "rssi_at_1m": cfg.rssi_at_1m,
-                        }),
-                    );
+                    // Coerce non-object state_json (null/array/scalar)
+                    // into an object; we only ever own the ble_anchor
+                    // key, but if some upstream wrote a non-object we
+                    // mustn't panic.
+                    if !existing_val.is_object() {
+                        existing_val = serde_json::json!({});
+                    }
+                    if let Some(obj) = existing_val.as_object_mut() {
+                        obj.insert(
+                            "ble_anchor".to_string(),
+                            serde_json::json!({
+                                "room_id": cfg.room_id,
+                                "rssi_at_1m": cfg.rssi_at_1m,
+                                "host_scanner": cfg.host_scanner,
+                            }),
+                        );
+                    }
                     tx.execute(
                         "UPDATE smart_home_devices SET state_json = ?
                           WHERE user_id = ? AND id = ?",
@@ -446,10 +511,18 @@ impl BleDriver {
         .map_err(|e| format!("join: {e}"))?
         .map_err(|e| format!("db: {e}"))?;
 
-        self.set_anchors(new_anchors).await;
+        // Splice this tenant's anchors back into the shared map without
+        // disturbing other tenants.
+        {
+            let mut g = self.anchors.lock().await;
+            g.retain(|(u, _), _| *u != user_id);
+            for (dev, cfg) in new_anchors {
+                g.insert((user_id, dev), cfg);
+            }
+        }
         log::info!(
-            "[smart_home::ble] persisted {} anchor(s); cleared {} stale",
-            written, cleared
+            "[smart_home::ble] user_id={} persisted {} anchor(s); cleared {} stale",
+            user_id, written, cleared
         );
         Ok(written)
     }
@@ -477,17 +550,17 @@ impl BleDriver {
                     state,
                     source,
                 }) => {
-                    if user_id != self.user_id || source != "mqtt" {
+                    if source != "mqtt" {
                         continue;
                     }
                     let known = {
                         let g = self.anchors.lock().await;
-                        g.contains_key(&device_id)
+                        g.contains_key(&(user_id, device_id))
                     };
                     if !known {
                         continue;
                     }
-                    let observations = parse_ble_rssi(device_id, &state, now_ts());
+                    let observations = parse_ble_rssi(user_id, device_id, &state, now_ts());
                     if observations.is_empty() {
                         continue;
                     }
@@ -506,6 +579,21 @@ impl BleDriver {
                 }
             }
         }
+    }
+
+    /// Push an observation directly into the buffer. Used by the
+    /// btleplug host scanner and any future ingestion path that
+    /// bypasses the MQTT bus.
+    pub async fn push_observation(&self, obs: RssiObservation) {
+        let known = {
+            let g = self.anchors.lock().await;
+            g.contains_key(&(obs.user_id, obs.anchor_device_id))
+        };
+        if !known {
+            return;
+        }
+        let mut g = self.buffer.lock().await;
+        g.entry(obs.target_mac.clone()).or_default().push(obs);
     }
 
     async fn tick_loop(self: Arc<Self>) {
@@ -533,10 +621,24 @@ impl BleDriver {
             let mut g = self.buffer.lock().await;
             g.drain().collect()
         };
-        let mut rows: Vec<(String, RoomEstimate)> = Vec::new();
+        // Per-tenant classification: split each MAC's observations by
+        // user_id so two tenants observing the same MAC each get their
+        // own room estimate (see persist_anchors note on multi-tenancy).
+        // Output rows carry user_id so the SQL writer attributes them.
+        let mut rows: Vec<(i64, String, RoomEstimate)> = Vec::new();
         for (mac, obs) in &drained {
-            if let Some(est) = estimate_room(obs, &anchors, now, self.staleness_window_secs) {
-                rows.push((mac.clone(), est));
+            // Bucket by user_id without an extra alloc in the hot path
+            // for the single-tenant case.
+            let mut by_user: HashMap<i64, Vec<RssiObservation>> = HashMap::new();
+            for o in obs {
+                by_user.entry(o.user_id).or_default().push(o.clone());
+            }
+            for (user_id, user_obs) in by_user {
+                if let Some(est) =
+                    estimate_room(&user_obs, &anchors, now, self.staleness_window_secs)
+                {
+                    rows.push((user_id, mac.clone(), est));
+                }
             }
         }
         if rows.is_empty() {
@@ -544,11 +646,10 @@ impl BleDriver {
         }
         let n_rows = rows.len();
         let db = self.db_path.clone();
-        let user_id = self.user_id;
         tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
             let mut conn = Connection::open(&db)?;
             let tx = conn.transaction()?;
-            for (mac, est) in rows {
+            for (user_id, mac, est) in rows {
                 tx.execute(
                     "INSERT INTO smart_home_presence_signals \
                      (user_id, person, ts, room_id, confidence, source) \
@@ -586,27 +687,43 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn anchors_two() -> HashMap<i64, AnchorConfig> {
+    /// Two anchors owned by user_id=1. Multi-tenant tests build their
+    /// own maps with cross-user keys.
+    fn anchors_two() -> HashMap<AnchorKey, AnchorConfig> {
         let mut m = HashMap::new();
         m.insert(
-            1,
+            (1, 1),
             AnchorConfig {
+                user_id: 1,
                 anchor_device_id: 1,
                 anchor_label: "proxy-kids".into(),
                 room_id: 10,
                 rssi_at_1m: -50,
+                host_scanner: false,
             },
         );
         m.insert(
-            2,
+            (1, 2),
             AnchorConfig {
+                user_id: 1,
                 anchor_device_id: 2,
                 anchor_label: "proxy-master-bath".into(),
                 room_id: 20,
                 rssi_at_1m: -50,
+                host_scanner: false,
             },
         );
         m
+    }
+
+    fn obs(uid: i64, anchor: i64, mac: &str, rssi: i16, ts: i64) -> RssiObservation {
+        RssiObservation {
+            user_id: uid,
+            anchor_device_id: anchor,
+            target_mac: mac.into(),
+            rssi,
+            ts,
+        }
     }
 
     #[test]
@@ -624,21 +741,11 @@ mod tests {
         let now = 1_000_000;
         // Anchor 1 hears −60 dBm, anchor 2 hears −80 dBm. Target lives
         // in room 10 (kids' wing). Closest-anchor wins.
-        let obs = vec![
-            RssiObservation {
-                anchor_device_id: 1,
-                target_mac: "aa:bb:cc:dd:ee:ff".into(),
-                rssi: -60,
-                ts: now,
-            },
-            RssiObservation {
-                anchor_device_id: 2,
-                target_mac: "aa:bb:cc:dd:ee:ff".into(),
-                rssi: -80,
-                ts: now,
-            },
+        let observations = vec![
+            obs(1, 1, "aa:bb:cc:dd:ee:ff", -60, now),
+            obs(1, 2, "aa:bb:cc:dd:ee:ff", -80, now),
         ];
-        let est = estimate_room(&obs, &anchors, now, 30).expect("should pick");
+        let est = estimate_room(&observations, &anchors, now, 30).expect("should pick");
         assert_eq!(est.room_id, 10);
         assert_eq!(est.best_anchor_device_id, 1);
         assert!(est.confidence > 0.0 && est.confidence <= 1.0);
@@ -648,55 +755,37 @@ mod tests {
     fn estimate_room_drops_stale_observations() {
         let anchors = anchors_two();
         let now = 1_000_000;
-        // Anchor 1's −60 is stale (120s old); anchor 2's −80 is fresh.
-        // Stale obs is dropped, so anchor 2 wins even though its RSSI
-        // is numerically weaker.
-        let obs = vec![
-            RssiObservation {
-                anchor_device_id: 1,
-                target_mac: "aa:bb:cc:dd:ee:ff".into(),
-                rssi: -60,
-                ts: now - 120,
-            },
-            RssiObservation {
-                anchor_device_id: 2,
-                target_mac: "aa:bb:cc:dd:ee:ff".into(),
-                rssi: -80,
-                ts: now,
-            },
+        let observations = vec![
+            obs(1, 1, "aa:bb:cc:dd:ee:ff", -60, now - 120),
+            obs(1, 2, "aa:bb:cc:dd:ee:ff", -80, now),
         ];
-        let est = estimate_room(&obs, &anchors, now, 30).expect("should pick");
+        let est = estimate_room(&observations, &anchors, now, 30).expect("should pick");
         assert_eq!(est.room_id, 20);
     }
 
     #[test]
     fn estimate_room_none_when_unknown_anchor() {
         let anchors = anchors_two();
-        let obs = vec![RssiObservation {
-            anchor_device_id: 999,
-            target_mac: "aa:bb:cc:dd:ee:ff".into(),
-            rssi: -40,
-            ts: 1_000_000,
-        }];
-        assert!(estimate_room(&obs, &anchors, 1_000_000, 30).is_none());
+        let observations = vec![obs(1, 999, "aa:bb:cc:dd:ee:ff", -40, 1_000_000)];
+        assert!(estimate_room(&observations, &anchors, 1_000_000, 30).is_none());
+    }
+
+    #[test]
+    fn estimate_room_isolates_tenants() {
+        // user_id 1 has anchors 1+2; observations with user_id=2 should
+        // never resolve against them, even at the same anchor_device_id.
+        let anchors = anchors_two();
+        let now = 1_000_000;
+        let cross_tenant = vec![obs(2, 1, "aa:bb:cc:dd:ee:ff", -40, now)];
+        assert!(estimate_room(&cross_tenant, &anchors, now, 30).is_none());
     }
 
     #[test]
     fn confidence_decays_with_distance() {
         let anchors = anchors_two();
         let now = 1_000_000;
-        let close = vec![RssiObservation {
-            anchor_device_id: 1,
-            target_mac: "aa:bb:cc:dd:ee:ff".into(),
-            rssi: -50,
-            ts: now,
-        }];
-        let far = vec![RssiObservation {
-            anchor_device_id: 1,
-            target_mac: "11:22:33:44:55:66".into(),
-            rssi: -90,
-            ts: now,
-        }];
+        let close = vec![obs(1, 1, "aa:bb:cc:dd:ee:ff", -50, now)];
+        let far = vec![obs(1, 1, "11:22:33:44:55:66", -90, now)];
         let ec = estimate_room(&close, &anchors, now, 30).unwrap();
         let ef = estimate_room(&far, &anchors, now, 30).unwrap();
         assert!(ec.confidence > ef.confidence);
@@ -705,12 +794,13 @@ mod tests {
     #[test]
     fn parse_ble_rssi_flat_shape() {
         let s = json!({ "rssi": -73, "target_mac": "AA:BB:CC:DD:EE:FF" });
-        let obs = parse_ble_rssi(7, &s, 42);
-        assert_eq!(obs.len(), 1);
-        assert_eq!(obs[0].anchor_device_id, 7);
-        assert_eq!(obs[0].rssi, -73);
-        assert_eq!(obs[0].target_mac, "aa:bb:cc:dd:ee:ff");
-        assert_eq!(obs[0].ts, 42);
+        let observations = parse_ble_rssi(3, 7, &s, 42);
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].user_id, 3);
+        assert_eq!(observations[0].anchor_device_id, 7);
+        assert_eq!(observations[0].rssi, -73);
+        assert_eq!(observations[0].target_mac, "aa:bb:cc:dd:ee:ff");
+        assert_eq!(observations[0].ts, 42);
     }
 
     #[test]
@@ -721,18 +811,18 @@ mod tests {
             "temperature": 22.5,
             "loop_time": 12
         });
-        let mut obs = parse_ble_rssi(9, &s, 0);
-        obs.sort_by(|a, b| a.target_mac.cmp(&b.target_mac));
-        assert_eq!(obs.len(), 2);
-        assert_eq!(obs[0].target_mac, "11:22:33:44:55:66");
-        assert_eq!(obs[1].target_mac, "aa:bb:cc:dd:ee:ff");
-        assert!(obs.iter().all(|o| o.anchor_device_id == 9));
+        let mut observations = parse_ble_rssi(5, 9, &s, 0);
+        observations.sort_by(|a, b| a.target_mac.cmp(&b.target_mac));
+        assert_eq!(observations.len(), 2);
+        assert_eq!(observations[0].target_mac, "11:22:33:44:55:66");
+        assert_eq!(observations[1].target_mac, "aa:bb:cc:dd:ee:ff");
+        assert!(observations.iter().all(|o| o.user_id == 5 && o.anchor_device_id == 9));
     }
 
     #[test]
     fn parse_ble_rssi_ignores_garbage() {
         let s = json!({ "nothing_to_see": true });
-        assert!(parse_ble_rssi(1, &s, 0).is_empty());
+        assert!(parse_ble_rssi(1, 1, &s, 0).is_empty());
     }
 
     #[test]

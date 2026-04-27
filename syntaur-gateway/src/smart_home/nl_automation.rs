@@ -453,6 +453,7 @@ mod tests {
                 at: "18:00".into(),
                 offset_min: 0,
             }],
+            trigger_logic: Default::default(),
             conditions: vec![],
             actions: vec![Action::SetDevice {
                 device_id: 999, // not in inventory
@@ -472,6 +473,7 @@ mod tests {
                 person: "Sean".into(),
                 state: "entered".into(),
             }],
+            trigger_logic: Default::default(),
             conditions: vec![],
             actions: vec![Action::Notify {
                 target: "telegram".into(),
@@ -487,6 +489,7 @@ mod tests {
         let inv = sample_inventory();
         let spec = AutomationSpec {
             triggers: vec![],
+            trigger_logic: Default::default(),
             conditions: vec![],
             actions: vec![],
         };
@@ -503,6 +506,7 @@ mod tests {
                 at: "18:30".into(),
                 offset_min: 0,
             }],
+            trigger_logic: Default::default(),
             conditions: vec![Condition::AnyoneHome { expect: true }],
             actions: vec![
                 Action::SetDevice {
