@@ -1081,6 +1081,127 @@ const SMART_HOME_JS: &str = r#"
     });
   });
 
+  // ── live tiles (Lights / Security / Energy) ────────
+  const SECURITY_KINDS = ['sensor_motion', 'sensor_contact', 'sensor_climate', 'sensor_smoke', 'sensor_water'];
+  const LIGHT_KINDS = ['light', 'switch'];
+
+  function isOn(state) {
+    if (!state) return false;
+    if (typeof state.on === 'boolean') return state.on;
+    // Some drivers report `on_off` instead.
+    if (typeof state.on_off === 'boolean') return state.on_off;
+    return false;
+  }
+
+  function parseState(dev) {
+    if (!dev || !dev.state_json) return {};
+    try { return JSON.parse(dev.state_json); } catch (_) { return {}; }
+  }
+
+  async function loadTiles() {
+    const lightsP = $('sh-lights-primary');
+    const lightsS = $('sh-lights-secondary');
+    const secP = $('sh-security-primary');
+    const secS = $('sh-security-secondary');
+    const energyP = $('sh-energy-primary');
+    const energyS = $('sh-energy-secondary');
+
+    let devices = [];
+    try {
+      const data = await shFetch('/api/smart-home/devices');
+      devices = (data && data.devices) || [];
+    } catch (e) {
+      if (lightsP) lightsP.textContent = '—';
+      console.warn('[smart-home] devices fetch failed:', e.message || e);
+      return;
+    }
+
+    // Lights tile.
+    const lights = devices.filter((d) => LIGHT_KINDS.includes(d.kind));
+    const lightsOn = lights.filter((d) => isOn(parseState(d))).length;
+    const lightsOff = lights.length - lightsOn;
+    if (lightsP) {
+      lightsP.innerHTML = lightsOn +
+        '<span class="sh-tile-unit">on • ' + lightsOff + ' off</span>';
+    }
+    if (lightsS) {
+      const rooms = new Set(
+        lights.filter((d) => isOn(parseState(d)))
+              .map((d) => d.room_id)
+              .filter((id) => id != null)
+      );
+      lightsS.textContent = lights.length === 0
+        ? 'No lights yet'
+        : rooms.size + (rooms.size === 1 ? ' room active' : ' rooms active');
+    }
+
+    // Security tile.
+    const sensors = devices.filter((d) => SECURITY_KINDS.includes(d.kind));
+    const locks = devices.filter((d) => d.kind === 'lock');
+    let issuesCount = 0;
+    try {
+      const diag = await shFetch('/api/smart-home/diagnostics/summary');
+      issuesCount = ((diag && diag.active_issues) || []).filter((i) => i.kind !== 'offline').length;
+    } catch (_) { /* leave at 0 — no diagnostics yet */ }
+    if (secP) secP.textContent = issuesCount === 0 ? 'All Secure' : issuesCount + ' alert' + (issuesCount === 1 ? '' : 's');
+    if (secS) {
+      const parts = [];
+      if (sensors.length) parts.push(sensors.length + ' sensor' + (sensors.length === 1 ? '' : 's'));
+      if (locks.length) parts.push(locks.length + ' lock' + (locks.length === 1 ? '' : 's'));
+      secS.textContent = parts.length ? parts.join(' • ') : 'No sensors yet';
+    }
+  }
+
+  async function loadEnergy() {
+    const energyP = $('sh-energy-primary');
+    const energyS = $('sh-energy-secondary');
+    const spark = $('sh-energy-spark');
+    try {
+      const data = await shFetch('/api/smart-home/energy/summary');
+      const entries = (data && data.devices) || [];
+      const totalW = entries.reduce(
+        (acc, d) => acc + (typeof d.current_watts === 'number' ? d.current_watts : 0),
+        0
+      );
+      const todayKwh = (data && typeof data.today_kwh === 'number') ? data.today_kwh : 0;
+      if (energyP) {
+        const kw = (totalW / 1000).toFixed(2);
+        energyP.innerHTML = kw + '<span class="sh-tile-unit">kW now</span>';
+      }
+      if (energyS) {
+        energyS.textContent = todayKwh.toFixed(1) + ' kWh today';
+      }
+      // Bar sparkline from per-device current_watts. Up to 17 bars
+      // (mockup count). Padded with low bars when device count <17.
+      if (spark) {
+        const watts = entries
+          .map((d) => (typeof d.current_watts === 'number' ? d.current_watts : 0))
+          .filter((w) => w > 0)
+          .sort((a, b) => b - a)
+          .slice(0, 17);
+        while (watts.length < 17) watts.push(0);
+        const peak = Math.max(1, ...watts);
+        let svg = '';
+        watts.forEach((w, i) => {
+          const x = i * 6;
+          const h = Math.max(2, Math.round((w / peak) * 24));
+          const y = 32 - h - 2;
+          svg += '<rect x="' + x + '" y="' + y + '" width="3" height="' + h + '" rx="1"/>';
+        });
+        spark.innerHTML = svg;
+      }
+    } catch (e) {
+      if (energyP) energyP.textContent = '—';
+      if (energyS) energyS.textContent = 'Energy data unavailable';
+      console.info('[smart-home] energy load skipped:', e.message || e);
+    }
+  }
+
+  loadTiles();
+  loadEnergy();
+  setInterval(loadTiles, 30000);
+  setInterval(loadEnergy, 30000);
+
   // ── drawer (placeholder bodies for tiles) ──────────
   const DRAWER_BODIES = {
     lights:    'Lights drawer lands in Phase 2F. It will show every room × every bulb with capability-aware controls.',
