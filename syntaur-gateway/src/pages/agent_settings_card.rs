@@ -676,7 +676,7 @@ const STYLES: &str = r#"
    JS auto-mounter sets `position: relative` on each registered panel
    only if its computed position is `static` — preserves any panel that
    already has fixed/absolute/relative positioning. */
-[data-syntaur-cog-host] { position: relative; }
+[data-syntaur-cogged] { position: relative; }
 
 /* ─── Slide-over agent settings drawer (singleton, lives in shell) ───
    Cog click anywhere on the page opens this. Holds the back-of-card
@@ -2103,9 +2103,19 @@ const RESOURCE_BUDGET_JS: &str = r#"
 
   function attachCogToPanel(panel, agent, headerSel) {
     if (!panel) return;
-    if (panel.dataset.syntaurCogHost === '1') return; // already mounted
+    // Idempotency. The earlier shape of this function set
+    // `dataset.syntaurCogHost = '1'` and then immediately called
+    // `setAttribute('data-syntaur-cog-host', '')` for a CSS hook —
+    // the second call STOMPED the first (both write the same DOM
+    // attribute), so on every subsequent MutationObserver tick the
+    // check `=== '1'` failed and we mounted ANOTHER cog. Sean reported
+    // a "bar of cogs rolling across the top of AI chats" — that bar
+    // was one cog per mutation. Use a separate boolean attribute
+    // (`data-syntaur-cogged`) for the CSS hook so the dataset value
+    // we read for idempotency is never overwritten.
+    if (panel.dataset.syntaurCogHost === '1') return;
     panel.dataset.syntaurCogHost = '1';
-    panel.setAttribute('data-syntaur-cog-host', ''); // CSS hook for right-click bind
+    panel.setAttribute('data-syntaur-cogged', '');
     panel.dataset.agent = agent;
     const cog = _makeCog(agent);
     const header = _findHeader(panel, headerSel);
@@ -2197,7 +2207,7 @@ const RESOURCE_BUDGET_JS: &str = r#"
   // We intercept only the dead chrome of the panel — text selections,
   // links, inputs, and buttons keep the native context menu.
   document.addEventListener('contextmenu', (ev) => {
-    const host = ev.target.closest && ev.target.closest('[data-syntaur-cog-host]');
+    const host = ev.target.closest && ev.target.closest('[data-syntaur-cogged]');
     if (!host) return;
     const tag = (ev.target.tagName || '').toLowerCase();
     if (['a','input','textarea','button'].includes(tag)) return;
