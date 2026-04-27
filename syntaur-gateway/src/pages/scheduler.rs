@@ -17,7 +17,13 @@ pub async fn render() -> Html<String> {
         title: "Scheduler",
         authed: true,
         extra_style: Some(EXTRA_STYLE),
-        body_class: None,
+        // Drop Tailwind's `bg-gray-950` default — it overrides the
+        // scheduler `body { background: var(--sch-bg) }` rule by class
+        // specificity and paints the gutters around the centered
+        // `.sch-shell` (max-width 1800px) charcoal-black. Sean
+        // reported "black bars on either side of the schedule" in
+        // week/day view; that's what they were.
+        body_class: Some("min-h-screen"),
         head_boot: None,
         crumb: None,
         topbar_status: None,
