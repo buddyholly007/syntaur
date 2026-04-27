@@ -16,6 +16,8 @@
 //!   - Text: `{"type":"transcript","text":"..."}` — STT result
 //!   - Text: `{"type":"error","message":"..."}` — error
 
+use std::sync::OnceLock;
+
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
@@ -23,8 +25,27 @@ use log::{debug, error, info, warn};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
-const STT_HOST: &str = "127.0.0.1:10300";
-pub const TTS_HOST: &str = "192.168.1.69:10400";
+// STT (Parakeet via Wyoming) and TTS engines run on the gaming PC, not
+// on whatever host the gateway happens to live on. Pre-2026-04-27 these
+// were hardcoded to `127.0.0.1` (correct only when the gateway *was* the
+// gaming PC); after the TrueNAS migration the chat-mic on prod started
+// dialing TrueNAS loopback and silently failing. Resolve at first use
+// from env, default to the gaming PC's LAN IP.
+fn stt_host() -> &'static str {
+    static H: OnceLock<String> = OnceLock::new();
+    H.get_or_init(|| {
+        std::env::var("SYNTAUR_STT_HOST").unwrap_or_else(|_| "192.168.1.69:10300".to_string())
+    })
+    .as_str()
+}
+
+pub fn tts_host() -> &'static str {
+    static H: OnceLock<String> = OnceLock::new();
+    H.get_or_init(|| {
+        std::env::var("SYNTAUR_TTS_HOST").unwrap_or_else(|_| "192.168.1.69:10400".to_string())
+    })
+    .as_str()
+}
 
 /// Axum handler for WebSocket upgrade.
 pub async fn ws_stt_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
@@ -123,9 +144,9 @@ async fn handle_stt_session(mut socket: WebSocket) {
 async fn run_wyoming_stt(pcm: &[i16]) -> Result<String, String> {
     let audio_bytes: Vec<u8> = pcm.iter().flat_map(|&s| s.to_le_bytes()).collect();
 
-    let stream = TcpStream::connect(STT_HOST)
+    let stream = TcpStream::connect(stt_host())
         .await
-        .map_err(|e| format!("connect: {}", e))?;
+        .map_err(|e| format!("connect {}: {}", stt_host(), e))?;
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
 

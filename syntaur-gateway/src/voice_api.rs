@@ -218,7 +218,7 @@ pub async fn synthesize_speech(
     let words = text.split_whitespace().count().max(1);
     let est_dur = (words as f64 * 0.15).clamp(2.0, 30.0) as i64;
     crate::music::trigger_duck(true, est_dur).await;
-    match satellite_client::run_tts(crate::voice_ws::TTS_HOST, text).await {
+    match satellite_client::run_tts(crate::voice_ws::tts_host(), text).await {
         Ok((audio, rate, ch, bits)) => {
             let url = satellite_client::cache_tts_audio(audio, 18789, rate, ch, bits).await;
             Ok(Json(json!({

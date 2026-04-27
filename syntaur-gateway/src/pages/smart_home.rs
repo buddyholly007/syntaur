@@ -1372,8 +1372,8 @@ const SMART_HOME_JS: &str = r#"
 
   // ── drawer (placeholder bodies for tiles) ──────────
   const DRAWER_BODIES = {
-    lights:    'Lights drawer lands in Phase 2F. It will show every room × every bulb with capability-aware controls.',
-    security:  'Security drawer lands in Phase 2F. It will show sensors, alarm armed state, and recent events.',
+    lights:    'Lights drawer is a follow-up. It will show every room × every bulb with capability-aware controls.',
+    security:  'Security drawer is a follow-up. It will show sensors, alarm armed state, and recent events.',
     energy:    'Energy drawer lands in Phase 2I. It will show a calendar heatmap, per-day hourly bars, and a per-device leaderboard.',
     'rooms-all': 'Full rooms management lands in Phase 2G. For now use Settings → Smart Home → Rooms.',
   };
