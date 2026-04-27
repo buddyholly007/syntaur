@@ -31,16 +31,11 @@ futures = "0.3"
 # Topo manifest lookups so verify knows what URL to hit for each
 # module (staging=Mac Mini, prod=TrueNAS) without hardcoded IPs.
 syntaur-topo = { path = "../syntaur-topo" }
-# Phase 2: Opus API via OpenRouter (chosen over direct Anthropic so
-# we can reuse Sean's existing openrouter vault entry — no new
-# credential to manage). Base64 screenshots embedded inline as
-# data: URLs in OpenAI-compatible message shape.
+# Phase 4c persona-tone audit POSTs to the gateway's /api/message
+# endpoint. (Phase 2 used to also call OpenRouter for Opus review;
+# that path was replaced by a file-queue handoff to a live Claude
+# Code session — see `src/opus.rs`.)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-base64 = "0.22"
-# Fetch the openrouter API key at runtime without reintroducing
-# plaintext-in-code. syntaur-vault is path-dep'd as the agent
-# client library.
-syntaur-vault = { path = "../syntaur-vault" }
 # Phase 3: persistent baselines + visual diff. Pure-Rust PNG
 # decoder/encoder + resize + grayscale — no libpng dep. Default
 # features disabled to keep the binary lean; we only need PNG.

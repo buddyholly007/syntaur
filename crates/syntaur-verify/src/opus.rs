@@ -1,97 +1,79 @@
-//! Opus vision client — sends a screenshot + module context to Claude
-//! Opus via OpenRouter and gets back structured Findings (regressions
-//! + improvements).
+//! Reviewer client — file-queue handoff to a live Claude Code session.
 //!
-//! Why OpenRouter: Sean already has an `openrouter` API key in the
-//! vault; routing via OpenRouter means no new credential to manage.
-//! Cost overhead vs. direct Anthropic is ~5% — negligible compared
-//! to the cost of maintaining a second credential.
+//! Phase 2 originally POSTed each screenshot to OpenRouter's
+//! `anthropic/claude-opus-4` for paid review. Sean's actual workflow
+//! runs syntaur-verify from inside Claude Code (which IS Opus 4.7), so
+//! paying OpenRouter to call Opus on his behalf was redundant. The
+//! binary now writes a review-request packet next to each screenshot
+//! and blocks until the running session writes back a response file.
+//! No API spend, full Opus quality, but a run is bound to an
+//! interactive reviewer.
 //!
-//! Model: `anthropic/claude-opus-4` by default; override via
-//! SYNTAUR_VERIFY_MODEL env var when a newer Opus ships.
+//! Wire format — for every `analyze_module_with_source` call the
+//! binary writes:
+//!
+//!   `<screenshot>.review-req.json` — prompt + module context + path
+//!                                    list to source files
+//!   `<screenshot>.review-resp.json`— Opus findings (the reviewer
+//!                                    writes this)
+//!
+//! Source files are referenced by path rather than embedded so the
+//! reviewer can use its native Read tool — the request stays small
+//! and the reviewer sees fresh file contents even after intervening
+//! edits.
+//!
+//! The reviewer (i.e. you, reading this in a Claude Code session)
+//! drains the queue with:
+//!
+//!   `find ~/.syntaur-verify/runs -name '*.review-req.json' -newer …`
+//!
+//! For each request: open the screenshot, read any listed source
+//! files, return findings in the response JSON. The binary picks up
+//! the response file automatically.
+//!
+//! The struct name `OpusClient` is preserved from Phase 2 so callers
+//! in `syntaur_verify.rs` don't need to change. "Opus" still names
+//! the reviewer's model — only the transport changed.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Context, Result};
-use base64::Engine as _;
+use anyhow::{Context, Result};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::run::{Finding, FindingEdit, FindingKind, Severity};
 
-const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
-const DEFAULT_MODEL: &str = "anthropic/claude-opus-4";
+/// How long to wait for a response file before failing the call.
+/// Configurable via `SYNTAUR_VERIFY_REVIEW_TIMEOUT_SECS`.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(900);
+
+/// How often to poll for the response file. Cheap stat() on local fs;
+/// no need for inotify wiring.
+const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 pub struct OpusClient {
-    api_key: String,
-    model: String,
-    http: reqwest::Client,
+    timeout: Duration,
 }
 
 impl OpusClient {
-    /// Fetch the `openrouter` key from the local syntaur-vault agent,
-    /// falling back to the `OPENROUTER_API_KEY` env var. Env-var path
-    /// is used by CI and by syntaur-ship Phase 6 where the vault agent
-    /// isn't running. Errors loudly if both are missing.
+    /// Phase 2 name — kept so `syntaur_verify.rs` doesn't need to be
+    /// touched. Resolves the timeout from env (no vault interaction
+    /// any more).
     pub fn from_vault() -> Result<Self> {
-        let api_key = Self::resolve_api_key()?;
-        let model =
-            std::env::var("SYNTAUR_VERIFY_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
-        Ok(Self {
-            api_key,
-            model,
-            http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
-                .build()?,
-        })
+        Self::new()
     }
 
-    /// Try vault socket first, fall back to `OPENROUTER_API_KEY` env.
-    fn resolve_api_key() -> Result<String> {
-        use syntaur_vault_core::{
-            agent::{request, AgentRequest, AgentResponse},
-            default_socket_path,
-        };
-        let socket = default_socket_path();
-        if socket.exists() {
-            let resp = request(
-                &socket,
-                &AgentRequest::Get {
-                    name: "openrouter".to_string(),
-                },
-            )
-            .context("asking vault for openrouter key")?;
-            match resp {
-                AgentResponse::Value { value } => return Ok(value),
-                AgentResponse::Error { message } => {
-                    log::warn!(
-                        "[opus] vault has no openrouter entry ({message}); trying env var"
-                    );
-                }
-                other => anyhow::bail!("unexpected vault response: {other:?}"),
-            }
-        }
-        // Env fallback — used by CI, syntaur-ship Phase 6, and any
-        // headless run where the vault agent isn't started.
-        if let Ok(k) = std::env::var("OPENROUTER_API_KEY") {
-            if !k.is_empty() {
-                return Ok(k);
-            }
-        }
-        anyhow::bail!(
-            "no openrouter key: vault agent not running at {} and OPENROUTER_API_KEY env is unset. \
-             Run `syntaur-vault unlock` OR `export OPENROUTER_API_KEY=sk-or-…`",
-            socket.display()
-        )
+    pub fn new() -> Result<Self> {
+        let timeout = std::env::var("SYNTAUR_VERIFY_REVIEW_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(DEFAULT_TIMEOUT);
+        Ok(Self { timeout })
     }
 
-    /// Send one screenshot + module context to Opus and parse the
-    /// structured findings response. Errors bubble up; the caller
-    /// decides whether to fail the run or continue with heuristic-
-    /// only Findings.
-    ///
-    /// Phase 2a shim — delegates to `analyze_module_with_source` with
-    /// no attached source context. Prefer the `_with_source` form for
-    /// Phase 2b auto-fix since Opus needs code to propose edits.
+    /// Phase 2a shim — no source context, no edits requested.
     pub async fn analyze_module(
         &self,
         module_slug: &str,
@@ -110,16 +92,11 @@ impl OpusClient {
         .await
     }
 
-    /// Phase 2b entry point. In addition to the screenshot + changed
-    /// paths, attaches module-relevant source files (already truncated
-    /// to a byte budget by the caller — we just embed them verbatim)
-    /// and — if `request_edits` is set — asks Opus to return
-    /// `{file, old_string, new_string}` edits for each regression so
-    /// the auto-fix loop can apply them precisely.
-    ///
-    /// Keeping the two modes behind one function avoids duplicating
-    /// the HTTP + parse plumbing; the prompt branches on
-    /// `request_edits` and whether `source_files` is non-empty.
+    /// Write a review-request packet next to the screenshot and block
+    /// until a response file shows up. Source files are sent as
+    /// `(path, body)` tuples; the body is recorded verbatim in the
+    /// request packet — but the reviewer is also free to re-Read the
+    /// path, which yields fresher content after auto-fix iterations.
     pub async fn analyze_module_with_source(
         &self,
         module_slug: &str,
@@ -129,139 +106,53 @@ impl OpusClient {
         source_files: &[(String, String)],
         request_edits: bool,
     ) -> Result<Vec<Finding>> {
-        let png = std::fs::read(screenshot_path)
-            .with_context(|| format!("reading screenshot {}", screenshot_path.display()))?;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
-        let data_url = format!("data:image/png;base64,{}", b64);
+        let (req_path, resp_path) = req_resp_paths(screenshot_path)?;
 
-        let changes_summary = if changed_paths.is_empty() {
-            "(no changed paths — full-sweep run)".to_string()
-        } else {
-            changed_paths
+        let req = ReviewRequest {
+            module_slug: module_slug.to_string(),
+            url: url.to_string(),
+            screenshot_path: screenshot_path.to_path_buf(),
+            changed_paths: changed_paths.to_vec(),
+            source_files: source_files
                 .iter()
-                .map(|p| format!("  - {}", p))
-                .collect::<Vec<_>>()
-                .join("\n")
+                .map(|(p, b)| SourceFile {
+                    path: p.clone(),
+                    body: b.clone(),
+                })
+                .collect(),
+            request_edits,
+            instructions: review_instructions(request_edits),
+            response_schema: response_schema_hint(request_edits),
+            written_at: Utc::now(),
         };
 
-        let source_section = if source_files.is_empty() {
-            String::new()
-        } else {
-            let mut s = String::from("\n\nRelevant source files (workspace-relative paths):\n");
-            for (path, body) in source_files {
-                s.push_str(&format!("\n===== {} =====\n", path));
-                s.push_str(body);
-                if !body.ends_with('\n') {
-                    s.push('\n');
-                }
-            }
-            s
-        };
+        // Atomic write: serialize → write tmp → rename. Avoids the
+        // reviewer racing on a half-written file.
+        let body = serde_json::to_vec_pretty(&req).context("serialize review request")?;
+        let tmp = req_path.with_extension("json.tmp");
+        std::fs::write(&tmp, &body)
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        std::fs::rename(&tmp, &req_path)
+            .with_context(|| format!("renaming {} -> {}", tmp.display(), req_path.display()))?;
 
-        let edits_clause = if request_edits {
-            ",\n      \"edits\": [ /* optional: precise source edits to fix this regression */\n        {\n          \"file\": \"workspace-relative path from the list above\",\n          \"old_string\": \"EXACT current text from the file (must be unique in the file; include enough surrounding lines to make it unique)\",\n          \"new_string\": \"replacement text\"\n        }\n      ]"
-        } else {
-            ""
-        };
-
-        let edits_rules = if request_edits {
-            "\n\nWhen you return `edits` for a regression:\n\
-- Only propose edits for files shown above. Do NOT invent new files.\n\
-- `old_string` must match EXACTLY (bytes, whitespace, indentation) and appear ONLY ONCE in the file. If you can't make it unique with 1-3 surrounding lines, widen the window until you can.\n\
-- Prefer the smallest edit that fixes the regression. Multiple small edits beat one large one.\n\
-- Keep total new code under ~40 lines per finding — large rewrites belong in a manual review, not auto-fix.\n\
-- Do NOT propose edits for `improvement` findings — only for `regression`.\n\
-- If you can see the regression on screen but the code context doesn't let you fix it precisely, omit `edits` (set null or leave out). A regression without edits is still useful — it tells the human what to look at."
-        } else {
-            ""
-        };
-
-        let prompt = format!(
-            "You are auditing one module of the Syntaur web application.
-
-Module slug: {module_slug}
-URL path: {url}
-Source paths changed since last successful deploy:
-{changes_summary}{source_section}
-
-Look at the attached screenshot and identify TWO categories of issues:
-
-1. REGRESSIONS — things that look broken or wrong: UI elements cut off, \
-overlapping text, unreadable contrast, missing affordances, obvious alignment \
-bugs, broken layouts, mystery floating elements with no label, text that reads \
-as placeholder/TODO/Lorem ipsum.
-
-2. IMPROVEMENTS — changes a user would appreciate: accessibility issues \
-(missing alt, small tap targets, poor contrast approaching WCAG AA cutoff), \
-missing loading/empty/error states, unclear interaction patterns, \
-likely-broken mobile layouts.
-
-Output ONLY a JSON object with this exact shape — NO prose, no code fences:
-
-{{
-  \"findings\": [
-    {{
-      \"kind\": \"regression\" | \"improvement\",
-      \"title\": \"short noun phrase (5-10 words)\",
-      \"detail\": \"one-sentence explanation of what is wrong + where on the page\",
-      \"suggested_fix\": \"optional: natural-language description of how to fix\"{edits_clause}
-    }}
-  ]
-}}
-
-If the module looks clean with no suggestions, output {{\"findings\": []}}.
-Be strict about regressions — a first-time user would not forgive them.
-Be practical about improvements — only surface things with clear user value.{edits_rules}"
+        // Stderr is the channel a Claude Code session is most likely
+        // to be tailing; logging through `log::info!` would also work
+        // but the path-on-its-own-line form here is grep-friendly.
+        eprintln!(
+            "[verify] awaiting review · {}",
+            req_path.display()
+        );
+        eprintln!(
+            "[verify]   module={module_slug}  url={url}  shot={}",
+            screenshot_path.display()
         );
 
-        let body = serde_json::json!({
-            "model": self.model,
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": data_url}}
-                ]
-            }],
-            "response_format": {"type": "json_object"},
-            "max_tokens": 2000,
-        });
-
-        let resp = self
-            .http
-            .post(OPENROUTER_URL)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("HTTP-Referer", "https://github.com/buddyholly007/syntaur")
-            .header("X-Title", "syntaur-verify")
-            .json(&body)
-            .send()
-            .await
-            .context("POST openrouter")?;
-
-        let status = resp.status();
-        let text = resp.text().await.context("read openrouter response")?;
-        if !status.is_success() {
-            anyhow::bail!("openrouter {}: {}", status, text);
-        }
-
-        let api: OpenAiResponse = serde_json::from_str(&text)
-            .with_context(|| format!("parse openrouter response: {text}"))?;
-        let content = api
-            .choices
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow!("openrouter returned no choices"))?
-            .message
-            .content;
-
-        // Model sometimes wraps JSON in code fences despite instructions.
-        // Strip them if present.
-        let json_body = strip_code_fence(&content);
-        let parsed: OpusFindings = serde_json::from_str(json_body).with_context(|| {
-            format!("parse Opus findings JSON: {}", json_body.chars().take(400).collect::<String>())
+        let resp_body = wait_for_response(&resp_path, self.timeout).await?;
+        let parsed: ReviewResponse = serde_json::from_slice(&resp_body).with_context(|| {
+            format!("parse review response from {}", resp_path.display())
         })?;
 
-        let now = chrono::Utc::now();
+        let now = Utc::now();
         let findings = parsed
             .findings
             .into_iter()
@@ -278,9 +169,10 @@ Be practical about improvements — only surface things with clear user value.{e
                         detail.push_str(&fix);
                     }
                 }
-                // Policy: only regressions carry edits. If Opus
-                // returned edits on an improvement we drop them —
-                // auto-fix is for breakage, not style tweaks.
+                // Phase 2b policy carry-over: only regressions carry
+                // edits. If the reviewer attached edits to an
+                // improvement we drop them — auto-fix is for
+                // breakage, not style tweaks.
                 let edits = match severity {
                     Severity::Regression => f.edits.filter(|v| !v.is_empty()),
                     Severity::Suggestion => None,
@@ -294,10 +186,6 @@ Be practical about improvements — only surface things with clear user value.{e
                     artifact: Some(screenshot_path.to_path_buf()),
                     captured_at: now,
                     edits,
-                    // Phase 4b — Opus returns a persona-agnostic
-                    // finding; the CLI stamps the active POV's slug
-                    // after it returns so the persona-tagging policy
-                    // lives in one place.
                     persona: None,
                 }
             })
@@ -307,46 +195,144 @@ Be practical about improvements — only surface things with clear user value.{e
     }
 }
 
-fn strip_code_fence(s: &str) -> &str {
-    let trimmed = s.trim();
-    if let Some(rest) = trimmed.strip_prefix("```json") {
-        rest.trim_start_matches('\n')
-            .trim_end_matches('\n')
-            .trim_end_matches("```")
-            .trim()
-    } else if let Some(rest) = trimmed.strip_prefix("```") {
-        rest.trim_start_matches('\n')
-            .trim_end_matches('\n')
-            .trim_end_matches("```")
-            .trim()
-    } else {
-        trimmed
+/// `<dir>/<stem>.review-req.json` and `<dir>/<stem>.review-resp.json`,
+/// derived from the screenshot path. Co-locating the queue with the
+/// screenshots keeps everything for one run in one dir.
+fn req_resp_paths(screenshot_path: &Path) -> Result<(PathBuf, PathBuf)> {
+    let parent = screenshot_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("screenshot has no parent dir: {}", screenshot_path.display()))?;
+    let stem = screenshot_path
+        .file_stem()
+        .ok_or_else(|| anyhow::anyhow!("screenshot has no stem: {}", screenshot_path.display()))?
+        .to_string_lossy()
+        .into_owned();
+    Ok((
+        parent.join(format!("{stem}.review-req.json")),
+        parent.join(format!("{stem}.review-resp.json")),
+    ))
+}
+
+async fn wait_for_response(path: &Path, timeout: Duration) -> Result<Vec<u8>> {
+    let started = Instant::now();
+    loop {
+        match std::fs::read(path) {
+            Ok(b) if !b.is_empty() => return Ok(b),
+            // Empty file = reviewer is mid-write; keep polling.
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        }
+        if started.elapsed() > timeout {
+            anyhow::bail!(
+                "review timed out after {:?} waiting for {}",
+                timeout,
+                path.display()
+            );
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
 
-// ── OpenRouter wire types ──────────────────────────────────────
+fn review_instructions(request_edits: bool) -> String {
+    let edits_clause = if request_edits {
+        "\n\nFor each REGRESSION, you MAY also attach `edits`: an array of \
+         {file, old_string, new_string} objects that, applied in order, fix \
+         the regression. Rules:\n\
+         - Only edit files listed in `source_files`. Do not invent new files.\n\
+         - `old_string` must match EXACTLY (bytes, whitespace, indentation) and \
+           appear exactly ONCE in the file. Widen the window with surrounding \
+           lines until it does.\n\
+         - Prefer the smallest edit that fixes the regression. Multiple small \
+           edits beat one large one.\n\
+         - Keep total new code under ~40 lines per finding.\n\
+         - Do NOT attach edits to improvements — auto-fix is for breakage only.\n\
+         - If you can see the regression but the source context isn't enough to \
+           fix it precisely, omit `edits`. A regression without edits still tells \
+           the human what to look at."
+    } else {
+        ""
+    };
 
-#[derive(Debug, Deserialize)]
-struct OpenAiResponse {
-    choices: Vec<Choice>,
+    format!(
+        "You are auditing one module of the Syntaur web application.\n\n\
+         Open the screenshot at `screenshot_path`. Use Read on listed \
+         `source_files` if you need code context — bodies are also embedded \
+         inline for convenience.\n\n\
+         Identify TWO categories of issues:\n\n\
+         1. REGRESSIONS — UI elements cut off, overlapping text, unreadable \
+         contrast, missing affordances, obvious alignment bugs, broken layouts, \
+         mystery floating elements, placeholder/TODO/Lorem ipsum text leaking to \
+         users.\n\n\
+         2. IMPROVEMENTS — accessibility issues (alt text, tap targets, contrast \
+         near WCAG AA), missing loading/empty/error states, unclear interaction \
+         patterns, likely-broken mobile layouts.\n\n\
+         Be strict on regressions — a first-time user wouldn't forgive them. \
+         Be practical on improvements — only surface things with clear user \
+         value.{edits_clause}\n\n\
+         Write the response as JSON to `<screenshot_stem>.review-resp.json` in \
+         the same directory as the request file. The binary is polling for it."
+    )
+}
+
+fn response_schema_hint(request_edits: bool) -> serde_json::Value {
+    if request_edits {
+        serde_json::json!({
+            "findings": [
+                {
+                    "kind": "regression | improvement",
+                    "title": "short noun phrase (5-10 words)",
+                    "detail": "one-sentence explanation + where on the page",
+                    "suggested_fix": "optional natural-language description",
+                    "edits": [
+                        {"file": "path/from/source_files/list",
+                         "old_string": "exact unique current text",
+                         "new_string": "replacement"}
+                    ]
+                }
+            ]
+        })
+    } else {
+        serde_json::json!({
+            "findings": [
+                {
+                    "kind": "regression | improvement",
+                    "title": "short noun phrase",
+                    "detail": "one-sentence explanation + where on the page",
+                    "suggested_fix": "optional"
+                }
+            ]
+        })
+    }
+}
+
+// ── on-disk packet shapes ──────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+struct ReviewRequest {
+    module_slug: String,
+    url: String,
+    screenshot_path: PathBuf,
+    changed_paths: Vec<String>,
+    source_files: Vec<SourceFile>,
+    request_edits: bool,
+    instructions: String,
+    response_schema: serde_json::Value,
+    written_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct SourceFile {
+    path: String,
+    body: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct Choice {
-    message: ChoiceMessage,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChoiceMessage {
-    content: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpusFindings {
+struct ReviewResponse {
     findings: Vec<RawFinding>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize)]
 struct RawFinding {
     kind: String,
     title: String,

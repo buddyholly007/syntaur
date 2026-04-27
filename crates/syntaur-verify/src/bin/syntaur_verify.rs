@@ -75,11 +75,12 @@ struct Cli {
     #[arg(long, env = "SYNTAUR_VERIFY_AUTH_TOKEN")]
     auth_token: Option<String>,
 
-    /// Also run Claude Opus (via OpenRouter) over each screenshot for
-    /// visual regression + UX improvement findings. Requires the
-    /// `openrouter` key in syntaur-vault. Off by default because it
-    /// hits a paid API; Phase 6 will flip this on automatically when
-    /// syntaur-verify runs inside syntaur-ship.
+    /// Run Opus review on each screenshot for visual regression + UX
+    /// improvement findings. The binary writes a `<shot>.review-req.json`
+    /// next to every screenshot and blocks until a `<shot>.review-resp.json`
+    /// shows up — drained by the live Claude Code session running this
+    /// command. Off by default because the run is bound to an
+    /// interactive reviewer; flip on for `--auto-fix` runs.
     #[arg(long)]
     with_opus: bool,
 

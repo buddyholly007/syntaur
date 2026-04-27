@@ -8491,7 +8491,6 @@ name = "syntaur-verify"
 version = "0.5.1"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
  "chromiumoxide 0.9.1",
  "chrono",
  "clap",
@@ -8505,7 +8504,6 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "syntaur-topo",
- "syntaur-vault",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
