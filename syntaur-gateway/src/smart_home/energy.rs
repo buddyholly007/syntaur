@@ -440,6 +440,176 @@ pub fn day_for_user(
 /// Currently active $/kWh rate for a user, if one is configured.
 /// Returns the cost_per_kwh for the rate row whose [starts_at, ends_at) covers "now".
 /// Powers Settings -> Smart Home -> Energy (Phase 2J).
+/// Per-device kWh totals over a [start, end) window. Mirrors integrate_window
+/// but bucketed by device. Used by Phase 2K anomaly detection.
+fn device_kwh_for_window(
+    conn: &Connection,
+    user_id: i64,
+    start: i64,
+    end: i64,
+) -> rusqlite::Result<std::collections::HashMap<i64, (String, f64)>> {
+    let mut by_dev: std::collections::HashMap<i64, (String, f64)> = std::collections::HashMap::new();
+
+    // Cumulative meters: max - min per (device).
+    let mut cstmt = conn.prepare(
+        "SELECT s.device_id, COALESCE(d.name, CAST(s.device_id AS TEXT)),
+                MIN(s.kwh_cumulative), MAX(s.kwh_cumulative)
+           FROM smart_home_energy_samples s
+           LEFT JOIN smart_home_devices d ON d.id = s.device_id
+          WHERE s.user_id = ? AND s.ts >= ? AND s.ts < ? AND s.kwh_cumulative IS NOT NULL
+          GROUP BY s.device_id, d.name",
+    )?;
+    for row in cstmt
+        .query_map(rusqlite::params![user_id, start, end], |row| {
+            let dev_id: i64 = row.get(0)?;
+            let name: String = row.get(1)?;
+            let lo: Option<f64> = row.get(2)?;
+            let hi: Option<f64> = row.get(3)?;
+            Ok((dev_id, name, lo, hi))
+        })?
+        .filter_map(Result::ok)
+    {
+        let (dev_id, name, lo, hi) = row;
+        let kwh = match (hi, lo) {
+            (Some(h), Some(l)) if h >= l => h - l,
+            _ => 0.0,
+        };
+        if kwh > 0.0 {
+            by_dev.entry(dev_id).or_insert_with(|| (name, 0.0)).1 += kwh;
+        }
+    }
+
+    // Watts integration (only for device-windows that have NO cumulative reading).
+    let mut wstmt = conn.prepare(
+        "SELECT s.device_id, COALESCE(d.name, CAST(s.device_id AS TEXT)), s.ts, s.watts
+           FROM smart_home_energy_samples s
+           LEFT JOIN smart_home_devices d ON d.id = s.device_id
+          WHERE s.user_id = ? AND s.ts >= ? AND s.ts < ? AND s.watts IS NOT NULL
+            AND NOT EXISTS (
+                SELECT 1 FROM smart_home_energy_samples k
+                 WHERE k.device_id = s.device_id AND k.user_id = s.user_id
+                   AND k.ts >= ? AND k.ts < ? AND k.kwh_cumulative IS NOT NULL
+            )
+          ORDER BY s.device_id, s.ts",
+    )?;
+    let mut current_dev: Option<i64> = None;
+    let mut current_name = String::new();
+    let mut prev: Option<(i64, f64)> = None;
+    let mut accum = 0.0_f64;
+    for row in wstmt
+        .query_map(
+            rusqlite::params![user_id, start, end, start, end],
+            |row| {
+                let dev_id: i64 = row.get(0)?;
+                let name: String = row.get(1)?;
+                let ts: i64 = row.get(2)?;
+                let w: f64 = row.get(3)?;
+                Ok((dev_id, name, ts, w))
+            },
+        )?
+        .filter_map(Result::ok)
+    {
+        let (dev_id, name, ts, w) = row;
+        if Some(dev_id) != current_dev {
+            if let Some(id) = current_dev {
+                if accum > 0.0 {
+                    by_dev.entry(id).or_insert_with(|| (current_name.clone(), 0.0)).1 += accum;
+                }
+            }
+            current_dev = Some(dev_id);
+            current_name = name;
+            prev = None;
+            accum = 0.0;
+        }
+        if let Some((t0, w0)) = prev {
+            if ts > t0 {
+                let dt_h = (ts - t0) as f64 / 3600.0;
+                accum += (w0 + w) / 2.0 * dt_h / 1000.0;
+            }
+        }
+        prev = Some((ts, w));
+    }
+    if let Some(id) = current_dev {
+        if accum > 0.0 {
+            by_dev.entry(id).or_insert_with(|| (current_name, 0.0)).1 += accum;
+        }
+    }
+
+    Ok(by_dev)
+}
+
+/// One device flagged as using significantly more energy today than its
+/// 30-day rolling average. Powers Phase 2K anomaly badges.
+#[derive(serde::Serialize, Debug, Clone)]
+pub struct Anomaly {
+    pub device_id: i64,
+    pub device_name: String,
+    /// Average daily kWh over the prior 30 days (not including today).
+    pub baseline_kwh_per_day: f64,
+    /// Projected total kWh for today, extrapolated from current pace.
+    pub projected_kwh: f64,
+    /// projected_kwh / baseline_kwh_per_day.
+    pub ratio: f64,
+    /// "medium" (1.5x..2x) or "high" (>=2x baseline).
+    pub severity: &'static str,
+}
+
+/// Returns devices whose projected today's kWh exceeds 1.5x their 30-day
+/// rolling baseline. Skips devices with baseline < 0.05 kWh/day (noise
+/// floor) and skips when fewer than 2 hours have elapsed today (projection
+/// is too noisy in the early morning).
+pub fn anomalies_for_user(
+    conn: &Connection,
+    user_id: i64,
+) -> rusqlite::Result<Vec<Anomaly>> {
+    let now = chrono::Utc::now().timestamp();
+    let today_start = midnight_local_ts();
+    let today_end = today_start + 24 * 3600;
+    let elapsed = (now - today_start).max(0) as f64;
+    if elapsed < 2.0 * 3600.0 {
+        return Ok(Vec::new());
+    }
+    let baseline_start = today_start - 30 * 24 * 3600;
+    let baseline_end = today_start;
+
+    let baseline = device_kwh_for_window(conn, user_id, baseline_start, baseline_end)?;
+    let today = device_kwh_for_window(conn, user_id, today_start, today_end)?;
+
+    let projection_factor = (24.0 * 3600.0) / elapsed;
+
+    let mut out: Vec<Anomaly> = Vec::new();
+    for (device_id, (today_name, today_kwh)) in today.iter() {
+        let projected = today_kwh * projection_factor;
+        let (base_name, base_total) = match baseline.get(device_id) {
+            Some(v) => (v.0.clone(), v.1),
+            None => continue,
+        };
+        let baseline_per_day = base_total / 30.0;
+        if baseline_per_day < 0.05 {
+            continue;
+        }
+        let ratio = projected / baseline_per_day;
+        let severity = if ratio >= 2.0 {
+            "high"
+        } else if ratio >= 1.5 {
+            "medium"
+        } else {
+            continue;
+        };
+        let device_name = if !today_name.is_empty() { today_name.clone() } else { base_name };
+        out.push(Anomaly {
+            device_id: *device_id,
+            device_name,
+            baseline_kwh_per_day: baseline_per_day,
+            projected_kwh: projected,
+            ratio,
+            severity,
+        });
+    }
+    out.sort_by(|a, b| b.ratio.partial_cmp(&a.ratio).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(out)
+}
+
 pub fn current_rate_for_user(
     conn: &Connection,
     user_id: i64,

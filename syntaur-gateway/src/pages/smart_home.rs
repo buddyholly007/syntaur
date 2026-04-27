@@ -706,6 +706,40 @@ const EXTRA_STYLE: &str = r#"
   font-size: 13px;
   color: var(--sh-text-dim);
 }
+
+/* Phase 2I — Energy drawer */
+.sh-energy-drawer { display: flex; flex-direction: column; gap: 18px; }
+.sh-energy-month-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.sh-energy-month-head h4 { margin: 0; font-size: 14px; color: var(--sh-text); font-weight: 500; }
+.sh-energy-month-head button { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.08); color: var(--sh-text); padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+.sh-energy-month-head button:hover { background: rgba(255,255,255,0.10); }
+.sh-cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.sh-cal-cell { aspect-ratio: 1 / 1; border-radius: 4px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05); display: flex; flex-direction: column; align-items: center; justify-content: center; cursor: pointer; font-size: 10px; color: var(--sh-text-dim); transition: transform 80ms ease; }
+.sh-cal-cell:hover { transform: scale(1.06); }
+.sh-cal-cell.empty { cursor: default; opacity: 0.35; }
+.sh-cal-cell.selected { outline: 2px solid var(--sh-accent-warm); }
+.sh-cal-cell .sh-cal-day { font-weight: 500; }
+.sh-cal-cell .sh-cal-kwh { font-size: 9px; opacity: 0.85; }
+.sh-day-section { display: flex; flex-direction: column; gap: 10px; }
+.sh-day-section h4 { margin: 0 0 4px; font-size: 13px; color: var(--sh-text); font-weight: 500; }
+.sh-bar-row { display: flex; align-items: end; gap: 2px; height: 80px; padding: 4px 0; }
+.sh-bar { flex: 1; min-width: 4px; background: var(--sh-accent-warm); border-radius: 2px 2px 0 0; opacity: 0.8; }
+.sh-bar-axis { display: flex; justify-content: space-between; font-size: 9px; color: var(--sh-text-dim); margin-top: -2px; }
+.sh-leaderboard { display: flex; flex-direction: column; gap: 6px; }
+.sh-leader-row { display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; background: rgba(255,255,255,0.03); border-radius: 6px; font-size: 12px; }
+.sh-leader-name { color: var(--sh-text); flex: 1; }
+.sh-leader-kwh { color: var(--sh-text-dim); font-variant-numeric: tabular-nums; }
+
+/* Phase 2K — anomaly badges */
+.sh-anomaly-section { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; background: rgba(255, 177, 104, 0.08); border: 1px solid rgba(255, 177, 104, 0.25); border-radius: 8px; }
+.sh-anomaly-section h4 { margin: 0; font-size: 12px; font-weight: 600; color: #ffb168; text-transform: uppercase; letter-spacing: 0.06em; }
+.sh-anomaly-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 12px; }
+.sh-anomaly-row .sh-anom-name { color: var(--sh-text); flex: 1; }
+.sh-anomaly-row .sh-anom-detail { color: var(--sh-text-dim); font-variant-numeric: tabular-nums; }
+.sh-anomaly-row.severity-high .sh-anom-detail { color: #ff8a8a; font-weight: 500; }
+.sh-anomaly-pill { display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; border-radius: 999px; background: rgba(255, 177, 104, 0.15); border: 1px solid rgba(255, 177, 104, 0.35); color: #ffb168; font-size: 10px; font-weight: 600; margin-left: 6px; vertical-align: middle; }
+.sh-leader-row.severity-high { border-left: 3px solid #ff8a8a; }
+.sh-leader-row.severity-medium { border-left: 3px solid #ffb168; }
 "#;
 
 const SMART_HOME_JS: &str = r#"
@@ -1369,6 +1403,191 @@ const SMART_HOME_JS: &str = r#"
   loadEnergy();
   setInterval(loadTiles, 30000);
   setInterval(loadEnergy, 30000);
+
+  // ── Phase 2I energy drawer + Phase 2K anomalies ──
+  let __shEnergyMonth = null;  // [year, month0]
+  let __shEnergySelected = null;  // [year, month, day]
+  let __shAnomalies = [];
+
+  function _todayLocal() {
+    const d = new Date();
+    return [d.getFullYear(), d.getMonth() + 1, d.getDate()];
+  }
+
+  function _monthName(y, m) {
+    return new Date(y, m - 1, 1).toLocaleString(undefined, { month: 'long', year: 'numeric' });
+  }
+
+  async function loadEnergyAnomalies() {
+    try {
+      const r = await fetch('/api/smart-home/energy/anomalies', { credentials: 'same-origin' });
+      if (!r.ok) return;
+      const data = await r.json();
+      __shAnomalies = (data && data.anomalies) || [];
+      // Tile badge.
+      const energyP = ;
+      if (energyP) {
+        energyP.querySelectorAll('.sh-anomaly-pill').forEach((el) => el.remove());
+        if (__shAnomalies.length > 0) {
+          const pill = document.createElement('span');
+          pill.className = 'sh-anomaly-pill';
+          pill.textContent = '⚠ ' + __shAnomalies.length;
+          pill.title = __shAnomalies.map((a) => a.device_name + ' (' + a.severity + ')').join(', ');
+          energyP.appendChild(pill);
+        }
+      }
+    } catch (_) { /* ignore */ }
+  }
+
+  function renderEnergyDrawer(body) {
+    if (!__shEnergyMonth) {
+      const t = _todayLocal();
+      __shEnergyMonth = [t[0], t[1]];
+      __shEnergySelected = t;
+    }
+    body.innerHTML = '<div class="sh-energy-drawer">' +
+      '<div id="sh-energy-anomaly"></div>' +
+      '<div class="sh-energy-month-head">' +
+        '<button type="button" id="sh-energy-prev">&laquo;</button>' +
+        '<h4 id="sh-energy-month-label">—</h4>' +
+        '<button type="button" id="sh-energy-next">&raquo;</button>' +
+      '</div>' +
+      '<div class="sh-cal-grid" id="sh-cal-grid"></div>' +
+      '<div class="sh-day-section" id="sh-day-section" hidden>' +
+        '<h4 id="sh-day-title">—</h4>' +
+        '<div class="sh-bar-row" id="sh-bar-row"></div>' +
+        '<div class="sh-bar-axis"><span>0</span><span>6</span><span>12</span><span>18</span><span>24</span></div>' +
+        '<h4 style="margin-top:10px">Top devices</h4>' +
+        '<div class="sh-leaderboard" id="sh-leaderboard"></div>' +
+      '</div>' +
+      '</div>';
+    document.getElementById('sh-energy-prev').onclick = () => {
+      let [y, m] = __shEnergyMonth;
+      m -= 1; if (m < 1) { m = 12; y -= 1; }
+      __shEnergyMonth = [y, m];
+      loadEnergyMonth();
+    };
+    document.getElementById('sh-energy-next').onclick = () => {
+      let [y, m] = __shEnergyMonth;
+      m += 1; if (m > 12) { m = 1; y += 1; }
+      __shEnergyMonth = [y, m];
+      loadEnergyMonth();
+    };
+    renderAnomalyCallout();
+    loadEnergyMonth();
+    if (__shEnergySelected) loadEnergyDay(__shEnergySelected[0], __shEnergySelected[1], __shEnergySelected[2]);
+  }
+
+  function renderAnomalyCallout() {
+    const host = document.getElementById('sh-energy-anomaly');
+    if (!host) return;
+    if (!__shAnomalies || __shAnomalies.length === 0) {
+      host.innerHTML = '';
+      return;
+    }
+    const rows = __shAnomalies.map((a) => {
+      const ratio = (a.ratio || 0).toFixed(1) + 'x';
+      const proj = (a.projected_kwh || 0).toFixed(2);
+      const base = (a.baseline_kwh_per_day || 0).toFixed(2);
+      return '<div class="sh-anomaly-row severity-' + (a.severity || 'medium') + '">' +
+        '<span class="sh-anom-name">' + (a.device_name || ('Device ' + a.device_id)) + '</span>' +
+        '<span class="sh-anom-detail">' + ratio + ' baseline · ' + proj + ' / ' + base + ' kWh</span>' +
+      '</div>';
+    }).join('');
+    host.innerHTML = '<div class="sh-anomaly-section">' +
+      '<h4>⚠ Using more than usual</h4>' + rows + '</div>';
+  }
+
+  async function loadEnergyMonth() {
+    const [y, m] = __shEnergyMonth;
+    const label = document.getElementById('sh-energy-month-label');
+    const grid = document.getElementById('sh-cal-grid');
+    if (label) label.textContent = _monthName(y, m);
+    if (!grid) return;
+    grid.innerHTML = '<div style="grid-column: span 7; text-align:center; color: var(--sh-text-dim); font-size:12px">Loading…</div>';
+    let days = [];
+    let max_kwh = 0;
+    try {
+      const ym = y + '-' + String(m).padStart(2, '0');
+      const r = await fetch('/api/smart-home/energy/calendar?month=' + encodeURIComponent(ym), { credentials: 'same-origin' });
+      const data = await r.json();
+      days = (data && data.days) || [];
+      max_kwh = days.reduce((acc, d) => Math.max(acc, d.kwh || 0), 0);
+    } catch (_) {
+      grid.innerHTML = '<div style="grid-column: span 7; text-align:center; color: var(--sh-text-dim); font-size:12px">No data.</div>';
+      return;
+    }
+    let html = '';
+    const firstDow = new Date(y, m - 1, 1).getDay();
+    for (let i = 0; i < firstDow; i++) html += '<div class="sh-cal-cell empty"></div>';
+    for (const d of days) {
+      const intensity = max_kwh > 0 ? Math.min(1, (d.kwh || 0) / max_kwh) : 0;
+      const bg = 'rgba(255, 177, 104, ' + (0.05 + intensity * 0.45).toFixed(2) + ')';
+      const isSelected = __shEnergySelected && __shEnergySelected[0] === y && __shEnergySelected[1] === m && __shEnergySelected[2] === d.day;
+      html += '<button type="button" class="sh-cal-cell' + (isSelected ? ' selected' : '') + '" data-day="' + d.day + '" style="background:' + bg + '">' +
+        '<span class="sh-cal-day">' + d.day + '</span>' +
+        '<span class="sh-cal-kwh">' + (d.kwh || 0).toFixed(1) + '</span>' +
+      '</button>';
+    }
+    grid.innerHTML = html;
+    grid.querySelectorAll('button[data-day]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const day = parseInt(btn.getAttribute('data-day'), 10);
+        __shEnergySelected = [y, m, day];
+        grid.querySelectorAll('.sh-cal-cell').forEach((el) => el.classList.remove('selected'));
+        btn.classList.add('selected');
+        loadEnergyDay(y, m, day);
+      });
+    });
+  }
+
+  async function loadEnergyDay(y, m, d) {
+    const sec = document.getElementById('sh-day-section');
+    const title = document.getElementById('sh-day-title');
+    const bars = document.getElementById('sh-bar-row');
+    const lead = document.getElementById('sh-leaderboard');
+    if (!sec || !title || !bars || !lead) return;
+    sec.hidden = false;
+    title.textContent = new Date(y, m - 1, d).toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
+    bars.innerHTML = '';
+    lead.innerHTML = '';
+    let payload = null;
+    try {
+      const date = y + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+      const r = await fetch('/api/smart-home/energy/day?date=' + encodeURIComponent(date), { credentials: 'same-origin' });
+      payload = await r.json();
+    } catch (_) {
+      bars.innerHTML = '<div style="color: var(--sh-text-dim); font-size:12px">No data.</div>';
+      return;
+    }
+    const hourly = (payload && payload.hourly) || [];
+    const peak = Math.max(0.001, ...hourly);
+    let bhtml = '';
+    for (const h of hourly) {
+      const pct = Math.max(2, Math.round((h / peak) * 100));
+      bhtml += '<div class="sh-bar" style="height: ' + pct + '%" title="' + (h || 0).toFixed(2) + ' kWh"></div>';
+    }
+    bars.innerHTML = bhtml;
+
+    const board = (payload && payload.leaderboard) || [];
+    const anomalyMap = {};
+    (__shAnomalies || []).forEach((a) => { anomalyMap[a.device_id] = a.severity; });
+    if (board.length === 0) {
+      lead.innerHTML = '<div style="color: var(--sh-text-dim); font-size:12px">No per-device samples for this day.</div>';
+    } else {
+      lead.innerHTML = board.map((row) => {
+        const sev = anomalyMap[row.device_id];
+        return '<div class="sh-leader-row' + (sev ? ' severity-' + sev : '') + '">' +
+          '<span class="sh-leader-name">' + (row.device_name || ('Device ' + row.device_id)) +
+            (sev ? ' <span class="sh-anomaly-pill">⚠ ' + sev + '</span>' : '') + '</span>' +
+          '<span class="sh-leader-kwh">' + (row.kwh || 0).toFixed(2) + ' kWh</span>' +
+        '</div>';
+      }).join('');
+    }
+  }
+
+  loadEnergyAnomalies();
+  setInterval(loadEnergyAnomalies, 60000);
 
   // ── drawer (placeholder bodies for tiles) ──────────
   const DRAWER_BODIES = {

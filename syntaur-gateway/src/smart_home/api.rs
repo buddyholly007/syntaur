@@ -1599,6 +1599,23 @@ pub async fn handle_energy_rate_put(
     Ok(Json(json!({ "rate": rate })))
 }
 
+/// GET /api/smart-home/energy/anomalies — devices using significantly
+/// more energy today than their 30-day baseline (Phase 2K).
+pub async fn handle_energy_anomalies(
+    State(state): State<std::sync::Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let user_id = current_user_id(&state);
+    let db = state.db_path.clone();
+    let anomalies = tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<energy::Anomaly>> {
+        let conn = rusqlite::Connection::open(&db)?;
+        energy::anomalies_for_user(&conn, user_id)
+    })
+    .await
+    .map_err(|e| err_500(format!("join error: {e}")))?
+    .map_err(|e| err_500(format!("db error: {e}")))?;
+    Ok(Json(json!({ "anomalies": anomalies })))
+}
+
 /// POST /api/smart-home/energy/ingest — force an immediate ingest pass.
 /// Useful for the "Refresh" button on the energy dashboard.
 pub async fn handle_energy_ingest(
