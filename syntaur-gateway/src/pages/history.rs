@@ -79,7 +79,7 @@ fn modal() -> Markup {
 }
 
 const PAGE_JS: &str = r#"
-const token = sessionStorage.getItem('syntaur_token') || '';
+const token = sessionStorage.getItem('syntaur_token') || localStorage.getItem('syntaur_token') || '';
 // Client-side token-gate removed 2026-04-24 (module-reset bug fix).
 
 // Phase 1.1: session token sent via Authorization: Bearer only. Server

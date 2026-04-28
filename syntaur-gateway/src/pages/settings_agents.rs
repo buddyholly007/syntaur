@@ -178,7 +178,7 @@ const EXTRA_STYLE: &str = r#"
 "#;
 
 const PAGE_JS: &str = r#"
-const token = sessionStorage.getItem('syntaur_token') || '';
+const token = sessionStorage.getItem('syntaur_token') || localStorage.getItem('syntaur_token') || '';
 // Client-side token-gate removed 2026-04-24 (module-reset bug fix).
 
 const esc = (s) => String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));

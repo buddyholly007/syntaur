@@ -3574,7 +3574,7 @@ const EXTRA_STYLE: &str = r##"@import url('/fonts.css');
   .transmit-btn:hover { background: var(--lcars-peach); box-shadow: 0 0 10px rgba(255,156,61,0.45); }"##;
 
 const PAGE_JS: &str = r##"
-const token = sessionStorage.getItem('syntaur_token') || '';
+const token = sessionStorage.getItem('syntaur_token') || localStorage.getItem('syntaur_token') || '';
 // Client-side token-gate removed 2026-04-25 (module-reset bug fix).
 
 // ── Module License Check ──

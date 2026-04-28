@@ -70,7 +70,7 @@ fn page_body() -> Markup {
 }
 
 const PAGE_JS: &str = r#"
-const token = sessionStorage.getItem('syntaur_token') || '';
+const token = sessionStorage.getItem('syntaur_token') || localStorage.getItem('syntaur_token') || '';
 // Client-side token-gate removed 2026-04-24 — it bounced cookie-
 // authenticated users back to `/` whenever storage was empty,
 // causing the module-reset bug. 401 handler below covers the

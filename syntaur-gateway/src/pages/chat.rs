@@ -208,7 +208,13 @@ const BODY_HTML: &str = r##"<!-- Agent strip (chips + new-chat) — lives inside
 </div>
 
 <script>
-const token = sessionStorage.getItem('syntaur_token') || '';
+// Read both stores: sessionStorage is per-window and wipes when the
+// native viewer (wry/WebKitGTK) closes, but localStorage persists.
+// Without this fallback, voice-mode EventSource opens with `?token=`
+// empty (it doesn't send cookies), the stream endpoint 401s on the
+// URL-scoped token check, onerror fires, and the chat page silently
+// drops back to listening — no TTS, no audible response.
+const token = sessionStorage.getItem('syntaur_token') || localStorage.getItem('syntaur_token') || '';
 // Server cookie-auth already authenticated this page render; the
 // prior `if (!token) window.location.href = '/'` guard here bounced
 // every user whose sessionStorage was empty back to the dashboard,
@@ -1549,7 +1555,7 @@ async function handleVmTranscript(e) {
           try {
             const ttsResp = await fetch('/api/tts', {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: JSON_AUTH_H(),
               body: JSON.stringify({ text: ev.response.substring(0, 500) })
             });
             const ttsData = await ttsResp.json();
