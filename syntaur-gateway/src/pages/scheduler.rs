@@ -3022,7 +3022,7 @@ const PAGE_JS: &str = r##"
         fd.append('audio', blob, 'voice.webm');
         fd.append('token', TOKEN);
         try {
-          const r = await fetch('/api/voice/transcribe', { method: 'POST', body: fd });
+          const r = await fetch('/api/voice/transcribe', { method: 'POST', headers: { 'Authorization': 'Bearer ' + TOKEN }, body: fd });
           const d = await r.json();
           const transcript = d.text || d.transcript || '';
           if (!transcript) return schNlCreatePrompt();

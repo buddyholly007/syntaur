@@ -1805,9 +1805,10 @@ const RESOURCE_BUDGET_JS: &str = r#"
         const blob = new Blob(chunks, { type: 'audio/webm' });
         const fd = new FormData();
         fd.append('audio', blob, 'audio.webm');
-        fd.append('token', sessionStorage.getItem('syntaur_token') || '');
+        const _tok = sessionStorage.getItem('syntaur_token') || localStorage.getItem('syntaur_token') || '';
+        fd.append('token', _tok);
         try {
-          const r = await fetch('/api/voice/transcribe', { method: 'POST', body: fd });
+          const r = await fetch('/api/voice/transcribe', { method: 'POST', headers: { 'Authorization': 'Bearer ' + _tok }, body: fd });
           const j = await r.json();
           const text = (j.text || '').trim();
           if (text) {
@@ -1917,10 +1918,11 @@ const RESOURCE_BUDGET_JS: &str = r#"
       const blob = new Blob(chunks, { type: 'audio/webm' });
       const fd = new FormData();
       fd.append('audio', blob, 'audio.webm');
-      fd.append('token', sessionStorage.getItem('syntaur_token') || '');
+      const _tok = sessionStorage.getItem('syntaur_token') || localStorage.getItem('syntaur_token') || '';
+      fd.append('token', _tok);
       let text = '';
       try {
-        const r = await fetch('/api/voice/transcribe', { method: 'POST', body: fd });
+        const r = await fetch('/api/voice/transcribe', { method: 'POST', headers: { 'Authorization': 'Bearer ' + _tok }, body: fd });
         const j = await r.json();
         text = (j.text || '').trim();
       } catch (e) { text = ''; }

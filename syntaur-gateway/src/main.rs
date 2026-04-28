@@ -7042,6 +7042,10 @@ async fn main() {
             post(smart_home::api::handle_esphome_flash),
         )
         .route(
+            "/api/smart-home/esphome/{id}/mode",
+            post(smart_home::api::handle_esphome_set_mode),
+        )
+        .route(
             "/api/smart-home/diagnostics/summary",
             get(smart_home::api::handle_diagnostics_summary),
         )
@@ -10355,6 +10359,7 @@ async fn handle_auth_pair_client(
 
 async fn handle_voice_transcribe(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     mut multipart: axum::extract::Multipart,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let mut token: Option<String> = None;
@@ -10383,7 +10388,16 @@ async fn handle_voice_transcribe(
             audio_bytes = Some(buf);
         }
     }
-    let token = token.unwrap_or_default();
+    let mut token = token.unwrap_or_default();
+    if token.is_empty() {
+        if let Some(bearer) = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "))
+        {
+            token = bearer.to_string();
+        }
+    }
     let _principal = resolve_principal(&state, &token).await?;
     let Some(audio) = audio_bytes else { return Err(axum::http::StatusCode::BAD_REQUEST); };
 
