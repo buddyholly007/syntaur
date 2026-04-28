@@ -15,7 +15,7 @@ path = "src/bin/syntaur_vault.rs"
 [dependencies]
 argon2 = "0.5"
 chacha20poly1305 = "0.10"
-rand = "0.8"
+rand = "0.10"
 serde = { workspace = true }
 serde_json = { workspace = true }
 clap = { version = "4", features = ["derive"] }
@@ -26,7 +26,7 @@ thiserror = { workspace = true }
 zeroize = { version = "1", features = ["zeroize_derive"] }
 # The agent uses blocking std::os::unix::net — no tokio needed. Small
 # single-threaded daemon; simpler + fewer deps.
-nix = { version = "0.29", features = ["process"] }
+nix = { version = "0.31", features = ["process"] }
 # Daemonizer: double-fork, setsid, detach from tty. Called by
 # `syntaur-vault agent --internal-daemon` after the parent CLI exec's
 # itself as a child. Plain crate, no transitive bloat.

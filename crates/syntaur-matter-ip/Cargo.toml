@@ -26,8 +26,8 @@ embassy-time-queue-utils = { version = "0.3", features = ["generic-queue-64"] }
 async-io = "2"
 futures-lite = "2"
 # mDNS resolver for _matterc._udp.local to find the ephemeral commissioning port.
-mdns-sd = "0.13"
-flume = { version = "0.11", default-features = false, features = ["async"] }
+mdns-sd = "0.19"
+flume = { version = "0.12", default-features = false, features = ["async"] }
 
 [[bin]]
 name = "matter-discover"

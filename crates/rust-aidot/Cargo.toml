@@ -23,6 +23,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
-aes = "0.8"
-cipher = "0.4"
+aes = "0.9"
+cipher = "0.5"
 chrono = "0.4"
