@@ -221,8 +221,16 @@ pub async fn synthesize_speech(
     match satellite_client::run_tts(crate::voice_ws::tts_host(), text).await {
         Ok((audio, rate, ch, bits)) => {
             let url = satellite_client::cache_tts_audio(audio, 18789, rate, ch, bits).await;
+            // Browser pages are served over HTTPS (Tailscale), but the cached
+            // URL is plain http://host:port/... — mixed-content rules silently
+            // block <audio src> from loading it. Return the path-only form so
+            // the browser resolves against the current HTTPS origin.
+            let browser_url = url
+                .split_once("/voice/tts/")
+                .map(|(_, rest)| format!("/voice/tts/{}", rest))
+                .unwrap_or(url);
             Ok(Json(json!({
-                "audio_url": url,
+                "audio_url": browser_url,
                 "estimated_duration_secs": est_dur,
             })))
         }

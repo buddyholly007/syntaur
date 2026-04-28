@@ -1938,3 +1938,237 @@ pub async fn handle_put_ble_anchors(
         .map_err(|e| err_500(format!("persist: {e}")))?;
     Ok(Json(json!({ "written": written })))
 }
+
+// ── ESPHome quick-setup wizard ──────────────────────────────────────────────
+
+/// `POST /api/smart-home/esphome/discover` — `{duration_secs: u64}` →
+/// `{devices: [...]}`. Browses `_esphomelib._tcp.local.` for the
+/// requested window (capped at 10 s server-side) and surfaces the
+/// rich shape from `esphome_discovery::DiscoveredEsphomeDevice` so
+/// the wizard's table can render board / role / project hints.
+#[derive(Debug, Deserialize)]
+pub struct EsphomeDiscoverBody {
+    /// Browse window. Defaults to 4 s when missing or 0; clamped to
+    /// 10 s upper bound so a runaway client can't tie up the daemon.
+    pub duration_secs: Option<u64>,
+}
+
+pub async fn handle_esphome_discover(
+    State(_state): State<std::sync::Arc<AppState>>,
+    Json(body): Json<EsphomeDiscoverBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let secs = body.duration_secs.unwrap_or(4).clamp(1, 10);
+    let devices = super::esphome_discovery::discover(std::time::Duration::from_secs(secs)).await;
+    Ok(Json(json!({ "devices": devices })))
+}
+
+/// `POST /api/smart-home/esphome/adopt` — register a discovered ESPHome
+/// proxy as a `kind=esphome_proxy` device row so Phase 4's ingest
+/// supervisor picks it up on the next 60 s refresh tick. The wizard JS
+/// posts the un-flattened `DiscoveredEsphomeDevice` fields plus a
+/// `mode` (defaults to "tracking"). Returns `{device_id: N}` on
+/// success.
+#[derive(Debug, Deserialize)]
+pub struct EsphomeAdoptBody {
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    pub friendly_name: Option<String>,
+    pub mac: Option<String>,
+    /// `"tracking"` (default) wires the proxy into the BLE-advert
+    /// supervisor immediately. `"idle"` adopts the device row but
+    /// leaves the connection dormant — useful for proxies that the
+    /// user wants to register before deciding their role.
+    pub mode: Option<String>,
+    /// Optional Noise PSK (32-byte base64). Stored encrypted under
+    /// provider="esphome_native_api" and label=<name> so the next
+    /// connect_and_pump call upgrades to encrypted mode.
+    pub api_encryption_key: Option<String>,
+    pub esphome_version: Option<String>,
+    pub bluetooth_mac: Option<String>,
+}
+
+pub async fn handle_esphome_adopt(
+    State(state): State<std::sync::Arc<AppState>>,
+    Json(body): Json<EsphomeAdoptBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let user_id = current_user_id(&state);
+    let db = state.db_path.clone();
+    let mode = body
+        .mode
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("tracking")
+        .to_string();
+    let chosen_name = if body.name.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "name is required" })),
+        ));
+    } else {
+        body.name.trim().to_string()
+    };
+    let host = body.host.trim().to_string();
+    if host.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "host is required" })),
+        ));
+    }
+    let external_id = format!("{}:{}", host, body.port);
+    let metadata = serde_json::json!({
+        "host": host,
+        "port": body.port,
+        "mac": body.mac,
+        "bluetooth_mac": body.bluetooth_mac,
+        "friendly_name": body.friendly_name,
+        "esphome_version": body.esphome_version,
+    });
+    let metadata_str = metadata.to_string();
+    let state_json = serde_json::json!({
+        "esphome": {
+            "mode": mode,
+            "pairing_window_secs": 300,
+        },
+    })
+    .to_string();
+
+    // Insert (or upsert if the same external_id already exists for
+    // this user) the device row, then write state_json so the BLE
+    // ingest supervisor sees the mode immediately.
+    let chosen_for_db = chosen_name.clone();
+    let device_id = tokio::task::spawn_blocking(move || -> rusqlite::Result<i64> {
+        let conn = rusqlite::Connection::open(&db)?;
+        let id = devices::upsert_from_scan(
+            &conn,
+            user_id,
+            "esphome",
+            &external_id,
+            &chosen_for_db,
+            "esphome_proxy",
+            "{}", // capabilities
+            &metadata_str,
+        )?;
+        conn.execute(
+            "UPDATE smart_home_devices SET state_json = ?
+              WHERE user_id = ? AND id = ?",
+            rusqlite::params![state_json, user_id, id],
+        )?;
+        Ok(id)
+    })
+    .await
+    .map_err(|e| err_500(format!("join: {e}")))?
+    .map_err(|e| err_500(format!("db: {e}")))?;
+
+    // Encrypted? Stash the PSK in smart_home_credentials so Phase 4's
+    // worker upgrades to Noise on next reconnect. Failures here are
+    // surfaced to the operator instead of silently downgrading — a
+    // stored mismatched key is harder to debug than an explicit
+    // "couldn't save key" response.
+    if let Some(psk_b64) = body.api_encryption_key.as_deref() {
+        let psk_b64 = psk_b64.trim();
+        if !psk_b64.is_empty() {
+            let key_label = chosen_name.clone();
+            let db = state.db_path.clone();
+            let secret = serde_json::json!({ "psk_b64": psk_b64 });
+            tokio::task::spawn_blocking(move || -> Result<(), String> {
+                let data_dir = db
+                    .parent()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+                let master = crate::crypto::load_or_create_key(&data_dir)
+                    .map_err(|e| format!("master key: {e}"))?;
+                let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+                super::credentials::upsert(
+                    &conn,
+                    &master,
+                    user_id,
+                    "esphome_native_api",
+                    &key_label,
+                    &secret,
+                    None,
+                )
+                .map(|_| ())
+            })
+            .await
+            .map_err(|e| err_500(format!("join: {e}")))?
+            .map_err(err_500)?;
+        }
+    }
+
+    Ok(Json(json!({
+        "device_id": device_id,
+        "external_id": format!("{}:{}", host, body.port),
+        "mode": mode,
+    })))
+}
+
+/// `POST /api/smart-home/esphome/flash` — render `firmware_role` YAML
+/// then shell out to `esphome` to compile + (optionally) OTA-upload.
+/// Body mirrors `firmware_role::FirmwareRequest` plus an explicit
+/// target host for the OTA step. Returns the structured `FlashResult`
+/// regardless of compile outcome so the wizard can show the captured
+/// logs even on failure.
+///
+/// Requires `esphome` on the gateway's PATH. Production deploys
+/// (TrueNAS Custom App, debian-slim image) don't currently bundle it;
+/// this endpoint surfaces the missing-binary error verbatim so
+/// operators see "install esphome on the build host" rather than a
+/// generic 500.
+#[derive(Debug, Deserialize)]
+pub struct EsphomeFlashBody {
+    pub name: String,
+    pub friendly_name: Option<String>,
+    pub variant: super::firmware_role::HardwareVariant,
+    pub role: super::esphome_discovery::SuggestedRole,
+    pub api_encryption_key: Option<String>,
+    pub ota_password: Option<String>,
+    pub wifi_ssid: String,
+    pub wifi_password: String,
+    pub ap_fallback_password: Option<String>,
+    /// `Some("ip-or-host")` triggers OTA upload; `None` compiles only.
+    pub target_host: Option<String>,
+}
+
+pub async fn handle_esphome_flash(
+    State(_state): State<std::sync::Arc<AppState>>,
+    Json(body): Json<EsphomeFlashBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let req = super::firmware_role::FirmwareRequest {
+        name: body.name,
+        friendly_name: body.friendly_name,
+        variant: body.variant,
+        role: body.role,
+        api_encryption_key: body.api_encryption_key,
+        ota_password: body.ota_password,
+        wifi_ssid: body.wifi_ssid,
+        wifi_password: body.wifi_password,
+        ap_fallback_password: body.ap_fallback_password,
+    };
+    let build_dir = super::firmware_flash::default_build_dir();
+    let yaml_path = super::firmware_flash::write_yaml_to_disk(&req, &build_dir)
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))))?;
+    let target = match body.target_host {
+        Some(h) if !h.trim().is_empty() => {
+            super::firmware_flash::FlashTarget::Ota(h.trim().to_string())
+        }
+        _ => super::firmware_flash::FlashTarget::CompileOnly,
+    };
+    let result = super::firmware_flash::flash_via_esphome(&yaml_path, target).await;
+    match result {
+        Ok(r) => Ok(Json(json!({
+            "success": r.success,
+            "log": r.log,
+            "elapsed_secs": r.elapsed_secs,
+            "yaml_path": r.yaml_path,
+        }))),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "success": false,
+                "error": e,
+                "yaml_path": yaml_path.display().to_string(),
+            })),
+        )),
+    }
+}

@@ -41,7 +41,10 @@ pub mod devices;
 pub mod diagnostics;
 pub mod drivers;
 pub mod energy;
+pub mod esphome_discovery;
 pub mod events;
+pub mod firmware_flash;
+pub mod firmware_role;
 pub mod nl_automation;
 pub mod presence;
 pub mod rooms;
@@ -80,6 +83,7 @@ pub async fn init(db_path: std::path::PathBuf) -> Result<(), String> {
 
     let energy_engine = std::sync::Arc::new(energy::EnergyEngine::new(db_path.clone()));
     let _energy_handle = energy_engine.spawn();
+    let ble_db_path = db_path.clone();
 
     // Phase E MQTT embedded broker — `rumqttd` on 127.0.0.1:1884 by
     // default. Honors `SMART_HOME_EMBEDDED_BROKER=off` to disable or
@@ -126,10 +130,13 @@ pub async fn init(db_path: std::path::PathBuf) -> Result<(), String> {
     // when the `ble-host` feature is off OR when the host has no BT
     // adapter, so this call is safe on every deployment target.
     let _host_handle = drivers::ble_host::start_host_scanner(ble.clone());
-    // ESPHome native-API ingest is currently a feature-gated scaffold —
-    // see drivers/ble_esphome.rs for the rationale and TODO list. The
-    // call is safe to leave in `init` so the wiring is permanent.
-    let _esphome_handle = drivers::ble_esphome::start_esphome_ingest(ble.clone());
+    // ESPHome native-API ingest — Phase 4. One TCP connection per
+    // smart_home_devices row of kind=esphome_proxy whose
+    // state_json.esphome.mode is "tracking". On builds without the
+    // ble-host feature the supervisor is a logging no-op so the wiring
+    // stays in place across deployment targets.
+    let _esphome_handle =
+        drivers::ble_esphome::start_esphome_ingest(ble.clone(), ble_db_path);
     drivers::ble::install(ble);
 
     log::info!(

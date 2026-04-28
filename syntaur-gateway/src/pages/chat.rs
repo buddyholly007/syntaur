@@ -1434,6 +1434,27 @@ function setVmState(state) {
   }
 }
 
+// Surface a voice-mode failure in the orb instead of silently dropping
+// back to listening. Keeps the user oriented when STT/LLM/TTS fail —
+// they see the actual problem and a hint, not a forever-cycling orb.
+// `caption` is shown briefly in the small text below the status; if
+// `state` is 'listening' we wait ~3.5s before resetting so the message
+// is readable. Console-logged at the same time so a Playwright/devtools
+// run can correlate.
+function vmShowError(state, caption, detail) {
+  if (!vmActive) return;
+  console.warn('[voice-mode]', state, caption, detail || '');
+  const xs = document.getElementById('vm-transcript');
+  if (xs) xs.textContent = caption || '';
+  setVmState('thinking'); // brief amber pulse so the user notices
+  setTimeout(() => {
+    if (!vmActive) return;
+    if (xs) xs.textContent = '';
+    setVmState('listening');
+    resetVmIdle();
+  }, 3500);
+}
+
 function handleVmAudio(e) {
   if (!vmActive || vmState === 'thinking' || vmState === 'playing') return;
 
@@ -1486,12 +1507,7 @@ async function handleVmTranscript(e) {
     // instead of leaving the overlay stuck on "Thinking..." until the 30s
     // idle timer hides it (the "I speak and the circle disappears" bug).
     if (msg.type === 'error') {
-      if (vmActive) {
-        document.getElementById('vm-transcript').textContent =
-          '(no speech captured — try a different mic from the dropdown)';
-        setVmState('listening');
-        resetVmIdle();
-      }
+      vmShowError('stt-error', 'STT couldn\'t process that — try a different mic from the dropdown', msg.message);
       return;
     }
     if (msg.type !== 'transcript') return;
@@ -1530,6 +1546,13 @@ async function handleVmTranscript(e) {
       headers: JSON_AUTH_H(),
       body: JSON.stringify({ message: text, agent: 'main' })
     });
+    if (!startResp.ok) {
+      const reason = startResp.status === 401 ? 'Not signed in — refresh the page'
+                   : startResp.status === 403 ? 'Permission denied'
+                   : `Agent unreachable (HTTP ${startResp.status})`;
+      vmShowError('agent-start-fail', reason);
+      return;
+    }
     const startData = await startResp.json();
     const turnId = startData.turn_id;
 
@@ -1558,7 +1581,15 @@ async function handleVmTranscript(e) {
               headers: JSON_AUTH_H(),
               body: JSON.stringify({ text: ev.response.substring(0, 500) })
             });
+            if (!ttsResp.ok) {
+              vmShowError('tts-http', `TTS unavailable (HTTP ${ttsResp.status})`);
+              return;
+            }
             const ttsData = await ttsResp.json();
+            if (ttsData.error) {
+              vmShowError('tts-engine', 'Voice unavailable — ' + ttsData.error);
+              return;
+            }
             if (ttsData.audio_url) {
               const audio = new Audio(ttsData.audio_url);
               // Estimate duration from response length (~150ms per word)
@@ -1576,21 +1607,24 @@ async function handleVmTranscript(e) {
                   if (vmActive) setVmState('listening');
                 }, (vmLastTtsDuration + 1) * 1000);
               };
-              audio.play().catch(() => {
-                if (vmActive) setVmState('listening');
+              audio.play().catch(err => {
+                vmShowError('tts-play-blocked', 'Audio blocked — click in the window and try again', err && err.message);
               });
             } else {
-              if (vmActive) setVmState('listening');
+              vmShowError('tts-no-url', 'No audio returned from TTS');
             }
-          } catch {
-            if (vmActive) setVmState('listening');
+          } catch (e) {
+            vmShowError('tts-exception', 'TTS failed — ' + (e && e.message ? e.message : 'unknown error'));
           }
         } else if (ev.event === 'error') {
           evtSource.close();
-          if (vmActive) setVmState('listening');
+          vmShowError('agent-error', 'Agent reply failed', ev.error || ev.message);
         }
       };
-      evtSource.onerror = () => { evtSource.close(); if (vmActive) setVmState('listening'); };
+      evtSource.onerror = () => {
+        evtSource.close();
+        vmShowError('sse-error', 'Lost connection to agent stream');
+      };
     }
   } catch {
     if (vmActive) setVmState('listening');

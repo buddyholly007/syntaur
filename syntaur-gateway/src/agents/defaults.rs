@@ -805,9 +805,30 @@ pub fn seed(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// True when this gateway is configured as a single-user / "local" deploy.
+///
+/// Local mode swaps Kyron (the safe-default product persona) for Peter (the
+/// warmer, Sean-named local persona) on the main agent slot. Set
+/// `SYNTAUR_DEPLOY_MODE=local` in the gateway's environment to enable. Any
+/// other value (or unset) keeps the multi-tenant default — every new user
+/// gets Kyron and tweaks from there.
+///
+/// We deliberately do NOT auto-detect from the user count: a brand-new
+/// multi-tenant install also has user count == 1 right after the admin
+/// registers, and we don't want them to get a Sean-named persona by accident.
+/// Explicit opt-in keeps the failure mode safe.
+fn is_local_deploy() -> bool {
+    std::env::var("SYNTAUR_DEPLOY_MODE")
+        .map(|v| v.eq_ignore_ascii_case("local"))
+        .unwrap_or(false)
+}
+
 /// Clone the product-default agents into a specific user's `user_agents` table.
-/// Called during onboarding so every new user starts with the 7 canonical
-/// personas (Peter is excluded — Sean's local-only deployment).
+/// Called during onboarding so every new user starts with the canonical
+/// personas. In `SYNTAUR_DEPLOY_MODE=local` deployments, the main slot is
+/// seeded as Peter (`base_agent = 'peter'`, agent_id = 'main') so the chat
+/// surface that addresses agent_id='main' resolves PROMPT_PETER. In all other
+/// deployments the main slot is Kyron (`base_agent = 'main'`).
 ///
 /// Each cloned row has `system_prompt = NULL`, which means the live chat path
 /// falls through to `try_default_persona()` and resolves the template
@@ -817,18 +838,17 @@ pub fn seed(conn: &Connection) -> rusqlite::Result<()> {
 /// Idempotent — uses INSERT OR IGNORE so re-calling is safe.
 pub fn clone_for_user(conn: &rusqlite::Connection, user_id: i64) -> rusqlite::Result<usize> {
     let now = chrono::Utc::now().timestamp();
-    conn.execute(
+    let local = is_local_deploy();
+
+    // Module specialists — always identical regardless of deploy mode.
+    let mut affected = conn.execute(
         r#"
         INSERT OR IGNORE INTO user_agents
             (user_id, agent_id, display_name, base_agent, system_prompt,
              tool_profile, enabled, created_at, updated_at)
         SELECT
             ?1,
-            CASE
-                WHEN agent_key = 'main_default' THEN 'main'
-                WHEN agent_key LIKE 'module_%' THEN SUBSTR(agent_key, 8)
-                ELSE agent_key
-            END,
+            SUBSTR(agent_key, 8),
             default_display_name,
             'main',
             NULL,
@@ -836,13 +856,55 @@ pub fn clone_for_user(conn: &rusqlite::Connection, user_id: i64) -> rusqlite::Re
             1,
             ?2, ?2
         FROM module_agent_defaults
-        WHERE agent_key != 'main_peter_local'
+        WHERE agent_key LIKE 'module_%'
         "#,
         rusqlite::params![user_id, now],
-    )
+    )?;
+
+    // Main slot — Peter in local mode (base_agent='peter' so try_default_persona
+    // picks PROMPT_PETER), Kyron everywhere else (base_agent='main').
+    let (main_display, main_base, main_key) = if local {
+        ("Peter", "peter", "main_peter_local")
+    } else {
+        ("Kyron", "main", "main_default")
+    };
+
+    affected += conn.execute(
+        r#"
+        INSERT OR IGNORE INTO user_agents
+            (user_id, agent_id, display_name, base_agent, system_prompt,
+             tool_profile, enabled, created_at, updated_at)
+        SELECT
+            ?1, 'main',
+            COALESCE(default_display_name, ?3),
+            ?4,
+            NULL,
+            'full',
+            1,
+            ?2, ?2
+        FROM module_agent_defaults
+        WHERE agent_key = ?5
+        "#,
+        rusqlite::params![user_id, now, main_display, main_base, main_key],
+    )?;
+
+    Ok(affected)
 }
 
 /// Rename a user's agent display name. Used during onboarding or from settings.
+///
+/// Upserts so a rename always lands, even if the user_agents row hasn't been
+/// seeded yet for this (user_id, agent_id) pair. The pre-2026-04-28 version
+/// did a bare UPDATE; if `clone_for_user` hadn't run for the user (e.g. Sean's
+/// local deployment, where 'main_peter_local' is filtered out), the rename
+/// silently affected 0 rows, so the chat surface kept calling itself by the
+/// `module_agent_defaults.default_display_name` value. Upsert closes that
+/// silent-no-op path.
+///
+/// `base_agent` defaults to the agent_id (so rename of agent_id='main' lands
+/// with base_agent='main' → resolves PROMPT_KYRON via try_default_persona).
+/// Callers that want a different persona template (e.g. local Peter mode)
+/// should write the row directly with the desired base_agent before renaming.
 pub fn rename_agent(
     conn: &rusqlite::Connection,
     user_id: i64,
@@ -851,8 +913,16 @@ pub fn rename_agent(
 ) -> rusqlite::Result<usize> {
     let now = chrono::Utc::now().timestamp();
     conn.execute(
-        "UPDATE user_agents SET display_name = ?1, updated_at = ?2 WHERE user_id = ?3 AND agent_id = ?4",
-        rusqlite::params![new_name, now, user_id, agent_id],
+        r#"
+        INSERT INTO user_agents
+            (user_id, agent_id, display_name, base_agent, system_prompt,
+             tool_profile, enabled, created_at, updated_at)
+        VALUES (?1, ?2, ?3, ?2, NULL, 'full', 1, ?4, ?4)
+        ON CONFLICT(user_id, agent_id) DO UPDATE SET
+            display_name = excluded.display_name,
+            updated_at   = excluded.updated_at
+        "#,
+        rusqlite::params![user_id, agent_id, new_name, now],
     )
 }
 

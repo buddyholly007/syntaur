@@ -586,6 +586,29 @@ impl UserStore {
         .map_err(|e| format!("get_user_agent: {}", e))
     }
 
+    /// Self-heal seed: if `user_agents` has zero rows for this user, run
+    /// `clone_for_user` (idempotent) so the chat surface stops falling
+    /// through to the unrenamed `module_agent_defaults` defaults. Closes the
+    /// gap that left Sean with an empty user_agents table — `clone_for_user`
+    /// is wired into user-create, but pre-existing users (or any user whose
+    /// row got wiped) had no recovery path. Safe to call on every chat.
+    pub async fn ensure_user_agents_seeded(&self, user_id: i64) -> Result<(), String> {
+        let db = self.db.lock().await;
+        let n: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM user_agents WHERE user_id = ?",
+                params![user_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("count user_agents: {}", e))?;
+        if n > 0 {
+            return Ok(());
+        }
+        crate::agents::defaults::clone_for_user(&db, user_id)
+            .map(|_| ())
+            .map_err(|e| format!("clone_for_user: {}", e))
+    }
+
     /// Create a new user-owned agent with the full set of v40 fields. Used
     /// by the Settings → Agents page (both manual create + file-import
     /// flows). `agent_id` must be unique per user; the caller is responsible

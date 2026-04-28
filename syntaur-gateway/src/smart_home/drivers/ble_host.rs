@@ -47,7 +47,7 @@ async fn run(_driver: Arc<BleDriver>) {
 
 #[cfg(feature = "ble-host")]
 async fn run(driver: Arc<BleDriver>) {
-    use btleplug::api::{Central, CentralEvent, Manager as _, ScanFilter};
+    use btleplug::api::{Central, CentralEvent, Manager as _, Peripheral as _, ScanFilter};
     use btleplug::platform::Manager;
     use futures_util::stream::StreamExt;
 

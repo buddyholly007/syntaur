@@ -40,11 +40,53 @@ fn tts_cache() -> &'static Mutex<HashMap<String, Vec<u8>>> {
     TTS_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Resolve the LAN-reachable host that the satellite should use to fetch
+/// `/voice/tts/<id>.wav`.
+///
+/// 1. `SYNTAUR_TTS_PUBLIC_HOST` env var — explicit override, wins.
+/// 2. LAN IP detected via the `connect-a-UDP-socket` trick: open a UDP
+///    socket "to" 1.1.1.1:80 (no packet sent until you write), read back
+///    `local_addr()`. The kernel picks the source IP it would use for
+///    default-route traffic — on a normal LAN host that's the LAN IP.
+/// 3. Last-resort `127.0.0.1` (browser case is fine because voice_api.rs
+///    strips this to a relative path; a satellite on the loopback would
+///    only fail in the "gateway and satellite on different boxes with no
+///    LAN" case, which is degenerate).
+///
+/// Cached in a `OnceLock` so we don't hit the kernel on every TTS call.
+fn tts_public_host() -> &'static str {
+    static H: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    H.get_or_init(|| {
+        if let Ok(explicit) = std::env::var("SYNTAUR_TTS_PUBLIC_HOST") {
+            if !explicit.trim().is_empty() {
+                return explicit;
+            }
+        }
+        match std::net::UdpSocket::bind("0.0.0.0:0")
+            .and_then(|s| { s.connect("1.1.1.1:80")?; s.local_addr() })
+        {
+            Ok(addr) => addr.ip().to_string(),
+            Err(_) => "127.0.0.1".to_string(),
+        }
+    })
+    .as_str()
+}
+
 /// Store TTS audio and return the URL the satellite can fetch it from.
 /// Wraps raw PCM in a WAV header if needed.
+///
+/// Host is auto-derived (see `tts_public_host`) so a fresh install on any
+/// LAN works without configuration. Browsers fetch via the relative URL
+/// emitted by `voice_api.rs::synthesize_speech`; satellites use this absolute
+/// form so they can fetch over the LAN regardless of which host the gateway
+/// is running on.
+///
+/// Pre-2026-04-27 this was hardcoded to `192.168.1.35` (the openclawprod VM
+/// that migrated to TrueNAS on 2026-04-22 and was powered off); the stale URL
+/// meant *every* user would have inherited a Sean-specific dead address.
 pub async fn cache_tts_audio(audio: Vec<u8>, gateway_port: u16, sample_rate: u32, channels: u16, bits: u16) -> String {
     let id = format!("{:016x}", rand::random::<u64>());
-    let url = format!("http://192.168.1.35:{}/voice/tts/{}.wav", gateway_port, id);
+    let url = format!("http://{}:{}/voice/tts/{}.wav", tts_public_host(), gateway_port, id);
 
     // If audio already has a WAV header, use as-is. Otherwise wrap raw PCM.
     let wav = if audio.len() > 4 && &audio[..4] == b"RIFF" {

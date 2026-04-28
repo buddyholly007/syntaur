@@ -1801,6 +1801,14 @@ async fn resolve_agent(state: &AppState, agent_id: &str, user_id: i64) -> Resolv
         };
     }
 
+    // Self-heal: seed default agents if this user has none yet. No-op when
+    // the row already exists. Belt-and-suspenders to user-create's call —
+    // covers pre-existing users whose user_agents got wiped or never
+    // populated.
+    if let Err(e) = state.users.ensure_user_agents_seeded(user_id).await {
+        log::warn!("[agents] ensure_user_agents_seeded(user_id={}) failed: {}", user_id, e);
+    }
+
     // Check user_agents table
     if let Ok(Some(ua)) = state.users.get_user_agent(user_id, agent_id).await {
         let base = &ua.base_agent;
@@ -1862,8 +1870,13 @@ async fn handle_api_message(
     // the legacy path for custom system agents (Felix, Crimson Lantern) that
     // don't have a seeded row in module_agent_defaults. `custom_prompt` from
     // user_agents.system_prompt is a user-explicit override and still prepends.
+    // Honor user_agents.base_agent so a row with base_agent='peter' resolves
+    // PROMPT_PETER even though the chat surface still sends agent_id='main'.
+    // Falls back to agent_id when no row exists (resolve_agent's fallback
+    // branch sets llm_agent_id = agent_id, so multi-user installs keep
+    // landing on PROMPT_KYRON via the existing 'main' → 'main_default' map).
     let (mut system_prompt, used_persona_template) =
-        match try_default_persona(&state, &agent_id, principal.user_id()).await {
+        match try_default_persona(&state, &resolved.llm_agent_id, principal.user_id()).await {
             Some(tmpl) => (tmpl, true),
             None => {
                 let mut parts = Vec::new();
@@ -2409,6 +2422,11 @@ async fn handle_message_start(
     let state_clone = Arc::clone(&state);
     let turn_id_for_task = turn_id.clone();
     let agent_for_task = agent_id.clone();
+    // Persona resolution honors user_agents.base_agent (e.g. base_agent='peter'
+    // on a row whose agent_id='main' yields PROMPT_PETER instead of PROMPT_KYRON).
+    // Everything else — logging, tool allowlist, conversation scoping — keeps
+    // using the surface-level agent_id so SQL keys + tool profiles don't shift.
+    let persona_key_for_task = resolved.llm_agent_id.clone();
     let message = req.message.clone();
     let conv_id = req.conversation_id.clone();
     let principal_scope = state.users.visible_user_ids(principal.user_id(), &sharing_mode, "conversations", Some(&agent_id)).await;
@@ -2428,7 +2446,7 @@ async fn handle_message_start(
         // for legacy/custom system agents without a seeded row. `custom_prompt`
         // still prepends in both branches. See handle_api_message for details.
         let (mut system_prompt, used_persona_template) =
-            match try_default_persona(&state_clone, &agent_for_task, principal_user_id).await {
+            match try_default_persona(&state_clone, &persona_key_for_task, principal_user_id).await {
                 Some(tmpl) => (tmpl, true),
                 None => {
                     let mut parts = Vec::new();
@@ -7002,6 +7020,26 @@ async fn main() {
             "/api/smart-home/ble/anchors",
             get(smart_home::api::handle_list_ble_anchors)
                 .put(smart_home::api::handle_put_ble_anchors),
+        )
+        // ESPHome quick-setup wizard surface (smart_home_esphome.rs page).
+        // discover → mDNS browse + role classifier (Phase 6 wizard).
+        // adopt    → register kind=esphome_proxy row + optional Noise PSK
+        //            stash; Phase 4 ingest supervisor picks it up on its
+        //            next 60s refresh.
+        // flash    → render firmware_role YAML + shell out to `esphome`
+        //            (Phase 6b). Requires esphome on PATH; surfaces a
+        //            "install esphome on build host" hint when missing.
+        .route(
+            "/api/smart-home/esphome/discover",
+            post(smart_home::api::handle_esphome_discover),
+        )
+        .route(
+            "/api/smart-home/esphome/adopt",
+            post(smart_home::api::handle_esphome_adopt),
+        )
+        .route(
+            "/api/smart-home/esphome/flash",
+            post(smart_home::api::handle_esphome_flash),
         )
         .route(
             "/api/smart-home/diagnostics/summary",

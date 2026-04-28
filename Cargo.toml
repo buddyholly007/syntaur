@@ -17,6 +17,7 @@ members = [
     "mace",
     "syntaur-isolation-tests",
     "syntaur-ship",
+    "syntaur-ble-shim",
     "crates/syntaur-zwave",
     "crates/rust-aidot",
     "crates/rust-kasa",
