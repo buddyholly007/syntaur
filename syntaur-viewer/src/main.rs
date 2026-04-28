@@ -469,6 +469,50 @@ fn run_viewer(url: &str) -> Result<(), String> {
             settings.set_media_playback_requires_user_gesture(false);
         }
 
+        // Optional debug hook: SYNTAUR_INIT_SCRIPT=<path> injects the file's JS
+        // at document-start in every frame, and exposes a `window.__syntaurLog`
+        // bridge via WebKit's script-message-handler that writes to
+        // SYNTAUR_INIT_LOG (stderr if unset). Off by default; only set when
+        // diagnosing the voice/audio pipeline against the actual viewer engine.
+        if let Ok(path) = std::env::var("SYNTAUR_INIT_SCRIPT") {
+            match std::fs::read_to_string(&path) {
+                Ok(src) => {
+                    let ucm = webview.user_content_manager().expect("ucm");
+                    let script = webkit6::UserScript::new(
+                        &src,
+                        webkit6::UserContentInjectedFrames::AllFrames,
+                        webkit6::UserScriptInjectionTime::Start,
+                        &[],
+                        &[],
+                    );
+                    ucm.add_script(&script);
+
+                    let log_path = std::env::var("SYNTAUR_INIT_LOG").ok();
+                    ucm.register_script_message_handler("syntaurLog", None);
+                    ucm.connect_script_message_received(
+                        Some("syntaurLog"),
+                        move |_mgr, val| {
+                            let s = val.to_string();
+                            let line = format!("{}\n", s);
+                            match &log_path {
+                                Some(p) => {
+                                    use std::io::Write;
+                                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                                        .create(true).append(true).open(p)
+                                    {
+                                        let _ = f.write_all(line.as_bytes());
+                                    }
+                                }
+                                None => eprint!("{}", line),
+                            }
+                        },
+                    );
+                    eprintln!("syntaur-viewer: injected init script from {}", path);
+                }
+                Err(e) => eprintln!("syntaur-viewer: SYNTAUR_INIT_SCRIPT read failed: {}", e),
+            }
+        }
+
         // Permission-request handler. WebKitGTK 6's default behaviour
         // for an UNHANDLED permission-request is to DENY. That breaks
         // any Syntaur feature that needs getUserMedia (chat mic, voice
