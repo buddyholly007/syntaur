@@ -442,6 +442,47 @@ impl Browser {
             }
         }
 
+        // Verify-mask: hide elements annotated with `data-verify-mask`
+        // before they paint. Pages mark time-of-day text, animated SVGs,
+        // and other procedurally-changing regions with the attribute.
+        // visibility:hidden preserves layout so the diff still catches
+        // real regressions everywhere else. Without this, the dashboard
+        // greeting + clock + sun-position widget alone yielded 94.6%
+        // pixel-diff on every voice ship.
+        {
+            use chromiumoxide::cdp::browser_protocol::page::AddScriptToEvaluateOnNewDocumentParams;
+            let mask_js = r#"
+                (function () {
+                  try {
+                    const css = '[data-verify-mask]{visibility:hidden!important;animation:none!important;transition:none!important}';
+                    const apply = () => {
+                      if (!document.head) return false;
+                      const s = document.createElement('style');
+                      s.setAttribute('data-from', 'syntaur-verify-mask');
+                      s.appendChild(document.createTextNode(css));
+                      document.head.appendChild(s);
+                      return true;
+                    };
+                    if (!apply()) {
+                      const obs = new MutationObserver(() => { if (apply()) obs.disconnect(); });
+                      obs.observe(document.documentElement, { childList: true });
+                    }
+                  } catch (e) { /* swallow */ }
+                })();
+            "#;
+            if let Err(e) = page
+                .execute(AddScriptToEvaluateOnNewDocumentParams {
+                    source: mask_js.to_string(),
+                    world_name: None,
+                    include_command_line_api: None,
+                    run_immediately: None,
+                })
+                .await
+            {
+                log::warn!("[browser] failed to inject verify-mask CSS: {e:#}");
+            }
+        }
+
         // Subscribe to console events BEFORE navigation.
         let mut console_events = page
             .event_listener::<chromiumoxide::cdp::browser_protocol::log::EventEntryAdded>()

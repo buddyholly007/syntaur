@@ -181,7 +181,7 @@ fn customize_bar() -> Markup {
 
 fn greeting_strip() -> Markup {
     html! {
-        section class="sd-greeting" id="sd-greeting" {
+        section class="sd-greeting" id="sd-greeting" data-verify-mask="time" {
             div class="sd-greeting-left" {
                 h1 class="sd-greeting-hello" id="sd-greeting-hello" { "Hello" }
                 div class="sd-greeting-sub" id="sd-greeting-sub" { "Welcome back" }
@@ -196,7 +196,7 @@ fn greeting_strip() -> Markup {
 
 fn sun_indicator() -> Markup {
     html! {
-        section class="sd-sun" id="sd-sun" aria-hidden="true" {
+        section class="sd-sun" id="sd-sun" aria-hidden="true" data-verify-mask="time" {
             div class="sd-sun-track" {
                 div class="sd-sun-dot" id="sd-sun-dot" {}
                 div class="sd-sun-tick sd-sun-tick-rise" id="sd-sun-tick-rise" {}
