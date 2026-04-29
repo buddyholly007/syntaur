@@ -1345,6 +1345,16 @@ let vmCurrentSse = null;
 let vmCurrentAudio = null;
 let vmTurnTimer = null;
 let vmPlaybackTimer = null;
+// Live mic diagnostics — Sean's viewer has no devtools, so the orb itself
+// has to surface "is the mic actually capturing?". `vmLastRms` is sampled
+// every audio chunk; `vmAudioReportTimer` periodically POSTs rms summaries
+// to /api/voice/client-event and shows a fallback prompt if zero-audio
+// stays zero for ~6s.
+let vmLastRms = 0;
+let vmRmsMaxSinceReport = 0;
+let vmAudioFramesSinceReport = 0;
+let vmAudioReportTimer = null;
+let vmMicHintShown = false;
 // Heartbeat to the server so we can see what state the client is wedged in
 // from prod logs without requiring devtools on Sean's viewer.
 function vmTelemetry(event, detail) {
@@ -1452,11 +1462,35 @@ async function startVoiceMode() {
 
   setVmState('listening');
   resetVmIdle();
+
+  // Periodic mic-health report. Every 5s for the first 30s, then every 30s.
+  // Posts rms_max + frame_count to the server and surfaces an in-orb prompt
+  // if the mic stays flat-lined.
+  vmTelemetry('mode_start');
+  vmRmsMaxSinceReport = 0; vmAudioFramesSinceReport = 0; vmMicHintShown = false;
+  let micCheckCount = 0;
+  vmAudioReportTimer = setInterval(() => {
+    if (!vmActive) return;
+    micCheckCount++;
+    const rmsMax = Math.round(vmRmsMaxSinceReport);
+    const frames = vmAudioFramesSinceReport;
+    vmTelemetry('mic_health', { rms_max: rmsMax, frames: frames, threshold: VM_SILENCE_THRESHOLD });
+    vmRmsMaxSinceReport = 0; vmAudioFramesSinceReport = 0;
+    // After two report windows (~10s) of essentially no audio, surface a hint.
+    if (!vmMicHintShown && micCheckCount >= 2 && rmsMax < 30 && frames > 10) {
+      vmMicHintShown = true;
+      const xs = document.getElementById('vm-transcript');
+      if (xs) xs.textContent = 'No mic audio detected — check your system mic input + volume';
+      vmTelemetry('mic_silent_hint_shown', { rms_max: rmsMax });
+    }
+  }, 5000);
 }
 
 function stopVoiceMode() {
   vmActive = false;
   vmTelemetry('mode_stop');
+  if (vmAudioReportTimer) { clearInterval(vmAudioReportTimer); vmAudioReportTimer = null; }
+  if (vmMicMeterTimer) { clearInterval(vmMicMeterTimer); vmMicMeterTimer = null; }
   if (vmTurnTimer) { clearTimeout(vmTurnTimer); vmTurnTimer = null; }
   if (vmPlaybackTimer) { clearTimeout(vmPlaybackTimer); vmPlaybackTimer = null; }
   if (vmCurrentSse) { try { vmCurrentSse.close(); } catch {} vmCurrentSse = null; }
@@ -1494,6 +1528,7 @@ function setVmState(state) {
     case 'listening':
       overlay.classList.add('vm-listening');
       status.textContent = 'Listening...';
+      startVmMicMeter();
       break;
     case 'speaking':
       overlay.classList.add('vm-speaking');
@@ -1512,6 +1547,28 @@ function setVmState(state) {
       status.textContent = 'Listening...';
       break;
   }
+}
+
+// Live mic level shown under the orb status. Animates the existing
+// '#vm-status' text so Sean can verify visually that his mic is capturing
+// audio even before the VAD threshold trips. RMS values 0-32767, but
+// realistic speech tops out around 3000-8000 — render a 10-bar meter.
+let vmMicMeterTimer = null;
+function startVmMicMeter() {
+  if (vmMicMeterTimer) return;
+  const status = document.getElementById('vm-status');
+  if (!status) return;
+  vmMicMeterTimer = setInterval(() => {
+    if (!vmActive || vmState !== 'listening') {
+      clearInterval(vmMicMeterTimer); vmMicMeterTimer = null; return;
+    }
+    // 10-step meter, log-ish so quiet voices still register a few bars.
+    const r = Math.max(0, vmLastRms);
+    const bars = Math.min(10, Math.round(Math.log10(1 + r) * 2.2));
+    const filled = '█'.repeat(bars);
+    const empty = '░'.repeat(10 - bars);
+    status.textContent = `Listening  ${filled}${empty}`;
+  }, 120);
 }
 
 // Surface a voice-mode failure in the orb instead of silently dropping
@@ -1543,6 +1600,12 @@ function handleVmAudio(e) {
   let sum = 0;
   for (let i = 0; i < f.length; i++) sum += f[i] * f[i];
   const rms = Math.sqrt(sum / f.length) * 32767; // scale to int16 range
+
+  // Diagnostics: track RMS so the orb can show a live mic-level hint and
+  // the server can correlate "no transcripts" with "mic flat-lined".
+  vmLastRms = rms;
+  if (rms > vmRmsMaxSinceReport) vmRmsMaxSinceReport = rms;
+  vmAudioFramesSinceReport++;
 
   if (rms >= VM_SILENCE_THRESHOLD) {
     // Speech detected
