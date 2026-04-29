@@ -39,7 +39,10 @@ For admins running Syntaur in production. Run through this after first install +
 ## Environment expectations
 
 - **`<data-dir>` ownership.** Must be owned by the process user + 0700 on the directory, 0600 on `master.key` and `vault.json`. Gateway refuses to start otherwise.
-- **`bubblewrap` installed.** Required for MCP process sandboxing (Phase 4.6). `apt-get install bubblewrap` on Debian/Ubuntu bases; Arch-based containers have it by default. Gateway falls back to unsandboxed MCP spawns with a loud warning if not found.
+- **`bubblewrap` installed.** Required for MCP process sandboxing (Phase 4.6). `apt-get install bubblewrap` on Debian/Ubuntu bases; Arch-based containers have it by default.
+  <!-- syntaur-doc-claim code_grep || syntaur-gateway/src/mcp_sandbox.rs || Command::new("/bin/false") -->
+  <!-- syntaur-doc-claim code_grep || syntaur-gateway/src/mcp_sandbox.rs || SYNTAUR_ALLOW_UNSANDBOXED_MCP -->
+  On Linux the gateway **fails closed** when bwrap is missing — the MCP child becomes `/bin/false` (the server cannot run) and an `error!` is logged. Install bubblewrap, or set `SYNTAUR_ALLOW_UNSANDBOXED_MCP=1` (legacy alias `SYNTAUR_STRICT_MCP_SANDBOX=0`) to opt back into fail-open. macOS and Windows keep the fail-open default since there is no bwrap backend on those platforms.
 - **`/dev/net/tun` accessible in the Tailscale sidecar container.** Required by the sidecar's compose definition (`devices: - /dev/net/tun:/dev/net/tun`). TrueNAS Electric Eel allows this by default.
 - **Runtime UID is 568 (apps) on TrueNAS.** Nightly-built images bake UID 568. Check with `docker exec syntaur id` — should report `uid=568(syntaur)`. Older images may report 950 or 1000; those map to privileged (truenas_admin) or regular (sean) host users and a container escape inherits those privileges. **Migration from an older UID:**
   ```bash
