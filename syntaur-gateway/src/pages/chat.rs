@@ -1317,6 +1317,9 @@ function stopVoice(e) {
 const VM_SILENCE_THRESHOLD = 1200;   // RMS energy (browser mic is louder than satellite)
 const VM_SILENCE_CHUNKS = 8;         // ~330ms at 4096 samples/chunk @ 16kHz
 const VM_MAX_SILENCE_S = 30;         // exit voice mode after 30s total silence
+// Hard watchdogs so a turn never wedges silently (post-cache-fix "dies after 2-3 turns" symptom)
+const VM_TURN_TIMEOUT_MS = 45000;     // SSE/turn must reach 'complete' or fall back to listening
+const VM_TTS_DURATION_PAD_S = 5;      // grace beyond estimated TTS duration before forcing 'listening'
 const VM_ECHO_WORDS = new Set([
   'yeah','yes','yep','yup','no','nah','nope','ok','okay','sure','right',
   'mm','hmm','uh','huh','oh','ah','so','well','hey','hi',
@@ -1335,6 +1338,56 @@ let vmHeardSpeech = false;
 let vmLastTtsDuration = 3;
 let vmCooldownTimer = null;
 let vmIdleTimer = null;
+// Turn supervisor — every turn registers its EventSource + Audio + timeouts here so
+// the cleanup path always converges to 'listening' even if the browser drops a callback.
+let vmCurrentTurnId = null;
+let vmCurrentSse = null;
+let vmCurrentAudio = null;
+let vmTurnTimer = null;
+let vmPlaybackTimer = null;
+// Heartbeat to the server so we can see what state the client is wedged in
+// from prod logs without requiring devtools on Sean's viewer.
+function vmTelemetry(event, detail) {
+  try {
+    fetch('/api/voice/client-event', {
+      method: 'POST',
+      headers: JSON_AUTH_H(),
+      body: JSON.stringify({
+        event: event, state: vmState, turn_id: vmCurrentTurnId,
+        ws_state: vmWs ? vmWs.readyState : -1,
+        detail: detail || null, ts: Date.now()
+      })
+    }).catch(() => {});
+  } catch {}
+}
+// One cleanup path. Anything that ends a turn — SSE complete, SSE error, TTS onended,
+// TTS onerror/onabort/onstalled, or the watchdog timeout — calls this. It is idempotent
+// and always lands the orb on 'listening' (or 'cooldown' if a TTS just finished).
+function vmEndTurn(reason, opts) {
+  opts = opts || {};
+  const wasListening = !!opts.afterTts;
+  vmTelemetry('turn_end', { reason: reason, after_tts: wasListening });
+  if (vmTurnTimer) { clearTimeout(vmTurnTimer); vmTurnTimer = null; }
+  if (vmPlaybackTimer) { clearTimeout(vmPlaybackTimer); vmPlaybackTimer = null; }
+  if (vmCurrentSse) { try { vmCurrentSse.close(); } catch {} vmCurrentSse = null; }
+  if (vmCurrentAudio) {
+    try { vmCurrentAudio.onended = null; vmCurrentAudio.onerror = null;
+          vmCurrentAudio.onabort = null; vmCurrentAudio.onstalled = null;
+          vmCurrentAudio.pause(); } catch {}
+    vmCurrentAudio = null;
+  }
+  vmCurrentTurnId = null;
+  if (!vmActive) return;
+  if (wasListening) {
+    setVmState('cooldown');
+    vmCooldownTimer = setTimeout(() => {
+      if (vmActive) setVmState('listening');
+    }, 700);
+  } else {
+    setVmState('listening');
+  }
+  resetVmIdle();
+}
 
 function toggleVoiceMode() {
   if (vmActive) {
@@ -1344,19 +1397,30 @@ function toggleVoiceMode() {
   }
 }
 
+// Replace just the STT WebSocket. Used both at session start and when the WS drops
+// mid-session — preserves vmStream / vmAudioCtx / mic permission across reconnects.
+function connectVmStt() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  vmWs = new WebSocket(`${proto}//${location.host}/ws/stt`);
+  vmWs.binaryType = 'arraybuffer';
+  vmWs.onmessage = handleVmTranscript;
+  vmWs.onerror = () => { try { vmWs && vmWs.close(); } catch {} };
+  vmWs.onclose = () => {
+    if (!vmActive) return;
+    vmTelemetry('ws_close', { reconnect_in_ms: 1000 });
+    setTimeout(() => { if (vmActive) connectVmStt(); }, 1000);
+  };
+}
+
 async function startVoiceMode() {
   vmActive = true;
   document.getElementById('voice-mode-overlay').classList.remove('hidden');
   document.getElementById('voice-mode-btn').classList.add('text-oc-500');
   document.getElementById('voice-mode-btn').classList.remove('text-gray-500');
 
-  // Connect STT WebSocket
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  vmWs = new WebSocket(`${proto}//${location.host}/ws/stt`);
-  vmWs.binaryType = 'arraybuffer';
-  vmWs.onclose = () => { if (vmActive) setTimeout(startVoiceMode, 1000); };
-  vmWs.onerror = () => vmWs.close();
-  vmWs.onmessage = handleVmTranscript;
+  // Connect STT WebSocket — WS-only reconnect on close, do NOT restart the whole mode
+  // (restarting would re-request mic permission and leak the existing AudioContext)
+  connectVmStt();
 
   await new Promise(r => {
     const check = setInterval(() => {
@@ -1392,7 +1456,23 @@ async function startVoiceMode() {
 
 function stopVoiceMode() {
   vmActive = false;
-  if (vmWs) { vmWs.close(); vmWs = null; }
+  vmTelemetry('mode_stop');
+  if (vmTurnTimer) { clearTimeout(vmTurnTimer); vmTurnTimer = null; }
+  if (vmPlaybackTimer) { clearTimeout(vmPlaybackTimer); vmPlaybackTimer = null; }
+  if (vmCurrentSse) { try { vmCurrentSse.close(); } catch {} vmCurrentSse = null; }
+  if (vmCurrentAudio) {
+    try { vmCurrentAudio.onended = null; vmCurrentAudio.onerror = null;
+          vmCurrentAudio.onabort = null; vmCurrentAudio.onstalled = null;
+          vmCurrentAudio.pause(); } catch {}
+    vmCurrentAudio = null;
+  }
+  vmCurrentTurnId = null;
+  if (vmWs) {
+    // Suppress reconnect on intentional close.
+    try { vmWs.onclose = null; } catch {}
+    try { vmWs.close(); } catch {}
+    vmWs = null;
+  }
   if (vmStream) { vmStream.getTracks().forEach(t => t.stop()); vmStream = null; }
   if (vmAudioCtx) { vmAudioCtx.close(); vmAudioCtx = null; }
   if (vmCooldownTimer) { clearTimeout(vmCooldownTimer); vmCooldownTimer = null; }
@@ -1551,19 +1631,31 @@ async function handleVmTranscript(e) {
                    : startResp.status === 403 ? 'Permission denied'
                    : `Agent unreachable (HTTP ${startResp.status})`;
       vmShowError('agent-start-fail', reason);
+      vmEndTurn('agent_start_fail_' + startResp.status);
       return;
     }
     const startData = await startResp.json();
     const turnId = startData.turn_id;
 
     if (turnId) {
+      // Register the turn so the supervisor can clean up unconditionally.
+      vmCurrentTurnId = turnId;
       // SSE: Authorization header not supported by EventSource, token stays in query.
       const evtSource = new EventSource(`/api/message/${turnId}/stream?token=${token}`);
+      vmCurrentSse = evtSource;
+      vmTelemetry('turn_start', { turn_id: turnId });
+      // Hard watchdog — if the SSE never reaches 'complete' (LLM hang, dropped stream,
+      // network blip), force a return to listening with a classified reason.
+      vmTurnTimer = setTimeout(() => {
+        if (vmCurrentTurnId !== turnId) return;
+        vmShowError('turn_timeout', 'Reply took too long — try again');
+        vmEndTurn('turn_timeout');
+      }, VM_TURN_TIMEOUT_MS);
       evtSource.onmessage = async (event) => {
+        // Ignore stale messages from a turn that was already cleaned up.
+        if (vmCurrentTurnId !== turnId) return;
         const ev = JSON.parse(event.data);
         if (ev.event === 'complete') {
-          evtSource.close();
-
           // Add response to chat
           const aiEl = document.createElement('div');
           aiEl.className = 'flex gap-4';
@@ -1572,7 +1664,8 @@ async function handleVmTranscript(e) {
           container.appendChild(aiEl);
           scroll.scrollTop = scroll.scrollHeight;
 
-          // Play TTS
+          // Hand off to TTS playback. The SSE itself can stay open for a moment;
+          // vmEndTurn closes it idempotently in any exit path.
           setVmState('playing');
           document.getElementById('vm-transcript').textContent = '';
           try {
@@ -1583,47 +1676,68 @@ async function handleVmTranscript(e) {
             });
             if (!ttsResp.ok) {
               vmShowError('tts-http', `TTS unavailable (HTTP ${ttsResp.status})`);
+              vmEndTurn('tts_http_' + ttsResp.status);
               return;
             }
             const ttsData = await ttsResp.json();
             if (ttsData.error) {
               vmShowError('tts-engine', 'Voice unavailable — ' + ttsData.error);
+              vmEndTurn('tts_engine_error');
               return;
             }
-            if (ttsData.audio_url) {
-              const audio = new Audio(ttsData.audio_url);
-              // Estimate duration from response length (~150ms per word)
-              const words = ev.response.split(/\s+/).length;
-              vmLastTtsDuration = Math.max(2, Math.round(words * 0.15));
-
-              audio.onplay = () => {
-                fetch('/api/music/duck', { method: 'POST', headers: JSON_AUTH_H(), body: JSON.stringify({state: 'on', duration_secs: vmLastTtsDuration + 5}) }).catch(()=>{});
-              };
-              audio.onended = () => {
-                fetch('/api/music/duck', { method: 'POST', headers: JSON_AUTH_H(), body: JSON.stringify({state: 'off'}) }).catch(()=>{});
-                // Enter cooldown, then resume listening
-                setVmState('cooldown');
-                vmCooldownTimer = setTimeout(() => {
-                  if (vmActive) setVmState('listening');
-                }, (vmLastTtsDuration + 1) * 1000);
-              };
-              audio.play().catch(err => {
-                vmShowError('tts-play-blocked', 'Audio blocked — click in the window and try again', err && err.message);
-              });
-            } else {
+            if (!ttsData.audio_url) {
               vmShowError('tts-no-url', 'No audio returned from TTS');
+              vmEndTurn('tts_no_url');
+              return;
             }
+            const audio = new Audio(ttsData.audio_url);
+            vmCurrentAudio = audio;
+            // Estimate duration from response length (~150ms per word)
+            const words = ev.response.split(/\s+/).length;
+            vmLastTtsDuration = Math.max(2, Math.round(words * 0.15));
+            // Playback watchdog — if onended/onerror never fires (audio stalls,
+            // codec issue, file truncated), force back to listening.
+            const watchdogMs = (vmLastTtsDuration + VM_TTS_DURATION_PAD_S) * 1000;
+            vmPlaybackTimer = setTimeout(() => {
+              if (vmCurrentAudio !== audio) return;
+              vmTelemetry('tts_watchdog_fired', { dur_s: vmLastTtsDuration });
+              fetch('/api/music/duck', { method: 'POST', headers: JSON_AUTH_H(), body: JSON.stringify({state: 'off'}) }).catch(()=>{});
+              vmEndTurn('tts_watchdog', { afterTts: true });
+            }, watchdogMs);
+            audio.onplay = () => {
+              vmTelemetry('tts_play');
+              fetch('/api/music/duck', { method: 'POST', headers: JSON_AUTH_H(), body: JSON.stringify({state: 'on', duration_secs: vmLastTtsDuration + 5}) }).catch(()=>{});
+            };
+            audio.onended = () => {
+              vmTelemetry('tts_ended');
+              fetch('/api/music/duck', { method: 'POST', headers: JSON_AUTH_H(), body: JSON.stringify({state: 'off'}) }).catch(()=>{});
+              vmEndTurn('tts_ended', { afterTts: true });
+            };
+            audio.onerror = () => {
+              vmTelemetry('tts_error', { err: audio.error && audio.error.code });
+              vmShowError('tts-play-error', 'Audio playback failed');
+              vmEndTurn('tts_error', { afterTts: true });
+            };
+            audio.onabort = () => { vmTelemetry('tts_abort'); vmEndTurn('tts_abort', { afterTts: true }); };
+            audio.onstalled = () => { vmTelemetry('tts_stalled'); /* let watchdog fire */ };
+            audio.play().catch(err => {
+              vmTelemetry('tts_play_blocked', { msg: err && err.message });
+              vmShowError('tts-play-blocked', 'Audio blocked — click in the window and try again', err && err.message);
+              vmEndTurn('tts_play_blocked');
+            });
           } catch (e) {
             vmShowError('tts-exception', 'TTS failed — ' + (e && e.message ? e.message : 'unknown error'));
+            vmEndTurn('tts_exception');
           }
         } else if (ev.event === 'error') {
-          evtSource.close();
           vmShowError('agent-error', 'Agent reply failed', ev.error || ev.message);
+          vmEndTurn('agent_error');
         }
       };
       evtSource.onerror = () => {
-        evtSource.close();
+        if (vmCurrentTurnId !== turnId) return;
         vmShowError('sse-error', 'Lost connection to agent stream');
+        vmEndTurn('sse_error');
       };
     }
   } catch {
@@ -1640,12 +1754,16 @@ function resetVmIdle() {
   }, VM_MAX_SILENCE_S * 1000);
 }
 
-// TTS playback for voice-initiated responses
+// TTS playback for voice-initiated responses (mic-button push-to-talk path).
+// Voice mode uses inline TTS with the supervisor; this is the simpler one-shot
+// path. /api/tts is auth-gated, so JSON_AUTH_H is mandatory — without it the
+// server 401s and the audio_url comes back undefined (bug class fixed in
+// vault/feedback/voice_mode_tts_auth_bug.md).
 async function playTts(text) {
   try {
     const resp = await fetch('/api/tts', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: JSON_AUTH_H(),
       body: JSON.stringify({ text: text.substring(0, 500) })
     });
     const data = await resp.json();

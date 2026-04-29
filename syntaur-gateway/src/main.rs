@@ -6766,6 +6766,7 @@ async fn main() {
         .route("/api/scheduler/meeting_prep", get(handle_scheduler_meeting_prep_upcoming))
         .route("/api/scheduler/meeting_prep/{event_id}", get(handle_scheduler_meeting_prep_event))
         .route("/api/voice/transcribe", post(handle_voice_transcribe))
+        .route("/api/voice/client-event", post(handle_voice_client_event))
         .route("/api/conversations", post(handle_conv_create))
         .route("/api/conversations", get(handle_conv_list))
         .route("/api/conversations/{id}", get(handle_conv_get))
@@ -10456,6 +10457,35 @@ async fn handle_voice_transcribe(
 }
 
 /// POST /api/tokens/mint_scoped — mint a short-TTL scoped token for a sub-
+/// Voice client state telemetry from chat.rs voice-mode supervisor.
+///
+/// The wry/WebKitGTK viewer has no devtools, so when voice mode wedges
+/// silently the only way to see WHERE it wedged is to have the client
+/// post its state transitions here. Body shape:
+/// `{ event: "tts_watchdog", state: "playing", turn_id: "turn-...", ws_state: 1, detail: {...}, ts: 1714... }`
+/// Logged at INFO; correlate with the existing `voice_ws` / `auth/stream`
+/// gateway logs to localize a failure without touching the user's machine.
+async fn handle_voice_client_event(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<axum::http::StatusCode, axum::http::StatusCode> {
+    // Auth required so this can't be spammed from the open net.
+    let token = crate::security::bearer_from_headers(&headers);
+    let principal = resolve_principal(&state, token).await?;
+    let uid = principal.user_id();
+    let event = body.get("event").and_then(|v| v.as_str()).unwrap_or("?");
+    let st = body.get("state").and_then(|v| v.as_str()).unwrap_or("?");
+    let turn = body.get("turn_id").and_then(|v| v.as_str()).unwrap_or("");
+    let ws = body.get("ws_state").and_then(|v| v.as_i64()).unwrap_or(-1);
+    let detail = body.get("detail").map(|v| v.to_string()).unwrap_or_else(|| "{}".to_string());
+    log::info!(
+        "[voice/client] uid={} event={} state={} ws={} turn={} detail={}",
+        uid, event, st, ws, turn, detail
+    );
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
 /// session (MACE is the only current caller). The caller must present an
 /// unscoped token — a scoped token can't spawn further scoped tokens.
 ///
