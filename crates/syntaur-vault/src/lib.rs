@@ -21,6 +21,7 @@ pub mod agent;
 pub mod crypto;
 pub mod file;
 pub mod import;
+#[cfg(unix)]
 pub mod keyring_store;
 pub mod vault;
 

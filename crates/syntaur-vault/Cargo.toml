@@ -24,23 +24,23 @@ chrono = { version = "0.4", features = ["serde"] }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 zeroize = { version = "1", features = ["zeroize_derive"] }
-# Unix-only deps for the agent daemon (UnixListener IPC + double-fork
-# detach). Behind a target gate so the lib still compiles on Windows
-# CI (the gateway transitively links this crate). nl_automation.rs
-# guards the call site with cfg(unix); on Windows the openrouter
-# fetch path bails cleanly with a "vault unavailable" error.
+# `import` subcommand: curated-rule regex matcher against CLAUDE.md.
+# Cross-platform crate, kept in main [dependencies].
+regex = "1"
 
+# Unix-only deps. Behind a target gate so the lib still compiles on
+# Windows CI (the gateway transitively links this crate). nl_automation.rs
+# guards the call site with cfg(unix); on Windows the openrouter fetch
+# path bails cleanly with a "vault unavailable" error. The keyring crate
+# is technically cross-platform but the `sync-secret-service` feature
+# pulls in dbus-secret-service which only builds on unix; keyring_store
+# itself is gated to cfg(unix) in lib.rs.
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["process"] }
 daemonize = "0.5"
-# `import` subcommand: curated-rule regex matcher against CLAUDE.md.
-regex = "1"
 # OS keychain: on hosts with gnome-keyring / kwallet / macOS keychain
 # the passphrase can be stored there so `unlock` doesn't prompt after
-# first use. `sync-secret-service` talks D-Bus Secret Service (works
-# with gnome-keyring AND kwallet — Sean's CachyOS box is kwallet).
-# Without an explicit backend feature keyring 3.x silently falls back
-# to a no-op, which looks like success but never persists. Learned
-# that the hard way on 2026-04-23. On headless claudevm the call
-# errors cleanly; we catch and fall back to prompt.
+# first use. Without an explicit backend feature keyring 3.x silently
+# falls back to a no-op, which looks like success but never persists.
+# Learned that the hard way on 2026-04-23.
 keyring = { version = "3", features = ["sync-secret-service"] }
