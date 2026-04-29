@@ -1422,7 +1422,7 @@ const SMART_HOME_JS: &str = r#"
       const data = await r.json();
       __shAnomalies = (data && data.anomalies) || [];
       // Tile badge.
-      const energyP = ;
+      const energyP = $('sh-energy-primary');
       if (energyP) {
         energyP.querySelectorAll('.sh-anomaly-pill').forEach((el) => el.remove());
         if (__shAnomalies.length > 0) {

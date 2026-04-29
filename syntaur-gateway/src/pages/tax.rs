@@ -3579,6 +3579,11 @@ const token = sessionStorage.getItem('syntaur_token') || localStorage.getItem('s
 
 // ── Module License Check ──
 let moduleUnlocked = false;
+// LCARS positron-log counter — must initialize early. sendTaxChat()
+// and updatePositronLog() both read this; init order can call
+// updatePositronLog (transitively via initPositronicBrain) before a
+// late declaration site is reached, throwing TDZ ReferenceError.
+let positronMsgCount = 0;
 
 async function checkModuleAccess() {
   try {
@@ -6699,11 +6704,8 @@ updateDeadlinePill();   // shows next IRS deadline if within 60 days
 showSection('investments'); // default landing — Sean's most-frequent use
 setInterval(loadKpiStrip, 90000); // refresh portfolio every 90s
 initPositronicBrain();  // neural-net canvas animation + LCARS log counter
-// positronMsgCount declared early so updatePositronLog() below doesn't
-// throw ReferenceError. Original declaration near the function body has
-// been demoted to a comment. Must remain module-scope so sendTaxChat
-// can increment it.
-let positronMsgCount = 0;
+// positronMsgCount declared at top of script alongside
+// other module-level lets; do not redeclare here.
 updatePositronLog();    // initial log reading
 
 // ═══ POSITRONIC BRAIN — animated neural network behind the chat panel ═══
