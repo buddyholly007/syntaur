@@ -1392,7 +1392,7 @@ const DASHBOARD_SCRIPT: &str = r##"
 // viewBox is 1600x900 with xMidYMid slice so the paths drape the full
 // viewport at any aspect ratio.
 const RIBBON_SVG: &str = r##"
-<svg class="sd-rb" aria-hidden="true" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid slice">
+<svg class="sd-rb" data-verify-mask="time" aria-hidden="true" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid slice">
   <g class="rb" style="color: var(--rib-a); --rb-dur: 13s; --rb-delay: -2s;">
     <path class="halo" d="M -50 210 C 180 240, 400 220, 700 180 S 1180 60, 1400 300 S 1680 500, 1700 420"/>
     <path class="mid"  d="M -50 210 C 180 240, 400 220, 700 180 S 1180 60, 1400 300 S 1680 500, 1700 420"/>

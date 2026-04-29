@@ -454,7 +454,7 @@ impl Browser {
             let mask_js = r#"
                 (function () {
                   try {
-                    const css = '[data-verify-mask]{visibility:hidden!important;animation:none!important;transition:none!important}';
+                    const css = '[data-verify-mask]{visibility:hidden!important;animation:none!important;transition:none!important}:root{--sh-backdrop:none!important}*,*::before,*::after{animation-duration:0s!important;animation-delay:0s!important;animation-iteration-count:1!important;transition:none!important}';
                     const apply = () => {
                       if (!document.head) return false;
                       const s = document.createElement('style');
