@@ -24,10 +24,21 @@
 //! reappear as drawers + sub-pages off the new shell as their phases
 //! land.
 
-use axum::response::Html;
+use std::path::PathBuf;
+
+use axum::body::Body;
+use axum::extract::Path as AxumPath;
+use axum::http::{header, StatusCode};
+use axum::response::{Html, IntoResponse, Response};
 use maud::{html, PreEscaped};
 
-use super::shared::{shell, top_bar, Page};
+use super::shared::{shell, top_bar, ModuleStatus, Page};
+
+/// Embedded default backdrop. Served when the user hasn't dropped a
+/// per-slot override at `~/.syntaur/smart-home/backdrops/{slot}.png`.
+/// All four time-of-day slots (morning/midday/evening/night) fall back
+/// to this single image until Sean replaces them.
+const BACKDROP_DEFAULT: &[u8] = include_bytes!("../../assets/smart-home/backdrop-default.png");
 
 pub async fn render() -> Html<String> {
     let page = Page {
@@ -37,31 +48,15 @@ pub async fn render() -> Html<String> {
         body_class: None,
         head_boot: None,
         crumb: Some("Smart Home"),
-        topbar_status: None,
+        topbar_status: Some(ModuleStatus::ok("All systems")),
     };
 
     let body = html! {
-        (top_bar("Smart Home", None))
-
+        // shell() renders the top bar automatically (page.authed = true);
+        // do NOT call top_bar here — that produced a duplicate stacked
+        // header. The `.sh-hero` strip was also dropped; "All systems"
+        // moved to topbar_status above.
         div class="sh-app" {
-            // ── Hero strip: clock + date + weather + status pills ──
-            header class="sh-hero" {
-                div id="sh-clock" class="sh-clock" { "—" }
-                div id="sh-date" class="sh-date" { "—" }
-                span class="sh-spacer" {}
-                div class="sh-weather" {
-                    span id="sh-weather-temp" { "—" }
-                    span class="sh-icon-pill" id="sh-weather-cond" { "Loading" }
-                }
-                div class="sh-status-pills" {
-                    span class="sh-icon-pill" {
-                        span class="sh-dot" {}
-                        "All systems"
-                    }
-                    span class="sh-icon-pill" id="sh-wifi-pill" { "Wi-Fi" }
-                }
-            }
-
             // ── Scenes row ─────────────────────────────────────────
             section class="sh-scenes" id="sh-scenes" {
                 @for (slug, glyph, name, sub) in &[
@@ -264,14 +259,19 @@ const EXTRA_STYLE: &str = r#"
   position: relative;
   min-height: calc(100vh - 48px);
   display: grid;
-  grid-template-rows: 56px 76px 1fr 56px;
+  grid-template-rows: 76px 1fr 56px;
   gap: 14px;
   padding: 14px 22px;
   color: var(--sh-text);
   font: 14px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "Inter", sans-serif;
+  /* Photo backdrop. JS sets --sh-backdrop to the time-of-day slot URL
+     on page load + every 5 minutes after that. The default fallback
+     is the embedded image served from the midday slot. */
+  --sh-backdrop: url('/assets/smart-home/backdrop/midday.png');
   background:
-    radial-gradient(ellipse at 30% 20%, rgba(110, 200, 255, 0.12), transparent 50%),
-    radial-gradient(ellipse at 80% 90%, rgba(255, 177, 104, 0.10), transparent 55%),
+    /* Cool darkening overlay so glass cards stay legible over the photo. */
+    linear-gradient(180deg, rgba(10, 20, 32, 0.55) 0%, rgba(18, 34, 54, 0.55) 100%),
+    var(--sh-backdrop) center/cover no-repeat fixed,
     linear-gradient(165deg, var(--sh-bg-0) 0%, var(--sh-bg-1) 100%);
   overflow: hidden;
 }
@@ -286,37 +286,10 @@ const EXTRA_STYLE: &str = r#"
 }
 .sh-app > * { position: relative; z-index: 1; }
 
-/* ── Hero strip ───────────────────────────────────── */
-.sh-hero {
-  display: flex; align-items: center; gap: 22px;
-  padding: 0 18px;
-  background: var(--sh-glass);
-  border: 1px solid var(--sh-border);
-  border-radius: 14px;
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-}
-.sh-clock { font-size: 22px; font-weight: 600; letter-spacing: 0.5px; }
-.sh-clock .sh-ampm { font-size: 12px; color: var(--sh-text-faint); margin-left: 4px; font-weight: 500; }
-.sh-date { color: var(--sh-text-dim); }
-.sh-spacer { flex: 1; }
-.sh-weather, .sh-status-pills {
-  display: flex; align-items: center; gap: 10px; color: var(--sh-text-dim);
-}
-.sh-icon-pill {
-  display: inline-flex; align-items: center; gap: 5px;
-  padding: 4px 10px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 999px;
-  font-size: 12px;
-  color: var(--sh-text-dim);
-}
-.sh-dot {
-  width: 7px; height: 7px; border-radius: 50%;
-  background: var(--sh-accent-good);
-  box-shadow: 0 0 6px var(--sh-accent-good);
-}
+/* The .sh-hero hero strip used to live here; it was removed because
+   the shared Syntaur 48px top bar (rendered by shell()) already
+   carries clock + module-status, and the strip was producing a
+   visible double-header. Status pills moved to topbar_status. */
 
 /* ── Scenes row ───────────────────────────────────── */
 .sh-scenes {
@@ -765,6 +738,30 @@ const SMART_HOME_JS: &str = r#"
     return r.json();
   }
   function $(id) { return document.getElementById(id); }
+
+  // ── time-of-day backdrop ────────────────────────────
+  // Picks a slot based on local hour. Slots map to assets that the
+  // gateway serves from disk (~/.syntaur/smart-home/backdrops/) with
+  // fallback to the embedded default. Sean drops AI-generated
+  // morning/midday/evening/night PNGs in that directory and the page
+  // picks them up automatically — no rebuild required.
+  function pickBackdropSlot() {
+    const h = new Date().getHours();
+    if (h >= 5 && h < 11)  return 'morning';
+    if (h >= 11 && h < 17) return 'midday';
+    if (h >= 17 && h < 20) return 'evening';
+    return 'night';
+  }
+  function applyBackdrop() {
+    const slot = pickBackdropSlot();
+    const url = '/assets/smart-home/backdrop/' + slot + '.png';
+    const root = document.querySelector('.sh-app');
+    if (root) root.style.setProperty('--sh-backdrop', "url('" + url + "')");
+  }
+  applyBackdrop();
+  // Re-check every 5 minutes so the backdrop shifts as the day turns
+  // without a full page reload.
+  setInterval(applyBackdrop, 5 * 60 * 1000);
 
   // ── clock + date ────────────────────────────────────
   function tickClock() {
@@ -1630,3 +1627,41 @@ const SMART_HOME_JS: &str = r#"
   });
 })();
 "#;
+
+/// `GET /assets/smart-home/backdrop/{slot}` — serves the backdrop PNG
+/// for the requested time-of-day slot.
+///
+/// Resolution order:
+///   1. `~/.syntaur/smart-home/backdrops/<slot>.png` if the user has
+///      dropped a per-slot override on disk.
+///   2. The embedded `BACKDROP_DEFAULT` baked into the binary.
+///
+/// Slot must be one of `morning` / `midday` / `evening` / `night`.
+/// Anything else returns 404.
+pub async fn handle_backdrop(AxumPath(slot): AxumPath<String>) -> Response {
+    if !matches!(slot.as_str(), "morning" | "midday" | "evening" | "night") {
+        return (StatusCode::NOT_FOUND, "unknown backdrop slot").into_response();
+    }
+
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+    let user_path: PathBuf = PathBuf::from(home)
+        .join(".syntaur")
+        .join("smart-home")
+        .join("backdrops")
+        .join(format!("{slot}.png"));
+
+    let bytes: Vec<u8> = match tokio::fs::read(&user_path).await {
+        Ok(b) => b,
+        Err(_) => BACKDROP_DEFAULT.to_vec(),
+    };
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "image/png")
+        // 1 hour cache — short enough that a fresh override is picked
+        // up reasonably quickly without hammering the handler on every
+        // page paint.
+        .header(header::CACHE_CONTROL, "public, max-age=3600")
+        .body(Body::from(bytes))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}

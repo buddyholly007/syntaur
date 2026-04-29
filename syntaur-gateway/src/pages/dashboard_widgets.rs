@@ -1171,13 +1171,17 @@ impl DashboardWidget for QuickActionsWidget {
         // Opus flagged as "unclear visual indicators" during a verify
         // run. Replaced with widely-recognized emoji that read as the
         // thing they are.
+        // Smart Home moved into the first 4 (default M-size widget
+        // shows count=4) so users with the default dashboard layout can
+        // find it without typing the URL. The full ordering still matters
+        // for L / Xl sizes which surface all 8.
         let actions: &[(&str, &str, &str)] = &[
             ("/scheduler",  "Scheduler",  "📅"),
+            ("/smart-home", "Smart home", "🏠"),
             ("/journal",    "Journal",    "📔"),
             ("/music",      "Music",      "🎵"),
             ("/knowledge",  "Knowledge",  "📚"),
             ("/tax",        "Tax",        "💰"),
-            ("/smart-home", "Smart home", "🏠"),
             ("/coders",     "Coders",     "💻"),
             ("/social",     "Social",     "💬"),
         ];
