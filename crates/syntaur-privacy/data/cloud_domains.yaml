@@ -1,0 +1,121 @@
+# Vendor-cloud-domain registry for Syntaur Privacy Mode.
+#
+# Format: a sequence of vendor entries. Each entry lists the vendor's
+# known cloud-control domains. When a device is in Privacy or Lockdown
+# mode, DNS lookups against any of these domains return NXDOMAIN.
+#
+# Wildcards: glob-style. `*.meross.com` matches any single label under
+# meross.com. `iotx-*.meross.com` matches any host whose name starts
+# with `iotx-` and ends with `.meross.com`.
+#
+# `hardcodes_ips: true` is a hint to the UI: this device class is known
+# to skip DNS for some/all of its cloud chatter, so DNS-tier blocking
+# is incomplete and Lockdown tier is recommended.
+#
+# Add new vendors here. The first version of this list is conservative
+# — if a domain is unverified, leave it commented with a note.
+
+- vendor_id: meross
+  vendor_name: Meross
+  cloud_domains:
+    - "*.meross.com"
+    - "iot.meross.com"
+    - "iotx-*.meross.com"
+    - "openapi.meross.com"
+  hardcodes_ips: false
+  notes: "MSS315 plug, MSS510 switch, garage door opener. Phones home for state-sync + OTA. Confirmed via tcpdump 2026-04-26."
+
+- vendor_id: tplink
+  vendor_name: TP-Link / Tapo / Kasa
+  cloud_domains:
+    - "*.tplinkcloud.com"
+    - "*.tplinkra.com"
+    - "*.tplinkcare.com"
+    - "*.tapo.com"
+    - "*.kasa.tp-link.com"
+  hardcodes_ips: false
+  notes: "Tapo P125M switches, Kasa KP125M. KLAP v2 LAN protocol means LAN control works fully without cloud once paired (see rust-kasa)."
+
+- vendor_id: govee
+  vendor_name: Govee
+  cloud_domains:
+    - "*.govee.com"
+    - "openapi.api.govee.com"
+    - "app2.govee.com"
+    - "developer-api.govee.com"
+  hardcodes_ips: false
+  notes: "BLE-first lights; LAN API is opt-in but stable once enabled."
+
+- vendor_id: aqara
+  vendor_name: Aqara
+  cloud_domains:
+    - "*.aqara.com"
+    - "*.aqara.cn"
+    - "iot.aqara.com"
+    - "*.lumiunited.com"
+  hardcodes_ips: false
+  notes: "M3 hub speaks Matter natively over LAN; cloud is for app pairing + OTA. U200 lock works fully on Matter once commissioned."
+
+- vendor_id: switchbot
+  vendor_name: SwitchBot
+  cloud_domains:
+    - "*.switch-bot.com"
+    - "*.switchbot.com"
+    - "api.switch-bot.com"
+  hardcodes_ips: false
+  notes: "Hub 3 + curtains. Bluetooth-first; cloud is for remote-via-app."
+
+- vendor_id: aidot
+  vendor_name: AiDot / Arnoo
+  cloud_domains:
+    - "*.aidot.com"
+    - "prod-us-api.arnoo.com"
+    - "*.arnoo.com"
+  hardcodes_ips: false
+  notes: "Bulbs (AOFRO etc). Cloud key harvest then pure-Rust LAN — see rust-aidot."
+
+- vendor_id: shelly
+  vendor_name: Shelly / Allterco
+  cloud_domains:
+    - "*.shelly.cloud"
+    - "*.shelly.com"
+    - "shelly-api-eu.shelly.cloud"
+    - "shelly-api-us.shelly.cloud"
+  hardcodes_ips: false
+  notes: "Shelly 1 Mini Gen 3 + 1PM. Excellent local-only support; cloud is opt-in."
+
+- vendor_id: chamberlain
+  vendor_name: Chamberlain / myQ / LiftMaster
+  cloud_domains:
+    - "*.myqdevice.com"
+    - "*.liftmaster.com"
+    - "*.chamberlain.com"
+  hardcodes_ips: true
+  notes: "myQ has actively broken third-party LAN access. Hardware-bypass via ratgdo32 is the recommended path — see chamberlain_garage_lan."
+
+- vendor_id: trane_nexia
+  vendor_name: Trane / American Standard / Nexia
+  cloud_domains:
+    - "*.mynexia.com"
+    - "*.tranehome.com"
+    - "*.americanstandardair.com"
+    - "*.nexiahome.com"
+  hardcodes_ips: true
+  notes: "Cloud-bound HVAC. rust-nexia driver is cloud REST against mynexia.com; without it the thermostat is offline. Until Trane offers a LAN protocol or we hardware-swap, do NOT sinkhole — verify with the user before enabling Privacy mode for this vendor."
+
+- vendor_id: reolink
+  vendor_name: Reolink
+  cloud_domains:
+    - "*.reolink.com"
+    - "p2p.reolink.com"
+    - "apis.reolink.com"
+  hardcodes_ips: true
+  notes: "Cameras work fully on LAN once configured (RTSP + ONVIF). Cloud relay is opt-in but the device pings p2p.reolink.com aggressively even when disabled."
+
+- vendor_id: eve
+  vendor_name: Eve Systems
+  cloud_domains:
+    - "*.evehome.com"
+    - "*.elgato.com"
+  hardcodes_ips: false
+  notes: "Matter-native; the cloud is mostly app-pairing assistance."

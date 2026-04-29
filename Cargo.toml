@@ -31,6 +31,7 @@ members = [
     "crates/syntaur-matter-ip",
     "crates/syntaur-vault",
     "crates/syntaur-topo",
+    "crates/syntaur-privacy",
     "crates/syntaur-verify",
 ]
 # `rust-aidot-harvest` is INTENTIONALLY excluded from the workspace.
