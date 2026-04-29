@@ -158,6 +158,7 @@ fn strip_code_fence(s: &str) -> &str {
     }
 }
 
+#[cfg(unix)]
 fn fetch_openrouter_key() -> anyhow::Result<String> {
     use syntaur_vault_core::{
         agent::{request, AgentRequest, AgentResponse},
@@ -185,6 +186,13 @@ fn fetch_openrouter_key() -> anyhow::Result<String> {
         }
         other => anyhow::bail!("unexpected vault response: {other:?}"),
     }
+}
+
+#[cfg(not(unix))]
+fn fetch_openrouter_key() -> anyhow::Result<String> {
+    anyhow::bail!(
+        "vault agent unavailable on this platform — natural-language          compile requires the unix-socket vault daemon"
+    )
 }
 
 // ── Inventory loading ───────────────────────────────────────────────────

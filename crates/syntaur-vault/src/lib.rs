@@ -12,6 +12,11 @@
 //! read its own secrets from the same vault format. For now only the
 //! binary in this crate consumes it.
 
+// agent uses UnixListener + daemonize (unix-only). Gated so the lib
+// can still compile on Windows CI for the syntaur-gateway transitive
+// dep. The CLI bin in src/bin/ is not part of any build target on
+// Windows so it does not need its own cfg gates.
+#[cfg(unix)]
 pub mod agent;
 pub mod crypto;
 pub mod file;
@@ -19,6 +24,7 @@ pub mod import;
 pub mod keyring_store;
 pub mod vault;
 
+#[cfg(unix)]
 pub use agent::{AgentRequest, AgentResponse, Status};
 pub use vault::{Entry, Vault};
 

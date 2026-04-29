@@ -24,12 +24,14 @@ chrono = { version = "0.4", features = ["serde"] }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 zeroize = { version = "1", features = ["zeroize_derive"] }
-# The agent uses blocking std::os::unix::net — no tokio needed. Small
-# single-threaded daemon; simpler + fewer deps.
+# Unix-only deps for the agent daemon (UnixListener IPC + double-fork
+# detach). Behind a target gate so the lib still compiles on Windows
+# CI (the gateway transitively links this crate). nl_automation.rs
+# guards the call site with cfg(unix); on Windows the openrouter
+# fetch path bails cleanly with a "vault unavailable" error.
+
+[target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["process"] }
-# Daemonizer: double-fork, setsid, detach from tty. Called by
-# `syntaur-vault agent --internal-daemon` after the parent CLI exec's
-# itself as a child. Plain crate, no transitive bloat.
 daemonize = "0.5"
 # `import` subcommand: curated-rule regex matcher against CLAUDE.md.
 regex = "1"
