@@ -34,6 +34,7 @@ mod license;
 mod tax;
 mod tax_pdf;
 mod ledger;
+mod trading;
 mod library;
 mod drafts;
 mod financial;
@@ -177,6 +178,11 @@ pub struct AppState {
     /// `None` when the file is absent so /api/ledger/* returns 503 rather
     /// than panicking. Migrated 2026-04-22.
     pub ledger: Option<Arc<crate::ledger::LedgerService>>,
+    /// Trading-bot snapshot service. Reads Alpaca creds from the
+    /// bind-mounted `/trading-data/stock-bot/.env` and exposes /api/trading/*.
+    /// `None` when the trading data dir / env file is absent so the routes
+    /// return 503 rather than panicking.
+    pub trading: Option<Arc<crate::trading::TradingService>>,
     /// Set true by `POST /api/system/drain` (called by deploy.sh before
     /// SIGTERM). Reflected in `/health.restart_pending` so connected
     /// clients can flush in-progress autosave state to `/api/drafts/save`
@@ -6604,6 +6610,31 @@ async fn main() {
                 None
             }
         },
+        trading: {
+            // Bind-mounted from `/mnt/cherry_family_nas/syntaur-trading/data`
+            // in production. Path overridable via SYNTAUR_TRADING_DATA env.
+            let path = std::env::var("SYNTAUR_TRADING_DATA")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::path::PathBuf::from("/trading-data"));
+            if path.join("stock-bot").join(".env").exists() {
+                match crate::trading::TradingService::new(path.clone()) {
+                    Ok(svc) => {
+                        info!("[trading] using {}", path.display());
+                        Some(Arc::new(svc))
+                    }
+                    Err(e) => {
+                        log::warn!("[trading] init failed at {}: {}", path.display(), e);
+                        None
+                    }
+                }
+            } else {
+                log::info!(
+                    "[trading] no stock-bot/.env at {} — /api/trading/* will return 503",
+                    path.display()
+                );
+                None
+            }
+        },
         restart_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         restart_pending_since: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         master_key: Arc::new(master_key),
@@ -7292,6 +7323,13 @@ async fn main() {
         .route("/api/ledger/transactions", get(ledger::api::handle_transactions))
         .route("/api/ledger/reports/expense_summary", get(ledger::api::handle_expense_summary))
         .route("/api/ledger/account_balance", get(ledger::api::handle_account_balance))
+        // Trading snapshot routes (read-only). Pulls from Alpaca + the
+        // sibling syntaur-trading container's bind-mounted state files.
+        .route("/api/trading/account", get(trading::api::handle_account))
+        .route("/api/trading/positions", get(trading::api::handle_positions))
+        .route("/api/trading/activity", get(trading::api::handle_activity))
+        .route("/api/trading/equity", get(trading::api::handle_equity))
+        .route("/api/trading/bots", get(trading::api::handle_bots))
         .route("/api/tax/receipts", post(tax::handle_receipt_upload))
         .route("/api/tax/receipts", get(tax::handle_receipt_list))
         .route("/api/tax/receipts/{id}/image", get(tax::handle_receipt_image))

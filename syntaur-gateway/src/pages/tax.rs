@@ -3069,6 +3069,14 @@ pub async fn render() -> Html<String> {
                         }
                     }
                 }
+                // Trading snapshot — Alpaca live data + per-bot heartbeat
+                div id="tab-trading-snapshot" class="hidden" {
+                    div id="trading-snapshot-body" {
+                        div class="text-sm text-gray-400" {
+                            "Loading…"
+                        }
+                    }
+                }
             }
             // end left panel
             // RIGHT: Positronic Matrix (AI chat, Positron persona)
@@ -3661,7 +3669,7 @@ function authFetch(url, opts = {}) {
 }
 
 function showTab(name) {
-  ['overview', 'expenses', 'receipts', 'documents', 'property', 'connections', 'credits', 'quarterly', 'investments', 'depreciation', 'state', 'entities', 'insights', 'deductions', 'wizard', 'ledger-overview', 'ledger-accounts', 'ledger-transactions'].forEach(t => {
+  ['overview', 'expenses', 'receipts', 'documents', 'property', 'connections', 'credits', 'quarterly', 'investments', 'depreciation', 'state', 'entities', 'insights', 'deductions', 'wizard', 'ledger-overview', 'ledger-accounts', 'ledger-transactions', 'trading-snapshot'].forEach(t => {
     const el = document.getElementById('tab-' + t);
     if (el) el.classList.toggle('hidden', t !== name);
     const btn = document.getElementById('tab-btn-' + t);
@@ -3688,6 +3696,7 @@ function showTab(name) {
   if (name === 'ledger-overview') loadLedgerOverview();
   if (name === 'ledger-accounts') loadLedgerAccounts();
   if (name === 'ledger-transactions') loadLedgerTransactions();
+  if (name === 'trading-snapshot') loadTradingSnapshot();
 }
 
 // ===== Ledger sub-feature (migrated from rust-ledger 2026-04-22) =====
@@ -3783,6 +3792,135 @@ async function loadLedgerTransactions() {
   }
 }
 
+// ===== Trading snapshot — sibling syntaur-trading container =====
+function fmtMoney(n) {
+  if (n == null || isNaN(n)) return '—';
+  const s = Math.abs(n).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+  return (n < 0 ? '-' : '') + '$' + s;
+}
+function fmtSignedMoney(n) {
+  if (n == null || isNaN(n)) return '—';
+  const s = Math.abs(n).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+  return (n >= 0 ? '+$' : '-$') + s;
+}
+function fmtAge(secs) {
+  if (secs == null) return 'no data';
+  if (secs < 90) return secs + 's ago';
+  if (secs < 5400) return Math.round(secs/60) + 'm ago';
+  if (secs < 86400) return (secs/3600).toFixed(1) + 'h ago';
+  return Math.round(secs/86400) + 'd ago';
+}
+async function loadTradingSnapshot() {
+  const root = document.getElementById('trading-snapshot-body');
+  if (!root) return;
+  root.innerHTML = '<div class="text-sm text-gray-400">Loading…</div>';
+  try {
+    const [accR, posR, actR, botsR, eqR] = await Promise.all([
+      authFetch('/api/trading/account'),
+      authFetch('/api/trading/positions'),
+      authFetch('/api/trading/activity'),
+      authFetch('/api/trading/bots'),
+      authFetch('/api/trading/equity'),
+    ]);
+    if (accR.status === 503) {
+      root.innerHTML = '<div class="card text-sm">Trading data dir not bind-mounted yet.</div>';
+      return;
+    }
+    const acc = accR.ok ? await accR.json() : null;
+    const pos = posR.ok ? await posR.json() : [];
+    const act = actR.ok ? await actR.json() : [];
+    const bots = botsR.ok ? await botsR.json() : {bots:[],kill_switch:{halted:false}};
+    const eq = eqR.ok ? await eqR.json() : null;
+
+    let html = `<div class="flex items-center justify-between mb-3"><div class="text-sm text-gray-400">Live snapshot of the syntaur-trading container</div><button class="btn-ghost text-xs" onclick="loadTradingSnapshot()">Refresh</button></div>`;
+
+    // ----- Account card with KPIs -----
+    if (acc) {
+      const dayPlClass = acc.day_pnl >= 0 ? 'text-green-400' : 'text-red-400';
+      const blocked = acc.trading_blocked || acc.account_blocked;
+      const halted = bots.kill_switch && bots.kill_switch.halted;
+      const statusBadge = halted
+        ? '<span class="text-amber-300">⚠ KILL SWITCH ON</span>'
+        : blocked
+          ? '<span class="text-red-400">✕ blocked</span>'
+          : `<span class="text-green-400">● ${acc.status}</span>`;
+      html += `<div class="card mb-4"><div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div><div class="text-xs text-gray-500">Equity</div><div class="text-2xl font-semibold">${fmtMoney(acc.equity)}</div><div class="text-xs ${dayPlClass}">${fmtSignedMoney(acc.day_pnl)} today (${acc.day_pnl_pct.toFixed(2)}%)</div></div>
+        <div><div class="text-xs text-gray-500">Cash</div><div class="text-lg">${fmtMoney(acc.cash)}</div><div class="text-xs text-gray-500">${fmtMoney(acc.long_market_value)} in positions</div></div>
+        <div><div class="text-xs text-gray-500">Buying power</div><div class="text-lg">${fmtMoney(acc.buying_power)}</div><div class="text-xs text-gray-500">DT count: ${acc.daytrade_count ?? 0}</div></div>
+        <div><div class="text-xs text-gray-500">Status</div><div class="text-lg">${statusBadge}</div><div class="text-xs text-gray-500">Acct since ${(acc.created_at || '').slice(0,10)}</div></div>
+      </div></div>`;
+    }
+
+    // ----- Bot heartbeat card -----
+    html += `<div class="card mb-4"><div class="text-sm font-semibold mb-2">Bot health</div><table class="text-sm w-full"><thead><tr><th class="text-left py-1">Bot</th><th class="text-left py-1">State file</th><th class="text-left py-1">Heartbeat</th><th class="text-left py-1">Status</th></tr></thead><tbody>`;
+    for (const b of (bots.bots || [])) {
+      const cls = b.stale ? 'text-red-400' : (b.exists ? 'text-green-400' : 'text-gray-500');
+      const label = b.stale ? 'STALE' : (b.exists ? 'OK' : 'MISSING');
+      html += `<tr><td class="py-1">${b.name}</td><td class="py-1 text-gray-500 text-xs">${b.state_file}</td><td class="py-1">${fmtAge(b.age_secs)}</td><td class="py-1 ${cls}">${label}</td></tr>`;
+    }
+    html += '</tbody></table>';
+    if (bots.monitor_state && bots.monitor_state.last_daily_summary) {
+      html += `<div class="text-xs text-gray-500 mt-2">Last bot-monitor daily summary: ${bots.monitor_state.last_daily_summary}</div>`;
+    } else if (bots.monitor_state && bots.monitor_state.extra && bots.monitor_state.extra.last_daily_summary) {
+      html += `<div class="text-xs text-amber-300 mt-2">bot-monitor stale (last summary: ${bots.monitor_state.extra.last_daily_summary})</div>`;
+    }
+    html += '</div>';
+
+    // ----- Positions card -----
+    if (Array.isArray(pos) && pos.length) {
+      html += `<div class="card mb-4"><div class="text-sm font-semibold mb-2">Open positions (${pos.length})</div><table class="text-sm w-full"><thead><tr><th class="text-left py-1">Symbol</th><th class="text-right py-1">Qty</th><th class="text-right py-1">Avg entry</th><th class="text-right py-1">Market value</th><th class="text-right py-1">Unrealized P&L</th></tr></thead><tbody>`;
+      for (const p of pos) {
+        const upl = parseFloat(p.unrealized_pl);
+        const upct = parseFloat(p.unrealized_plpc) * 100;
+        const cls = upl >= 0 ? 'text-green-400' : 'text-red-400';
+        const qty = parseFloat(p.qty);
+        if (Math.abs(qty) < 0.000001) continue;  // hide dust
+        html += `<tr><td class="py-1 font-mono">${p.symbol}</td><td class="py-1 text-right">${qty.toLocaleString(undefined,{maximumFractionDigits:6})}</td><td class="py-1 text-right">${fmtMoney(parseFloat(p.avg_entry_price))}</td><td class="py-1 text-right">${fmtMoney(parseFloat(p.market_value))}</td><td class="py-1 text-right ${cls}">${fmtSignedMoney(upl)} (${upct.toFixed(2)}%)</td></tr>`;
+      }
+      html += '</tbody></table></div>';
+    } else {
+      html += '<div class="card mb-4 text-sm text-gray-400">No open positions.</div>';
+    }
+
+    // ----- Equity curve (last 30 daily samples) -----
+    if (eq && Array.isArray(eq.timestamp) && eq.timestamp.length) {
+      const ts = eq.timestamp, eqArr = eq.equity, plArr = eq.profit_loss;
+      const start = parseFloat(eqArr[0]);
+      const end = parseFloat(eqArr[eqArr.length-1]);
+      const peak = Math.max(...eqArr.map(parseFloat));
+      const trough = Math.min(...eqArr.slice(eqArr.indexOf(peak)).map(parseFloat));
+      const ddPct = peak > 0 ? ((trough - peak)/peak*100) : 0;
+      html += `<div class="card mb-4"><div class="text-sm font-semibold mb-2">Equity curve — last ${eqArr.length} samples</div>`;
+      html += `<div class="grid grid-cols-3 gap-3 text-sm mb-2"><div><div class="text-xs text-gray-500">Window P&L</div><div class="${end-start >= 0 ? 'text-green-400' : 'text-red-400'}">${fmtSignedMoney(end-start)} (${start>0?((end-start)/start*100).toFixed(2):'0.00'}%)</div></div><div><div class="text-xs text-gray-500">Peak</div><div>${fmtMoney(peak)}</div></div><div><div class="text-xs text-gray-500">Max DD from peak</div><div class="${ddPct < -1 ? 'text-amber-300' : 'text-green-400'}">${ddPct.toFixed(2)}%</div></div></div>`;
+      html += '<div class="text-xs"><table class="w-full"><thead><tr><th class="text-left py-1 text-gray-500">Date</th><th class="text-right py-1 text-gray-500">Equity</th><th class="text-right py-1 text-gray-500">Day P&L</th></tr></thead><tbody>';
+      for (let i = Math.max(0, ts.length-10); i < ts.length; i++) {
+        const d = new Date(ts[i]*1000).toISOString().slice(0,10);
+        const dpl = parseFloat(plArr[i] || 0);
+        const dplCls = dpl >= 0 ? 'text-green-400' : 'text-red-400';
+        html += `<tr><td class="py-0.5 text-gray-400">${d}</td><td class="py-0.5 text-right">${fmtMoney(parseFloat(eqArr[i]))}</td><td class="py-0.5 text-right ${dplCls}">${fmtSignedMoney(dpl)}</td></tr>`;
+      }
+      html += '</tbody></table></div></div>';
+    }
+
+    // ----- Recent fills -----
+    if (Array.isArray(act) && act.length) {
+      html += `<div class="card mb-4"><div class="text-sm font-semibold mb-2">Recent fills (${act.length})</div><table class="text-sm w-full"><thead><tr><th class="text-left py-1">Time</th><th class="text-left py-1">Symbol</th><th class="text-left py-1">Side</th><th class="text-right py-1">Qty</th><th class="text-right py-1">Price</th></tr></thead><tbody>`;
+      for (const f of act.slice(0, 30)) {
+        if (!f.symbol) continue;
+        const sideCls = f.side === 'buy' ? 'text-blue-300' : 'text-amber-300';
+        const t = (f.transaction_time || '').slice(5,19).replace('T', ' ');
+        html += `<tr><td class="py-0.5 text-gray-400 font-mono text-xs">${t}</td><td class="py-0.5 font-mono">${f.symbol}</td><td class="py-0.5 ${sideCls}">${f.side}</td><td class="py-0.5 text-right">${parseFloat(f.qty).toLocaleString(undefined,{maximumFractionDigits:6})}</td><td class="py-0.5 text-right">${fmtMoney(parseFloat(f.price))}</td></tr>`;
+      }
+      html += '</tbody></table></div>';
+    }
+
+    root.innerHTML = html;
+  } catch (e) {
+    root.innerHTML = `<div class="card text-sm text-red-400">Failed: ${e.message || e}</div>`;
+  }
+}
+
 // ===== Section / sub-tab model =====
 // Top-level sections, in display order (Investments first — most-frequent use).
 // Each section lists its sub-tabs as [tab-id, display-label] pairs.
@@ -3794,6 +3932,7 @@ const TAX_SECTIONS = {
   dashboard:   { label: 'Dashboard',   tabs: [['overview', 'Year overview']] },
   filing:      { label: 'Filing',      tabs: [['wizard', 'Wizard'], ['quarterly', 'Quarterly'], ['state', 'State'], ['entities', 'Entities'], ['insights', 'Insights'], ['connections', 'Bank & brokerage']] },
   ledger:      { label: 'Ledger',      tabs: [['ledger-overview', 'Overview'], ['ledger-accounts', 'Accounts'], ['ledger-transactions', 'Transactions']] },
+  trading:     { label: 'Trading',     tabs: [['trading-snapshot', 'Snapshot']] },
 };
 
 let currentSection = 'investments';
