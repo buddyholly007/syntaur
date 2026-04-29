@@ -52,10 +52,11 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::Connection;
+use serde::Serialize;
 use serde_json::Value;
 use tokio::net::TcpStream;
 use tokio::time::{interval, timeout};
@@ -91,6 +92,95 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// proxy's own heartbeat (~60 s ping cycle) is well within the window.
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Live ingest counters per esphome_proxy device. Surfaced via
+/// `GET /api/smart-home/esphome/status` so the wizard + BLE page can
+/// show "last advert 4 s ago / 1,234 total" without round-tripping to
+/// journalctl. Reset by the supervisor when a worker exits — a stale
+/// row would lie about the proxy still being live.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ProxyStats {
+    /// Unix seconds when the last successful subscribe completed.
+    /// `None` = never subscribed (still in connect/handshake retry).
+    pub subscribed_at: Option<i64>,
+    /// Unix seconds of the most recent advert batch this worker pumped.
+    pub last_advert_at: Option<i64>,
+    /// Cumulative advert count since the worker started.
+    pub total_adverts: u64,
+    /// Most recent error string. Cleared on every successful subscribe.
+    pub last_error: Option<String>,
+    /// `"noise"` or `"plain"` after a successful subscribe; empty before.
+    pub mode: String,
+    /// `name@host:port` for display purposes.
+    pub label: String,
+}
+
+/// Per-supervisor stats map. Keyed by `device_id`. The supervisor owns
+/// inserts/removes; workers update their own row.
+pub type StatsHandle = Arc<Mutex<HashMap<i64, ProxyStats>>>;
+
+static ESPHOME_STATS: OnceLock<StatsHandle> = OnceLock::new();
+
+/// Get (or create on first call) the global stats handle. The
+/// supervisor calls this on startup; the API handler calls it to
+/// snapshot. Idempotent.
+pub fn stats_handle() -> StatsHandle {
+    ESPHOME_STATS
+        .get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+        .clone()
+}
+
+/// Snapshot the current stats map. Returns `(device_id, stats)` pairs.
+/// Used by the HTTP status endpoint.
+pub fn stats_snapshot() -> Vec<(i64, ProxyStats)> {
+    let handle = stats_handle();
+    let guard = handle.lock().expect("esphome stats poisoned");
+    guard.iter().map(|(k, v)| (*k, v.clone())).collect()
+}
+
+fn stats_record_subscribe(stats: &StatsHandle, device_id: i64, mode: &str) {
+    let mut g = stats.lock().expect("esphome stats poisoned");
+    let entry = g.entry(device_id).or_default();
+    entry.subscribed_at = Some(now_secs());
+    entry.last_error = None;
+    entry.mode = mode.to_string();
+}
+
+fn stats_record_adverts(stats: &StatsHandle, device_id: i64, n: u64) {
+    if n == 0 {
+        return;
+    }
+    let mut g = stats.lock().expect("esphome stats poisoned");
+    let entry = g.entry(device_id).or_default();
+    entry.last_advert_at = Some(now_secs());
+    entry.total_adverts = entry.total_adverts.saturating_add(n);
+}
+
+fn stats_record_error(stats: &StatsHandle, device_id: i64, err: &str) {
+    let mut g = stats.lock().expect("esphome stats poisoned");
+    let entry = g.entry(device_id).or_default();
+    entry.last_error = Some(err.to_string());
+}
+
+fn stats_init_label(stats: &StatsHandle, device_id: i64, label: &str) {
+    let mut g = stats.lock().expect("esphome stats poisoned");
+    let entry = g.entry(device_id).or_default();
+    if entry.label.is_empty() {
+        entry.label = label.to_string();
+    }
+}
+
+fn stats_remove(stats: &StatsHandle, device_id: i64) {
+    let mut g = stats.lock().expect("esphome stats poisoned");
+    g.remove(&device_id);
+}
+
+fn now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// Spawn the ESPHome ingest supervisor. Returns immediately; the
 /// supervisor loop runs detached until the JoinHandle is dropped.
 pub fn start_esphome_ingest(
@@ -106,6 +196,7 @@ async fn run(driver: Arc<BleDriver>, db_path: PathBuf) {
         REFRESH_INTERVAL.as_secs()
     );
 
+    let stats = stats_handle();
     let mut workers: HashMap<i64, tokio::task::AbortHandle> = HashMap::new();
     let mut tick = interval(REFRESH_INTERVAL);
     // Don't burst-tick on a missed deadline; one refresh per interval
@@ -124,6 +215,7 @@ async fn run(driver: Arc<BleDriver>, db_path: PathBuf) {
         let live: HashSet<i64> = proxies.iter().map(|p| p.device_id).collect();
 
         // Stop workers for proxies that disappeared or switched off tracking.
+        let stats_for_retain = stats.clone();
         workers.retain(|id, h| {
             if live.contains(id) {
                 true
@@ -132,6 +224,7 @@ async fn run(driver: Arc<BleDriver>, db_path: PathBuf) {
                     "[smart_home::ble_esphome] device id={id} no longer tracking — stopping worker"
                 );
                 h.abort();
+                stats_remove(&stats_for_retain, *id);
                 false
             }
         });
@@ -145,11 +238,18 @@ async fn run(driver: Arc<BleDriver>, db_path: PathBuf) {
                 "[smart_home::ble_esphome] starting worker device_id={} ({} @ {}:{})",
                 p.device_id, p.name, p.host, p.port
             );
+            stats_init_label(
+                &stats,
+                p.device_id,
+                &format!("{}@{}:{}", p.name, p.host, p.port),
+            );
             let driver_c = driver.clone();
             let db_c = db_path.clone();
             let row = p.clone();
-            let handle =
-                tokio::spawn(async move { worker_loop(driver_c, db_c, row).await });
+            let stats_c = stats.clone();
+            let handle = tokio::spawn(async move {
+                worker_loop(driver_c, db_c, row, stats_c).await
+            });
             workers.insert(p.device_id, handle.abort_handle());
         }
     }
@@ -340,7 +440,12 @@ fn decode_psk(b64: &str) -> Option<[u8; 32]> {
 
 /// Per-proxy worker: connect, subscribe, ingest, reconnect on error.
 /// Runs forever (until aborted by the supervisor).
-async fn worker_loop(driver: Arc<BleDriver>, db_path: PathBuf, row: ProxyRow) {
+async fn worker_loop(
+    driver: Arc<BleDriver>,
+    db_path: PathBuf,
+    row: ProxyRow,
+    stats: StatsHandle,
+) {
     let mut backoff = RECONNECT_MIN;
     loop {
         let psk = load_noise_psk(&db_path, row.user_id, &row.name).await;
@@ -349,7 +454,7 @@ async fn worker_loop(driver: Arc<BleDriver>, db_path: PathBuf, row: ProxyRow) {
             row.device_id, row.name, row.host, row.port
         );
 
-        match connect_and_pump(&driver, &row, psk).await {
+        match connect_and_pump(&driver, &row, psk, &stats).await {
             Ok(()) => {
                 log::info!("[smart_home::ble_esphome] {label}: connection closed cleanly");
                 backoff = RECONNECT_MIN;
@@ -359,6 +464,7 @@ async fn worker_loop(driver: Arc<BleDriver>, db_path: PathBuf, row: ProxyRow) {
                     "[smart_home::ble_esphome] {label}: {e}; reconnect in {}s",
                     backoff.as_secs()
                 );
+                stats_record_error(&stats, row.device_id, &e);
             }
         }
         tokio::time::sleep(backoff).await;
@@ -372,6 +478,7 @@ async fn connect_and_pump(
     driver: &Arc<BleDriver>,
     row: &ProxyRow,
     psk: Option<[u8; 32]>,
+    stats: &StatsHandle,
 ) -> Result<(), String> {
     let addr = format!("{}:{}", row.host, row.port);
     let stream = timeout(CONNECT_TIMEOUT, TcpStream::connect(&addr))
@@ -424,15 +531,16 @@ async fn connect_and_pump(
     conn.write_message(MSG_SUBSCRIBE_BLE_ADVERTS, &sub.finish())
         .await?;
 
+    let mode_label = if matches!(conn, Conn::Noise(_)) {
+        "noise"
+    } else {
+        "plain"
+    };
     log::info!(
         "[smart_home::ble_esphome] device_id={} subscribed (mode={})",
-        row.device_id,
-        if matches!(conn, Conn::Noise(_)) {
-            "noise"
-        } else {
-            "plain"
-        },
+        row.device_id, mode_label,
     );
+    stats_record_subscribe(stats, row.device_id, mode_label);
 
     // 4. Pump until error.
     loop {
@@ -447,6 +555,7 @@ async fn connect_and_pump(
                     .map(|d| d.as_secs() as i64)
                     .unwrap_or(0);
                 let n = decode_and_push_adverts(driver, row, &msg.payload, ts).await;
+                stats_record_adverts(stats, row.device_id, n as u64);
                 log::trace!(
                     "[smart_home::ble_esphome] device_id={} +{n} adverts",
                     row.device_id

@@ -39,6 +39,7 @@ const MATTER_WS_URL: &str = "ws://127.0.0.1:5580/ws";
 const CLUSTER_ON_OFF: u32 = 6;
 const CLUSTER_LEVEL_CONTROL: u32 = 8;
 const CLUSTER_COLOR_CONTROL: u32 = 768; // 0x300
+const CLUSTER_DOOR_LOCK: u32 = 257; // 0x101
 
 /// Load the room mapping from disk.
 /// Looks in ~/.syntaur first (persistent config), falls back to /tmp/syntaur.
@@ -287,6 +288,70 @@ pub async fn set_color_temp_kelvin(node_id: u64, kelvin: u32) -> Result<(), Stri
             "cluster_id": CLUSTER_COLOR_CONTROL,
             "command_name": "MoveToColorTemperature",
             "payload": {"colorTemperature": mireds, "transitionTime": 0}
+        }),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Lock a Matter DoorLock node (cluster 0x0101 command 0x00 LockDoor on
+/// endpoint 1). The optional `pin_code` is the user PIN as bytes — most
+/// admin-fabric writes accept `None`. python-matter-server's
+/// `device_command` accepts the matter-server-compatible name `lock-door`
+/// for the LockDoor command and routes the JSON payload through to
+/// `OperationalState.LockDoor`.
+///
+/// Aqara U200 multi-admin: once Sean opens the Aqara-app commissioning
+/// window and Path C completes the AddNOC flow, this helper drives lock
+/// commands directly without touching Aqara cloud. See
+/// [[projects/aqara_u200_direct_control]].
+pub async fn lock_door(node_id: u64, pin_code: Option<Vec<u8>>) -> Result<(), String> {
+    let mut payload = serde_json::Map::new();
+    if let Some(pin) = pin_code {
+        // python-matter-server expects octet-string fields as base64; mirror
+        // its on-the-wire encoding for nullable PIN credentials. Spec §5.2.7.
+        use base64::Engine;
+        payload.insert(
+            "pinCode".into(),
+            Value::from(base64::engine::general_purpose::STANDARD.encode(pin)),
+        );
+    }
+    matter_command(
+        &reqwest::Client::new(),
+        "device_command",
+        json!({
+            "node_id": node_id,
+            "endpoint_id": 1,
+            "cluster_id": CLUSTER_DOOR_LOCK,
+            "command_name": "LockDoor",
+            "payload": Value::Object(payload),
+        }),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Unlock a Matter DoorLock node (cluster 0x0101 command 0x01 UnlockDoor
+/// on endpoint 1). PIN handling matches `lock_door` — most admin-fabric
+/// writes accept `None`.
+pub async fn unlock_door(node_id: u64, pin_code: Option<Vec<u8>>) -> Result<(), String> {
+    let mut payload = serde_json::Map::new();
+    if let Some(pin) = pin_code {
+        use base64::Engine;
+        payload.insert(
+            "pinCode".into(),
+            Value::from(base64::engine::general_purpose::STANDARD.encode(pin)),
+        );
+    }
+    matter_command(
+        &reqwest::Client::new(),
+        "device_command",
+        json!({
+            "node_id": node_id,
+            "endpoint_id": 1,
+            "cluster_id": CLUSTER_DOOR_LOCK,
+            "command_name": "UnlockDoor",
+            "payload": Value::Object(payload),
         }),
     )
     .await

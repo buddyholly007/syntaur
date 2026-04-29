@@ -67,6 +67,9 @@ pub async fn render() -> Html<String> {
                             th title="Use the gateway's local Bluetooth adapter as this anchor" {
                                 "Host scanner"
                             }
+                            th title="ESPHome proxy ingest mode — `tracking` opens the native-API socket and pumps adverts; `idle` leaves the proxy alone (use during Matter commissioning)." {
+                                "Proxy mode"
+                            }
                             th { "" }
                         }
                     }
@@ -258,8 +261,24 @@ const PAGE_SCRIPT: &str = r#"
     }
 
     function escapeHtml(s) {
-        return String(s)
-            .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        return String(s == null ? "" : s)
+            .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+    }
+
+    // Resolve the current `state_json.esphome.mode` for an anchor row.
+    // For ESPHome proxies this drives whether the Phase 4 supervisor
+    // subscribes; for any other device kind it's "n/a".
+    function proxyModeFor(deviceId) {
+        var d = state.devicePool.find(function (x) { return x.id === deviceId; });
+        if (!d || d.kind !== "esphome_proxy") return null;
+        try {
+            var s = JSON.parse(d.state_json || "{}");
+            var m = (s.esphome && typeof s.esphome.mode === "string") ? s.esphome.mode : null;
+            return m || "tracking";
+        } catch (_) {
+            return "tracking";
+        }
     }
 
     function renderRows() {
@@ -270,6 +289,17 @@ const PAGE_SCRIPT: &str = r#"
         }
         $empty.hidden = true;
         $rows.innerHTML = state.anchors.map(function (a, idx) {
+            var mode = proxyModeFor(a.anchor_device_id);
+            var modeCell = mode == null
+                ? "<td><span class=\"sh-mac\">n/a</span></td>"
+                : ""
+                    + "<td>"
+                    +   "<select data-field=\"esphome_mode\">"
+                    +     "<option value=\"tracking\"" + (mode === "tracking" ? " selected" : "") + ">tracking</option>"
+                    +     "<option value=\"idle\""     + (mode === "idle"     ? " selected" : "") + ">idle</option>"
+                    +   "</select> "
+                    +   "<button type=\"button\" class=\"sh-btn sh-mode-apply\" data-action=\"apply-mode\">Apply</button>"
+                    + "</td>";
             return ""
                 + "<tr data-row=\"" + idx + "\">"
                 + "<td><select data-field=\"anchor_device_id\">"
@@ -282,6 +312,7 @@ const PAGE_SCRIPT: &str = r#"
                 +   "min=\"-127\" max=\"0\" step=\"1\" value=\"" + a.rssi_at_1m + "\"></td>"
                 + "<td><input data-field=\"host_scanner\" type=\"checkbox\""
                 +   (a.host_scanner ? " checked" : "") + "></td>"
+                + modeCell
                 + "<td><button class=\"sh-row-remove\" data-action=\"remove\">Remove</button></td>"
                 + "</tr>";
         }).join("");
@@ -293,6 +324,11 @@ const PAGE_SCRIPT: &str = r#"
         var idx = +tr.getAttribute("data-row");
         var field = e.target.getAttribute("data-field");
         if (idx == null || !field) return;
+        // The "esphome_mode" select drives a side endpoint
+        // (POST /esphome/{id}/mode via the Apply button) and is NOT
+        // part of the anchor PUT body. Skip it here so we don't pollute
+        // state.anchors with a string field.
+        if (field === "esphome_mode") return;
         if (field === "host_scanner") {
             // At most one host_scanner per tenant — checking this row
             // un-checks every other row to keep the contract loud.
@@ -300,20 +336,74 @@ const PAGE_SCRIPT: &str = r#"
                 a.host_scanner = (i === idx) ? e.target.checked : false;
             });
             renderRows();
-        } else if (field === "rssi_at_1m") {
-            state.anchors[idx][field] = parseInt(e.target.value, 10);
         } else {
             state.anchors[idx][field] = parseInt(e.target.value, 10);
+            // Switching the anchor device changes which esphome_proxy
+            // (if any) drives the Proxy mode column — re-render so the
+            // mode select reflects the new row's state_json.
+            if (field === "anchor_device_id") renderRows();
         }
     });
 
     $rows.addEventListener("click", function (e) {
-        if (e.target.getAttribute("data-action") !== "remove") return;
-        var tr = e.target.closest("tr");
-        var idx = +tr.getAttribute("data-row");
-        state.anchors.splice(idx, 1);
-        renderRows();
+        var action = e.target.getAttribute("data-action");
+        if (action === "remove") {
+            var tr = e.target.closest("tr");
+            var idx = +tr.getAttribute("data-row");
+            state.anchors.splice(idx, 1);
+            renderRows();
+        } else if (action === "apply-mode") {
+            applyMode(e.target);
+        }
     });
+
+    // Per-proxy mode toggle. POSTs to /esphome/{id}/mode which merges
+    // state_json.esphome.mode atomically; the Phase 4 supervisor picks
+    // the new mode up on its next 60s refresh tick.
+    function applyMode(btn) {
+        var tr = btn.closest("tr");
+        var idx = +tr.getAttribute("data-row");
+        var anchor = state.anchors[idx];
+        if (!anchor) return;
+        var sel = tr.querySelector("[data-field=esphome_mode]");
+        if (!sel) return;
+        var newMode = sel.value;
+        btn.disabled = true;
+        var prevText = btn.textContent;
+        btn.textContent = "…";
+        fetch("/api/smart-home/esphome/" + anchor.anchor_device_id + "/mode", {
+            method: "POST", credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ mode: newMode }),
+        })
+        .then(function (r) {
+            return r.json().then(function (j) {
+                if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
+                return j;
+            });
+        })
+        .then(function (j) {
+            btn.textContent = "✓";
+            setStatus("Proxy " + anchor.anchor_device_id + " → " + j.mode, "ok");
+            // Refresh local devicePool snapshot so subsequent renders show the new mode
+            // without a full page reload.
+            var dev = state.devicePool.find(function (x) { return x.id === anchor.anchor_device_id; });
+            if (dev) {
+                try {
+                    var s = JSON.parse(dev.state_json || "{}");
+                    s.esphome = s.esphome || {};
+                    s.esphome.mode = j.mode;
+                    dev.state_json = JSON.stringify(s);
+                } catch (_) { /* keep best-effort */ }
+            }
+            setTimeout(function () { btn.disabled = false; btn.textContent = prevText; }, 1200);
+        })
+        .catch(function (err) {
+            btn.disabled = false;
+            btn.textContent = prevText;
+            setStatus("Mode change: " + (err.message || err), "err");
+        });
+    }
 
     document.getElementById("ble-add").addEventListener("click", function () {
         var pickDev = state.devicePool[0];

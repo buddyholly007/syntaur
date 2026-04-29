@@ -184,6 +184,47 @@ const EXTRA_STYLE: &str = r#"
 .sh-esp-help summary { cursor: pointer; font-weight: 500; }
 .sh-esp-help p { color: var(--sh-text-muted, #98a2b3); margin: 0.6rem 0; }
 .sh-esp-help code { background: rgba(0,0,0,0.30); padding: 0 0.3em; border-radius: 4px; }
+.sh-modal-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.55);
+    z-index: 9999; display: flex; align-items: center; justify-content: center;
+}
+.sh-modal {
+    background: #14171c; color: #e7eaf0;
+    border: 1px solid rgba(255,255,255,0.13);
+    border-radius: 14px;
+    padding: 1rem 1.2rem;
+    width: min(560px, 92vw);
+    max-height: 86vh; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 0.8rem;
+}
+.sh-modal-head { display: flex; justify-content: space-between; align-items: center; }
+.sh-modal-close {
+    background: transparent; color: inherit; border: none; font-size: 1.4rem;
+    cursor: pointer; padding: 0 0.4rem;
+}
+.sh-modal-body { display: flex; flex-direction: column; gap: 0.55rem; }
+.sh-modal-body label { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.85rem; color: #98a2b3; }
+.sh-modal-body input[type="text"], .sh-modal-body input[type="password"], .sh-modal-body select {
+    background: rgba(0,0,0,0.25); color: inherit;
+    border: 1px solid rgba(255,255,255,0.13);
+    border-radius: 8px; padding: 0.45rem 0.6rem;
+    font: inherit;
+}
+.sh-modal-row { flex-direction: row !important; align-items: center; gap: 0.5rem !important; color: #e7eaf0 !important; }
+.sh-modal-note { color: #98a2b3; font-size: 0.8rem; margin: 0.3rem 0 0; }
+.sh-modal-foot { display: flex; gap: 0.5rem; align-items: center; justify-content: flex-end; }
+.sh-modal-foot .sh-esp-status { margin-right: auto; font-size: 0.85rem; }
+.sh-flash-log {
+    background: rgba(0,0,0,0.40);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 8px;
+    padding: 0.6rem 0.8rem;
+    margin: 0;
+    max-height: 280px; overflow: auto;
+    font-family: ui-monospace, monospace; font-size: 0.78rem;
+    white-space: pre-wrap; word-break: break-word;
+    color: #c8cdd6;
+}
 "#;
 
 const PAGE_SCRIPT: &str = r#"
@@ -202,7 +243,7 @@ const PAGE_SCRIPT: &str = r#"
     function escapeHtml(s) {
         return String(s == null ? "" : s)
             .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-            .replace(/"/g, "&quot;");
+            .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
     }
 
     function roleLabel(r) {
@@ -232,7 +273,7 @@ const PAGE_SCRIPT: &str = r#"
                 +     "<div>" + escapeHtml(d.friendly_name || d.name) + "</div>"
                 +     "<div class=\"sh-mac\">" + escapeHtml(d.name) + (d.mac ? " · " + escapeHtml(d.mac) : "") + "</div>"
                 +   "</td>"
-                +   "<td><span class=\"sh-mac\">" + escapeHtml(d.host) + ":" + d.port + "</span></td>"
+                +   "<td><span class=\"sh-mac\">" + escapeHtml(d.host) + ":" + escapeHtml(d.port) + "</span></td>"
                 +   "<td>"
                 +     escapeHtml(d.esphome_version || "—")
                 +     (d.project_name ? "<div class=\"sh-mac\">" + escapeHtml(d.project_name)
@@ -245,7 +286,10 @@ const PAGE_SCRIPT: &str = r#"
                 +     "<span class=\"sh-pill sh-pill-rec\">" + escapeHtml(roleLabel(d.recommended_role)) + "</span>"
                 +     "<span class=\"sh-rec-why\">" + escapeHtml(d.recommendation_reason || "") + "</span>"
                 +   "</div></td>"
-                +   "<td><button type=\"button\" class=\"sh-btn\" data-action=\"adopt\">Adopt</button></td>"
+                +   "<td>"
+                +     "<button type=\"button\" class=\"sh-btn\" data-action=\"adopt\">Adopt</button> "
+                +     "<button type=\"button\" class=\"sh-btn\" data-action=\"flash\">Flash</button>"
+                +   "</td>"
                 + "</tr>";
         }).join("");
     }
@@ -277,13 +321,22 @@ const PAGE_SCRIPT: &str = r#"
     });
 
     $rows.addEventListener("click", function (e) {
-        if (e.target.getAttribute("data-action") !== "adopt") return;
+        var action = e.target.getAttribute("data-action");
+        if (action !== "adopt" && action !== "flash") return;
         var tr = e.target.closest("tr");
         var name = tr.getAttribute("data-name");
         var d = lastDiscovered.find(function (x) { return x.name === name; });
         if (!d) return;
-        e.target.disabled = true;
-        e.target.textContent = "Adopting…";
+        if (action === "adopt") {
+            doAdopt(e.target, d);
+        } else {
+            openFlashModal(d);
+        }
+    });
+
+    function doAdopt(btn, d) {
+        btn.disabled = true;
+        btn.textContent = "Adopting…";
         fetch("/api/smart-home/esphome/adopt", {
             method: "POST", credentials: "same-origin",
             headers: { "Content-Type": "application/json" },
@@ -300,12 +353,151 @@ const PAGE_SCRIPT: &str = r#"
             });
         })
         .then(function (j) {
-            e.target.textContent = "Adopted (id " + j.device_id + ")";
+            btn.textContent = "Adopted (id " + j.device_id + ")";
         })
         .catch(function (err) {
-            e.target.disabled = false; e.target.textContent = "Adopt";
+            btn.disabled = false; btn.textContent = "Adopt";
             setStatus("Adopt: " + (err.message || err), "err");
         });
-    });
+    }
+
+    // ── Flash modal ──────────────────────────────────────────────
+    // Renders a small inline form that asks for WiFi creds + variant
+    // + role, auto-generates a fresh Noise PSK, then POSTs the full
+    // FirmwareRequest at /esphome/flash. Compile + OTA can take 3-15
+    // minutes on a cold ESP-IDF cache; we hold the fetch open and
+    // surface log output verbatim on resolution.
+    function genNoiseKey() {
+        // 32 bytes random → base64. Matches what `esphome wizard`
+        // generates for api.encryption.key.
+        var bytes = new Uint8Array(32);
+        (window.crypto || window.msCrypto).getRandomValues(bytes);
+        var bin = "";
+        for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+        return btoa(bin);
+    }
+
+    function openFlashModal(d) {
+        var existing = document.getElementById("esp-flash-modal");
+        if (existing) existing.remove();
+        var defaultVariant = (d.board && d.board.toLowerCase().indexOf("c3") !== -1)
+            ? "esp32-c3"
+            : (d.board && d.board.toLowerCase().indexOf("s3") !== -1)
+                ? "esp32-s3"
+                : "esp32-generic";
+        var defaultRole = d.recommended_role || "bt-proxy-active";
+        var modal = document.createElement("div");
+        modal.id = "esp-flash-modal";
+        modal.className = "sh-modal-overlay";
+        modal.innerHTML =
+            "<div class=\"sh-modal\">"
+            +   "<div class=\"sh-modal-head\">"
+            +     "<strong>Flash " + escapeHtml(d.friendly_name || d.name) + "</strong>"
+            +     "<button type=\"button\" class=\"sh-modal-close\" data-action=\"close\">×</button>"
+            +   "</div>"
+            +   "<div class=\"sh-modal-body\">"
+            +     "<label>Wi-Fi SSID <input type=\"text\" id=\"esp-flash-ssid\" placeholder=\"IOT\"></label>"
+            +     "<label>Wi-Fi password <input type=\"password\" id=\"esp-flash-pw\"></label>"
+            +     "<label>Variant"
+            +       "<select id=\"esp-flash-variant\">"
+            +         "<option value=\"esp32-generic\"" + (defaultVariant === "esp32-generic" ? " selected" : "") + ">ESP32 (generic)</option>"
+            +         "<option value=\"esp32-s3\"" + (defaultVariant === "esp32-s3" ? " selected" : "") + ">ESP32-S3</option>"
+            +         "<option value=\"esp32-c3\"" + (defaultVariant === "esp32-c3" ? " selected" : "") + ">ESP32-C3</option>"
+            +       "</select>"
+            +     "</label>"
+            +     "<label>Role"
+            +       "<select id=\"esp-flash-role\">"
+            +         "<option value=\"bt-proxy-active\"" + (defaultRole === "bt-proxy-active" ? " selected" : "") + ">BLE proxy (active)</option>"
+            +         "<option value=\"bt-proxy-passive\"" + (defaultRole === "bt-proxy-passive" ? " selected" : "") + ">BLE proxy (passive)</option>"
+            +         "<option value=\"voice-satellite\"" + (defaultRole === "voice-satellite" ? " selected" : "") + ">Voice satellite</option>"
+            +         "<option value=\"presence-mmwave\"" + (defaultRole === "presence-mmwave" ? " selected" : "") + ">Presence (mmWave + BLE)</option>"
+            +       "</select>"
+            +     "</label>"
+            +     "<label class=\"sh-modal-row\">"
+            +       "<input type=\"checkbox\" id=\"esp-flash-ota\" checked> "
+            +       "Push OTA to <code>" + escapeHtml(d.host) + "</code>"
+            +     "</label>"
+            +     "<p class=\"sh-modal-note\">Compile + upload runs <code>esphome run</code> on the gateway. "
+            +       "Cold builds take 3–5 min; warm rebuilds ~30 s. The button stays disabled until the run finishes.</p>"
+            +   "</div>"
+            +   "<div class=\"sh-modal-foot\">"
+            +     "<span id=\"esp-flash-status\" class=\"sh-esp-status\"></span>"
+            +     "<button type=\"button\" class=\"sh-btn\" data-action=\"close\">Cancel</button>"
+            +     "<button type=\"button\" class=\"sh-btn sh-btn-primary\" data-action=\"go\">Flash</button>"
+            +   "</div>"
+            +   "<pre id=\"esp-flash-log\" class=\"sh-flash-log\" hidden></pre>"
+            + "</div>";
+        document.body.appendChild(modal);
+        modal.addEventListener("click", function (ev) {
+            var a = ev.target.getAttribute("data-action");
+            if (a === "close" || ev.target === modal) { modal.remove(); return; }
+            if (a === "go") submitFlash(modal, d);
+        });
+    }
+
+    function submitFlash(modal, d) {
+        var ssid = modal.querySelector("#esp-flash-ssid").value.trim();
+        var pw   = modal.querySelector("#esp-flash-pw").value;
+        if (!ssid || !pw) {
+            modal.querySelector("#esp-flash-status").textContent = "Wi-Fi SSID + password required";
+            modal.querySelector("#esp-flash-status").className = "sh-esp-status err";
+            return;
+        }
+        var variant = modal.querySelector("#esp-flash-variant").value;
+        var role    = modal.querySelector("#esp-flash-role").value;
+        var ota     = modal.querySelector("#esp-flash-ota").checked;
+        var goBtn   = modal.querySelector("[data-action=go]");
+        var status  = modal.querySelector("#esp-flash-status");
+        var logBox  = modal.querySelector("#esp-flash-log");
+        goBtn.disabled = true;
+        goBtn.textContent = "Compiling…";
+        status.textContent = "Building " + d.name + " — this can take a few minutes.";
+        status.className = "sh-esp-status";
+        logBox.hidden = true;
+        logBox.textContent = "";
+        var body = {
+            name: d.name,
+            friendly_name: d.friendly_name,
+            variant: variant,
+            role: role,
+            api_encryption_key: genNoiseKey(),
+            ota_password: null,
+            wifi_ssid: ssid,
+            wifi_password: pw,
+            ap_fallback_password: null,
+            target_host: ota ? d.host : null,
+        };
+        fetch("/api/smart-home/esphome/flash", {
+            method: "POST", credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+        })
+        .then(function (r) {
+            return r.json().then(function (j) { return { ok: r.ok, j: j }; });
+        })
+        .then(function (resp) {
+            var j = resp.j;
+            if (j.log) {
+                logBox.textContent = j.log;
+                logBox.hidden = false;
+            }
+            if (resp.ok && j.success) {
+                status.textContent = "Flashed in " + (j.elapsed_secs || "?") + " s";
+                status.className = "sh-esp-status ok";
+                goBtn.textContent = "Done";
+            } else {
+                status.textContent = (j.error || "esphome reported failure") + " — see log";
+                status.className = "sh-esp-status err";
+                goBtn.disabled = false;
+                goBtn.textContent = "Retry";
+            }
+        })
+        .catch(function (err) {
+            status.textContent = String(err.message || err);
+            status.className = "sh-esp-status err";
+            goBtn.disabled = false;
+            goBtn.textContent = "Retry";
+        });
+    }
 })();
 "#;

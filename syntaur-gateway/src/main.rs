@@ -7042,6 +7042,10 @@ async fn main() {
             post(smart_home::api::handle_esphome_flash),
         )
         .route(
+            "/api/smart-home/esphome/status",
+            get(smart_home::api::handle_esphome_status),
+        )
+        .route(
             "/api/smart-home/esphome/{id}/mode",
             post(smart_home::api::handle_esphome_set_mode),
         )

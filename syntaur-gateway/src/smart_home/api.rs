@@ -534,13 +534,24 @@ async fn control_matter(
             .await
             .map_err(|e| err_500(format!("matter set_color_temp: {e}")))?;
     }
-    if desired.get("locked").is_some() {
-        return Err((
-            StatusCode::NOT_IMPLEMENTED,
-            Json(json!({
-                "error": "Matter lock control not wired in v1 (requires PIN handling; slated for v1.1 Controller)."
-            })),
-        ));
+    if let Some(locked) = desired.get("locked").and_then(|v| v.as_bool()) {
+        // Optional PIN as a hex string (e.g. "1234" → b"1234"). For
+        // Aqara U200 multi-admin, the admin fabric typically does not
+        // require a PIN. If `pin_code` is present in the payload, it
+        // overrides the no-PIN default.
+        let pin_code = desired
+            .get("pin_code")
+            .and_then(|v| v.as_str())
+            .map(|s| s.as_bytes().to_vec());
+        if locked {
+            crate::tools::matter::lock_door(node_id, pin_code)
+                .await
+                .map_err(|e| err_500(format!("matter lock_door: {e}")))?;
+        } else {
+            crate::tools::matter::unlock_door(node_id, pin_code)
+                .await
+                .map_err(|e| err_500(format!("matter unlock_door: {e}")))?;
+        }
     }
     if desired.get("setpoint").is_some() {
         return Err((
@@ -2025,22 +2036,26 @@ pub async fn handle_esphome_adopt(
         "esphome_version": body.esphome_version,
     });
     let metadata_str = metadata.to_string();
-    let state_json = serde_json::json!({
-        "esphome": {
-            "mode": mode,
-            "pairing_window_secs": 300,
-        },
-    })
-    .to_string();
+    let esphome_subkey = serde_json::json!({
+        "mode": mode,
+        "pairing_window_secs": 300,
+    });
 
     // Insert (or upsert if the same external_id already exists for
-    // this user) the device row, then write state_json so the BLE
-    // ingest supervisor sees the mode immediately.
+    // this user) the device row, then merge our `esphome` subkey into
+    // state_json so the BLE ingest supervisor sees the mode without
+    // wiping sibling subkeys (`ble_anchor`, etc.) that other code paths
+    // own. A blind overwrite would clobber anchor config every time the
+    // user re-adopts an already-registered proxy.
     let chosen_for_db = chosen_name.clone();
     let device_id = tokio::task::spawn_blocking(move || -> rusqlite::Result<i64> {
-        let conn = rusqlite::Connection::open(&db)?;
+        let mut conn = rusqlite::Connection::open(&db)?;
+        // Wrap upsert + read-merge-write in one transaction so a
+        // concurrent writer (e.g. PUT /ble/anchors hitting the same
+        // row) can't lose-update us between the SELECT and UPDATE.
+        let tx = conn.transaction()?;
         let id = devices::upsert_from_scan(
-            &conn,
+            &tx,
             user_id,
             "esphome",
             &external_id,
@@ -2049,11 +2064,29 @@ pub async fn handle_esphome_adopt(
             "{}", // capabilities
             &metadata_str,
         )?;
-        conn.execute(
+        let existing: Option<String> = tx
+            .query_row(
+                "SELECT state_json FROM smart_home_devices WHERE user_id = ? AND id = ?",
+                rusqlite::params![user_id, id],
+                |row| row.get(0),
+            )
+            .ok();
+        let mut merged: serde_json::Value = existing
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        if !merged.is_object() {
+            merged = serde_json::json!({});
+        }
+        if let Some(obj) = merged.as_object_mut() {
+            obj.insert("esphome".to_string(), esphome_subkey);
+        }
+        tx.execute(
             "UPDATE smart_home_devices SET state_json = ?
               WHERE user_id = ? AND id = ?",
-            rusqlite::params![state_json, user_id, id],
+            rusqlite::params![merged.to_string(), user_id, id],
         )?;
+        tx.commit()?;
         Ok(id)
     })
     .await
@@ -2135,26 +2168,41 @@ pub async fn handle_esphome_flash(
     Json(body): Json<EsphomeFlashBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let req = super::firmware_role::FirmwareRequest {
-        name: body.name,
-        friendly_name: body.friendly_name,
+        name: body.name.clone(),
+        friendly_name: body.friendly_name.clone(),
         variant: body.variant,
         role: body.role,
-        api_encryption_key: body.api_encryption_key,
-        ota_password: body.ota_password,
-        wifi_ssid: body.wifi_ssid,
-        wifi_password: body.wifi_password,
+        api_encryption_key: body.api_encryption_key.clone(),
+        ota_password: body.ota_password.clone(),
+        wifi_ssid: body.wifi_ssid.clone(),
+        wifi_password: body.wifi_password.clone(),
         ap_fallback_password: body.ap_fallback_password,
     };
-    let build_dir = super::firmware_flash::default_build_dir();
-    let yaml_path = super::firmware_flash::write_yaml_to_disk(&req, &build_dir)
-        .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))))?;
     let target = match body.target_host {
         Some(h) if !h.trim().is_empty() => {
             super::firmware_flash::FlashTarget::Ota(h.trim().to_string())
         }
         _ => super::firmware_flash::FlashTarget::CompileOnly,
     };
-    let result = super::firmware_flash::flash_via_esphome(&yaml_path, target).await;
+
+    // Sidecar dispatch: when SYNTAUR_FIRMWARE_BUILDER_URL is set the
+    // gateway POSTs the FirmwareRequest at the firmware-builder
+    // TrueNAS Custom App container, polls its job state, and surfaces
+    // the same FlashResult shape the wizard already knows. This keeps
+    // the prod gateway free of Python esphome — see
+    // `vault/projects/syntaur_firmware_builder.md`.
+    let result = if let Some(url) = super::firmware_flash::sidecar_url() {
+        super::firmware_flash::flash_via_sidecar(&url, &req, target).await
+    } else {
+        // Local-shellout fallback. Renders YAML on the gateway and
+        // shells out to `esphome` if it's on PATH (dev workstations,
+        // not prod). Same code path the wizard exercised before the
+        // sidecar plumbing landed.
+        let build_dir = super::firmware_flash::default_build_dir();
+        let yaml_path = super::firmware_flash::write_yaml_to_disk(&req, &build_dir)
+            .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))))?;
+        super::firmware_flash::flash_via_esphome(&yaml_path, target).await
+    };
     match result {
         Ok(r) => Ok(Json(json!({
             "success": r.success,
@@ -2167,8 +2215,122 @@ pub async fn handle_esphome_flash(
             Json(json!({
                 "success": false,
                 "error": e,
-                "yaml_path": yaml_path.display().to_string(),
             })),
         )),
     }
+}
+
+/// `GET /api/smart-home/esphome/status` — per-proxy ingest counters.
+/// The Phase 4 supervisor maintains these in-memory, keyed by
+/// `device_id`; entries are inserted on first connect attempt and
+/// removed when the supervisor stops the worker (mode flipped to idle
+/// or row deleted). Useful for verifying advert flow without journal
+/// access and for the wizard / mode-toggle UI.
+///
+/// Response shape:
+/// ```json
+/// { "proxies": [
+///   { "device_id": 1, "label": "proxy-kids@192.168.20.229:6053",
+///     "subscribed_at": 1777405200, "last_advert_at": 1777405240,
+///     "total_adverts": 1234, "mode": "noise", "last_error": null }
+/// ] }
+/// ```
+pub async fn handle_esphome_status(
+    State(_state): State<std::sync::Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let snapshot = super::drivers::ble_esphome::stats_snapshot();
+    let proxies: Vec<serde_json::Value> = snapshot
+        .into_iter()
+        .map(|(device_id, s)| {
+            json!({
+                "device_id": device_id,
+                "label": s.label,
+                "subscribed_at": s.subscribed_at,
+                "last_advert_at": s.last_advert_at,
+                "total_adverts": s.total_adverts,
+                "mode": s.mode,
+                "last_error": s.last_error,
+            })
+        })
+        .collect();
+    Json(json!({ "proxies": proxies }))
+}
+
+/// `POST /api/smart-home/esphome/{id}/mode` — flip a single proxy
+/// between `"tracking"` and `"idle"` without re-supplying host/port/PSK.
+/// Used by the BLE anchors page so the user can pause advert ingest on
+/// a proxy that's busy with a Matter commission window without going
+/// through the full adopt form again.
+///
+/// Persists by merging `state_json.esphome.mode` inside a transaction
+/// — same merge pattern as `handle_esphome_adopt` so we never lose-
+/// update a sibling subkey (e.g. `ble_anchor`). The Phase 4 supervisor
+/// picks up the new mode on its next 60 s refresh tick.
+#[derive(Debug, Deserialize)]
+pub struct EsphomeModeBody {
+    pub mode: String,
+}
+
+pub async fn handle_esphome_set_mode(
+    State(state): State<std::sync::Arc<AppState>>,
+    axum::extract::Path(device_id): axum::extract::Path<i64>,
+    Json(body): Json<EsphomeModeBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let mode = body.mode.trim().to_string();
+    if mode != "tracking" && mode != "idle" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "mode must be 'tracking' or 'idle'" })),
+        ));
+    }
+    let user_id = current_user_id(&state);
+    let db = state.db_path.clone();
+    let mode_for_db = mode.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let mut conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let row: rusqlite::Result<(String, String)> = tx.query_row(
+            "SELECT kind, COALESCE(state_json, '{}') FROM smart_home_devices
+              WHERE user_id = ? AND id = ?",
+            rusqlite::params![user_id, device_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        );
+        let (kind, state_raw) = row.map_err(|e| format!("device not found: {e}"))?;
+        if kind != "esphome_proxy" {
+            return Err(format!("device id={device_id} is kind={kind}, not esphome_proxy"));
+        }
+        let mut merged: serde_json::Value =
+            serde_json::from_str(&state_raw).unwrap_or_else(|_| serde_json::json!({}));
+        if !merged.is_object() {
+            merged = serde_json::json!({});
+        }
+        // Preserve any other esphome subkeys (e.g. pairing_window_secs)
+        // that were written by adopt. Only touch `mode`.
+        let mut esphome_obj = merged
+            .get("esphome")
+            .cloned()
+            .filter(|v| v.is_object())
+            .unwrap_or_else(|| serde_json::json!({}));
+        if let Some(obj) = esphome_obj.as_object_mut() {
+            obj.insert(
+                "mode".to_string(),
+                serde_json::Value::String(mode_for_db),
+            );
+        }
+        if let Some(obj) = merged.as_object_mut() {
+            obj.insert("esphome".to_string(), esphome_obj);
+        }
+        tx.execute(
+            "UPDATE smart_home_devices SET state_json = ?
+              WHERE user_id = ? AND id = ?",
+            rusqlite::params![merged.to_string(), user_id, device_id],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| err_500(format!("join: {e}")))?
+    .map_err(err_500)?;
+    Ok(Json(json!({ "device_id": device_id, "mode": mode })))
 }

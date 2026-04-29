@@ -4808,7 +4808,7 @@ checksum = "baee0bbc17ce759db233beb01648088061bf678383130602a298e6998eedb2d8"
 
 [[package]]
 name = "mace"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -4954,7 +4954,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-protocol"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "async-trait",
  "log",
@@ -4986,7 +4986,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-server-search-rs"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7494,7 +7494,7 @@ dependencies = [
 
 [[package]]
 name = "rust-media-bridge"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8295,28 +8295,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "syntaur-ble-shim"
-version = "0.5.1"
-dependencies = [
- "btleplug",
- "clap",
- "env_logger",
- "futures",
- "hex",
- "hostname",
- "if-addrs",
- "log",
- "rand 0.8.6",
- "serde",
- "serde_json",
- "snow",
- "socket2 0.5.10",
- "tokio",
- "toml 0.8.2",
- "uuid",
-]
-
-[[package]]
 name = "syntaur-capability-shim"
 version = "0.1.0"
 dependencies = [
@@ -8332,7 +8310,7 @@ dependencies = [
 
 [[package]]
 name = "syntaur-gateway"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -8417,7 +8395,7 @@ dependencies = [
 
 [[package]]
 name = "syntaur-isolation-tests"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -8508,7 +8486,7 @@ dependencies = [
 
 [[package]]
 name = "syntaur-sdk"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8522,7 +8500,7 @@ dependencies = [
 
 [[package]]
 name = "syntaur-setup"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -8533,7 +8511,7 @@ dependencies = [
 
 [[package]]
 name = "syntaur-ship"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -8586,7 +8564,7 @@ dependencies = [
 
 [[package]]
 name = "syntaur-verify"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "chromiumoxide 0.9.1",
@@ -8609,7 +8587,7 @@ dependencies = [
 
 [[package]]
 name = "syntaur-viewer"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "gtk4",
  "serde",
@@ -8621,7 +8599,7 @@ dependencies = [
 
 [[package]]
 name = "syntaur-voice-pipeline"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "byteorder",
  "chrono",

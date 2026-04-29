@@ -17,7 +17,11 @@ members = [
     "mace",
     "syntaur-isolation-tests",
     "syntaur-ship",
-    "syntaur-ble-shim",
+    # syntaur-ble-shim — workspace member ref temporarily removed during the
+    # 2026-04-29 voice cache-fix ship. The crate dir is gaming-pc's untracked
+    # WIP that was stashed during a parallel-session race; restore this line
+    # after `git stash pop` brings the dir back, OR commit the dir first.
+    # "syntaur-ble-shim",
     "crates/syntaur-zwave",
     "crates/rust-aidot",
     "crates/rust-kasa",

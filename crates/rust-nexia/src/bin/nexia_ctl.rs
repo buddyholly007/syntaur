@@ -23,7 +23,7 @@ async fn main() -> anyhow::Result<()> {
     let mut client = NexiaClient::new(brand);
     client.login(&email, &password).await.context("login")?;
 
-    let mut therms = client.list_thermostats().await.context("list_thermostats")?;
+    let therms = client.list_thermostats().await.context("list_thermostats")?;
     if therms.is_empty() {
         println!("(no thermostats on this account)");
         return Ok(());
