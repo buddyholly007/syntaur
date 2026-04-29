@@ -1,7 +1,7 @@
 # Syntaur threat model
 
-Last updated 2026-04-29. Applies to v0.5.x.
-<!-- syntaur-doc-claim applies_to_version || 0.5 -->
+Last updated 2026-04-29. Applies to v0.6.x.
+<!-- syntaur-doc-claim applies_to_version || 0.6 -->
 <!-- syntaur-doc-claim code_grep || syntaur-gateway/src/security.rs || if !host_is_private(&req_host) -->
 <!-- syntaur-doc-claim code_grep || syntaur-gateway/src/mcp_sandbox.rs || SYNTAUR_ALLOW_UNSANDBOXED_MCP -->
 <!-- syntaur-doc-claim code_no_match || syntaur-gateway/src/mcp_sandbox.rs || SYNTAUR_STRICT_MCP_SANDBOX=1 flips fail-open to fail-closed -->
