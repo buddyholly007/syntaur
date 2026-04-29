@@ -913,7 +913,7 @@ const TOP_BAR_SCRIPT: &str = r##"
     const tk = token();
     if (!tk) { pill.hidden = true; return; }
     try {
-      const r = await fetch('/api/music/now_playing?token=' + encodeURIComponent(tk));
+      const r = await fetch('/api/music/now_playing', { headers: { 'Authorization': 'Bearer ' + tk } });
       if (!r.ok) { pill.hidden = true; return; }
       const d = await r.json();
       const state = d.state || 'off';
@@ -1144,6 +1144,50 @@ const TOP_BAR_SCRIPT: &str = r##"
       if (r.ok) {
         const j = await r.json();
         if (j && j.stream_token) return '?stream_token=' + encodeURIComponent(j.stream_token);
+      }
+    } catch (_) { /* fall through to legacy fallback */ }
+    return '?token=' + encodeURIComponent(tok);
+  };
+
+  // sdPrefixStreamQuery() — stream token for a whole directory of
+  // resources. Use when a single page renders many resources under
+  // one prefix (e.g. 50 album-art tiles in a list view). Mints once
+  // with `?url` ending in `/`, server treats the binding as a path
+  // prefix instead of an exact match. Cached in-memory until near
+  // expiry so list re-renders don't re-mint.
+  //
+  //   const qs = await sdPrefixStreamQuery('/api/music/local/art/');
+  //   row.style.backgroundImage = "url('" + path + qs + "')";
+  //
+  // The trailing slash is REQUIRED — without it the server uses
+  // exact-match and the token won't authorize subpaths.
+  const _prefixCache = {};
+  window.sdPrefixStreamQuery = async function(prefixPath, ttlSecs) {
+    if (!prefixPath.endsWith('/')) {
+      console.warn('[sdPrefixStreamQuery] prefix should end with /, got', prefixPath);
+    }
+    const ttl = ttlSecs || 300;
+    const now = Date.now() / 1000;
+    const cached = _prefixCache[prefixPath];
+    if (cached && now < cached.expiresAt - 10) return cached.qs;
+    const tok = (function(){
+      try { return localStorage.getItem('syntaur_token') || sessionStorage.getItem('syntaur_token') || ''; }
+      catch (_) { return ''; }
+    })();
+    if (!tok) return '';
+    try {
+      const r = await fetch('/api/auth/stream-token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + tok },
+        body: JSON.stringify({ url: prefixPath, ttl_secs: ttl })
+      });
+      if (r.ok) {
+        const j = await r.json();
+        if (j && j.stream_token) {
+          const qs = '?stream_token=' + encodeURIComponent(j.stream_token);
+          _prefixCache[prefixPath] = { qs, expiresAt: now + (j.expires_in || ttl) };
+          return qs;
+        }
       }
     } catch (_) { /* fall through to legacy fallback */ }
     return '?token=' + encodeURIComponent(tok);

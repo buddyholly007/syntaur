@@ -114,15 +114,20 @@ are known and being worked on:
 
 - **Long-lived tokens in SSE / WebSocket / media-element URLs.** Browser
   streaming APIs can't attach an `Authorization: Bearer` header, so those
-  endpoints currently accept `?token=<long-lived>` in the URL. That's the
-  session token — if it leaks into browser history, proxy access logs, or
-  a referrer header, an attacker gets up to 48 hours of session access.
-  **Mitigation in progress (v0.5.0):** a new `POST /api/auth/stream-token`
-  endpoint mints 60-second URL-scoped tokens, and handlers can opt in via
-  `resolve_principal_for_stream`. The message-stream SSE endpoint is the
-  first converted reference. Remaining ~39 SSE/WS/media handlers migrate
-  in subsequent v0.5.x point releases; until then each emits a
-  `DEPRECATED: long-lived ?token= on stream endpoint` warning.
+  endpoints historically accepted `?token=<long-lived>` in the URL. That's
+  the session token — if it leaks into browser history, proxy access logs,
+  or a referrer header, an attacker gets up to 48 hours of session access.
+  **Mitigation complete (v0.6.0):** every browser-side stream endpoint —
+  music file/art streaming, /api/music/local_events SSE, /ws/terminal
+  WebSocket, the chat / knowledge / scheduler SSE flows — now uses
+  `POST /api/auth/stream-token` to mint a 60-second URL-scoped token via
+  `window.sdStreamQuery` (single resource) or `window.sdPrefixStreamQuery`
+  (a directory of art tiles). The `resolve_principal_for_stream` helper
+  is the single auth gate: stream_token → Authorization header →
+  legacy `?token=` (DEPRECATED with audit-log warn). Operators who've
+  watched their `[auth/stream] DEPRECATED` log lines hit zero can flip
+  `SYNTAUR_REJECT_LEGACY_STREAM_TOKEN=1` to make legacy `?token=` a hard
+  401. The default flips to reject in v0.7.0.
 - The `/v1/chat/completions` voice-relay endpoint requires an explicit
   `voice_secret` in config; unsetting it is allowed only when the gateway is
   bound to loopback.

@@ -200,7 +200,7 @@ async function apiPost(path, body) {
   return data;
 }
 async function apiDelete(path) {
-  const r = await fetch(path + '?token=' + encodeURIComponent(token), { method: 'DELETE' });
+  const r = await authFetch(path, { method: 'DELETE' });
   if (!r.ok) throw new Error('delete failed');
   return r.json();
 }

@@ -1116,9 +1116,18 @@ impl StreamTokenStore {
     }
 
     /// Mint a new stream token. TTL is clamped to [5, 300] seconds; the
-    /// default of 60 is right for normal SSE / media-element usage. url
-    /// is stored by its path prefix (query string stripped) so a
-    /// reconnect with a slightly different query param still matches.
+    /// default of 60 is right for normal SSE / media-element usage.
+    ///
+    /// `url` is stored by its path (query string stripped). Two binding
+    /// modes are supported, distinguished by trailing slash:
+    ///   - `/api/x/stream`  → exact-match: only resolves for that path
+    ///   - `/api/x/art/`    → directory prefix: resolves for any path
+    ///                        that starts with `/api/x/art/`
+    ///
+    /// Directory mode exists for list-row use cases (50 art tiles in a
+    /// playlist view) where minting one token per tile would mean 50
+    /// round-trips. Mint once with the trailing-slash prefix and append
+    /// the resulting `?stream_token=` to every URL under that directory.
     pub fn mint(
         &self,
         user_id: i64,
@@ -1150,17 +1159,26 @@ impl StreamTokenStore {
         token
     }
 
-    /// Resolve a stream token against the URL it was minted for. Returns
-    /// `None` on: unknown token, expired, or URL-prefix mismatch.
+    /// Resolve a stream token against the URL the request is hitting.
+    /// Returns `None` on: unknown token, expired, or path doesn't match
+    /// the binding (exact for non-trailing-slash; prefix for `/`-ended).
     pub fn resolve(&self, token: &str, request_url: &str) -> Option<StreamToken> {
         let now = chrono::Utc::now().timestamp();
-        let want_prefix = request_url.split('?').next().unwrap_or(request_url);
+        let want_path = request_url.split('?').next().unwrap_or(request_url);
         let g = self.inner.read().unwrap();
         let t = g.get(token)?;
         if t.expires_at <= now {
             return None;
         }
-        if t.url_prefix != want_prefix {
+        let matches = if t.url_prefix.ends_with('/') {
+            // Directory binding: only resolves under this prefix. The
+            // trailing slash stops `/api/foo/` from matching `/api/foo`
+            // or `/api/food`.
+            want_path.starts_with(&t.url_prefix)
+        } else {
+            t.url_prefix == want_path
+        };
+        if !matches {
             return None;
         }
         Some(t.clone())
@@ -1175,5 +1193,59 @@ impl StreamTokenStore {
     pub fn active_count(&self) -> usize {
         let now = chrono::Utc::now().timestamp();
         self.inner.read().unwrap().values().filter(|t| t.expires_at > now).count()
+    }
+}
+
+#[cfg(test)]
+mod stream_token_tests {
+    use super::StreamTokenStore;
+
+    fn store() -> StreamTokenStore {
+        StreamTokenStore::new()
+    }
+
+    fn mint(s: &StreamTokenStore, url: &str) -> String {
+        s.mint(1, "u".into(), "user".into(), vec!["music".into()], url, 60)
+    }
+
+    #[test]
+    fn exact_path_resolves_only_for_that_path() {
+        let s = store();
+        let t = mint(&s, "/api/x/stream");
+        assert!(s.resolve(&t, "/api/x/stream").is_some());
+        assert!(s.resolve(&t, "/api/x/stream-other").is_none());
+        assert!(s.resolve(&t, "/api/x/").is_none());
+    }
+
+    #[test]
+    fn trailing_slash_resolves_for_subpaths() {
+        let s = store();
+        let t = mint(&s, "/api/music/local/art/");
+        assert!(s.resolve(&t, "/api/music/local/art/42").is_some());
+        assert!(s.resolve(&t, "/api/music/local/art/9999").is_some());
+        assert!(s.resolve(&t, "/api/music/local/art/").is_some());
+    }
+
+    #[test]
+    fn trailing_slash_does_not_match_sibling_paths() {
+        let s = store();
+        let t = mint(&s, "/api/music/local/art/");
+        // Same prefix without the slash must not leak to neighbors.
+        assert!(s.resolve(&t, "/api/music/local/artist").is_none());
+        assert!(s.resolve(&t, "/api/music/local/art").is_none());
+        assert!(s.resolve(&t, "/api/other").is_none());
+    }
+
+    #[test]
+    fn query_string_stripped_for_match() {
+        let s = store();
+        let t = mint(&s, "/api/x/stream");
+        assert!(s.resolve(&t, "/api/x/stream?reconnect=1").is_some());
+    }
+
+    #[test]
+    fn unknown_token_is_none() {
+        let s = store();
+        assert!(s.resolve("st_nonsense", "/api/x").is_none());
     }
 }

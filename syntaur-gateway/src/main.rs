@@ -3818,13 +3818,30 @@ pub async fn resolve_principal_for_stream(
     {
         return Ok((resolve_principal(state, bearer).await?, false));
     }
-    // 3. Long-lived ?token= — accepted with DEPRECATED warning while the
-    // UI migrates to sdStreamQuery / Authorization header.
+    // 3. Long-lived ?token= — accepted by default with DEPRECATED warn,
+    // OR rejected outright when the operator has flipped the kill-switch
+    // SYNTAUR_REJECT_LEGACY_STREAM_TOKEN=1. The kill-switch is the
+    // structural sunset path: ship a release with `?token=` deprecated
+    // (default), watch the [auth/stream] DEPRECATED log lines drop to
+    // zero, then flip the switch on. The default flips to reject in a
+    // future release once we're confident every UI surface is on
+    // stream-token / Authorization header.
     if let Some(token) = params.get("token") {
+        let reject_legacy = std::env::var("SYNTAUR_REJECT_LEGACY_STREAM_TOKEN")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if reject_legacy {
+            log::warn!(
+                "[auth/stream] REJECTED legacy ?token= on stream endpoint \
+                 {request_path}: SYNTAUR_REJECT_LEGACY_STREAM_TOKEN is set."
+            );
+            return Err(axum::http::StatusCode::UNAUTHORIZED);
+        }
         log::warn!(
             "[auth/stream] DEPRECATED: long-lived ?token= on stream endpoint \
              {request_path}. Call POST /api/auth/stream-token first and \
-             pass ?stream_token= instead."
+             pass ?stream_token= instead. Set \
+             SYNTAUR_REJECT_LEGACY_STREAM_TOKEN=1 to force rejection."
         );
         return Ok((resolve_principal(state, token).await?, false));
     }
@@ -6733,6 +6750,47 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    // Loud-banner the unsandboxed-MCP escape hatch. The flag exists for
+    // operators on minimal images that genuinely cannot install bwrap;
+    // setting it on a normal install means MCP children spawn with full
+    // gateway privileges (read-only-rootfs sandbox bypassed). At minimum
+    // log an error on every startup + audit-log it so it's visible in
+    // /api/audit and shows up in any incident review.
+    let allow_unsandboxed_explicit = std::env::var("SYNTAUR_ALLOW_UNSANDBOXED_MCP")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let allow_unsandboxed_legacy = std::env::var("SYNTAUR_STRICT_MCP_SANDBOX")
+        .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+        .unwrap_or(false);
+    if allow_unsandboxed_explicit || allow_unsandboxed_legacy {
+        let which = if allow_unsandboxed_explicit { "SYNTAUR_ALLOW_UNSANDBOXED_MCP=1" } else { "SYNTAUR_STRICT_MCP_SANDBOX=0" };
+        log::error!("┌──────────────────────────────────────────────────────────────────");
+        log::error!("│ ⚠ DANGEROUS MODE: MCP sandboxing is DISABLED via {which}.");
+        log::error!("│   Every MCP server spawn runs with full gateway privileges —");
+        log::error!("│   no bwrap rootfs view, no PID/user namespace isolation.");
+        log::error!("│   Recommended only on minimal images that genuinely cannot");
+        log::error!("│   install bubblewrap. Unset the flag and `apt install bubblewrap`");
+        log::error!("│   to return to the fail-closed default.");
+        log::error!("└──────────────────────────────────────────────────────────────────");
+        // Audit-log the choice so /api/audit shows it in the post-incident
+        // timeline. Best-effort — audit failures here shouldn't block startup.
+        let db = state.db_path.clone();
+        let env_name = which.to_string();
+        tokio::spawn(async move {
+            let _ = tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
+                let conn = rusqlite::Connection::open(&db)?;
+                let now = chrono::Utc::now().timestamp();
+                let metadata = format!(r#"{{"env":"{}"}}"#, env_name);
+                conn.execute(
+                    "INSERT INTO audit_log (ts, user_id, action, target, metadata) \
+                     VALUES (?, NULL, 'gateway.start.unsandboxed_mcp', NULL, ?)",
+                    rusqlite::params![now, metadata],
+                )?;
+                Ok(())
+            }).await;
+        });
+    }
 
     // Library subsystem: ensure on-disk layout + start the consume-folder
     // watcher (no-op when no user has the feature enabled). The watcher

@@ -873,9 +873,15 @@ async function connectSession(tab) {
     });
     ro.observe(container);
 
-    // WebSocket
+    // WebSocket — mint a 60s URL-scoped stream token so the long-lived
+    // session token doesn't ride in the WS upgrade URL (proxy logs,
+    // browser history, referer leakage). sdStreamQuery falls back to
+    // ?token= during the migration window if the mint endpoint is
+    // unreachable.
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${proto}//${location.host}/ws/terminal/${tab.sessionId}?token=${encodeURIComponent(S.token)}`;
+    const __wsPath = `/ws/terminal/${tab.sessionId}`;
+    const __wsQs = await window.sdStreamQuery(__wsPath);
+    const wsUrl = `${proto}//${location.host}${__wsPath}${__wsQs}`;
     const ws = new WebSocket(wsUrl);
     ws.binaryType = 'arraybuffer';
     tab.ws = ws;

@@ -15,14 +15,17 @@ use serde_json::json;
 use crate::AppState;
 use crate::security::extract_session_token;
 
-/// GET /ws/terminal/{session_id}?token=...
+/// GET /ws/terminal/{session_id}?stream_token=…  (preferred)
+///                        ?token=…                (DEPRECATED, long-lived)
 ///
-/// Auth resolution order: `?token=` query param → `Authorization: Bearer …`
-/// → `syntaur_token` HttpOnly cookie. Cookie fallback matters here:
-/// post-cookie-auth migration, sessionStorage is empty for many users
-/// and the JS-side `S.token` is `""` — without the cookie path this
-/// 401s the WS upgrade and the terminal renders "Connection closed"
-/// the instant it opens.
+/// Auth resolution order:
+///   1. `?stream_token=` query param — short-lived URL-scoped, preferred
+///   2. `Authorization: Bearer` header — non-browser callers
+///   3. `syntaur_token` HttpOnly cookie — post-cookie-auth fallback so
+///      sessionStorage-empty browsers don't 401 on upgrade
+///   4. `?token=` query param — long-lived session token, DEPRECATED
+///      (logs every hit so we can spot any remaining UI call sites
+///      before sunsetting the path)
 pub async fn ws_terminal_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
@@ -30,10 +33,34 @@ pub async fn ws_terminal_handler(
     Query(params): Query<std::collections::HashMap<String, String>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let mut token = params.get("token").cloned().unwrap_or_default();
-    if token.is_empty() {
-        token = extract_session_token(&headers);
+    let request_path = format!("/ws/terminal/{session_id}");
+
+    // 1. Stream-token path first.
+    if let Some(st) = params.get("stream_token") {
+        match state.stream_tokens.resolve(st, &request_path) {
+            Some(_) => return ws.on_upgrade(move |socket| handle_terminal_ws(socket, state, session_id)).into_response(),
+            None => {
+                warn!("[ws/terminal] invalid/expired stream_token for {request_path}");
+                return axum::http::StatusCode::UNAUTHORIZED.into_response();
+            }
+        }
     }
+
+    // 2-3. Authorization header or cookie via existing helper.
+    let mut token = extract_session_token(&headers);
+
+    // 4. Legacy ?token= — accepted with deprecation warning.
+    if token.is_empty() {
+        if let Some(legacy) = params.get("token") {
+            warn!(
+                "[ws/terminal] DEPRECATED: long-lived ?token= on WebSocket \
+                 upgrade for {request_path}. Call POST /api/auth/stream-token \
+                 first and pass ?stream_token= instead."
+            );
+            token = legacy.clone();
+        }
+    }
+
     if token.is_empty() {
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     }

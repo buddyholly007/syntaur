@@ -146,7 +146,7 @@ let systemAgents = [];
 async function loadProfile() {
   let me = null;
   try {
-    me = await authFetch('/api/me?token=' + encodeURIComponent(token)).then(r => r.json());
+    me = await authFetch('/api/me').then(r => r.json());
   } catch(e) {
     me = null;
   }
@@ -226,14 +226,14 @@ async function doCreateAgent() {
 
 async function deleteAgent(id) {
   if (!confirm('Delete agent "' + id + '"?')) return;
-  await authFetch('/api/me/agents/' + id + '?token=' + encodeURIComponent(token), { method: 'DELETE' });
+  await authFetch('/api/me/agents/' + id, { method: 'DELETE' });
   loadProfile();
 }
 
 // ── Personality ──────────────────────────────────────────────────────────
 async function loadPersonality() {
   const aid = document.getElementById('personality-agent').value || 'main';
-  const data = await authFetch('/api/me/personality?token=' + encodeURIComponent(token) + '&agent_id=' + aid).then(r => r.json());
+  const data = await authFetch('/api/me/personality?agent_id=' + aid).then(r => r.json());
   const list = document.getElementById('personality-list');
   const docs = data.docs || [];
   if (docs.length === 0) {
@@ -279,7 +279,7 @@ async function uploadPersonalityFile(file) {
 }
 
 async function deletePersonalityDoc(id) {
-  await authFetch('/api/me/personality/' + id + '?token=' + encodeURIComponent(token), { method: 'DELETE' });
+  await authFetch('/api/me/personality/' + id, { method: 'DELETE' });
   loadPersonality();
 }
 

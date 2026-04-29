@@ -1837,13 +1837,21 @@ pub async fn emit_local_event(ev: LocalEvent) {
 pub async fn handle_local_events(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
+    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> axum::response::Response {
     use axum::response::sse::{Event, KeepAlive, Sse};
     use axum::response::IntoResponse;
 
-    let token = crate::security::bearer_from_headers(&headers);
-    if crate::resolve_principal_scoped(&state, token, "music").await.is_err() {
-        return (axum::http::StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    // SSE EventSource can't attach Authorization; accept stream_token,
+    // Bearer header, or legacy ?token= (deprecated) via the shared
+    // helper. Scope check enforced after.
+    let principal = match crate::resolve_principal_for_stream(&state, &headers, &params, uri.path()).await {
+        Ok((p, _via_stream)) => p,
+        Err(s) => return (s, "unauthorized").into_response(),
+    };
+    if principal.require_scope("music").is_err() {
+        return (axum::http::StatusCode::FORBIDDEN, "forbidden").into_response();
     }
 
     let tx = get_local_event_tx().await;

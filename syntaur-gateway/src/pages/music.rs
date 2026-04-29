@@ -1282,6 +1282,18 @@ const BODY_HTML: &str = r##"<!-- Module sub-bar — "Bridge live" indicator + re
 const MUSIC_JS: &str = r##"const token = sessionStorage.getItem('syntaur_token') || localStorage.getItem('syntaur_token') || '';
 // Client-side token-gate removed 2026-04-25 (module-reset bug fix).
 
+// One prefix-bound stream-token covers every /api/music/local/art/<id>
+// tile rendered on the page (lists, playlists, dashboard widgets).
+// renderTrackRow / renderPlaylistTrackRow read this string after each
+// list-fetch awaits ensureArtQs(). Cached + auto-refreshed by
+// sdPrefixStreamQuery; we just funnel its return value into a global
+// the sync renderers can splice into URLs.
+let _artQs = '';
+async function ensureArtQs() {
+  _artQs = await window.sdPrefixStreamQuery('/api/music/local/art/');
+  return _artQs;
+}
+
 // ── Syntaur Media Bridge (optional local companion) ──────────────────────
 // Runs on the user's desktop at 127.0.0.1:18790. When alive, we prefer it
 // for apple_music/spotify/tidal/youtube_music playback — avoids the
@@ -1629,7 +1641,7 @@ function loadSpotifySDK() {
 
 window.onSpotifyWebPlaybackSDKReady = function() {
   // Fetch our access token from the gateway (same-origin)
-  fetch('/api/music/spotify_token?token=' + token, { headers: { 'Authorization': 'Bearer ' + token } })
+  fetch('/api/music/spotify_token', { headers: { 'Authorization': 'Bearer ' + token } })
     .then(r => r.json())
     .then(data => {
       if (!data.access_token) {
@@ -2239,9 +2251,13 @@ function applyLocalDuck(active) {
   });
 }
 
-function startLocalEventStream() {
+async function startLocalEventStream() {
   if (localEventSource) return;
-  const url = '/api/music/local_events?token=' + encodeURIComponent(token);
+  // SSE EventSource can't set Authorization; mint a 60s URL-scoped
+  // stream token instead of leaking the long-lived session token.
+  const __ssePath = '/api/music/local_events';
+  const __sseQs = await window.sdStreamQuery(__ssePath);
+  const url = __ssePath + __sseQs;
   localEventSource = new EventSource(url);
   localEventSource.onopen = () => console.log('[local-sse] connected');
   localEventSource.onmessage = (e) => {
@@ -2395,8 +2411,8 @@ function closeFolderPicker() {
 }
 async function fsPickerLoad(path) {
   try {
-    const url = '/api/fs/list?token=' + encodeURIComponent(token) + (path ? '&path=' + encodeURIComponent(path) : '');
-    const r = await fetch(url);
+    const url = '/api/fs/list' + (path ? '?path=' + encodeURIComponent(path) : '');
+    const r = await authFetch(url);
     if (!r.ok) {
       const msg = r.status === 403 ? 'This folder is outside the allowed roots.' :
                   r.status === 404 ? 'Folder not found.' :
@@ -2501,8 +2517,7 @@ async function fsPickerSelectCurrent() {
 async function removeFolder(id) {
   if (!confirm('Remove this folder from the library? (Your files stay on disk.)')) return;
   try {
-    await fetch('/api/music/local/folders/' + id + '?token=' + encodeURIComponent(token),
-      { method: 'DELETE' });
+    await authFetch('/api/music/local/folders/' + id, { method: 'DELETE' });
     loadLocalFolders();
   } catch(e) { console.warn('[local-lib] remove failed', e); }
 }
@@ -2547,6 +2562,7 @@ async function loadLocalTracks() {
       const s = Math.round(ms / 1000);
       return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
     };
+    await ensureArtQs();
     el.innerHTML = '<p class="text-[10px] text-gray-600 px-1 pb-1">' + d.total + ' track(s)</p>'
       + tracks.map(renderTrackRow).join('');
   } catch(e) { console.warn('[local-lib] load tracks failed', e); el.innerHTML = ''; }
@@ -3458,7 +3474,7 @@ function renderTrackRow(t) {
   // Art is now a 44px tile with hover-revealed play icon and an
   // equalizer slot that only animates when this row is the playing
   // one (toggled via .is-playing class on the row by wireLocalAudioEvents).
-  const artBgStyle = t.has_art ? ' style="background-image:url(/api/music/local/art/' + t.id + ')"' : '';
+  const artBgStyle = t.has_art ? ' style="background-image:url(/api/music/local/art/' + t.id + _artQs + ')"' : '';
   const artClass = 'row-art' + (t.has_art ? '' : ' placeholder');
   const art = '<span class="' + artClass + '"' + artBgStyle + '>'
     + '<span class="row-art-play" aria-hidden="true">▶</span>'
@@ -3571,6 +3587,7 @@ async function loadFavoritesView() {
     const favs = (d.tracks || []).filter(t => t.favorite);
     const el = document.getElementById('local-lib-tracks');
     if (!favs.length) { el.innerHTML = '<p class="text-xs text-gray-500 italic p-4 text-center">Love a track to see it here. Tap ♡ on any row.</p>'; return; }
+    await ensureArtQs();
     el.innerHTML = '<p class="text-[10px] text-gray-600 px-1 pb-1">' + favs.length + ' favorite(s)</p>' + favs.map(renderTrackRow).join('');
   } catch(e) {}
 }
@@ -3583,6 +3600,7 @@ async function loadRecentView() {
     const el = document.getElementById('local-lib-tracks');
     const rows = d.tracks || [];
     if (!rows.length) { el.innerHTML = '<p class="text-xs text-gray-500 italic p-4 text-center">No plays logged yet.</p>'; return; }
+    await ensureArtQs();
     el.innerHTML = '<p class="text-[10px] text-gray-600 px-1 pb-1">' + rows.length + ' recently played</p>' + rows.map(renderTrackRow).join('');
   } catch(e) {}
 }
@@ -3593,9 +3611,10 @@ async function loadAlbumsView() {
     const el = document.getElementById('local-lib-tracks');
     const albums = d.albums || [];
     if (!albums.length) { el.innerHTML = '<p class="text-xs text-gray-500 italic p-4 text-center">No albums yet — scan a folder first.</p>'; return; }
+    await ensureArtQs();
     el.innerHTML = '<div class="alb-grid">' + albums.map(a => {
       const art = a.art_track_id
-        ? '<img src="/api/music/local/art/' + a.art_track_id + '" onerror="this.remove()">'
+        ? '<img src="/api/music/local/art/' + a.art_track_id + _artQs + '" onerror="this.remove()">'
         : '';
       return '<div class="alb-tile" onclick="openAlbum(' + JSON.stringify(a.album).replace(/"/g,'&quot;') + ',' + JSON.stringify(a.artist).replace(/"/g,'&quot;') + ')">'
         + '<div class="alb-art">' + art + '</div>'
@@ -3705,6 +3724,7 @@ async function openPlaylist(id, name, hostEl) {
       + '</div>'
       + '</div>';
     html += '<p class="text-[10px] text-gray-600 px-1 pb-1">' + tracks.length + ' track(s)</p>';
+    await ensureArtQs();
     html += tracks.map(t => renderPlaylistTrackRow(t, id)).join('');
     el.innerHTML = html;
 
@@ -3756,7 +3776,7 @@ function renderPlaylistTrackRow(t, plId) {
   const album = escapeHtml(t.album || '');
   const minutes = (ms) => { if (!ms) return ''; const s = Math.round(ms/1000); return Math.floor(s/60) + ':' + String(s%60).padStart(2,'0'); };
   const art = t.has_art
-    ? `<span class="row-art" style="background-image:url(/api/music/local/art/${t.id}?token=${encodeURIComponent(token)})"></span>`
+    ? `<span class="row-art" style="background-image:url(/api/music/local/art/${t.id}${_artQs})"></span>`
     : '<span class="row-art placeholder"></span>';
   return '<div class="flex items-center gap-2 px-2 py-1 rounded hover:bg-gray-900 group" style="user-select:none;-webkit-user-select:none;">'
     + art
@@ -3794,6 +3814,7 @@ async function runNLSearch() {
     const d = await r.json();
     const tracks = d.tracks || [];
     if (!tracks.length) { el.innerHTML = '<p class="text-xs text-gray-500 italic p-4 text-center">Couldn\'t match that query. Try different words.</p>'; return; }
+    await ensureArtQs();
     el.innerHTML = '<p class="text-[10px] text-gray-600 px-1 pb-1">' + tracks.length + ' match(es) for "' + escapeHtml(q) + '"</p>'
       + tracks.map(renderTrackRow).join('');
   } catch(e) {
@@ -3900,7 +3921,7 @@ async function openLocalDetails(trackId) {
   modal.style.display = 'flex';
   body.innerHTML = '<p class="text-xs text-gray-500 italic">Looking this up on MusicBrainz…</p>';
   try {
-    const r = await fetch('/api/music/local/lookup/' + trackId + '?token=' + encodeURIComponent(token));
+    const r = await authFetch('/api/music/local/lookup/' + trackId);
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const data = await r.json();
     localDetailsState.current = data.current || {};
@@ -3988,7 +4009,7 @@ async function fetchLyrics() {
   const panel = document.getElementById('local-lyrics-panel');
   if (panel) panel.innerHTML = '<p class="text-xs text-gray-500 italic">Looking up…</p>';
   try {
-    const r = await fetch('/api/music/local/lyrics/' + localDetailsState.trackId + '?token=' + encodeURIComponent(token));
+    const r = await authFetch('/api/music/local/lyrics/' + localDetailsState.trackId);
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json();
     if (panel) {
