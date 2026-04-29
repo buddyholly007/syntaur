@@ -16,8 +16,13 @@ Only the current release line receives security fixes:
 | < 0.5   | ❌ unsupported |
 
 <!-- syntaur-doc-claim applies_to_version || 0.6 -->
+**v0.6.1 highlights** (security patch):
+- Long-lived `?token=` on stream endpoints is now **REJECTED by default**. The flip moved up from v0.7.0 because pre-flip prod telemetry showed zero `[auth/stream] DEPRECATED` log hits in the 7-day window — every UI surface had already migrated. Operators with custom integrations that still pass `?token=` can opt back in for one release with `SYNTAUR_ALLOW_LEGACY_STREAM_TOKEN=1` (kept for emergency only; both env names removed in v0.8.0 along with the entire `?token=` code path). The legacy `SYNTAUR_REJECT_LEGACY_STREAM_TOKEN=1` env is honored as a no-op so operators who pre-flipped don't see a behavior change.
+- Non-Linux MCP startup banner — macOS / Windows now print a multi-line `warn!` block at gateway startup AND write a `gateway.start.mcp_sandbox_unavailable` `audit_log` row. Mirrors the visibility of the Linux opt-out (`SYNTAUR_ALLOW_UNSANDBOXED_MCP=1`) banner so non-Linux operators see the limitation immediately instead of waiting for the first MCP spawn warn line.
+- Landing page primary install command switched from `curl … | sh` to two-step `wget` then `sh install.sh`, with copy explaining why (read the script before running it). Three new `syntaur-doc-claim` markers pin the policy: a `code_no_match` for `install.sh | sh` and `code_grep` for the wget command + `sh install.sh`.
+
 **v0.6.0 highlights:**
-- Stream-token migration **complete** for every browser-side stream surface — music file/art streaming, `/api/music/local_events` SSE, `/ws/terminal` WebSocket, the chat / knowledge / scheduler SSE flows. Every UI path mints a 60-second URL-scoped token via `POST /api/auth/stream-token` (`window.sdStreamQuery` for single resources, `window.sdPrefixStreamQuery` for directory-scoped lists). Long-lived `?token=` is still accepted on stream endpoints with a `[auth/stream] DEPRECATED` warn log; flip `SYNTAUR_REJECT_LEGACY_STREAM_TOKEN=1` to make legacy a hard 401, and the default flips to reject in v0.7.0.
+- Stream-token migration **complete** for every browser-side stream surface — music file/art streaming, `/api/music/local_events` SSE, `/ws/terminal` WebSocket, the chat / knowledge / scheduler SSE flows. Every UI path mints a 60-second URL-scoped token via `POST /api/auth/stream-token` (`window.sdStreamQuery` for single resources, `window.sdPrefixStreamQuery` for directory-scoped lists). Long-lived `?token=` deprecation pipeline shipped here; default flipped to reject in v0.6.1 (see above).
 - `SYNTAUR_ALLOW_UNSANDBOXED_MCP=1` (and legacy `SYNTAUR_STRICT_MCP_SANDBOX=0`) now emits a multi-line startup `error!` banner AND writes a `gateway.start.unsandboxed_mcp` row to `audit_log` so the dangerous mode is visible in `/api/audit` and incident review.
 - Pages site is now a derived artifact of `landing/` — every push to main that touches the landing page redeploys via Actions, with a hard-fail check that `<!-- VERSION-BADGE -->` matches `/VERSION` before publish. Eliminates the stale-`gh-pages`-branch failure mode that pinned the public site at v0.4.
 - `operator-hardening.md` now agrees with `mcp_sandbox.rs`: Linux fail-closes when bubblewrap is missing (`/bin/false` MCP child), pinned with two `<!-- syntaur-doc-claim -->` markers so future code/doc drift fails the ship pipeline.
@@ -160,17 +165,18 @@ are known and being worked on:
   endpoints historically accepted `?token=<long-lived>` in the URL. That's
   the session token — if it leaks into browser history, proxy access logs,
   or a referrer header, an attacker gets up to 48 hours of session access.
-  **Mitigation complete (v0.6.0):** every browser-side stream endpoint —
-  music file/art streaming, /api/music/local_events SSE, /ws/terminal
-  WebSocket, the chat / knowledge / scheduler SSE flows — now uses
-  `POST /api/auth/stream-token` to mint a 60-second URL-scoped token via
-  `window.sdStreamQuery` (single resource) or `window.sdPrefixStreamQuery`
+  **Mitigation complete (v0.6.0) + default flipped (v0.6.1):** every browser-side
+  stream endpoint — music file/art streaming, /api/music/local_events SSE,
+  /ws/terminal WebSocket, the chat / knowledge / scheduler SSE flows —
+  uses `POST /api/auth/stream-token` to mint a 60-second URL-scoped token
+  via `window.sdStreamQuery` (single resource) or `window.sdPrefixStreamQuery`
   (a directory of art tiles). The `resolve_principal_for_stream` helper
-  is the single auth gate: stream_token → Authorization header →
-  legacy `?token=` (DEPRECATED with audit-log warn). Operators who've
-  watched their `[auth/stream] DEPRECATED` log lines hit zero can flip
-  `SYNTAUR_REJECT_LEGACY_STREAM_TOKEN=1` to make legacy `?token=` a hard
-  401. The default flips to reject in v0.7.0.
+  is the single auth gate: stream_token → Authorization header → legacy
+  `?token=` (now REJECTED by default with 401). Operators with custom
+  integrations that need the old accept-with-warn behavior for one
+  release can set `SYNTAUR_ALLOW_LEGACY_STREAM_TOKEN=1` — both env names
+  (allow + the legacy `SYNTAUR_REJECT_LEGACY_STREAM_TOKEN=1`) are
+  removed in v0.8.0 along with the entire `?token=` code path.
 - The `/v1/chat/completions` voice-relay endpoint requires an explicit
   `voice_secret` in config; unsetting it is allowed only when the gateway is
   bound to loopback.

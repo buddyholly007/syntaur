@@ -3818,30 +3818,40 @@ pub async fn resolve_principal_for_stream(
     {
         return Ok((resolve_principal(state, bearer).await?, false));
     }
-    // 3. Long-lived ?token= — accepted by default with DEPRECATED warn,
-    // OR rejected outright when the operator has flipped the kill-switch
-    // SYNTAUR_REJECT_LEGACY_STREAM_TOKEN=1. The kill-switch is the
-    // structural sunset path: ship a release with `?token=` deprecated
-    // (default), watch the [auth/stream] DEPRECATED log lines drop to
-    // zero, then flip the switch on. The default flips to reject in a
-    // future release once we're confident every UI surface is on
-    // stream-token / Authorization header.
+    // 3. Long-lived ?token= — REJECTED by default in v0.6.1+. The
+    // 2026-04-29 third external review (8.0 → 8.2/10) recommended
+    // flipping the default earlier than the originally promised v0.7.0
+    // because legacy `?token=` is the last remaining URL-leakage risk
+    // for session tokens. Pre-flip prod telemetry showed zero
+    // `[auth/stream] DEPRECATED` log hits in the 7-day window, so
+    // flipping in v0.6.1 ships zero observable client breakage.
+    //
+    // Emergency opt-back-in: SYNTAUR_ALLOW_LEGACY_STREAM_TOKEN=1
+    // restores the pre-v0.6.1 accept-with-warn behavior. The legacy
+    // SYNTAUR_REJECT_LEGACY_STREAM_TOKEN=1 env is honored as a no-op
+    // (since reject is now default) so operators who already set it
+    // don't see a behavior change. Both env names are scheduled to
+    // be removed in v0.8.0 along with the entire ?token= code path.
     if let Some(token) = params.get("token") {
-        let reject_legacy = std::env::var("SYNTAUR_REJECT_LEGACY_STREAM_TOKEN")
+        let allow_legacy = std::env::var("SYNTAUR_ALLOW_LEGACY_STREAM_TOKEN")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-        if reject_legacy {
+        if !allow_legacy {
             log::warn!(
                 "[auth/stream] REJECTED legacy ?token= on stream endpoint \
-                 {request_path}: SYNTAUR_REJECT_LEGACY_STREAM_TOKEN is set."
+                 {request_path}: long-lived URL tokens are reject-by-default \
+                 since v0.6.1. Call POST /api/auth/stream-token and pass \
+                 ?stream_token= instead, or set \
+                 SYNTAUR_ALLOW_LEGACY_STREAM_TOKEN=1 to opt back into the \
+                 pre-v0.6.1 accept-with-warn behavior."
             );
             return Err(axum::http::StatusCode::UNAUTHORIZED);
         }
         log::warn!(
             "[auth/stream] DEPRECATED: long-lived ?token= on stream endpoint \
-             {request_path}. Call POST /api/auth/stream-token first and \
-             pass ?stream_token= instead. Set \
-             SYNTAUR_REJECT_LEGACY_STREAM_TOKEN=1 to force rejection."
+             {request_path}. SYNTAUR_ALLOW_LEGACY_STREAM_TOKEN=1 is keeping \
+             this path alive — every hit here is an audit liability. Migrate \
+             the caller to POST /api/auth/stream-token + ?stream_token=."
         );
         return Ok((resolve_principal(state, token).await?, false));
     }

@@ -49,13 +49,27 @@ pub async fn ws_terminal_handler(
     // 2-3. Authorization header or cookie via existing helper.
     let mut token = extract_session_token(&headers);
 
-    // 4. Legacy ?token= — accepted with deprecation warning.
+    // 4. Legacy ?token= — REJECTED by default in v0.6.1+ (same flip as
+    // resolve_principal_for_stream). Operators who still need the old
+    // accept-with-warn behavior can set SYNTAUR_ALLOW_LEGACY_STREAM_TOKEN=1.
     if token.is_empty() {
         if let Some(legacy) = params.get("token") {
+            let allow_legacy = std::env::var("SYNTAUR_ALLOW_LEGACY_STREAM_TOKEN")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            if !allow_legacy {
+                warn!(
+                    "[ws/terminal] REJECTED legacy ?token= on WebSocket upgrade \
+                     for {request_path}: long-lived URL tokens are reject-by-default \
+                     since v0.6.1. Call POST /api/auth/stream-token and pass \
+                     ?stream_token= instead."
+                );
+                return axum::http::StatusCode::UNAUTHORIZED.into_response();
+            }
             warn!(
                 "[ws/terminal] DEPRECATED: long-lived ?token= on WebSocket \
-                 upgrade for {request_path}. Call POST /api/auth/stream-token \
-                 first and pass ?stream_token= instead."
+                 upgrade for {request_path}. SYNTAUR_ALLOW_LEGACY_STREAM_TOKEN=1 \
+                 is keeping this path alive — migrate to ?stream_token=."
             );
             token = legacy.clone();
         }
