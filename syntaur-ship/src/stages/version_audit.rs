@@ -35,24 +35,50 @@ pub fn run(ctx: &StageContext) -> Result<()> {
 
     results.push(("prod /health version".into(), health_version(&cfg.health_url)));
     results.push(("prod landing VERSION-BADGE".into(), landing_badge(cfg)));
-    results.push(("GitHub Releases latest tag".into(), github_latest_tag()));
+    // GH Releases gets a 5-min poll-with-backoff because the release-sign
+    // workflow takes 4-8 min to build + sign + publish on tag push. If
+    // VERSION just bumped and the operator used `syntaur-ship release`,
+    // the workflow is in-flight when this stage starts. Without the
+    // poll, every release deploy would log a spurious warning.
+    results.push(("GitHub Releases latest tag".into(), github_latest_tag_polled(expected, 5)));
     results.push(("install.sh raw (from GH main)".into(), install_sh_version()));
 
     let mut mismatches = Vec::new();
+    let mut gh_drift = false;
     for (name, got) in &results {
         match got {
             Ok(v) if v == expected => log::info!("  {name:<32} = {v} ✓"),
             Ok(v) => {
                 log::warn!("  {name:<32} = {v} (expected {expected})");
+                if name == "GitHub Releases latest tag" {
+                    gh_drift = true;
+                }
                 mismatches.push(format!("{name}: got {v}, expected {expected}"));
             }
             Err(e) => log::warn!("  {name:<32} probe failed: {e}"),
         }
     }
 
+    if gh_drift {
+        // Hard fail when GH Releases lags VERSION. The 2026-04-29 second
+        // review caught the public version-story split (site says
+        // v0.6.0, GH "latest" said v0.5.9 in the reviewer's cache) — the
+        // ship pipeline must refuse to declare a deploy clean while
+        // that gap is real, even after the 5-min poll. Operators who
+        // bumped VERSION without running `syntaur-ship release` get a
+        // pointer at the right command.
+        anyhow::bail!(
+            "version-audit ✗ GitHub Releases 'latest' did not catch up to v{expected} after \
+             5-min poll. Either the release-sign.yml workflow failed (check GH Actions), or \
+             VERSION was bumped without running `syntaur-ship release v{expected}` to tag + \
+             push. Other drift:\n  {}",
+            mismatches.join("\n  ")
+        );
+    }
+
     if !mismatches.is_empty() {
         log::warn!(
-            "[version-audit] ⚠ {} surface(s) drift from v{expected} — deploy already landed, fix at source + redeploy:\n  {}",
+            "[version-audit] ⚠ {} surface(s) drift from v{expected} — deploy landed, fix at source + redeploy:\n  {}",
             mismatches.len(),
             mismatches.join("\n  ")
         );
@@ -60,6 +86,36 @@ pub fn run(ctx: &StageContext) -> Result<()> {
         log::info!("[version-audit] ✓ all user-visible surfaces report v{expected}");
     }
     Ok(())
+}
+
+/// Poll GH Releases up to `max_minutes` for the tag to match `expected`.
+/// release-sign.yml takes 4-8 min on tag push, so a fresh `release`
+/// subcommand needs grace before we declare drift real.
+fn github_latest_tag_polled(expected: &str, max_minutes: u64) -> Result<String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(max_minutes * 60);
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        let got = github_latest_tag();
+        match &got {
+            Ok(v) if v == expected => return got,
+            Ok(v) => {
+                if std::time::Instant::now() >= deadline {
+                    return Ok(v.clone());
+                }
+                log::info!(
+                    "  GitHub Releases latest tag      = {v} (waiting for v{expected}, attempt {attempt})"
+                );
+            }
+            Err(e) => {
+                if std::time::Instant::now() >= deadline {
+                    anyhow::bail!("gh api kept failing through deadline: {e}");
+                }
+                log::info!("  GitHub Releases latest tag      probe failed (attempt {attempt}): {e}");
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(30));
+    }
 }
 
 fn read_file_string(p: &std::path::Path) -> Result<String> {
