@@ -57,7 +57,7 @@ exclude = [
 # crates/syntaur-matter, crates/syntaur-matter-ble, crates/syntaur-zwave,
 # mcp-server-filesystem-rs, syntaur-hwscan, syntaur-license-server, syntaur-mod)
 # keep their own versions so they can be released on their own cadence.
-version = "0.5.1"
+version = "0.5.2"
 edition = "2021"
 license = "MIT"
 authors = ["Sean"]
