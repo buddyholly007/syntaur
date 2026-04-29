@@ -1,6 +1,26 @@
 # Syntaur threat model
 
 Last updated 2026-04-29. Applies to v0.5.x.
+<!-- syntaur-doc-claim applies_to_version || 0.5 -->
+<!-- syntaur-doc-claim code_grep || syntaur-gateway/src/security.rs || if !host_is_private(&req_host) -->
+<!-- syntaur-doc-claim code_grep || syntaur-gateway/src/mcp_sandbox.rs || SYNTAUR_ALLOW_UNSANDBOXED_MCP -->
+<!-- syntaur-doc-claim code_no_match || syntaur-gateway/src/mcp_sandbox.rs || SYNTAUR_STRICT_MCP_SANDBOX=1 flips fail-open to fail-closed -->
+
+> Tagged-claim audit. The HTML comments above are read by `syntaur-ship`'s
+> `doc_audit` stage, which asserts each claim against the live workspace
+> before every build. The audit also runs through the example syntax
+> below; claims inside fenced code blocks (``` ... ```) are skipped as
+> documentation, not assertions. To add a new claim:
+>
+> ```text
+> <!-- syntaur-doc-claim applies_to_version || PREFIX -->
+> <!-- syntaur-doc-claim code_grep        || FILE || NEEDLE -->
+> <!-- syntaur-doc-claim code_no_match    || FILE || NEEDLE -->
+> ```
+>
+> Keep `NEEDLE` small + unique. If the surrounding code is refactored
+> such that the substring no longer appears, the audit fails — that's
+> correct: revalidate the doc and the code together.
 
 ## Assets (what an attacker wants)
 

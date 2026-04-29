@@ -262,6 +262,13 @@ fn run_full_inner(cfg: &Config, opts: &RunOptions, ctx: &StageContext) -> Result
     // public version surfaces disagree. Cheap local file reads; no
     // network. Fix at source + re-run rather than shipping drift.
     stages::version_sweep::run(ctx)?;
+    // Phase 3b: doc-claim audit — walks docs/*.md for HTML-comment
+    // tagged claims (applies_to_version / code_grep / code_no_match)
+    // and verifies each against the live workspace. Catches the
+    // doc-rot class that the 2026-04-29 security review surfaced
+    // (threat-model.md claiming v0.4.x while VERSION was 0.5.9, etc.).
+    // Cheap local file reads; no network.
+    stages::doc_audit::run(ctx)?;
     // Backup-freshness gate: refuse to deploy if no independent
     // TrueNAS snapshot in the last 24h. Catches silently-broken
     // backup/replication tasks. Override via SYNTAUR_SHIP_ALLOW_STALE_BACKUP=1.
