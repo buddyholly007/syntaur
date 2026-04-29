@@ -1,0 +1,55 @@
+name: Deploy landing page to Pages
+
+# Publishes `landing/` to GitHub Pages on every push to main. Pages
+# becomes a derived artifact of the source tree, so it can never drift
+# from the canonical `landing/index.html` (which version-check.yml
+# already gates against /VERSION). Replaces the legacy gh-pages branch
+# that had to be hand-edited and went stale at v0.4 while the code
+# shipped v0.5.x.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'landing/**'
+      - '.github/workflows/pages-deploy.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify VERSION-BADGE is in sync
+        # Belt-and-suspenders: version-check.yml already gates this on
+        # PR. Re-checking here means if someone bypasses CI on main,
+        # Pages still refuses to publish a drifted badge.
+        run: |
+          V=$(tr -d '[:space:]' < VERSION)
+          if ! grep -qE "<!-- VERSION-BADGE -->v$V<!-- /VERSION-BADGE -->" landing/index.html; then
+            echo "::error file=landing/index.html::VERSION-BADGE != v$V; refusing to deploy stale page"
+            exit 1
+          fi
+          echo "Publishing landing/ at v$V"
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: landing/
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
