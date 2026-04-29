@@ -576,7 +576,18 @@ pub async fn security_headers(req: Request, next: Next) -> Response {
 
     // API responses must never be cached — they commonly contain tokens,
     // PII, or user-scoped data that would bleed across sessions otherwise.
-    if path.starts_with("/api/") || path.starts_with("/v1/") {
+    //
+    // HTML responses must also never be cached. Every Syntaur page inlines
+    // its own JS in a `<script>` block, so caching the page caches the JS.
+    // WebKitGTK in the wry viewer has aggressive default caching: when the
+    // viewer reopens, it serves the cached `/chat`/`/scheduler`/etc. HTML
+    // including stale JS from before any deploy. That's how voice mode
+    // kept regressing post-fix on 2026-04-28..29 — the fix landed in v0.5.1
+    // but Sean's viewer kept executing pre-fix JS that didn't add the
+    // `Authorization: Bearer` header on `/api/voice/transcribe` POSTs,
+    // hitting CSRF rejection on every voice attempt. `no-store` here forces
+    // WebKit to revalidate against the gateway on every navigation.
+    if path.starts_with("/api/") || path.starts_with("/v1/") || is_html {
         insert(headers, "cache-control", "no-store, private");
     }
 
