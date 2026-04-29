@@ -106,6 +106,13 @@ researchers who:
 <!-- syntaur-doc-claim code_no_match || SECURITY.md || next release cycle -->
 <!-- syntaur-doc-claim code_no_match || SECURITY.md || Until signatures are live -->
 <!-- syntaur-doc-claim code_grep || .github/workflows/release-sign.yml || cosign-installer -->
+<!-- Landing page must NOT recommend a pipe-to-shell installer. Two-step  -->
+<!-- (wget then sh install.sh) lets the operator read the script before  -->
+<!-- running it. A 2026-04-29 reviewer noted the prior `curl ... | sh`   -->
+<!-- recommendation was a regression — pin against its return.           -->
+<!-- syntaur-doc-claim code_no_match || landing/index.html || install.sh | sh -->
+<!-- syntaur-doc-claim code_grep    || landing/index.html || wget https://github.com/buddyholly007/syntaur/releases/latest/download/install.sh -->
+<!-- syntaur-doc-claim code_grep    || landing/index.html || sh install.sh -->
 
 Every GitHub Release is signed with Sigstore cosign via the
 [`release-sign.yml`](.github/workflows/release-sign.yml) workflow under the

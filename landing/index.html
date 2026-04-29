@@ -49,13 +49,12 @@
     <a href="https://github.com/buddyholly007/syntaur/releases/latest" class="bg-oc-600 hover:bg-oc-700 text-white px-8 py-3.5 rounded-xl font-semibold text-lg transition-colors inline-flex items-center justify-center gap-2">
       Download Syntaur
     </a>
-    <div class="bg-gray-800 border border-gray-700 rounded-xl px-6 py-3.5 font-mono text-sm text-gray-300 select-all">
-      curl -sSL https://github.com/buddyholly007/syntaur/releases/latest/download/install.sh | sh
-    </div>
+    <div class="bg-gray-800 border border-gray-700 rounded-xl px-6 py-3.5 font-mono text-xs text-gray-300 select-all whitespace-pre leading-relaxed text-left">wget https://github.com/buddyholly007/syntaur/releases/latest/download/install.sh
+sh install.sh</div>
   </div>
   <p class="text-xs text-gray-600 mt-4">Linux, macOS, Windows · Free tier included · No account required</p>
   <p class="text-xs text-gray-500 mt-2 max-w-xl mx-auto">
-    Every release is <a href="https://github.com/buddyholly007/syntaur/blob/main/.github/workflows/release-sign.yml" class="underline hover:text-gray-300">signed with Sigstore cosign</a> via GitHub Actions OIDC and ships a <code class="text-gray-400">checksums.txt</code> with SHA-256s for every binary. <code class="text-gray-400">install.sh</code> verifies both and aborts on mismatch — see <a href="https://github.com/buddyholly007/syntaur/blob/main/SECURITY.md#release-integrity-verification" class="underline hover:text-gray-300">SECURITY.md</a>.
+    Two-step on purpose — <code class="text-gray-400">wget</code> the script so you can read it before running it. The script then verifies every binary against a <a href="https://github.com/buddyholly007/syntaur/blob/main/.github/workflows/release-sign.yml" class="underline hover:text-gray-300">Sigstore-cosign signature</a> and SHA-256 checksum and aborts on mismatch — see <a href="https://github.com/buddyholly007/syntaur/blob/main/SECURITY.md#release-integrity-verification" class="underline hover:text-gray-300">SECURITY.md</a>.
   </p>
 </section>
 

@@ -6792,6 +6792,42 @@ async fn main() {
         });
     }
 
+    // Non-Linux platforms have no bubblewrap backend yet, so MCP fail-closed
+    // is unenforceable. Banner this at startup and audit-log so an operator
+    // running Syntaur on macOS / Windows sees the limitation without having
+    // to wait for the first MCP spawn warn line. The 2026-04-29 second
+    // review (8.0/10) called this out as still being a quiet limitation;
+    // making it a startup banner + audit row matches the visibility
+    // promises we already make for the Linux opt-out path.
+    #[cfg(not(target_os = "linux"))]
+    {
+        let os = if cfg!(target_os = "macos") { "macOS" }
+                 else if cfg!(target_os = "windows") { "Windows" }
+                 else { std::env::consts::OS };
+        log::warn!("┌──────────────────────────────────────────────────────────────────");
+        log::warn!("│ ⚠ MCP SANDBOX UNAVAILABLE on {os}.");
+        log::warn!("│   The bubblewrap backend exists only on Linux today, so MCP");
+        log::warn!("│   children spawn with full gateway privileges. Avoid running");
+        log::warn!("│   untrusted MCP servers on this host. Track Path B sandboxing");
+        log::warn!("│   for {os} in docs/security/threat-model.md.");
+        log::warn!("└──────────────────────────────────────────────────────────────────");
+        let db = state.db_path.clone();
+        let os_name = os.to_string();
+        tokio::spawn(async move {
+            let _ = tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
+                let conn = rusqlite::Connection::open(&db)?;
+                let now = chrono::Utc::now().timestamp();
+                let metadata = format!(r#"{{"os":"{}"}}"#, os_name);
+                conn.execute(
+                    "INSERT INTO audit_log (ts, user_id, action, target, metadata) \
+                     VALUES (?, NULL, 'gateway.start.mcp_sandbox_unavailable', NULL, ?)",
+                    rusqlite::params![now, metadata],
+                )?;
+                Ok(())
+            }).await;
+        });
+    }
+
     // Library subsystem: ensure on-disk layout + start the consume-folder
     // watcher (no-op when no user has the feature enabled). The watcher
     // polls every 30s for files dropped into `_consume/`.
