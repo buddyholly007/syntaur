@@ -109,12 +109,18 @@ impl TradingService {
             .unwrap_or_default()
             .as_secs() as i64;
         let bots: &[(&str, &str, bool)] = &[
-            // (name, state file, expected_24_7)
+            // (name, heartbeat file, expected_24_7)
+            // crypto: oms_state.json bumps on every 60s heartbeat cycle.
+            // kalshi: audit_log.jsonl appends per-market (~70s); predictions
+            //         only rewrite per ~2h cycle so they look stale even
+            //         when the bot is healthy.
+            // equity bots: bot_state.json only mutates on signal/fill, so
+            //         "stale" is gated by us_market_open_now() (4h thresh).
             ("stock_bot", "stock-bot/bot_state.json", false),
             ("crypto_bot", "crypto-bot/oms_state.json", true),
             ("leveraged_bot", "leveraged-bot/leveraged_oms_state.json", false),
             ("options_bot", "options-bot/bot_state.json", false),
-            ("kalshi_bot", "kalshi/predictions.json", true),
+            ("kalshi_bot", "kalshi/audit_log.jsonl", true),
         ];
         let mut out = Vec::new();
         for (name, rel, full_time) in bots {
