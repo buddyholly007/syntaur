@@ -557,16 +557,33 @@ pub async fn security_headers(req: Request, next: Next) -> Response {
     // `X-Forwarded-Proto: https` on inbound requests, which is our
     // authoritative signal for "TLS was on the wire." Belt-and-suspenders:
     // also refuse HSTS when the Host header resolves to a private address.
-    let forwarded_proto = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let is_tls_fronted = forwarded_proto.eq_ignore_ascii_case("https");
+    // HSTS emission rule: emit on every response whose Host header is
+    // NOT a LAN / loopback / link-local address. Rationale:
+    //
+    //   - The original gate also required `X-Forwarded-Proto: https`,
+    //     but Tailscale Serve in `--tls-terminated-tcp=443` mode is an
+    //     L4 forwarder that doesn't propagate that header, so prod
+    //     never emitted HSTS in practice. Adding an env-var-gated
+    //     "assume TLS fronted" knob would require a `docker compose up`
+    //     recreate (not a `docker restart`) to take effect, which is
+    //     more footgun than fix.
+    //
+    //   - Host-based gating gets the prod case right (Tailscale-Serve
+    //     hostname is non-private → HSTS emits) and explicitly guards
+    //     the danger zone (LAN-IP / 127.0.0.1 / link-local → no HSTS,
+    //     so plain-HTTP dev / direct-IP access never triggers a year-
+    //     long browser pin).
+    //
+    //   - The remaining theoretical foot-gun is "operator binds a
+    //     public-looking hostname over plain HTTP." HSTS-pinning on
+    //     such a misconfiguration is the *lesser* harm: it forces TLS
+    //     to be wired before the gateway is reachable again, instead
+    //     of leaving an exposed plain-HTTP endpoint live.
     let host = headers
         .get("host")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if is_tls_fronted && !host_is_private(host) {
+    if !host_is_private(host) {
         insert(
             headers,
             "strict-transport-security",

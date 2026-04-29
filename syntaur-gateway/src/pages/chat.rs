@@ -576,10 +576,14 @@ async function send(msg) {
       }
       responseEl.innerHTML = replyHtml;
     } else {
-      // Stream events via SSE. EventSource can't set Authorization headers
-      // so token stays in the query for SSE only; /api/* is cache-control:
-      // no-store and SSE URLs aren't surfaced in the history bar.
-      const evtSource = new EventSource(`/api/message/${turnId}/stream?token=${token}`);
+      // Stream events via SSE. EventSource can't set Authorization headers,
+      // so we mint a 60s URL-scoped stream token instead of leaking the
+      // long-lived session token in the URL. sdStreamQuery falls back to
+      // ?token= if the mint endpoint is unreachable (server still accepts
+      // both during the migration window).
+      const __streamPath = `/api/message/${turnId}/stream`;
+      const __qs = await window.sdStreamQuery(__streamPath);
+      const evtSource = new EventSource(__streamPath + __qs);
       let toolsUsed = [];
 
       // Split the response container into a persistent thought line + a
@@ -1703,8 +1707,12 @@ async function handleVmTranscript(e) {
     if (turnId) {
       // Register the turn so the supervisor can clean up unconditionally.
       vmCurrentTurnId = turnId;
-      // SSE: Authorization header not supported by EventSource, token stays in query.
-      const evtSource = new EventSource(`/api/message/${turnId}/stream?token=${token}`);
+      // SSE: Authorization header not supported by EventSource. Mint a
+      // 60s URL-scoped stream token via sdStreamQuery instead of leaking
+      // the long-lived session token.
+      const __vmStreamPath = `/api/message/${turnId}/stream`;
+      const __vmQs = await window.sdStreamQuery(__vmStreamPath);
+      const evtSource = new EventSource(__vmStreamPath + __vmQs);
       vmCurrentSse = evtSource;
       vmTelemetry('turn_start', { turn_id: turnId });
       // Hard watchdog — if the SSE never reaches 'complete' (LLM hang, dropped stream,

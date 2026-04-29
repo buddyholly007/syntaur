@@ -1083,6 +1083,43 @@ const TOP_BAR_SCRIPT: &str = r##"
 
     return { register, restore, discard, flushAll };
   })();
+
+  // Stream-token helper. Browser stream APIs (EventSource, WebSocket,
+  // <audio src>) can't attach Authorization headers, so historical code
+  // appended `?token=<long-lived>` to the URL. That long-lived token has
+  // a 48h lifespan; logging it into proxy access logs / browser history /
+  // referer leak windows of the same length.
+  //
+  // sdStreamQuery() returns a query string that auths the call with a
+  // 60-second URL-scoped stream token instead. Falls back to the long-
+  // lived token if the mint endpoint is unreachable, since the server
+  // still accepts both during the migration window. Use:
+  //
+  //   const qs = await sdStreamQuery('/api/x/stream');
+  //   new EventSource('/api/x/stream' + qs);
+  //
+  // The path passed in MUST match the endpoint about to be opened — the
+  // token is bound to the URL prefix and won't validate against a
+  // different path.
+  window.sdStreamQuery = async function(streamPath, ttlSecs) {
+    const tok = (function(){
+      try { return localStorage.getItem('syntaur_token') || sessionStorage.getItem('syntaur_token') || ''; }
+      catch (_) { return ''; }
+    })();
+    if (!tok) return '';
+    try {
+      const r = await fetch('/api/auth/stream-token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + tok },
+        body: JSON.stringify({ url: streamPath, ttl_secs: ttlSecs || 60 })
+      });
+      if (r.ok) {
+        const j = await r.json();
+        if (j && j.stream_token) return '?stream_token=' + encodeURIComponent(j.stream_token);
+      }
+    } catch (_) { /* fall through to legacy fallback */ }
+    return '?token=' + encodeURIComponent(tok);
+  };
 })();
 </script>
 "##;

@@ -950,7 +950,15 @@ const BODY_HTML: &str = r##"<div class="max-w-2xl mx-auto px-4 py-8">
       <div class="space-y-4">
         <div>
           <label class="label">Dashboard password</label>
-          <input type="password" id="admin-pass" class="input" placeholder="Choose a strong password">
+          <input type="password" id="admin-pass" class="input" placeholder="Choose a strong password" oninput="updatePasswordStrength()">
+          <!-- Pure advisory; setup never blocks on these signals. -->
+          <div id="pass-strength-row" class="mt-2 hidden">
+            <div class="h-1 rounded-full bg-gray-700 overflow-hidden">
+              <div id="pass-strength-bar" class="h-full transition-all" style="width:0%"></div>
+            </div>
+            <p id="pass-strength-label" class="text-xs mt-1 text-gray-500"></p>
+            <p id="pass-hibp" class="text-xs mt-1 text-gray-500"></p>
+          </div>
         </div>
         <div>
           <label class="label">Confirm password</label>
@@ -2091,6 +2099,80 @@ function buildSummary() {
     <div class="flex justify-between"><span>Telegram</span><span class="text-white">${telegramEnabled ? 'Paired' : 'Off'}</span></div>
     <div class="flex justify-between"><span>Modules</span><span class="text-white">${enabledMods} enabled</span></div>
   `;
+}
+
+// Password strength advisory — pure UX hint, never blocks submission.
+// Per feedback/security_no_user_friction: no min-length increase, no
+// complexity rules, no rotation. Just show the user what we see, let
+// them decide.
+let _hibpTimer = null;
+function updatePasswordStrength() {
+  const inp = document.getElementById('admin-pass');
+  const row = document.getElementById('pass-strength-row');
+  const bar = document.getElementById('pass-strength-bar');
+  const lab = document.getElementById('pass-strength-label');
+  const hibp = document.getElementById('pass-hibp');
+  const v = inp.value;
+  if (!v) { row.classList.add('hidden'); return; }
+  row.classList.remove('hidden');
+
+  // Local strength heuristic: length + character-class diversity. Not a
+  // gate — it's a hint that maps to a 0-100 colored bar.
+  let score = 0;
+  if (v.length >= 8)  score += 20;
+  if (v.length >= 12) score += 20;
+  if (v.length >= 16) score += 15;
+  if (/[a-z]/.test(v)) score += 10;
+  if (/[A-Z]/.test(v)) score += 10;
+  if (/[0-9]/.test(v)) score += 10;
+  if (/[^a-zA-Z0-9]/.test(v)) score += 15;
+  if (score > 100) score = 100;
+
+  let color, msg;
+  if (score < 30)      { color = '#ef4444'; msg = 'Weak — short or low-variety. A passphrase of 4+ random words is stronger and easier to remember.'; }
+  else if (score < 60) { color = '#f59e0b'; msg = 'OK — consider making it longer or mixing in punctuation.'; }
+  else if (score < 80) { color = '#10b981'; msg = 'Good.'; }
+  else                 { color = '#10b981'; msg = 'Strong.'; }
+  bar.style.width = score + '%';
+  bar.style.background = color;
+  lab.textContent = msg;
+  lab.style.color = color;
+
+  // Optional HIBP k-anonymity check — sends only the first 5 hex chars
+  // of the SHA-1 hash, never the password. https://haveibeenpwned.com/API/v3#PwnedPasswords
+  // Fully advisory: a hit shows "appeared in N known breaches" but
+  // doesn't disable the button.
+  hibp.textContent = '';
+  if (v.length < 8) return;
+  if (_hibpTimer) clearTimeout(_hibpTimer);
+  _hibpTimer = setTimeout(async () => {
+    try {
+      const buf = new TextEncoder().encode(v);
+      const digest = await crypto.subtle.digest('SHA-1', buf);
+      const hex = Array.from(new Uint8Array(digest))
+        .map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
+      const prefix = hex.slice(0, 5), suffix = hex.slice(5);
+      const r = await fetch('https://api.pwnedpasswords.com/range/' + prefix, {
+        headers: { 'Add-Padding': 'true' }
+      });
+      if (!r.ok) return;
+      const text = await r.text();
+      const line = text.split('\n').find(l => l.split(':')[0].trim().toUpperCase() === suffix);
+      if (line) {
+        const count = parseInt(line.split(':')[1], 10) || 0;
+        if (count > 0) {
+          hibp.textContent = `⚠️ This password appeared in ${count.toLocaleString()} known data breaches. It still works, but consider picking a different one.`;
+          hibp.style.color = '#f59e0b';
+        }
+      } else {
+        hibp.textContent = 'Not found in known breach corpora.';
+        hibp.style.color = '#10b981';
+      }
+    } catch (e) {
+      // Offline / DNS-blocked / network refused — silently skip. Never
+      // surface as an error since the check is purely optional.
+    }
+  }, 600);
 }
 
 // Finish

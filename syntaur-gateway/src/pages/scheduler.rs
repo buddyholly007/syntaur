@@ -3654,9 +3654,9 @@ const PAGE_JS: &str = r##"
         return;
       }
 
-      // SSE: EventSource can't set headers, so token goes in the URL
-      // query string for this endpoint only. /api/* is cache-control:
-      // no-store and SSE URLs aren't surfaced in history.
+      // SSE: EventSource can't set headers. Mint a 60s URL-scoped stream
+      // token via sdStreamQuery instead of leaking the long-lived session
+      // token in the URL.
       //
       // Important: the server emits untyped `data:` frames. The JSON
       // payload's `event` field names the type. `onmessage` fires for
@@ -3664,7 +3664,9 @@ const PAGE_JS: &str = r##"
       // ...)` does NOT work here — it only fires for frames with an
       // explicit `event: thinking` line, which the server doesn't emit.
       // This pattern is copied from /chat's own SSE handler.
-      const es = new EventSource(`/api/message/${turnId}/stream?token=${encodeURIComponent(TOKEN)}`);
+      const __thadStreamPath = `/api/message/${turnId}/stream`;
+      const __thadQs = await window.sdStreamQuery(__thadStreamPath);
+      const es = new EventSource(__thadStreamPath + __thadQs);
       let gotComplete = false;
       // Track whether Thaddeus used any tool this turn that may have
       // mutated calendar / list / habit / todo state. On `complete` we

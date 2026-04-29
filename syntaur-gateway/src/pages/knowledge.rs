@@ -1391,14 +1391,15 @@ async function launchResearch(clarification_answers) {
   loadResearchRecent();
 }
 
-function streamResearchSession(sessionId) {
+async function streamResearchSession(sessionId) {
   if (researchActiveStream) { try { researchActiveStream.close(); } catch(e) {} }
-  // EventSource's native API can't set Authorization headers; token in query
-  // is the standard workaround. SSE URLs aren't sent as navigations so they
-  // don't hit the browser history bar, and `cache-control: no-store` on
-  // /api/* (set by security::security_headers) keeps them out of disk cache.
-  const url = `/api/research/${encodeURIComponent(sessionId)}/stream?token=${encodeURIComponent(token)}`;
-  const es = new EventSource(url);
+  // EventSource's native API can't set Authorization headers. Mint a 60s
+  // URL-scoped stream token via sdStreamQuery instead of leaking the
+  // long-lived session token; falls back to ?token= during the migration
+  // window if the mint endpoint is unreachable.
+  const path = `/api/research/${encodeURIComponent(sessionId)}/stream`;
+  const qs = await window.sdStreamQuery(path);
+  const es = new EventSource(path + qs);
   researchActiveStream = es;
   es.onmessage = (ev) => {
     try {
