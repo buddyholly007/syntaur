@@ -8,12 +8,14 @@ Security reports are welcome — please read this page before filing.
 
 Only the current release line receives security fixes:
 
+<!-- syntaur-doc-claim applies_to_version || 0.6 -->
 | Version | Supported |
 | ------- | --------- |
 | 0.6.x   | ✅ fixes land here |
 | 0.5.x   | ⚠️ 60-day maintenance window from 0.6.0 release date; critical fixes only |
 | < 0.5   | ❌ unsupported |
 
+<!-- syntaur-doc-claim applies_to_version || 0.6 -->
 **v0.6.0 highlights:**
 - Stream-token migration **complete** for every browser-side stream surface — music file/art streaming, `/api/music/local_events` SSE, `/ws/terminal` WebSocket, the chat / knowledge / scheduler SSE flows. Every UI path mints a 60-second URL-scoped token via `POST /api/auth/stream-token` (`window.sdStreamQuery` for single resources, `window.sdPrefixStreamQuery` for directory-scoped lists). Long-lived `?token=` is still accepted on stream endpoints with a `[auth/stream] DEPRECATED` warn log; flip `SYNTAUR_REJECT_LEGACY_STREAM_TOKEN=1` to make legacy a hard 401, and the default flips to reject in v0.7.0.
 - `SYNTAUR_ALLOW_UNSANDBOXED_MCP=1` (and legacy `SYNTAUR_STRICT_MCP_SANDBOX=0`) now emits a multi-line startup `error!` banner AND writes a `gateway.start.unsandboxed_mcp` row to `audit_log` so the dangerous mode is visible in `/api/audit` and incident review.
@@ -95,6 +97,15 @@ researchers who:
 - Do not degrade the availability of production systems they are testing against
 
 ## Release-integrity verification
+
+<!-- Pin against future-tense drift. The pre-v0.6.0 version of this section -->
+<!-- promised signing was "rolling out over the next release cycle" — kept -->
+<!-- saying that for two minor versions after signing went live. Forbid the -->
+<!-- giveaway phrases so the audit fails before the doc ships stale again. -->
+<!-- syntaur-doc-claim code_no_match || SECURITY.md || rolling out -->
+<!-- syntaur-doc-claim code_no_match || SECURITY.md || next release cycle -->
+<!-- syntaur-doc-claim code_no_match || SECURITY.md || Until signatures are live -->
+<!-- syntaur-doc-claim code_grep || .github/workflows/release-sign.yml || cosign-installer -->
 
 Every GitHub Release is signed with Sigstore cosign via the
 [`release-sign.yml`](.github/workflows/release-sign.yml) workflow under the

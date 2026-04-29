@@ -57,15 +57,36 @@ struct Located {
 
 pub fn run(ctx: &StageContext) -> Result<()> {
     let ws = &ctx.cfg.workspace;
+
+    // Audit roots: `docs/` recursively, plus a curated set of top-level
+    // .md files. SECURITY.md / README.md / CHANGELOG.md live at the
+    // workspace root and historically slipped past audit because the
+    // walker only descended docs/. The 2026-04-29 second review caught
+    // SECURITY.md drift (stale supported-versions table, "rolling out"
+    // signing language a release after signing went live) — pinning
+    // those sections requires the audit to actually read the file.
+    let mut roots: Vec<PathBuf> = Vec::new();
     let docs_root = ws.join("docs");
-    if !docs_root.exists() {
-        log::info!("[doc-audit] docs/ missing, skipping");
+    if docs_root.exists() {
+        roots.push(docs_root);
+    }
+    for top in &["SECURITY.md", "README.md", "CHANGELOG.md"] {
+        let p = ws.join(top);
+        if p.exists() {
+            roots.push(p);
+        }
+    }
+    if roots.is_empty() {
+        log::info!("[doc-audit] no docs/ or top-level .md to scan, skipping");
         return Ok(());
     }
-    log::info!("[doc-audit] scanning docs/ for tagged claims");
+    log::info!(
+        "[doc-audit] scanning {} root(s) for tagged claims",
+        roots.len()
+    );
 
     let mut found: Vec<Located> = Vec::new();
-    walk_md(&docs_root, &mut |path, content| {
+    let mut visit = |path: &Path, content: &str| {
         // Track fenced code blocks. Lines inside ``` ... ``` are
         // documentation examples, not real claims — the audit skips
         // them so docs can show users how to write a claim without
@@ -92,7 +113,16 @@ pub fn run(ctx: &StageContext) -> Result<()> {
                 });
             }
         }
-    })?;
+    };
+    for root in &roots {
+        if root.is_dir() {
+            walk_md(root, &mut visit)?;
+        } else {
+            let text = std::fs::read_to_string(root)
+                .with_context(|| root.display().to_string())?;
+            visit(root, &text);
+        }
+    }
 
     if found.is_empty() {
         log::info!("[doc-audit] no tagged claims found — skipping");
@@ -169,7 +199,23 @@ fn verify(claim: &Claim, version: &str, ws: &Path) -> std::result::Result<(), St
             let abs = ws.join(file);
             let text = std::fs::read_to_string(&abs)
                 .map_err(|e| format!("read {}: {e}", abs.display()))?;
-            if !text.contains(needle.as_str()) {
+            // Exclude HTML-comment lines from the corpus. Markers like
+            // `<!-- syntaur-doc-claim … -->` and explanatory comments
+            // sitting next to them embed the forbidden needle by
+            // necessity ("forbid the phrase 'rolling out'"), and would
+            // always trip the audit if scanned. Forbidden phrases
+            // mislead readers only when they appear in real prose, so
+            // restricting the search to non-comment lines is the
+            // intended scope.
+            let corpus: String = text
+                .lines()
+                .filter(|l| {
+                    let t = l.trim_start();
+                    !t.starts_with("<!--")
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !corpus.contains(needle.as_str()) {
                 Ok(())
             } else {
                 Err(format!(
@@ -313,5 +359,54 @@ mod tests {
             Path::new("/tmp"),
         );
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn code_no_match_excludes_marker_lines() {
+        // A doc that asserts forbidden phrases against itself MUST not
+        // fail just because the marker line spells the phrase.
+        let dir = std::env::temp_dir().join(format!(
+            "syntaur-ship-doc-audit-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("self_referential.md");
+        std::fs::write(
+            &path,
+            "# Doc\n\
+             <!-- syntaur-doc-claim code_no_match || self_referential.md || rolling out -->\n\
+             <!-- explanatory: pre-v0.6 said 'rolling out' — forbid it -->\n\
+             Real prose with no forbidden phrase.\n",
+        )
+        .unwrap();
+        let r = verify(
+            &Claim::CodeNoMatch {
+                file: PathBuf::from("self_referential.md"),
+                needle: "rolling out".into(),
+            },
+            "0.6.0",
+            &dir,
+        );
+        assert!(r.is_ok(), "unexpected failure: {:?}", r);
+
+        // But if the phrase appears in real prose, it MUST fail.
+        std::fs::write(
+            &path,
+            "# Doc\n\
+             <!-- syntaur-doc-claim code_no_match || self_referential.md || rolling out -->\n\
+             Signing is rolling out next quarter.\n",
+        )
+        .unwrap();
+        let r = verify(
+            &Claim::CodeNoMatch {
+                file: PathBuf::from("self_referential.md"),
+                needle: "rolling out".into(),
+            },
+            "0.6.0",
+            &dir,
+        );
+        assert!(r.is_err(), "should have caught real prose violation");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
