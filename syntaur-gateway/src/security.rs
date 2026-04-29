@@ -448,6 +448,18 @@ mod hsts_tests {
 /// XSS-via-injected-inline vector.
 pub async fn security_headers(req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
+    // Capture the Host header from the REQUEST before `next.run(req)`
+    // consumes it. The earlier version read Host from the response
+    // headers, which never has one, so the HSTS gate either silently
+    // never emitted (when paired with an X-Forwarded-Proto check that
+    // was equally empty-string-broken) or emitted unconditionally
+    // (after the proto check was removed). Capturing here is the fix.
+    let req_host = req
+        .headers()
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_default();
     let mut res = next.run(req).await;
 
     // Decide upfront whether this response carries HTML. If so, buffer
@@ -579,11 +591,7 @@ pub async fn security_headers(req: Request, next: Next) -> Response {
     //     such a misconfiguration is the *lesser* harm: it forces TLS
     //     to be wired before the gateway is reachable again, instead
     //     of leaving an exposed plain-HTTP endpoint live.
-    let host = headers
-        .get("host")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if !host_is_private(host) {
+    if !host_is_private(&req_host) {
         insert(
             headers,
             "strict-transport-security",
