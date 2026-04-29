@@ -327,7 +327,13 @@ impl DashboardWidget for NowPlayingWidget {
     setText('title', s.title || ('Track ' + s.trackId));
     setText('artist', s.artist || '');
     setText('album', s.album || '');
-    setArt('/api/music/local/art/' + s.trackId);
+    // Mint a 60s stream token before painting art so the URL doesn't
+    // need auth-on-cookie (which the gateway doesn't have).
+    const __artPath = '/api/music/local/art/' + s.trackId;
+    window.sdStreamQuery(__artPath).then(qs => {{
+      const cur = readLocal();
+      if (cur && cur.trackId === s.trackId) setArt(__artPath + qs);
+    }});
     const playing = !!(ga && !ga.paused && ga.currentTime > 0);
     setPlayIcon(playing);
     if (ga && ga.duration) {{

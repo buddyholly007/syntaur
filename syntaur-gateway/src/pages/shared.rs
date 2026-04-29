@@ -723,13 +723,17 @@ const TOP_BAR_SCRIPT: &str = r##"
   // the SAME global-audio element via playLocalTrack — when the user
   // clicks a track there, playLocalTrack stops the resumed audio
   // cleanly before starting the new one.
-  function resumeSavedMusic() {
+  async function resumeSavedMusic() {
     if (!ga) return;
     const s = readMusic();
     if (!s || !s.trackId) return;
     try {
       suspendPersist = true;
-      ga.src = '/api/music/local/file/' + s.trackId + '?token=' + encodeURIComponent(token());
+      // Stream token instead of long-lived ?token= so the audio src
+      // doesn't leak the session token into history / proxy logs.
+      const __filePath = '/api/music/local/file/' + s.trackId;
+      const __fileQs = await window.sdStreamQuery(__filePath);
+      ga.src = __filePath + __fileQs;
       ga.load();
       ga.addEventListener('loadedmetadata', function once() {
         ga.removeEventListener('loadedmetadata', once);
@@ -803,13 +807,30 @@ const TOP_BAR_SCRIPT: &str = r##"
   function syncMediaSession(s) {
     if (!('mediaSession' in navigator) || !s || !s.trackId) return;
     try {
+      // Set metadata immediately without artwork so OS-level controls
+      // light up; mint a stream token in the background and re-set
+      // metadata once the token is in hand. Avoids leaking the session
+      // token into MediaSession state / lock-screen URL bar.
       navigator.mediaSession.metadata = new MediaMetadata({
         title: s.title || ('Track ' + s.trackId),
         artist: s.artist || '',
         album: s.album || '',
-        artwork: [
-          { src: '/api/music/local/art/' + s.trackId, sizes: '512x512', type: 'image/jpeg' },
-        ],
+        artwork: [],
+      });
+      const __artPath = '/api/music/local/art/' + s.trackId;
+      window.sdStreamQuery(__artPath).then(qs => {
+        try {
+          const cur = readMusic();
+          if (!cur || cur.trackId !== s.trackId) return;
+          navigator.mediaSession.metadata = new MediaMetadata({
+            title: s.title || ('Track ' + s.trackId),
+            artist: s.artist || '',
+            album: s.album || '',
+            artwork: [
+              { src: __artPath + qs, sizes: '512x512', type: 'image/jpeg' },
+            ],
+          });
+        } catch (_e) {}
       });
       navigator.mediaSession.playbackState = (ga && !ga.paused) ? 'playing' : 'paused';
       navigator.mediaSession.setActionHandler('play',  () => { if (ga && ga.paused) ga.play(); });
@@ -857,9 +878,16 @@ const TOP_BAR_SCRIPT: &str = r##"
       const cover = pill.querySelector('.smp-cover');
       const art = document.getElementById('smp-art');
       if (cover && art) {
-        const url = '/api/music/local/art/' + s.trackId;
-        art.style.backgroundImage = "url('" + url + "')";
-        cover.classList.add('has-art');
+        // Bare /art URL has no auth header path (background-image),
+        // so mint a stream token before painting. Until then leave
+        // the cover hidden — better than a broken-image flash.
+        const __artPath = '/api/music/local/art/' + s.trackId;
+        window.sdStreamQuery(__artPath).then(qs => {
+          const cur = readMusic();
+          if (!cur || cur.trackId !== s.trackId) return;
+          art.style.backgroundImage = "url('" + __artPath + qs + "')";
+          cover.classList.add('has-art');
+        });
       }
       const pb = document.getElementById('smp-play');
       if (pb) {

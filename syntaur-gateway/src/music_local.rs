@@ -580,14 +580,21 @@ pub async fn list_tracks(
 /// GET /api/music/local/file/:id — stream track audio bytes.
 /// Supports HTTP Range so HTML5 `<audio>` can scrub. Ownership gate:
 /// the track's user_id must match the authenticated caller.
+///
+/// Auth: prefers `?stream_token=` (60s URL-scoped, minted via
+/// /api/auth/stream-token). Also accepts `Authorization: Bearer` for
+/// non-browser clients and legacy `?token=` (long-lived, deprecated —
+/// emits a warn log on every hit so we can finish the migration).
 pub async fn stream_file(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     AxumPath(id): AxumPath<i64>,
-    Query(q): Query<TokenQuery>,
+    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
+    Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Response<Body>, StatusCode> {
-    let token = extract_token(&headers, q.token.as_deref());
-    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
+    let (principal, _via_stream) =
+        crate::resolve_principal_for_stream(&state, &headers, &params, uri.path()).await?;
+    principal.require_scope("music")?;
     let uid = principal.user_id();
 
     let db = state.db_path.clone();
@@ -703,14 +710,18 @@ const FOLDER_ART_NAMES: &[&str] = &[
     "artwork.jpg","artwork.jpeg","artwork.png",
 ];
 
+/// GET /api/music/local/art/:id — cover-art bytes for an `<img src=...>`
+/// tag. Same auth surface as `stream_file`.
 pub async fn serve_art(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     AxumPath(id): AxumPath<i64>,
-    Query(q): Query<TokenQuery>,
+    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
+    Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Response<Body>, StatusCode> {
-    let token = extract_token(&headers, q.token.as_deref());
-    let principal = crate::resolve_principal_scoped(&state, &token, "music").await?;
+    let (principal, _via_stream) =
+        crate::resolve_principal_for_stream(&state, &headers, &params, uri.path()).await?;
+    principal.require_scope("music")?;
     let uid = principal.user_id();
 
     let db = state.db_path.clone();

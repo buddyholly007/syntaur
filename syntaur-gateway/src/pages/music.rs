@@ -2608,9 +2608,16 @@ function playLocalTrack(trackId, title, artist, extra) {
   try { a.removeAttribute('src'); } catch(e) {}
   try { a.load(); } catch(e) {}
   setLocalNowPlaying(title, artist, trackId, row);
-  setTimeout(() => {
+  setTimeout(async () => {
     if (myGen !== localPlayGeneration) return;
-    a.src = '/api/music/local/file/' + trackId + '?token=' + encodeURIComponent(token);
+    // 60s URL-scoped stream token instead of leaking the long-lived
+    // session token in the audio element's src (browser history /
+    // proxy access logs / referer leakage). sdStreamQuery falls back
+    // to ?token= if /api/auth/stream-token can't be reached.
+    const __filePath = '/api/music/local/file/' + trackId;
+    const __fileQs = await window.sdStreamQuery(__filePath);
+    if (myGen !== localPlayGeneration) return;
+    a.src = __filePath + __fileQs;
     a.load();
     const p = a.play();
     if (p && typeof p.catch === 'function') {
@@ -2720,11 +2727,20 @@ function setLocalNowPlaying(title, artist, trackId, extra) {
   // Album art — always try the /art endpoint; server handles the three-
   // tier fallback (embedded → folder.jpg → MB Cover Art Archive). If
   // the response is a 404 we fall back to the music-note placeholder.
+  // Mint a stream token async so the long-lived session token never
+  // lands in the <img src> URL.
   const artEl = document.getElementById('np-art');
   if (artEl) {
-    const url = '/api/music/local/art/' + trackId + '?token=' + encodeURIComponent(token);
-    artEl.innerHTML = '<img src="' + url + '" style="width:100%;height:100%;object-fit:cover;display:block;" onerror="this.remove();">'
-      + '<svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.25" class="text-gray-700" style="position:absolute;z-index:-1"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>';
+    const __artPath = '/api/music/local/art/' + trackId;
+    const __artGen = trackId;
+    artEl.innerHTML = '<svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.25" class="text-gray-700"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>';
+    window.sdStreamQuery(__artPath).then(qs => {
+      // Track may have changed during the mint round-trip; only paint
+      // if we're still on the same one.
+      if (localPlaybackCurrent !== __artGen) return;
+      artEl.innerHTML = '<img src="' + __artPath + qs + '" style="width:100%;height:100%;object-fit:cover;display:block;" onerror="this.remove();">'
+        + '<svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.25" class="text-gray-700" style="position:absolute;z-index:-1"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>';
+    });
   }
 
   // Love button reflects the track's favorite state.
@@ -2740,11 +2756,26 @@ function setLocalNowPlaying(title, artist, trackId, extra) {
   // screens all work.
   if ('mediaSession' in navigator) {
     try {
+      // MediaMetadata artwork hit's the OS-level lock screen; same
+      // leak class as <img src>. Mint a stream token before exposing
+      // the URL.
+      const __mdArtPath = '/api/music/local/art/' + trackId;
+      window.sdStreamQuery(__mdArtPath).then(qs => {
+        try {
+          if (localPlaybackCurrent !== trackId) return;
+          navigator.mediaSession.metadata = new MediaMetadata({
+            title: title || 'Track ' + trackId,
+            artist: artist || '',
+            album: row.album || '',
+            artwork: [{ src: __mdArtPath + qs, sizes: '512x512', type: 'image/jpeg' }],
+          });
+        } catch (_e) {}
+      });
       navigator.mediaSession.metadata = new MediaMetadata({
         title: title || 'Track ' + trackId,
         artist: artist || '',
         album: row.album || '',
-        artwork: [{ src: '/api/music/local/art/' + trackId + '?token=' + encodeURIComponent(token), sizes: '512x512', type: 'image/jpeg' }],
+        artwork: [],
       });
       navigator.mediaSession.playbackState = 'playing';
       navigator.mediaSession.setActionHandler('play', () => { const a = document.getElementById('global-audio'); if (a && a.paused) a.play(); });
@@ -3710,7 +3741,7 @@ async function openPlaylist(id, name, hostEl) {
       btn.addEventListener('click', async (ev) => {
         ev.stopPropagation();
         const tid = parseInt(btn.dataset.trackId, 10);
-        const r = await fetch(`/api/music/local/playlists/${id}/tracks/${tid}?token=${encodeURIComponent(token)}`, { method: 'DELETE' });
+        const r = await authFetch(`/api/music/local/playlists/${id}/tracks/${tid}`, { method: 'DELETE' });
         if (r.ok) openPlaylist(id, name, el);
       });
     });

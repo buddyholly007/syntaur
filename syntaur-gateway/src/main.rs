@@ -2766,12 +2766,13 @@ async fn handle_message_start(
 
 async fn handle_message_stream(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     uri: axum::http::Uri,
     axum::extract::Path(id): axum::extract::Path<String>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<axum::response::Response, axum::http::StatusCode> {
     use axum::response::IntoResponse;
-    let (_principal, _via_stream) = resolve_principal_for_stream(&state, &params, uri.path()).await?;
+    let (_principal, _via_stream) = resolve_principal_for_stream(&state, &headers, &params, uri.path()).await?;
     let receiver = {
         let map = state.message_events.lock().unwrap();
         match map.get(&id) {
@@ -3769,20 +3770,27 @@ async fn handle_auth_stream_token(
     })))
 }
 
-/// Helper for streaming handlers: resolve either a long-lived session
-/// token or a stream_token. Stream-token path is preferred — logs a
-/// DEPRECATED warning when a session token is presented via `?token=`
-/// to a stream endpoint.
+/// Helper for streaming handlers: resolve a Principal from any of three
+/// auth-on-the-URL/header forms a stream client might send. Auth order:
+///   1. `?stream_token=` query — short-lived URL-scoped, preferred
+///   2. `Authorization: Bearer` header — fine for fetch() callers
+///   3. `?token=` query — long-lived session token in URL, DEPRECATED
+///
+/// The third path stays accepted for now so the UI can migrate handler-
+/// by-handler. Each hit emits a `[auth/stream] DEPRECATED` log so we
+/// can spot any remaining UI call sites in production logs and finish
+/// the migration before sunsetting the path.
 ///
 /// Returns `(Principal, via_stream_token)`. The bool lets the caller
-/// decide whether to also run CSRF / origin checks (stream tokens are
-/// exempt — they're already URL-scoped + short-lived).
+/// skip CSRF / origin checks for stream-token requests (those are
+/// already URL-scoped + short-lived).
 pub async fn resolve_principal_for_stream(
     state: &AppState,
+    headers: &axum::http::HeaderMap,
     params: &HashMap<String, String>,
     request_path: &str,
 ) -> Result<(auth::Principal, bool), axum::http::StatusCode> {
-    // Stream-token path first.
+    // 1. Stream-token path — preferred.
     if let Some(st) = params.get("stream_token") {
         if let Some(t) = state.stream_tokens.resolve(st, request_path) {
             return Ok((
@@ -3800,7 +3808,18 @@ pub async fn resolve_principal_for_stream(
         );
         return Err(axum::http::StatusCode::UNAUTHORIZED);
     }
-    // Long-lived token path with DEPRECATED warning.
+    // 2. Authorization: Bearer — fine when the caller can attach headers
+    // (fetch / curl / non-browser clients). Doesn't leak into proxy logs
+    // or browser history the way ?token= does, so no deprecation here.
+    if let Some(bearer) = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer ").or_else(|| s.strip_prefix("bearer ")))
+    {
+        return Ok((resolve_principal(state, bearer).await?, false));
+    }
+    // 3. Long-lived ?token= — accepted with DEPRECATED warning while the
+    // UI migrates to sdStreamQuery / Authorization header.
     if let Some(token) = params.get("token") {
         log::warn!(
             "[auth/stream] DEPRECATED: long-lived ?token= on stream endpoint \
