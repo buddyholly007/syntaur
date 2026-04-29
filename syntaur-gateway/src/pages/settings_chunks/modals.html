@@ -1230,12 +1230,26 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 }
 
-// Load on tab-switch to sync
-const _origShowTab = showTab;
-showTab = function(name) {
-  _origShowTab(name);
-  if (name === 'sync' && !syncProviders.length) loadSyncProviders();
-};
+// Load on tab-switch to sync. Deferred to DOMContentLoaded so the
+// later <script> tag containing legacy/page.js (which declares
+// `function showTab(...){}`) has executed by the time this override
+// runs. queueMicrotask was attempted but microtasks drain before the
+// next script-tag runs, so the override fired before showTab existed
+// and threw ReferenceError. modals.html is rendered as raw HTML
+// before legacy/page.js (settings.rs:58 vs settings.rs:75).
+function _settingsApplyShowTabOverride() {
+  if (typeof showTab !== 'function') return;  // page.js never loaded
+  const _origShowTab = showTab;
+  showTab = function(name) {
+    _origShowTab(name);
+    if (name === 'sync' && !syncProviders.length) loadSyncProviders();
+  };
+}
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', _settingsApplyShowTabOverride);
+} else {
+  _settingsApplyShowTabOverride();
+}
 
 // Save LLM provider via API
 async function saveProvider(name, baseUrl, apiKey, apiType, modelId) {
