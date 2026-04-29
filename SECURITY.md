@@ -10,17 +10,22 @@ Only the current release line receives security fixes:
 
 | Version | Supported |
 | ------- | --------- |
-| 0.5.x   | ✅ fixes land here |
-| 0.4.x   | ⚠️ 60-day maintenance window from 0.5.0 release date; critical fixes only |
-| < 0.4   | ❌ unsupported |
+| 0.6.x   | ✅ fixes land here |
+| 0.5.x   | ⚠️ 60-day maintenance window from 0.6.0 release date; critical fixes only |
+| < 0.5   | ❌ unsupported |
 
-**v0.5.0 highlights:**
+**v0.6.0 highlights:**
+- Stream-token migration **complete** for every browser-side stream surface — music file/art streaming, `/api/music/local_events` SSE, `/ws/terminal` WebSocket, the chat / knowledge / scheduler SSE flows. Every UI path mints a 60-second URL-scoped token via `POST /api/auth/stream-token` (`window.sdStreamQuery` for single resources, `window.sdPrefixStreamQuery` for directory-scoped lists). Long-lived `?token=` is still accepted on stream endpoints with a `[auth/stream] DEPRECATED` warn log; flip `SYNTAUR_REJECT_LEGACY_STREAM_TOKEN=1` to make legacy a hard 401, and the default flips to reject in v0.7.0.
+- `SYNTAUR_ALLOW_UNSANDBOXED_MCP=1` (and legacy `SYNTAUR_STRICT_MCP_SANDBOX=0`) now emits a multi-line startup `error!` banner AND writes a `gateway.start.unsandboxed_mcp` row to `audit_log` so the dangerous mode is visible in `/api/audit` and incident review.
+- Pages site is now a derived artifact of `landing/` — every push to main that touches the landing page redeploys via Actions, with a hard-fail check that `<!-- VERSION-BADGE -->` matches `/VERSION` before publish. Eliminates the stale-`gh-pages`-branch failure mode that pinned the public site at v0.4.
+- `operator-hardening.md` now agrees with `mcp_sandbox.rs`: Linux fail-closes when bubblewrap is missing (`/bin/false` MCP child), pinned with two `<!-- syntaur-doc-claim -->` markers so future code/doc drift fails the ship pipeline.
+
+**v0.5.0 highlights** (still load-bearing):
 - `LegacyAdmin` principal + every `gateway.auth.token` / `gateway.auth.password` config-file login path deleted. Every login now hits a real user row.
 - Handler-layer defense-in-depth for the first-run bootstrap endpoints — non-loopback peers are rejected at the handler *and* the middleware, not just the middleware.
-- Bearer-header migration completed: all JSON handlers read the token from `Authorization: Bearer …` via `security::bearer_from_headers`. The request body and URL query no longer carry session tokens on JSON endpoints.
-- Stream-token mint/validate pipeline (`POST /api/auth/stream-token`, `resolve_principal_for_stream`) is live for SSE/WS/media endpoints; the message-stream SSE is the first converted reference. Remaining long-lived-`?token=` handlers migrate incrementally in 0.5.x — see Known gaps below.
+- Bearer-header migration completed: all JSON handlers read the token from `Authorization: Bearer …` via `security::bearer_from_headers`.
 
-When 0.6 ships, 0.5 moves to the same 60-day maintenance window.
+When 0.7 ships, 0.6 moves to the same 60-day maintenance window.
 
 ## Reporting a vulnerability
 
@@ -91,13 +96,33 @@ researchers who:
 
 ## Release-integrity verification
 
-Release artifacts will be signed with Sigstore cosign (rolling out over the
-next release cycle). Until signatures are live, verify by SHA-256 against the
-`checksums.txt` file attached to each GitHub Release.
+Every GitHub Release is signed with Sigstore cosign via the
+[`release-sign.yml`](.github/workflows/release-sign.yml) workflow under the
+GitHub Actions OIDC identity. Each release ships:
 
-Install paths that skip verification (e.g. `curl … | sh` without `--verify`)
-are clearly labelled as developer-convenience only. The documented default is
-the verified path.
+- All platform binaries (gateway / viewer / isolation-tests, ×3 for Linux-x86_64
+  / macOS-arm64 / Windows-x86_64).
+- A `.cosign.bundle` for every binary.
+- A single `checksums.txt` listing SHA-256 of every binary, plus its own
+  `.cosign.bundle`.
+
+To verify a downloaded binary:
+
+```bash
+# 1. Verify the cosign signature is from the release-sign workflow on this repo.
+cosign verify-blob \
+  --certificate-identity-regexp "^https://github.com/buddyholly007/syntaur/" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --bundle syntaur-gateway-linux-x86_64.cosign.bundle \
+  syntaur-gateway-linux-x86_64
+
+# 2. Cross-check against checksums.txt (also cosign-signed).
+sha256sum -c <(grep syntaur-gateway-linux-x86_64 checksums.txt)
+```
+
+`install.sh` does the cosign + checksum verification automatically and aborts
+on mismatch. Install paths that skip verification (e.g. `curl … | sh` without
+`--verify`) are clearly labelled as developer-convenience only.
 
 ## Operator resources
 

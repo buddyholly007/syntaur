@@ -54,7 +54,9 @@
     </div>
   </div>
   <p class="text-xs text-gray-600 mt-4">Linux, macOS, Windows · Free tier included · No account required</p>
-  <p class="text-xs text-gray-700 mt-1">Verified install (checksums + cosign): see <a href="https://github.com/buddyholly007/syntaur#quick-start" class="underline hover:text-gray-500">README</a></p>
+  <p class="text-xs text-gray-500 mt-2 max-w-xl mx-auto">
+    Every release is <a href="https://github.com/buddyholly007/syntaur/blob/main/.github/workflows/release-sign.yml" class="underline hover:text-gray-300">signed with Sigstore cosign</a> via GitHub Actions OIDC and ships a <code class="text-gray-400">checksums.txt</code> with SHA-256s for every binary. <code class="text-gray-400">install.sh</code> verifies both and aborts on mismatch — see <a href="https://github.com/buddyholly007/syntaur/blob/main/SECURITY.md#release-integrity-verification" class="underline hover:text-gray-300">SECURITY.md</a>.
+  </p>
 </section>
 
 <!-- What you get -->
