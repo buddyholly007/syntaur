@@ -1449,18 +1449,40 @@ async function startVoiceMode() {
     setTimeout(() => { clearInterval(check); r(); }, 2000);
   });
 
-  // Start mic with VAD
-  const constraints = { sampleRate: 16000, channelCount: 1,
-    echoCancellation: true, noiseSuppression: true, autoGainControl: true };
-  if (selectedMicId) constraints.deviceId = { exact: selectedMicId };
-
-  try {
-    vmStream = await navigator.mediaDevices.getUserMedia({ audio: constraints });
-  } catch {
+  // Start mic with VAD. WebKitGTK is stricter than Chrome about sampleRate +
+  // channelCount constraints — both as exact values fail OverconstrainedError on
+  // some Linux mic stacks. Use a three-tier fallback: ideal-with-deviceId →
+  // ideal-no-deviceId → bare `{audio:true}`. AudioContext({sampleRate:16000})
+  // below handles the actual resampling so the GUM rate doesn't matter.
+  const baseAudio = {
+    echoCancellation: true, noiseSuppression: true, autoGainControl: true,
+    sampleRate: { ideal: 16000 }, channelCount: { ideal: 1 },
+  };
+  const withDevice = selectedMicId ? { ...baseAudio, deviceId: { exact: selectedMicId } } : baseAudio;
+  const tries = [
+    ['exact-device', { audio: withDevice }],
+    ['ideal-no-device', { audio: baseAudio }],
+    ['bare', { audio: true }],
+  ];
+  let lastErr = null;
+  for (const [tag, c] of tries) {
     try {
-      delete constraints.deviceId;
-      vmStream = await navigator.mediaDevices.getUserMedia({ audio: constraints });
-    } catch { stopVoiceMode(); return; }
+      vmStream = await navigator.mediaDevices.getUserMedia(c);
+      lastErr = null;
+      break;
+    } catch (e) {
+      lastErr = e;
+      console.warn('[voice-mode] getUserMedia', tag, 'failed:', e && (e.name + ': ' + e.message));
+      vmTelemetry('gum_fail', { tier: tag, name: e && e.name, msg: e && (e.message || '').slice(0, 120) });
+    }
+  }
+  if (lastErr) {
+    const hint = lastErr.name === 'NotAllowedError' ? 'Mic permission was blocked — allow it in browser settings'
+      : lastErr.name === 'NotFoundError' ? 'No mic found — check the device dropdown'
+      : 'Mic could not be opened';
+    vmShowError('mic-error', hint, lastErr.name + ': ' + (lastErr.message || ''));
+    stopVoiceMode();
+    return;
   }
 
   vmAudioCtx = new AudioContext({ sampleRate: 16000 });
