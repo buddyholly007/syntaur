@@ -149,6 +149,10 @@ default = []
 # Operators with a local BT adapter or ESPHome proxies enable this to
 # get the host scanner + native-API ingest paths.
 ble-host = ["dep:btleplug", "dep:esphome-native-api"]
+# Sean's personal deployment only — compiles in private personas
+# (Peter) so they don't ship in distributed builds. Combine with
+# SYNTAUR_DEPLOY_MODE=local at runtime.
+personal-peter = []
 
 [dev-dependencies]
 # Used by #[cfg(test)] modules (crypto, schema migrations, etc.).

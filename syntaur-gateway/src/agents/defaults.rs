@@ -81,6 +81,10 @@ fn compose_prompt(template: &str, include_protocol: bool) -> String {
 
 // ── System prompt templates ──────────────────────────────────────────────────
 
+// Sean's personal-deployment persona — gated behind `personal-peter` cargo
+// feature. Public/distributed builds compile WITHOUT this feature, so the
+// prompt string never lands in the shipped binary.
+#[cfg(feature = "personal-peter")]
 const PROMPT_PETER: &str = r#"You are Peter, Sean's personal assistant. You run across his whole setup — text chat, voice through the house speakers, everything in between. One Peter, two surfaces.
 
 Today is {{current_date_human}} ({{current_date}}). Resolve any relative date ("tomorrow", "next Friday", "in 2 weeks") against this before calling a tool. Never guess.
@@ -623,6 +627,7 @@ What you never do:
 
 // ── Agent metadata ───────────────────────────────────────────────────────────
 
+#[cfg(feature = "personal-peter")]
 const PETER: DefaultAgent = DefaultAgent {
     agent_key: "main_peter_local",
     module_name: None,
@@ -754,18 +759,53 @@ const MUSHI: DefaultAgent = DefaultAgent {
     include_memory_protocol: false,
 };
 
-const ALL_DEFAULTS: &[&DefaultAgent] = &[
-    &PETER, &KYRON, &POSITRON, &CORTEX, &SILVR, &THADDEUS, &MAURICE, &NYOTA, &MUSHI,
+const PUBLIC_DEFAULTS: &[&DefaultAgent] = &[
+    &KYRON, &POSITRON, &CORTEX, &SILVR, &THADDEUS, &MAURICE, &NYOTA, &MUSHI,
 ];
+
+/// Local-only personas. Seeded ONLY when both:
+///   - the binary was built with `--features personal-peter`, AND
+///   - `SYNTAUR_DEPLOY_MODE=local` is set at runtime.
+/// Distributed (default-features) builds don't include this constant at all,
+/// so the source code for any local-only persona never lands in the shipped
+/// binary.
+#[cfg(feature = "personal-peter")]
+const LOCAL_ONLY_DEFAULTS: &[&DefaultAgent] = &[&PETER];
+
+fn defaults_for_this_deploy() -> Vec<&'static DefaultAgent> {
+    let v: Vec<&'static DefaultAgent> = PUBLIC_DEFAULTS.iter().copied().collect();
+    #[cfg(feature = "personal-peter")]
+    let v = {
+        let mut v = v;
+        if is_local_deploy() {
+            v.extend(LOCAL_ONLY_DEFAULTS.iter().copied());
+        }
+        v
+    };
+    v
+}
 
 // ── Seeding ──────────────────────────────────────────────────────────────────
 
-/// Upsert the eight default agent rows. Idempotent — safe to call on every
-/// gateway startup. Updates metadata in place so edits to this file take
-/// effect after a restart.
+/// Upsert the default agent rows. Idempotent — safe to call on every gateway
+/// startup. Updates metadata in place so edits to this file take effect after
+/// a restart. In SYNTAUR_DEPLOY_MODE=local installs Peter is included; in
+/// distributed installs only the eight public personas are seeded.
 pub fn seed(conn: &Connection) -> rusqlite::Result<()> {
+    // Distributed (non-personal-peter) builds proactively delete any
+    // local-only persona rows that may have leaked from earlier versions.
+    // Idempotent + safe: nothing references main_peter_local in distributed
+    // builds, so deleting it is purely a cleanup of stale rows.
+    #[cfg(not(feature = "personal-peter"))]
+    {
+        conn.execute(
+            "DELETE FROM module_agent_defaults WHERE agent_key = 'main_peter_local'",
+            [],
+        )?;
+    }
+
     let now = chrono::Utc::now().timestamp();
-    for a in ALL_DEFAULTS {
+    for a in defaults_for_this_deploy() {
         conn.execute(
             r#"
             INSERT INTO module_agent_defaults (
@@ -861,11 +901,18 @@ pub fn clone_for_user(conn: &rusqlite::Connection, user_id: i64) -> rusqlite::Re
         rusqlite::params![user_id, now],
     )?;
 
-    // Main slot — Peter in local mode (base_agent='peter' so try_default_persona
-    // picks PROMPT_PETER), Kyron everywhere else (base_agent='main').
+    // Main slot — Peter only when the binary was built with the
+    // `personal-peter` feature AND SYNTAUR_DEPLOY_MODE=local is set.
+    // Distributed (default-features) builds always assign Kyron, full stop.
+    #[cfg(feature = "personal-peter")]
     let (main_display, main_base, main_key) = if local {
         ("Peter", "peter", "main_peter_local")
     } else {
+        ("Kyron", "main", "main_default")
+    };
+    #[cfg(not(feature = "personal-peter"))]
+    let (main_display, main_base, main_key) = {
+        let _ = local; // local flag unused without personal-peter feature
         ("Kyron", "main", "main_default")
     };
 
