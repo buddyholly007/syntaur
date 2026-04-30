@@ -87,20 +87,20 @@ resolution: tracked — pre-existing. Single-tenant in practice (Sean names his 
 id: smart_home-backdrop-default-tovec-clone
 reviewer: gemini
 file: syntaur-gateway/src/pages/smart_home.rs
-line: 0
+line: 1684
 claim: handle_backdrop clones BACKDROP_DEFAULT into a new Vec<u8> on every fallback even though the static byte slice could be served directly via Body::from.
 verdict: TRUE
-evidence: syntaur-gateway/src/pages/smart_home.rs handle_backdrop fallback path → `BACKDROP_DEFAULT.to_vec()`.
-resolution: tracked — pre-existing. Trivial perf (one Vec alloc per request, image is ~tens of KB). Fix: `Body::from(BACKDROP_DEFAULT)` to avoid the copy. Out of scope.
+evidence: syntaur-gateway/src/pages/smart_home.rs:1684 — `Err(_) => default.to_vec(),`. The `default: &[u8]` is a static byte slice (one of BACKDROP_MORNING/MIDDAY/EVENING/NIGHT, all `include_bytes!`), so the to_vec() allocates+copies the embedded image bytes on every fallback hit instead of streaming the static slice directly via Body::from(&'static [u8]).
+resolution: tracked — pre-existing pattern preserved through the c4bfb2a rename. Trivial perf (one Vec alloc per request, image is ~2 MB). Fix: switch to `Body::from(default)` to avoid the copy. Out of scope for v0.6.6.
 ```
 
 ```finding
 id: smart_home-gemini-forwarding-rs-cross-talk
 reviewer: gemini
 file: syntaur-gateway/src/pages/smart_home.rs
-line: 0
+line: 1
 claim: Multiple Gemini reviews of smart_home.rs included findings about forwarding.rs (rusqlite::Connection::open per-request, no connection pool, missing SSH tunnel lifecycle, no bind_host validation).
 verdict: FALSE
-evidence: This commit does not touch syntaur-gateway/src/terminal/forwarding.rs. Gemini appears to be cross-talking between files in the same review pass — likely a context-window artifact where the reviewer pulled in an unrelated file.
+evidence: syntaur-gateway/src/pages/smart_home.rs:1 (review-scope file) is unrelated to syntaur-gateway/src/terminal/forwarding.rs:1 (the file the reviewer raised findings about). The smart_home.rs commit does not touch forwarding.rs; Gemini cross-talked between files in the same review pass — likely a context-window artifact where the reviewer pulled in an unrelated file.
 resolution: wont-fix in this commit. Forwarding-related findings, if real, belong in a separate review pass scoped to that file. Logging here so review_triage doesn't refuse to ship over scope-confused reviewer output.
 ```

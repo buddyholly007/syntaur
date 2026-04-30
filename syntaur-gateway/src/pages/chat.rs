@@ -1851,11 +1851,38 @@ async function handleVmTranscript(e) {
             };
             audio.onabort = () => { vmTelemetry('tts_abort'); vmEndTurn('tts_abort', { afterTts: true }); };
             audio.onstalled = () => { vmTelemetry('tts_stalled'); /* let watchdog fire */ };
-            audio.play().catch(err => {
-              vmTelemetry('tts_play_blocked', { msg: err && err.message });
-              vmShowError('tts-play-blocked', 'Audio blocked — click in the window and try again', err && err.message);
-              vmEndTurn('tts_play_blocked');
-            });
+            // WebKitGTK quirk: audio.play() occasionally rejects with
+            // NotSupportedError ("The operation is not supported.") even
+            // when the URL is fine — usually because the media element's
+            // internal state is stale from a prior turn. A single
+            // load()+retry inside the same turn clears it. Distinct from
+            // NotAllowedError (autoplay policy needs a real click) and
+            // AbortError (deliberate stop) — those still bubble straight
+            // to vmShowError. Sean called this 2026-04-30: "for some
+            // reason his voice didn't work uh we need to look into that".
+            const playWithRetry = (attempt) => {
+              audio.play().catch(err => {
+                if (vmCurrentAudio !== audio) return; // turn already moved on
+                const name = (err && err.name) || '';
+                const msg = (err && err.message) || '';
+                const transient = attempt === 0 && (
+                  name === 'NotSupportedError' ||
+                  /not supported/i.test(msg)
+                );
+                if (transient) {
+                  vmTelemetry('tts_play_retry', { name: name, msg: msg });
+                  try { audio.load(); } catch (_) { /* swallow */ }
+                  setTimeout(() => {
+                    if (vmCurrentAudio === audio) playWithRetry(attempt + 1);
+                  }, 150);
+                  return;
+                }
+                vmTelemetry('tts_play_blocked', { name: name, msg: msg, attempt: attempt });
+                vmShowError('tts-play-blocked', 'Audio blocked — click in the window and try again', msg);
+                vmEndTurn('tts_play_blocked');
+              });
+            };
+            playWithRetry(0);
           } catch (e) {
             vmShowError('tts-exception', 'TTS failed — ' + (e && e.message ? e.message : 'unknown error'));
             vmEndTurn('tts_exception');
@@ -1919,7 +1946,22 @@ async function playTts(text) {
       audio.onended = () => {
         fetch('/api/music/duck', { method: 'POST', headers: JSON_AUTH_H(), body: JSON.stringify({state: 'off'}) }).catch(()=>{});
       };
-      audio.play().catch(e => console.log('audio play blocked:', e));
+      // Same WebKitGTK NotSupportedError quirk as voice mode TTS — see
+      // the playWithRetry comment above. One load()+retry clears the
+      // transient state.
+      const playOnce = (attempt) => {
+        audio.play().catch(e => {
+          const name = (e && e.name) || '';
+          const msg = (e && e.message) || '';
+          if (attempt === 0 && (name === 'NotSupportedError' || /not supported/i.test(msg))) {
+            try { audio.load(); } catch (_) {}
+            setTimeout(() => playOnce(attempt + 1), 150);
+            return;
+          }
+          console.log('audio play blocked:', e);
+        });
+      };
+      playOnce(0);
     }
   } catch(e) { console.log('TTS error:', e); }
 }
