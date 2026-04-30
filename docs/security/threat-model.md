@@ -69,18 +69,38 @@ Last updated 2026-04-29. Applies to v0.6.x.
 - `audit_log` table records: login success/fail, token refresh/revoke/mint, admin user ops, password changes, scheduler approval decisions, voice ingest, tailscale connect/disconnect/key-rotate.
 - Per-user + time-range indexed. Retention TBD (operator choice).
 
-## Known gaps (2026-04-29)
+## Known gaps (2026-04-30)
 
 | Gap | Mitigation in place | Fix plan |
 |---|---|---|
-| Stream-token migration partial. Server side: `POST /api/auth/stream-token` mints 60s URL-scoped tokens; `resolve_principal_for_stream` is wired into `/api/message/{id}/stream` and `/api/research/{id}/stream`. Client side: `window.sdStreamQuery` helper now mints + falls back to `?token=` if the mint endpoint is unreachable; `pages/chat.rs` (×2), `pages/scheduler.rs`, `pages/knowledge.rs` migrated. | Server still accepts long-lived `?token=` on every stream endpoint with a `DEPRECATED:` warning log per request — no immediate compatibility loss while clients catch up. | Audit remaining stream endpoints (`<audio>` TTS srcs, `/ws/stt` WebSocket which currently has NO auth at all, music streaming). Once every client mints, flip the middleware to reject long-lived query tokens on stream paths. |
-| `/ws/stt` WebSocket has no authentication | Bound to LAN; reachable only via Tailscale or local network. No state mutation possible — STT is read-only synthesis. | Add `Query<HashMap>` extraction + `state.stream_tokens.resolve` validation; couple with a client mint-then-connect dance in voice-mode JS. Tracked as the highest-priority remaining stream-token item. |
 | Isolation harness covers 15+ endpoints but direct write-verb probes exist only on journal + calendar | List-visibility is the primary leakage path and it's covered everywhere; cross-user DELETE / PUT is now probed on journal-moments + calendar-events | Extend direct write-verb probes to music folders, social drafts, scheduler-lists. |
 | No automated secret-rotation for non-Tailscale integrations | Tailscale auto-rotates via OAuth client-credentials | Add per-integration rotation configs (OpenRouter, Gmail, etc.) where the upstream API supports it. |
 | Password policy is intentionally light: no minimum-length increase, no complexity rules, no forced rotation. See `feedback/security_no_user_friction.md` | Setup form now shows a strength meter + optional HIBP k-anonymity check (SHA-1 prefix only, password never leaves the device). Pure advisory — no rejection. | Stays as advisory by design. If breach data shows real-world abuse against household-deployed Syntaur instances, revisit. |
 
 ### Closed gaps (was previously in this list)
 
+- **Stream-token migration complete + reject-by-default (v0.6.0 + v0.6.1).**
+  Every browser-side stream surface — music file/art streaming,
+  `/api/music/local_events` SSE, `/ws/terminal` WebSocket, the chat /
+  knowledge / scheduler SSE flows — mints a 60-second URL-scoped token
+  via `POST /api/auth/stream-token` and passes it as `?stream_token=`.
+  Helpers: `window.sdStreamQuery` (single resource), `window.sdPrefixStreamQuery`
+  (a directory of resources, cached). Long-lived `?token=` on stream
+  endpoints flipped to reject-by-default in v0.6.1 with
+  `SYNTAUR_ALLOW_LEGACY_STREAM_TOKEN=1` as a one-release emergency opt-in.
+  Both the allow + legacy `SYNTAUR_REJECT_LEGACY_STREAM_TOKEN` env names
+  are removed in v0.8.0 along with the entire `?token=` code path.
+- **`/ws/stt` WebSocket now requires a stream-token (v0.6.2).** Pre-v0.6.2
+  the STT WebSocket accepted any upgrade and forwarded audio to the
+  Wyoming pipeline with no auth. Threat-model called this out as the
+  highest-priority remaining stream-token item. v0.6.2 wires the same
+  four-step auth resolution as `/ws/terminal` (stream_token → Bearer
+  → cookie → 401, with the legacy `?token=` only honored under the
+  v0.6.1 opt-back-in env). All three browser call sites — `pages/chat.rs`
+  voice button, voice-mode WS, `pages/music.rs` DJ STT — now mint via
+  `sdStreamQuery('/ws/stt')` before opening. The `sdStreamQuery` and
+  `sdPrefixStreamQuery` helpers also dropped their dead `?token=`
+  fallback (silently produced 401-bound URLs after the v0.6.1 flip).
 - **HSTS now emits in production (2026-04-29).** The original gate
   required `X-Forwarded-Proto: https`, which Tailscale Serve's
   `--tls-terminated-tcp=443` L4 forwarder does not set. Replaced with

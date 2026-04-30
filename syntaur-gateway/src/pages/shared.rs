@@ -1119,9 +1119,13 @@ const TOP_BAR_SCRIPT: &str = r##"
   // referer leak windows of the same length.
   //
   // sdStreamQuery() returns a query string that auths the call with a
-  // 60-second URL-scoped stream token instead. Falls back to the long-
-  // lived token if the mint endpoint is unreachable, since the server
-  // still accepts both during the migration window. Use:
+  // 60-second URL-scoped stream token. Pre-v0.6.2 it fell back to the
+  // long-lived `?token=` if the mint endpoint was unreachable; that
+  // fallback was silently broken once the server flipped reject-by-
+  // default in v0.6.1, so it now returns '' (and warns) instead. The
+  // calling stream endpoint will 401 and the existing onclose/onerror
+  // retry paths take over — far better than producing a URL that
+  // silently 401s every retry. Use:
   //
   //   const qs = await sdStreamQuery('/api/x/stream');
   //   new EventSource('/api/x/stream' + qs);
@@ -1145,8 +1149,11 @@ const TOP_BAR_SCRIPT: &str = r##"
         const j = await r.json();
         if (j && j.stream_token) return '?stream_token=' + encodeURIComponent(j.stream_token);
       }
-    } catch (_) { /* fall through to legacy fallback */ }
-    return '?token=' + encodeURIComponent(tok);
+      console.warn('[sdStreamQuery] mint failed for', streamPath, '— stream call will 401');
+    } catch (e) {
+      console.warn('[sdStreamQuery] mint threw for', streamPath, e);
+    }
+    return '';
   };
 
   // sdPrefixStreamQuery() — stream token for a whole directory of
@@ -1189,8 +1196,11 @@ const TOP_BAR_SCRIPT: &str = r##"
           return qs;
         }
       }
-    } catch (_) { /* fall through to legacy fallback */ }
-    return '?token=' + encodeURIComponent(tok);
+      console.warn('[sdPrefixStreamQuery] mint failed for', prefixPath, '— prefix calls will 401');
+    } catch (e) {
+      console.warn('[sdPrefixStreamQuery] mint threw for', prefixPath, e);
+    }
+    return '';
   };
 })();
 </script>

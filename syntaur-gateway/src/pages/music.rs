@@ -2052,7 +2052,9 @@ async function startDjStt(e) {
     const source = djAudioCtx.createMediaStreamSource(stream);
     djProcessor = djAudioCtx.createScriptProcessor(4096, 1, 1);
     const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    djSttWs = new WebSocket(`${wsProto}//${location.host}/ws/stt`);
+    // /ws/stt requires a stream-token since v0.6.2.
+    const __sttQs = await window.sdStreamQuery('/ws/stt');
+    djSttWs = new WebSocket(`${wsProto}//${location.host}/ws/stt${__sttQs}`);
     djSttWs.binaryType = 'arraybuffer';
     djSttWs.onmessage = (msg) => {
       try {

@@ -1171,9 +1171,13 @@ let voiceStream = null;
 let micClickTime = 0;
 let selectedMicId = localStorage.getItem('syntaur_mic_id') || '';
 
-function connectVoiceWs() {
+async function connectVoiceWs() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  voiceWs = new WebSocket(`${proto}//${location.host}/ws/stt`);
+  // /ws/stt requires a stream-token since v0.6.2 — the long-lived
+  // session token must NOT ride in the WS upgrade URL (proxy logs,
+  // browser history, referer leakage).
+  const __qs = await window.sdStreamQuery('/ws/stt');
+  voiceWs = new WebSocket(`${proto}//${location.host}/ws/stt${__qs}`);
   voiceWs.binaryType = 'arraybuffer';
   voiceWs.onclose = () => { voiceWs = null; };
   voiceWs.onerror = () => { if (voiceWs) voiceWs.close(); };
@@ -1249,7 +1253,7 @@ async function startVoice(e) {
   if (voiceRecording) return;
 
   if (!voiceWs || voiceWs.readyState !== 1) {
-    connectVoiceWs();
+    await connectVoiceWs();
     await new Promise(r => {
       const check = setInterval(() => {
         if (voiceWs && voiceWs.readyState === 1) { clearInterval(check); r(); }
@@ -1413,9 +1417,11 @@ function toggleVoiceMode() {
 
 // Replace just the STT WebSocket. Used both at session start and when the WS drops
 // mid-session — preserves vmStream / vmAudioCtx / mic permission across reconnects.
-function connectVmStt() {
+async function connectVmStt() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  vmWs = new WebSocket(`${proto}//${location.host}/ws/stt`);
+  // /ws/stt requires a stream-token since v0.6.2 (see connectVoiceWs).
+  const __qs = await window.sdStreamQuery('/ws/stt');
+  vmWs = new WebSocket(`${proto}//${location.host}/ws/stt${__qs}`);
   vmWs.binaryType = 'arraybuffer';
   vmWs.onmessage = handleVmTranscript;
   vmWs.onerror = () => { try { vmWs && vmWs.close(); } catch {} };
@@ -1434,7 +1440,7 @@ async function startVoiceMode() {
 
   // Connect STT WebSocket — WS-only reconnect on close, do NOT restart the whole mode
   // (restarting would re-request mic permission and leak the existing AudioContext)
-  connectVmStt();
+  await connectVmStt();
 
   await new Promise(r => {
     const check = setInterval(() => {
