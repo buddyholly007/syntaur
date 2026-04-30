@@ -728,8 +728,29 @@ const SMART_HOME_JS: &str = r#"
 
 (function () {
   // ── helpers ─────────────────────────────────────────
+  // Bearer token is injected on every /api/smart-home/* call. Without
+  // this, Sean's bug 2026-04-30: all room/device/scene/energy fetches
+  // 401'd, page stuck on "Loading…" forever, no UI was navigable.
+  // Mirrors the pattern in music.rs::authFetch + dashboard.rs::sdFetch.
+  // Token may rotate via login → re-read on every call rather than
+  // capturing at IIFE init.
+  function shToken() {
+    try {
+      return (sessionStorage.getItem('syntaur_token')
+           || localStorage.getItem('syntaur_token')
+           || '');
+    } catch (_e) { return ''; }
+  }
   async function shFetch(path, opts) {
-    const r = await fetch(path, opts || {});
+    opts = opts || {};
+    const headers = new Headers(opts.headers || {});
+    const tk = shToken();
+    if (tk && !headers.has('authorization')) {
+      headers.set('Authorization', 'Bearer ' + tk);
+    }
+    opts.headers = headers;
+    opts.credentials = opts.credentials || 'same-origin';
+    const r = await fetch(path, opts);
     if (!r.ok) {
       let msg = 'HTTP ' + r.status;
       try { const j = await r.json(); if (j && j.error) msg += ': ' + j.error; } catch (_) {}
@@ -1417,7 +1438,7 @@ const SMART_HOME_JS: &str = r#"
 
   async function loadEnergyAnomalies() {
     try {
-      const r = await fetch('/api/smart-home/energy/anomalies', { credentials: 'same-origin' });
+      const r = await fetch('/api/smart-home/energy/anomalies', { credentials: 'same-origin', headers: shToken() ? { 'Authorization': 'Bearer ' + shToken() } : {} });
       if (!r.ok) return;
       const data = await r.json();
       __shAnomalies = (data && data.anomalies) || [];
@@ -1506,7 +1527,7 @@ const SMART_HOME_JS: &str = r#"
     let max_kwh = 0;
     try {
       const ym = y + '-' + String(m).padStart(2, '0');
-      const r = await fetch('/api/smart-home/energy/calendar?month=' + encodeURIComponent(ym), { credentials: 'same-origin' });
+      const r = await fetch('/api/smart-home/energy/calendar?month=' + encodeURIComponent(ym), { credentials: 'same-origin', headers: shToken() ? { 'Authorization': 'Bearer ' + shToken() } : {} });
       const data = await r.json();
       days = (data && data.days) || [];
       max_kwh = days.reduce((acc, d) => Math.max(acc, d.kwh || 0), 0);
@@ -1551,7 +1572,7 @@ const SMART_HOME_JS: &str = r#"
     let payload = null;
     try {
       const date = y + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0');
-      const r = await fetch('/api/smart-home/energy/day?date=' + encodeURIComponent(date), { credentials: 'same-origin' });
+      const r = await fetch('/api/smart-home/energy/day?date=' + encodeURIComponent(date), { credentials: 'same-origin', headers: shToken() ? { 'Authorization': 'Bearer ' + shToken() } : {} });
       payload = await r.json();
     } catch (_) {
       bars.innerHTML = '<div style="color: var(--sh-text-dim); font-size:12px">No data.</div>';
