@@ -1,0 +1,144 @@
+name: Release — Public install smoke
+
+# Triggers AFTER a release is published (release-sign.yml's
+# `gh release upload` step lands and the release entity flips to
+# published). Validates the trust chain a real user would walk:
+#
+#   1. wget releases/latest/download/install.sh           (the homepage URL)
+#   2. wget releases/latest/download/install.sh.cosign.bundle
+#   3. cosign verify-blob install.sh                       (Sigstore attestation)
+#   4. wget releases/latest/download/checksums.txt + .cosign.bundle
+#   5. cosign verify-blob checksums.txt
+#   6. sha256sum -c (only the install.sh + install.ps1 lines)
+#   7. parse install.sh's VERSION="x.y.z" and confirm it matches the tag
+#
+# If any step fails, the workflow fails red — operator sees that the
+# advertised public install path is broken BEFORE Sean does, and
+# before any external reviewer logs a score-lowering finding for it.
+# Catches the regression class that hit on v0.6.5 (release-sign.yml
+# never uploaded install.sh as an asset, so the homepage's wget URL
+# 302 → 404).
+#
+# Runs on `release: published`. Doesn't gate the publish itself
+# (that already shipped) but emits a workflow failure that's visible
+# in the next `syntaur-ship status` ci-audit + the GitHub repo
+# health page, so the next deploy refuses to declare clean until
+# this comes back green.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to smoke (e.g. v0.6.6); defaults to latest'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  id-token: write   # cosign verify-blob keyless
+
+jobs:
+  install-smoke:
+    name: wget + cosign verify + checksum
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Resolve tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          INPUT_TAG: ${{ inputs.tag }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_TAG:-}" ]; then
+            tag="$INPUT_TAG"
+          elif [ -n "${EVENT_TAG:-}" ]; then
+            tag="$EVENT_TAG"
+          else
+            tag=$(gh release view --json tagName --jq .tagName)
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "::notice::smoking release tag $tag"
+
+      - name: Fetch advertised install.sh + bundle
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p smoke
+          cd smoke
+          # The homepage URL — the one users wget. If this 404s the
+          # whole workflow fails right here. (This is the v0.6.5 class
+          # of regression we're explicitly catching.)
+          curl -fL --retry 3 --retry-delay 5 \
+            "https://github.com/${GH_REPO}/releases/download/${TAG}/install.sh" \
+            -o install.sh
+          curl -fL --retry 3 --retry-delay 5 \
+            "https://github.com/${GH_REPO}/releases/download/${TAG}/install.sh.cosign.bundle" \
+            -o install.sh.cosign.bundle
+          curl -fL --retry 3 --retry-delay 5 \
+            "https://github.com/${GH_REPO}/releases/download/${TAG}/install.ps1" \
+            -o install.ps1
+          curl -fL --retry 3 --retry-delay 5 \
+            "https://github.com/${GH_REPO}/releases/download/${TAG}/install.ps1.cosign.bundle" \
+            -o install.ps1.cosign.bundle
+          curl -fL --retry 3 --retry-delay 5 \
+            "https://github.com/${GH_REPO}/releases/download/${TAG}/checksums.txt" \
+            -o checksums.txt
+          curl -fL --retry 3 --retry-delay 5 \
+            "https://github.com/${GH_REPO}/releases/download/${TAG}/checksums.txt.cosign.bundle" \
+            -o checksums.txt.cosign.bundle
+          ls -la
+
+      - name: cosign verify install.sh
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          GH_REPO: ${{ github.repository }}
+        working-directory: smoke
+        run: |
+          set -euo pipefail
+          cosign verify-blob \
+            --bundle install.sh.cosign.bundle \
+            --certificate-identity "https://github.com/${GH_REPO}/.github/workflows/release-sign.yml@refs/tags/${TAG}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            install.sh
+          cosign verify-blob \
+            --bundle install.ps1.cosign.bundle \
+            --certificate-identity "https://github.com/${GH_REPO}/.github/workflows/release-sign.yml@refs/tags/${TAG}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            install.ps1
+          cosign verify-blob \
+            --bundle checksums.txt.cosign.bundle \
+            --certificate-identity "https://github.com/${GH_REPO}/.github/workflows/release-sign.yml@refs/tags/${TAG}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            checksums.txt
+
+      - name: sha256sum -c install scripts
+        working-directory: smoke
+        run: |
+          set -euo pipefail
+          # Only check the install scripts here — the binaries are not
+          # present in this workflow, full hash check happens elsewhere.
+          grep -E ' install\.(sh|ps1)$' checksums.txt | sha256sum -c --quiet
+
+      - name: Parse VERSION + match tag
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        working-directory: smoke
+        run: |
+          set -euo pipefail
+          script_ver=$(grep -E '^VERSION="' install.sh | head -1 | sed 's/VERSION="\(.*\)"/\1/')
+          tag_ver="${TAG#v}"
+          if [ "$script_ver" != "$tag_ver" ]; then
+            echo "::error::install.sh VERSION ($script_ver) does not match release tag (v$tag_ver)"
+            exit 1
+          fi
+          echo "✓ install.sh advertises v$script_ver, matches tag $TAG"

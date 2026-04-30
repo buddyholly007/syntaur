@@ -228,6 +228,23 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Stage install scripts into dist
+        # The landing page advertises
+        # `https://github.com/buddyholly007/syntaur/releases/latest/download/install.sh`
+        # — without copying install.sh + install.ps1 into the release
+        # asset bundle, that URL 404s and the advertised install path is
+        # broken. (Reviewer caught this 2026-04-30: site → 302 →
+        # release/v0.6.5/install.sh → 404.) Staging here means the same
+        # checksums + cosign + assertion pipeline below picks them up
+        # automatically, so what users wget is the same content the
+        # release was tagged with, and they can verify it before running.
+        run: |
+          set -euo pipefail
+          cp install.sh   dist/install.sh
+          cp install.ps1  dist/install.ps1
+          chmod +x dist/install.sh
+          ls -la dist/install.sh dist/install.ps1
+
       - name: List dist
         run: ls -la dist/
 
@@ -236,7 +253,11 @@ jobs:
         run: |
           # Intel Mac is optional (runner shortage). Everything else is
           # mandatory — refuse to publish a partial release that's missing
-          # Linux, Windows, or Apple Silicon Mac.
+          # Linux, Windows, or Apple Silicon Mac. Install scripts are
+          # mandatory so the homepage's wget/curl install path is never
+          # 404. Their absence indicates a workflow regression upstream
+          # (e.g. someone removed the Stage step) and the release should
+          # not publish.
           required=(
             syntaur-gateway-linux-x86_64
             syntaur-viewer-linux-x86_64
@@ -245,6 +266,8 @@ jobs:
             syntaur-viewer-macos-arm64
             syntaur-gateway-windows-x86_64.exe
             syntaur-viewer-windows-x86_64.exe
+            install.sh
+            install.ps1
           )
           missing=()
           for f in "${required[@]}"; do
@@ -254,7 +277,7 @@ jobs:
             echo "::error::Missing required release artifacts: ${missing[*]}"
             exit 1
           fi
-          echo "All core artifacts present ($(ls syntaur-* | wc -l) total)."
+          echo "All core artifacts present ($(ls syntaur-* install.sh install.ps1 | wc -l) total)."
 
       - name: Compute checksums
         working-directory: dist
@@ -263,8 +286,10 @@ jobs:
           # viewer + isolation-tests alongside the gateway (all
           # `syntaur-*`-prefixed); each must enter the checksum + sign +
           # provenance pipeline so the published release is actually fully
-          # verifiable.
-          sha256sum syntaur-* > checksums.txt
+          # verifiable. Install scripts are also hashed so a user who
+          # wgets install.sh can sha256sum-c against checksums.txt
+          # before running it.
+          sha256sum syntaur-* install.sh install.ps1 > checksums.txt
           cat checksums.txt
 
       - name: Install cosign
@@ -273,7 +298,13 @@ jobs:
       - name: Sign each artifact
         working-directory: dist
         run: |
-          for f in syntaur-*; do
+          # Sign every shipped artifact AND the install scripts. The
+          # install scripts are the FIRST thing a user runs, so they
+          # need to be cosign-verifiable too — a tampered install.sh
+          # would let an attacker subvert checksum verification before
+          # any binary is touched. Closing that hole is the most
+          # security-relevant part of this signing pass.
+          for f in syntaur-* install.sh install.ps1; do
             # Skip the cosign bundles + checksum file themselves (signed below).
             case "$f" in
               *.cosign.bundle|checksums.txt) continue ;;
@@ -291,7 +322,14 @@ jobs:
       - name: Attest SLSA provenance
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: 'dist/syntaur-*'
+          # Provenance covers binaries AND install scripts so a user
+          # verifying install.sh can confirm it was built by THIS
+          # workflow on THIS tag, not patched in transit or pushed by
+          # an attacker who swapped the asset post-publish.
+          subject-path: |
+            dist/syntaur-*
+            dist/install.sh
+            dist/install.ps1
 
       # Replaces softprops/action-gh-release@v2 — that action flaked on
       # v0.6.2 and v0.6.4 with intermittent "Upload release assets" failures
@@ -318,7 +356,7 @@ jobs:
           # so the post-upload assertion (`actual < expected`) failed
           # despite the release being correctly published with all 16
           # files. `sort -u` collapses the overlap.
-          mapfile -t assets < <(printf '%s\n' syntaur-* checksums.txt *.cosign.bundle | sort -u)
+          mapfile -t assets < <(printf '%s\n' syntaur-* checksums.txt install.sh install.ps1 *.cosign.bundle | sort -u)
           expected=${#assets[@]}
           if (( expected == 0 )); then
             echo "::error::no assets found in dist/ — refusing to publish empty release"

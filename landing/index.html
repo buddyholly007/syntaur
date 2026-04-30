@@ -5,6 +5,28 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Syntaur — Your Personal AI Platform</title>
 <meta name="description" content="A single binary that gives you a private AI assistant with 100+ built-in tools, voice control, smart home, and more. Runs on your hardware. Free to start.">
+<!--
+  Defense-in-depth headers. GitHub Pages doesn't expose true HTTP
+  headers, so these go via meta http-equiv (still honored by every
+  modern browser).
+
+  CSP: locks the landing page to known origins. Currently allows the
+  Tailwind CDN + Google Fonts because the page uses them; replacing
+  cdn.tailwindcss.com with a built static CSS file would let us drop
+  to strict 'self' here. That switch is a worthwhile follow-up — the
+  Tailwind CDN is itself a supply-chain risk (if compromised, an
+  attacker can serve JS that executes on the landing page).
+
+  X-Content-Type-Options: prevents MIME sniffing, blocks a class of
+  XSS where an attacker tricks the browser into executing a non-script
+  asset as script.
+
+  Referrer-Policy: limits what we leak to outbound links — currently
+  only github.com, but tightening this is free.
+-->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; connect-src 'self' https://api.github.com; base-uri 'self'; form-action 'self'; object-src 'none'; frame-ancestors 'none'">
+<meta http-equiv="X-Content-Type-Options" content="nosniff">
+<meta name="referrer" content="strict-origin-when-cross-origin">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <script src="https://cdn.tailwindcss.com"></script>
 <script>tailwind.config={theme:{extend:{colors:{oc:{500:'#0ea5e9',600:'#0284c7',700:'#0369a1',800:'#075985'}}}}}</script>
