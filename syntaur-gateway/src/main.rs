@@ -1794,34 +1794,44 @@ struct ResolvedAgent {
     allowlist: Vec<String>,
 }
 
-/// Resolve an agent_id to its full context. Checks system agents first,
-/// then falls back to user_agents table for the given user.
+/// Resolve an agent_id to its full context. Checks the user's per-user
+/// agent customization FIRST (user_agents table), so persona edits made
+/// through the settings UI always win over the legacy config-file system
+/// agents. Falls through to the config-file system agent only when the
+/// user has no row for this agent_id. Final fallback treats the agent_id
+/// as a bare system agent.
+///
+/// Why user-first: system agents in `state.config.agents.list` are a
+/// legacy mechanism (crimson-lantern, woodworks-scout). When a user has
+/// customized their persona via `PUT /api/me/agents/{id}` (which writes
+/// to `user_agents.system_prompt`), that customization MUST be honored
+/// even if the same `agent_id` happens to also appear in the config
+/// list. Sean called this 2026-04-30: "this affects all of our users and
+/// their ability to modify their AI personas". Pre-fix, any user who
+/// edited their main agent's persona had it silently ignored because
+/// "main" is also defined in `config.agents.list` and the old order
+/// short-circuited there.
 async fn resolve_agent(state: &AppState, agent_id: &str, user_id: i64) -> ResolvedAgent {
-    // Check if it's a system agent (defined in config)
-    let is_system = state.config.agents.list.iter().any(|a| a.id == agent_id);
-    if is_system {
-        return ResolvedAgent {
-            llm_agent_id: agent_id.to_string(),
-            workspace: state.config.agent_workspace(agent_id),
-            custom_prompt: None,
-            allowlist: state.config.agent_script_allowlist(agent_id),
-        };
-    }
-
-    // Self-heal: seed default agents if this user has none yet. No-op when
-    // the row already exists. Belt-and-suspenders to user-create's call —
-    // covers pre-existing users whose user_agents got wiped or never
-    // populated.
+    // Self-heal: seed default agents if this user has none yet. No-op
+    // when the row already exists. Belt-and-suspenders to user-create's
+    // call — covers pre-existing users whose user_agents got wiped or
+    // never populated.
     if let Err(e) = state.users.ensure_user_agents_seeded(user_id).await {
         log::warn!("[agents] ensure_user_agents_seeded(user_id={}) failed: {}", user_id, e);
     }
 
-    // Check user_agents table
+    // 1. User-level customization wins.
     if let Ok(Some(ua)) = state.users.get_user_agent(user_id, agent_id).await {
         let base = &ua.base_agent;
         let workspace = if let Some(ref ws) = ua.workspace {
             let expanded = ws.replace("~", &std::env::var("HOME").unwrap_or_default());
             std::path::PathBuf::from(expanded)
+        } else if state.config.agents.list.iter().any(|a| a.id == agent_id) {
+            // Inherit workspace from system-agent config if it exists.
+            // Keeps legacy crimson-lantern/woodworks-scout etc. pointing
+            // at their declared dirs even when the user has only edited
+            // the persona prompt.
+            state.config.agent_workspace(agent_id)
         } else {
             // Use per-user data_dir if set, otherwise default
             let base_dir = match state.users.get_data_dir(user_id).await {
@@ -1834,15 +1844,30 @@ async fn resolve_agent(state: &AppState, agent_id: &str, user_id: i64) -> Resolv
             }
             ws
         };
+        // Allowlist always inherits from system-agent config when one
+        // exists for the base agent — script allowlists are a server-
+        // operator decision, not a user one.
+        let allowlist = state.config.agent_script_allowlist(base);
         return ResolvedAgent {
             llm_agent_id: base.clone(),
             workspace,
             custom_prompt: ua.system_prompt,
-            allowlist: state.config.agent_script_allowlist(base),
+            allowlist,
         };
     }
 
-    // Fallback: treat as system agent "main" with the requested id
+    // 2. No user row — fall back to system-agent config.
+    let is_system = state.config.agents.list.iter().any(|a| a.id == agent_id);
+    if is_system {
+        return ResolvedAgent {
+            llm_agent_id: agent_id.to_string(),
+            workspace: state.config.agent_workspace(agent_id),
+            custom_prompt: None,
+            allowlist: state.config.agent_script_allowlist(agent_id),
+        };
+    }
+
+    // 3. Final fallback: treat as a bare system agent with this id.
     ResolvedAgent {
         llm_agent_id: agent_id.to_string(),
         workspace: state.config.agent_workspace(agent_id),
