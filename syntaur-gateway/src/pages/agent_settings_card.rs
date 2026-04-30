@@ -2249,14 +2249,18 @@ const RESOURCE_BUDGET_JS: &str = r#"
     if (!msg) return;
     let el = card.querySelector('.cf-back-error');
     if (!el) {
-      const back = card.querySelector('.cf-back');
-      if (!back) return;
+      // The card IS the cf-back wrapper now (after the 4511363 fix
+      // wrapped settings_back with chat-card-flip + cf-back), so
+      // querySelector('.cf-back') would only match a descendant —
+      // not the card itself. Prefer cf-back-inner as the host for
+      // the error strip so it renders inside the drawer chrome.
+      const host = card.querySelector('.cf-back-inner') || card;
       el = document.createElement('div');
       el.className = 'cf-back-error';
       el.style.cssText =
         'margin:8px 12px;padding:8px 12px;border-radius:6px;' +
         'background:rgba(239,68,68,.12);color:#fecaca;font-size:12px;line-height:1.4;';
-      back.insertBefore(el, back.firstChild);
+      host.insertBefore(el, host.firstChild);
     }
     el.textContent = msg;
     el.hidden = false;
@@ -2267,15 +2271,35 @@ const RESOURCE_BUDGET_JS: &str = r#"
     if (!agent) return;
     showSavingIndicator(card, true);
     const payload = {}; payload[field] = value;
+    // WebKitGTK FormData rule applies to JSON PUTs as well — when the
+    // viewer drops Origin/Referer the CSRF middleware can fall back to
+    // a cookie-only auth path that may not match the JS-stored token.
+    // Always send the bearer explicitly. See feedback/webkitgtk_formdata_no_origin.md.
+    const tok = sessionStorage.getItem('syntaur_token')
+      || localStorage.getItem('syntaur_token') || '';
+    const headers = Object.assign({}, getCsrfHeaders());
+    if (tok) headers['Authorization'] = 'Bearer ' + tok;
     try {
-      await fetch('/api/agents/' + encodeURIComponent(agent) + '/settings', {
+      const r = await fetch('/api/agents/' + encodeURIComponent(agent) + '/settings', {
         method: 'PUT',
         credentials: 'same-origin',
-        headers: getCsrfHeaders(),
+        headers: headers,
         body: JSON.stringify(payload),
       });
-    } catch (e) { /* eat — UI is auto-save best-effort */ }
-    finally { showSavingIndicator(card, false); }
+      if (!r.ok) {
+        // Surface the server's error so silent-fail can't recur. This
+        // is the same UX rule as the icon upload path: never let an
+        // auto-save vanish without trace. feedback/never_swallow_ux_fetch_errors.md.
+        let msg = 'Could not save — HTTP ' + r.status;
+        try {
+          const body = await r.json();
+          if (body && body.error) msg = body.error;
+        } catch (_) {}
+        showCardError(card, msg);
+      }
+    } catch (e) {
+      showCardError(card, 'Could not save — ' + ((e && e.message) || 'network error'));
+    } finally { showSavingIndicator(card, false); }
   }
 
   document.addEventListener('change', (ev) => {
