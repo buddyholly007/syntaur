@@ -1800,18 +1800,39 @@ async function handleVmTranscript(e) {
             }
             const audio = new Audio(ttsData.audio_url);
             vmCurrentAudio = audio;
-            // Estimate duration from response length (~150ms per word)
+            // Initial duration estimate — VERY conservative on the high
+            // side because the watchdog pause()s audio when it fires.
+            // Old 0.15s/word (≈400 WPM) was way over real TTS rate
+            // (≈130 WPM = 0.46s/word) and was killing long replies
+            // halfway through. Sean called this "Peter speaks then cuts
+            // off partway" 2026-04-30. Use 0.55s/word + 5s floor so the
+            // initial watchdog is always longer than real playback.
             const words = ev.response.split(/\s+/).length;
-            vmLastTtsDuration = Math.max(2, Math.round(words * 0.15));
+            vmLastTtsDuration = Math.max(5, Math.round(words * 0.55));
+            const armWatchdog = (durSecs, source) => {
+              if (vmPlaybackTimer) clearTimeout(vmPlaybackTimer);
+              vmLastTtsDuration = durSecs;
+              const ms = (durSecs + VM_TTS_DURATION_PAD_S) * 1000;
+              vmPlaybackTimer = setTimeout(() => {
+                if (vmCurrentAudio !== audio) return;
+                vmTelemetry('tts_watchdog_fired', { dur_s: durSecs, source: source });
+                fetch('/api/music/duck', { method: 'POST', headers: JSON_AUTH_H(), body: JSON.stringify({state: 'off'}) }).catch(()=>{});
+                vmEndTurn('tts_watchdog', { afterTts: true });
+              }, ms);
+            };
             // Playback watchdog — if onended/onerror never fires (audio stalls,
             // codec issue, file truncated), force back to listening.
-            const watchdogMs = (vmLastTtsDuration + VM_TTS_DURATION_PAD_S) * 1000;
-            vmPlaybackTimer = setTimeout(() => {
+            armWatchdog(vmLastTtsDuration, 'estimate');
+            // Once the audio file's metadata loads, swap the watchdog over
+            // to the REAL duration. This is the authoritative source —
+            // word-count heuristics are only a fallback for the brief
+            // window before metadata arrives.
+            audio.onloadedmetadata = () => {
               if (vmCurrentAudio !== audio) return;
-              vmTelemetry('tts_watchdog_fired', { dur_s: vmLastTtsDuration });
-              fetch('/api/music/duck', { method: 'POST', headers: JSON_AUTH_H(), body: JSON.stringify({state: 'off'}) }).catch(()=>{});
-              vmEndTurn('tts_watchdog', { afterTts: true });
-            }, watchdogMs);
+              if (Number.isFinite(audio.duration) && audio.duration > 0) {
+                armWatchdog(audio.duration, 'metadata');
+              }
+            };
             audio.onplay = () => {
               vmTelemetry('tts_play');
               fetch('/api/music/duck', { method: 'POST', headers: JSON_AUTH_H(), body: JSON.stringify({state: 'on', duration_secs: vmLastTtsDuration + 5}) }).catch(()=>{});
