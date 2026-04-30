@@ -49,7 +49,7 @@ pub fn run(ctx: &StageContext) -> Result<()> {
     // bulletproof (fresh mtimes guarantee cargo recompiles their
     // compilation units), preserves the dep cache (axum/tokio/etc.
     // stay built).
-    if !ctx.opts.dry_run && !ctx.opts.skip_build {
+    if !ctx.opts.dry_run {
         for crate_rel in ["syntaur-gateway", "mace"] {
             let crate_path = ctx.cfg.workspace.join(crate_rel);
             if !crate_path.is_dir() {

@@ -134,6 +134,15 @@ pub static CORE_MODULES: &[CoreModule] = &[
         tools: &[],
         default_enabled: true,
     },
+    CoreModule {
+        id: "mod-smart-home",
+        name: "Smart Home",
+        description: "Matter + LAN smart-home device control: scenes, room presence (BLE proxies), \
+                      Matter device commands (lights, locks, switches), camera streams (Frigate), \
+                      and satellite announcements. Works fully on-LAN — no vendor cloud required.",
+        tools: &["announce", "scene", "matter", "camera"],
+        default_enabled: true,
+    },
 ];
 
 /// Module configuration from syntaur.json.

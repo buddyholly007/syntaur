@@ -293,29 +293,103 @@ jobs:
         with:
           subject-path: 'dist/syntaur-*'
 
-      - name: Upload release assets
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/syntaur-*
-            dist/checksums.txt
-            dist/*.cosign.bundle
-          body: |
-            ## Verified release
+      # Replaces softprops/action-gh-release@v2 — that action flaked on
+      # v0.6.2 and v0.6.4 with intermittent "Upload release assets" failures
+      # that left the release entity uncreated, so prod deployed but the
+      # public GitHub Release page lagged behind. Direct gh CLI with
+      # explicit retry + post-upload asset-count assertion gives us a
+      # workflow that EITHER publishes a complete release OR fails the
+      # workflow loud and clear with no half-published state.
+      - name: Create release + upload assets (with retry + verification)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        shell: bash
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
 
-            Every binary is signed with Sigstore cosign (keyless OIDC) and
-            accompanied by `.cosign.bundle`. Verify before running:
+          assets=( syntaur-* checksums.txt *.cosign.bundle )
+          expected=${#assets[@]}
+          if (( expected == 0 )); then
+            echo "::error::no assets found in dist/ — refusing to publish empty release"
+            exit 1
+          fi
+          echo "preparing to publish ${expected} assets for ${TAG}:"
+          printf '  %s\n' "${assets[@]}"
 
-            ```bash
-            # SHA-256 verification (fast)
-            sha256sum -c checksums.txt
+          cat > /tmp/release-body.md <<EOF
+          ## Verified release
 
-            # Cosign signature verification (authoritative)
-            cosign verify-blob \
-              --bundle syntaur-gateway-linux-x86_64.cosign.bundle \
-              --certificate-identity "https://github.com/buddyholly007/syntaur/.github/workflows/release-sign.yml@${{ github.ref }}" \
-              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-              syntaur-gateway-linux-x86_64
-            ```
+          Every binary is signed with Sigstore cosign (keyless OIDC) and
+          accompanied by \`.cosign.bundle\`. Verify before running:
 
-            See `SECURITY.md` for the rolling disclosure policy.
+          \`\`\`bash
+          # SHA-256 verification (fast)
+          sha256sum -c checksums.txt
+
+          # Cosign signature verification (authoritative)
+          cosign verify-blob \\
+            --bundle syntaur-gateway-linux-x86_64.cosign.bundle \\
+            --certificate-identity "https://github.com/buddyholly007/syntaur/.github/workflows/release-sign.yml@refs/tags/${TAG}" \\
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \\
+            syntaur-gateway-linux-x86_64
+          \`\`\`
+
+          See \`SECURITY.md\` for the rolling disclosure policy.
+          EOF
+
+          # Create the release if it doesn't exist; tolerate idempotent retries.
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "release ${TAG} already exists; will upload to it"
+          else
+            for attempt in 1 2 3; do
+              if gh release create "${TAG}" \
+                  --title "${TAG}" \
+                  --notes-file /tmp/release-body.md \
+                  --verify-tag; then
+                echo "release ${TAG} created (attempt ${attempt})"
+                break
+              fi
+              if (( attempt == 3 )); then
+                echo "::error::failed to create release ${TAG} after 3 attempts"
+                exit 1
+              fi
+              sleep $(( attempt * 5 ))
+            done
+          fi
+
+          # Upload each asset with retry. --clobber tolerates re-uploads
+          # so a partial-success retry doesn't dupe-collide.
+          for asset in "${assets[@]}"; do
+            if [ ! -f "${asset}" ]; then
+              echo "::error::expected asset ${asset} not present in dist/"
+              exit 1
+            fi
+            uploaded=0
+            for attempt in 1 2 3 4 5; do
+              if gh release upload "${TAG}" "${asset}" --clobber; then
+                echo "  ✓ uploaded ${asset} (attempt ${attempt})"
+                uploaded=1
+                break
+              fi
+              echo "  ✗ upload ${asset} attempt ${attempt} failed; backing off"
+              sleep $(( attempt * 10 ))
+            done
+            if (( uploaded == 0 )); then
+              echo "::error::failed to upload ${asset} after 5 attempts"
+              exit 1
+            fi
+          done
+
+          # Post-upload assertion — refuse to declare success if the release
+          # is missing any expected asset.
+          actual=$(gh release view "${TAG}" --json assets --jq '.assets | length')
+          if (( actual < expected )); then
+            echo "::error::release ${TAG} has only ${actual}/${expected} assets after upload — pipeline must not declare success"
+            gh release view "${TAG}" --json assets --jq '.assets[].name' | sed 's/^/  present: /'
+            exit 1
+          fi
+          echo "✓ release ${TAG} published with ${actual} assets"

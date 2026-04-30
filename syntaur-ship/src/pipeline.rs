@@ -4,7 +4,7 @@
 //!   preflight → snapshot (NEW) → build → mac_mini → git_push →
 //!   truenas (now with .prev + auto-rollback) → viewer.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
 use std::time::Instant;
 
@@ -25,19 +25,10 @@ const LOCK_TTL_SECS: i64 = 1800;
 #[derive(Debug, Clone, Default)]
 pub struct RunOptions {
     pub dry_run: bool,
-    pub skip_build: bool,
-    pub skip_mac: bool,
-    pub skip_git: bool,
+    /// Deploy only `rust-social-manager`, leaving the gateway running.
+    /// Partial-deploy SCOPE, not a quality bypass — every stage that
+    /// runs runs in full.
     pub social_only: bool,
-    /// Override the blocking CI-failure gate. Use when deploying
-    /// DESPITE known CI failures (e.g. a CVE that's upstream-only and
-    /// can't be fixed until an unrelated release cadence). Logged into
-    /// the journal as an explicit skip-flag so it's auditable.
-    pub force_ci_drift: bool,
-    /// Skip the syntaur-verify visual audit stage. Emergency flag —
-    /// the audit is the only automated gate on UX regressions between
-    /// Mac Mini smoke and TrueNAS deploy.
-    pub skip_verify: bool,
     /// When Opus catches a regression during verify, let it propose
     /// edits, rebuild the gateway, reload Mac Mini, and re-verify
     /// (capped at 2 iters, ≤150 LoC/module per iteration). Off by
@@ -54,8 +45,8 @@ pub struct StageContext<'a> {
 pub fn run_full(cfg: &Config, opts: &RunOptions) -> Result<()> {
     let start = Instant::now();
     log::info!(
-        "=== syntaur-ship pipeline starting (dry_run={} skip_build={} skip_mac={} skip_git={} social_only={}) ===",
-        opts.dry_run, opts.skip_build, opts.skip_mac, opts.skip_git, opts.social_only,
+        "=== syntaur-ship pipeline starting (dry_run={} social_only={} auto_fix={}) ===",
+        opts.dry_run, opts.social_only, opts.auto_fix,
     );
 
     // Phase 5: PID guard + broker lock + CI gate. Acquired BEFORE any
@@ -97,48 +88,39 @@ pub fn run_full(cfg: &Config, opts: &RunOptions) -> Result<()> {
     }
 
     // Pre-deploy BLOCKING CI gate: refuse to deploy if any workflow on
-    // the current HEAD is failing. Override via --force-ci-drift.
-    // Catches the class of "I didn't notice CI was red" that had me
-    // deploy past 5 consecutive cargo-audit failures before Sean
-    // flagged the email notifications. Runs in dry-run too so
-    // `syntaur-ship check` catches CI drift before the real run.
+    // the current HEAD is failing. v0.6.5: --force-ci-drift is GONE.
+    // Every prior emergency that needed it turned out to be either a
+    // bug we should have fixed inline OR a transient we should have
+    // retried. Runs in dry-run too so `syntaur-ship check` catches CI
+    // drift before the real run.
+    // Critical: if git rev-parse HEAD fails, an empty string flows
+    // into ci_audit::run, which silently reports "no failures" because
+    // the GitHub API returns no runs for an empty SHA. That bypasses
+    // the CI gate entirely. Must be fatal — there is no safe fallback.
     let head = run_capture(
         "git",
         &["-C", cfg.workspace.to_str().unwrap(), "rev-parse", "HEAD"],
     )
-    .unwrap_or_default()
+    .context("ci-gate: failed to read HEAD via `git rev-parse`. Without a HEAD, the CI audit is meaningless. Fix the git environment and re-run.")?
     .trim()
     .to_string();
+    if head.is_empty() {
+        anyhow::bail!("ci-gate: `git rev-parse HEAD` returned empty output");
+    }
     let pre_failures = crate::ci_audit::run(&head);
-    if !pre_failures.is_empty() {
-        if opts.force_ci_drift || opts.dry_run {
-            let tag = if opts.dry_run { "[ci-gate] (dry-run)" } else { "[ci-gate]" };
-            log::warn!(
-                "{tag} ⚠ {} CI workflow(s) failing on HEAD {}:",
-                pre_failures.len(),
-                &head[..head.len().min(10)]
-            );
-            for f in &pre_failures {
-                log::warn!("   ✗ {f}");
-            }
-            if !opts.dry_run {
-                log::warn!("[ci-gate] proceeding anyway because --force-ci-drift is set");
-            }
-        } else {
-            let list = pre_failures
-                .iter()
-                .map(|f| format!("  ✗ {f}"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            anyhow::bail!(
-                "CI gate: {} workflow(s) failing on HEAD {}:\n{list}\n\nFix them or re-run with --force-ci-drift (logged).",
-                pre_failures.len(),
-                &head[..head.len().min(10)]
-            );
-        }
-    } else {
-        log::info!(
-            "[ci-gate] ✓ all CI workflows passing on HEAD {}",
+    let blocking_failures = crate::ci_audit::blocking(&pre_failures);
+    crate::ci_audit::log_failures(&pre_failures, &head[..head.len().min(10)]);
+    if !blocking_failures.is_empty() && !opts.dry_run {
+        let list = blocking_failures
+            .iter()
+            .map(|f| format!("  ✗ {f}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        anyhow::bail!(
+            "CI gate: {} deploy-gating workflow(s) failing on HEAD {}:\n{list}\n\nFix the underlying issue, then re-run. \
+             (--force-ci-drift was removed in v0.6.5: every prior 'emergency' override masked a real bug. \
+             To change which workflows are deploy-gating, edit ci_audit::DEPLOY_GATING_WORKFLOWS.)",
+            blocking_failures.len(),
             &head[..head.len().min(10)]
         );
     }
@@ -161,7 +143,11 @@ pub fn run_full(cfg: &Config, opts: &RunOptions) -> Result<()> {
 
     // Wrap the whole pipeline in a closure so we can emit a journal
     // entry + broker notification on BOTH success and failure.
-    let result = run_full_inner(cfg, opts, &ctx);
+    // Threaded `snapshot_holder`: written by run_full_inner the moment
+    // the ZFS snapshot is created, so the failure-path journal entry
+    // can record the recovery point even if a later stage aborts.
+    let mut snapshot_holder: Option<String> = None;
+    let result = run_full_inner(cfg, opts, &ctx, &mut snapshot_holder);
     let duration_ms = start.elapsed().as_millis();
 
     // Write journal entry regardless of outcome (unless dry-run).
@@ -169,7 +155,13 @@ pub fn run_full(cfg: &Config, opts: &RunOptions) -> Result<()> {
         let outcome = if result.is_ok() { "success" } else { "aborted" };
         let (failed_stage, failure_reason) = match &result {
             Ok(()) => (None, None),
-            Err(e) => (Some("unknown".into()), Some(format!("{e:#}"))),
+            Err(e) => {
+                // Outermost anyhow context is the .context("<stage>")
+                // applied at the call site in run_full_inner. The full
+                // chain is preserved in failure_reason via {:#}.
+                let stage = e.to_string();
+                (Some(stage), Some(format!("{e:#}")))
+            }
         };
         // Read back the stamp we wrote (on success path) for the journal.
         let stamp_opt = state::read_stamp(&cfg.state_dir).unwrap_or(None);
@@ -200,7 +192,7 @@ pub fn run_full(cfg: &Config, opts: &RunOptions) -> Result<()> {
                     version,
                     git_head,
                     gateway_sha256: None,
-                    pre_deploy_snapshot: None,
+                    pre_deploy_snapshot: snapshot_holder.clone(),
                     deploy_session: cfg.coord_session.clone(),
                     skip_flags: collect_skip_flags(opts),
                     failed_stage,
@@ -236,79 +228,38 @@ pub fn run_full(cfg: &Config, opts: &RunOptions) -> Result<()> {
     result
 }
 
-fn run_full_inner(cfg: &Config, opts: &RunOptions, ctx: &StageContext) -> Result<()> {
-    // Phase 5: Cargo.lock drift — if deps changed since last successful
-    // deploy, --skip-build is unsafe and we silently force a rebuild.
-    // Prevents the class of bug where a stale binary ships after an
-    // upstream dep bump.
-    let skip_build_effective = if opts.skip_build {
-        let current_sha = guards::cargo_lock_sha(&cfg.workspace).ok();
-        let last_sha = state::read_stamp(&cfg.state_dir).ok().flatten()
-            .and_then(|s| s.cargo_lock_sha256);
-        match (current_sha, last_sha) {
-            (Some(c), Some(l)) if c == l => true,
-            (Some(_), Some(_)) => {
-                log::warn!("[cargo-lock] drift detected since last deploy — overriding --skip-build, rebuilding");
-                false
-            }
-            _ => true, // No prior stamp; honor --skip-build.
-        }
-    } else {
-        false
-    };
-
-    stages::preflight::run(ctx)?;
-    // Phase 3a: version sweep BEFORE build — abort deploy if the 5
-    // public version surfaces disagree. Cheap local file reads; no
-    // network. Fix at source + re-run rather than shipping drift.
-    stages::version_sweep::run(ctx)?;
-    // Phase 3b: doc-claim audit — walks docs/*.md for HTML-comment
-    // tagged claims (applies_to_version / code_grep / code_no_match)
-    // and verifies each against the live workspace. Catches the
-    // doc-rot class that the 2026-04-29 security review surfaced
-    // (threat-model.md claiming v0.4.x while VERSION was 0.5.9, etc.).
-    // Cheap local file reads; no network.
-    stages::doc_audit::run(ctx)?;
-    // Backup-freshness gate: refuse to deploy if no independent
-    // TrueNAS snapshot in the last 24h. Catches silently-broken
-    // backup/replication tasks. Override via SYNTAUR_SHIP_ALLOW_STALE_BACKUP=1.
-    stages::backup_freshness::run(ctx)?;
-    // Phase 2: snapshot BEFORE any TrueNAS writes. If any later stage
-    // fails we still have a restore point.
-    let snapshot_name = stages::snapshot::run(ctx)?;
-    if !skip_build_effective {
-        stages::build::run(ctx)?;
-    } else {
-        log::warn!("[preflight] --skip-build honored; reusing existing target/release binaries");
-    }
+fn run_full_inner(
+    cfg: &Config,
+    opts: &RunOptions,
+    ctx: &StageContext,
+    snapshot_out: &mut Option<String>,
+) -> Result<()> {
+    // Each .context("<stage>") makes the stage name the outermost
+    // anyhow message, so on failure run_full can extract failed_stage
+    // by reading e.to_string(). Replaces the prior hardcoded "unknown".
+    stages::preflight::run(ctx).context("preflight")?;
+    stages::review_triage::run(ctx).context("review_triage")?;
+    stages::version_sweep::run(ctx).context("version_sweep")?;
+    stages::doc_audit::run(ctx).context("doc_audit")?;
+    stages::backup_freshness::run(ctx).context("backup_freshness")?;
+    let snapshot_name = stages::snapshot::run(ctx).context("snapshot")?;
+    // Record snapshot for the journal/rollback path BEFORE any later
+    // stage can fail — so an aborted deploy still surfaces the recovery
+    // point.
+    *snapshot_out = Some(snapshot_name.clone());
+    stages::build::run(ctx).context("build")?;
     if !opts.social_only {
-        if !opts.skip_mac {
-            stages::mac_mini::run(ctx)?;
-        } else {
-            log::warn!("[mac_mini] --skip-mac set; skipping smoke (emergency only)");
-        }
-        // Canary: re-probe Mac Mini /health after 45s to catch
-        // delayed-crash bugs before rsync'ing to TrueNAS.
-        stages::canary::run(ctx)?;
-        // Phase 6: syntaur-verify visual audit against Mac Mini. Fails
-        // the pipeline on regressions (console errors, visual diffs,
-        // Opus-flagged regressions) before TrueNAS is touched. Opt-out
-        // via --skip-verify for emergencies.
-        stages::verify::run(ctx)?;
-        if !opts.skip_git {
-            stages::git_push::run(ctx)?;
-        } else {
-            log::warn!("[git_push] --skip-git set; not propagating to origin");
-        }
+        stages::mac_mini::run(ctx).context("mac_mini")?;
+        stages::canary::run(ctx).context("canary")?;
+        stages::verify::run(ctx).context("verify")?;
+        stages::git_push::run(ctx).context("git_push")?;
     }
-    stages::truenas::run(ctx)?;
+    stages::truenas::run(ctx).context("truenas")?;
     if !opts.social_only {
-        stages::viewer::run(ctx)?;
+        stages::viewer::run(ctx).context("viewer")?;
     }
-    // Phase 3a: post-deploy version audit on live prod. Warns (doesn't
-    // abort) — prod is already live at this point; drift here means
-    // repair at source + redeploy, not roll back.
-    let _ = stages::version_audit::run(ctx);
+    // v0.6.5: version_audit promoted from warn-only to fatal.
+    stages::version_audit::run(ctx).context("version_audit")?;
 
     // Post-deploy CI audit: poll ALL workflows on the current HEAD and
     // surface failures. Replaces the old narrow release-sign-only
@@ -368,12 +319,11 @@ fn build_stamp(cfg: &Config, opts: &RunOptions) -> Result<DeployStamp> {
         .to_string();
     let version = read_version_file(ws)?;
 
+    // v0.6.5: --skip-build / --skip-mac / --skip-git / --skip-verify /
+    // --force-ci-drift were removed. Only social-only is a real "scope"
+    // flag (it changes which artifacts ship, not whether stages run).
     let mut skip_flags = Vec::new();
-    if opts.skip_build { skip_flags.push("skip-build".into()); }
-    if opts.skip_mac { skip_flags.push("skip-mac".into()); }
-    if opts.skip_git { skip_flags.push("skip-git".into()); }
     if opts.social_only { skip_flags.push("social-only".into()); }
-    if opts.force_ci_drift { skip_flags.push("force-ci-drift".into()); }
 
     let cargo_lock_sha256 = guards::cargo_lock_sha(&cfg.workspace).ok();
     Ok(DeployStamp {
@@ -429,7 +379,14 @@ pub fn run_rollback(cfg: &Config, zfs: Option<&str>) -> Result<()> {
             log::info!(">> docker restart syntaur after ZFS rollback");
             let mut args = cfg.truenas_ssh_args();
             args.push("docker restart syntaur".into());
-            std::process::Command::new("ssh").args(&args).status()?;
+            let status = std::process::Command::new("ssh").args(&args).status()
+                .context("spawn ssh for docker restart")?;
+            if !status.success() {
+                anyhow::bail!(
+                    "docker restart syntaur failed on TrueNAS (ssh exit {}); container may be down — verify with `ssh truenas docker ps` before retrying",
+                    status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into())
+                );
+            }
         }
         None => {
             log::info!("Binary rollback: restoring latest .prev-* for each binary on TrueNAS");
@@ -552,11 +509,7 @@ pub fn run_status(cfg: &Config) -> Result<()> {
 
 fn collect_skip_flags(opts: &RunOptions) -> Vec<String> {
     let mut v = Vec::new();
-    if opts.skip_build { v.push("skip-build".into()); }
-    if opts.skip_mac { v.push("skip-mac".into()); }
-    if opts.skip_git { v.push("skip-git".into()); }
     if opts.social_only { v.push("social-only".into()); }
-    if opts.force_ci_drift { v.push("force-ci-drift".into()); }
     v
 }
 

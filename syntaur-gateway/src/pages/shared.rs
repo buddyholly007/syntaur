@@ -576,18 +576,19 @@ const TOP_BAR_SCRIPT: &str = r##"
 
   // ── modules palette (⌘K / Ctrl-K) ──────────────────────
   const SYNTAUR_MODULES = [
-    { path: '/chat',       name: 'Chat',      sub: 'Main agent' },
-    { path: '/coders',     name: 'Coders',    sub: 'Maurice' },
-    { path: '/scheduler',  name: 'Scheduler', sub: 'Thaddeus' },
-    { path: '/tax',        name: 'Tax',       sub: 'Positron' },
-    { path: '/knowledge',  name: 'Knowledge', sub: 'Cortex' },
-    { path: '/music',      name: 'Music',     sub: 'Silvr' },
-    { path: '/journal',    name: 'Journal',   sub: 'Mushi' },
-    { path: '/social',     name: 'Social',    sub: 'Nyota' },
-    { path: '/dashboard',  name: 'Dashboard', sub: 'Overview' },
-    { path: '/settings',   name: 'Settings',  sub: null },
-    { path: '/profile',    name: 'Profile',   sub: null },
-    { path: '/history',    name: 'History',   sub: null },
+    { path: '/chat',       name: 'Chat',       sub: 'Main agent' },
+    { path: '/coders',     name: 'Coders',     sub: 'Maurice' },
+    { path: '/scheduler',  name: 'Scheduler',  sub: 'Thaddeus' },
+    { path: '/tax',        name: 'Tax',        sub: 'Positron' },
+    { path: '/knowledge',  name: 'Knowledge',  sub: 'Cortex' },
+    { path: '/music',      name: 'Music',      sub: 'Silvr' },
+    { path: '/journal',    name: 'Journal',    sub: 'Mushi' },
+    { path: '/social',     name: 'Social',     sub: 'Nyota' },
+    { path: '/smart-home', name: 'Smart Home', sub: 'Matter + LAN' },
+    { path: '/dashboard',  name: 'Dashboard',  sub: 'Overview' },
+    { path: '/settings',   name: 'Settings',   sub: null },
+    { path: '/profile',    name: 'Profile',    sub: null },
+    { path: '/history',    name: 'History',    sub: null },
   ];
 
   function renderList(q) {
@@ -1168,6 +1169,11 @@ const TOP_BAR_SCRIPT: &str = r##"
   //
   // The trailing slash is REQUIRED — without it the server uses
   // exact-match and the token won't authorize subpaths.
+  // Cache key is `<token-prefix>::<prefixPath>` so a logout+login cycle
+  // can never serve stream tokens that were minted under the previous
+  // session's auth. We don't cache the raw token (don't want it in
+  // memory longer than necessary) — first 12 chars are enough to
+  // disambiguate sessions in a single-user app.
   const _prefixCache = {};
   window.sdPrefixStreamQuery = async function(prefixPath, ttlSecs) {
     if (!prefixPath.endsWith('/')) {
@@ -1175,13 +1181,14 @@ const TOP_BAR_SCRIPT: &str = r##"
     }
     const ttl = ttlSecs || 300;
     const now = Date.now() / 1000;
-    const cached = _prefixCache[prefixPath];
-    if (cached && now < cached.expiresAt - 10) return cached.qs;
     const tok = (function(){
       try { return localStorage.getItem('syntaur_token') || sessionStorage.getItem('syntaur_token') || ''; }
       catch (_) { return ''; }
     })();
     if (!tok) return '';
+    const cacheKey = tok.slice(0, 12) + '::' + prefixPath;
+    const cached = _prefixCache[cacheKey];
+    if (cached && now < cached.expiresAt - 10) return cached.qs;
     try {
       const r = await fetch('/api/auth/stream-token', {
         method: 'POST',
@@ -1192,7 +1199,7 @@ const TOP_BAR_SCRIPT: &str = r##"
         const j = await r.json();
         if (j && j.stream_token) {
           const qs = '?stream_token=' + encodeURIComponent(j.stream_token);
-          _prefixCache[prefixPath] = { qs, expiresAt: now + (j.expires_in || ttl) };
+          _prefixCache[cacheKey] = { qs, expiresAt: now + (j.expires_in || ttl) };
           return qs;
         }
       }
@@ -1287,12 +1294,28 @@ const SPA_ROUTER_SCRIPT: &str = r##"
       // attribute on the new content container. This lets us avoid
       // a full top-bar re-render (which would re-create #global-audio
       // and break music continuity). The top bar's #module-name span
-      // gets its text content updated; the status pill's class /
-      // text are updated if the new page exposes them.
+      // gets its text content updated, and we mirror the new page's
+      // status pill (parsed from the fetched DOM) onto the live one
+      // so it doesn't stay stuck on the entry-page state.
       const newMain = doc.getElementById('syntaur-app-content');
       const moduleName = document.querySelector('.syntaur-topbar .module-name');
       if (moduleName && newMain && newMain.dataset.page) {
         moduleName.textContent = newMain.dataset.page;
+      }
+      // Mirror the status pill from the fetched DOM. Both source and
+      // destination pills share the .module-status-pill class with one
+      // extra modifier (.ok / .info / .warn / .pause). If the new page
+      // doesn't render a pill (e.g. settings), we hide the live one.
+      const newPill = doc.querySelector('.syntaur-topbar .module-status-pill');
+      const livePill = document.querySelector('.syntaur-topbar .module-status-pill');
+      if (livePill) {
+        if (newPill) {
+          livePill.className = newPill.className;
+          livePill.innerHTML = newPill.innerHTML;
+          livePill.style.display = '';
+        } else {
+          livePill.style.display = 'none';
+        }
       }
       // ── Body class (some pages opt into ambient theming)
       if (doc.body && doc.body.className) document.body.className = doc.body.className;

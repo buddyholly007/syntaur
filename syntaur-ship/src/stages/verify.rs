@@ -25,29 +25,24 @@ use std::process::Command;
 use crate::pipeline::StageContext;
 
 pub fn run(ctx: &StageContext) -> Result<()> {
-    if ctx.opts.dry_run || ctx.opts.skip_mac || ctx.opts.social_only {
+    if ctx.opts.dry_run || ctx.opts.social_only {
         return Ok(());
     }
-    if ctx.opts.skip_verify {
-        log::warn!("[verify] --skip-verify set; skipping visual audit (emergency only)");
-        return Ok(());
-    }
-    if std::env::var("SYNTAUR_SHIP_SKIP_VERIFY").ok().as_deref() == Some("1") {
-        log::warn!("[verify] SYNTAUR_SHIP_SKIP_VERIFY=1 in env; skipping visual audit");
-        return Ok(());
-    }
+    // v0.6.5: --skip-verify and SYNTAUR_SHIP_SKIP_VERIFY were removed.
+    // Visual audit failures used to mask three weeks of broken
+    // smart-home + 506 daily page errors before Sean caught them
+    // manually. Verify is now mandatory; if it catches a regression,
+    // fix it inline or fail the deploy.
 
     // Locate the verify binary. Prefer workspace release over installed
     // ~/.local/bin so a fresh-built syntaur-verify is what runs.
-    let binary = locate_verify_binary(ctx)?;
-    if binary.is_none() {
-        log::warn!(
-            "[verify] syntaur-verify binary not found in target/release or ~/.local/bin — \
-             skipping audit. Build with `cargo build --release -p syntaur-verify`"
-        );
-        return Ok(());
-    }
-    let binary = binary.unwrap();
+    let binary = locate_verify_binary(ctx)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "verify: syntaur-verify binary not found in target/release or ~/.local/bin. \
+             Build it with `cargo build --release -p syntaur-verify` and re-run. \
+             (v0.6.5 made verify mandatory — there is no skip flag.)"
+        )
+    })?;
 
     // The Mac Mini gateway binds to 127.0.0.1 only (smoke stage hits
     // it via ssh+curl for the same reason). We reach it from claudevm
@@ -143,14 +138,15 @@ pub fn run(ctx: &StageContext) -> Result<()> {
         Some(1) => {
             anyhow::bail!(
                 "verify: regressions caught by visual audit — TrueNAS NOT touched. \
-                 Inspect ~/.syntaur-verify/runs/<latest>/report.json and either fix the \
-                 regression or re-run ship with --skip-verify if the deploy is critical."
+                 Inspect ~/.syntaur-verify/runs/<latest>/report.json, fix the regression \
+                 at source, then re-run. (v0.6.5 made verify mandatory; if a regression \
+                 looks like a verify-tool bug, fix the tool inline rather than bypassing it.)"
             )
         }
         Some(code) => {
             anyhow::bail!(
                 "verify: syntaur-verify exited with code {code} (tool error, not a findings \
-                 failure). Check output above; re-run with --skip-verify to bypass."
+                 failure). Check output above and fix the verify tool — there is no skip flag."
             )
         }
         None => anyhow::bail!("verify: syntaur-verify killed by signal"),

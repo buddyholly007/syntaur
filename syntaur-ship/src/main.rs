@@ -54,49 +54,30 @@ struct Cli {
     #[arg(long, global = true)]
     dry_run: bool,
 
-    /// Reuse the existing target/release binary instead of rebuilding.
-    /// Emergency flag — only safe when the binary was just built and
-    /// nothing changed since. See feedback/never_skip_pipeline_steps.
-    #[arg(long, global = true)]
-    skip_build: bool,
-
-    /// Skip the Mac Mini smoke step. Emergency flag only; disables the
-    /// sole guard that catches HSTS-on-HTTP regressions before prod.
-    /// Defaults to false.
-    #[arg(long, global = true)]
-    skip_mac: bool,
-
-    /// Skip the `git push` step. Emergency flag only; use when a
-    /// concurrent session has uncommitted drift. Not a substitute for
-    /// --skip-mac (the smoke is independent of git state).
-    #[arg(long, global = true)]
-    skip_git: bool,
-
     /// Deploy only `rust-social-manager`, leaving the gateway running.
+    /// This is a partial-deploy scope, NOT a quality bypass — every
+    /// stage that runs still runs in full.
     #[arg(long, global = true)]
     social_only: bool,
 
-    /// Override the blocking CI-failure gate. Use ONLY when deploying
-    /// despite known failing workflows (e.g. upstream-only CVE that
-    /// can't be fixed right now). Logged into the deploy journal as
-    /// an auditable skip.
-    #[arg(long, global = true)]
-    force_ci_drift: bool,
-
-    /// Skip the syntaur-verify visual audit (Phase 6). The audit is
-    /// the only automated gate catching UX regressions between the
-    /// Mac Mini smoke and TrueNAS deploy — use only if the tool is
-    /// known-broken or the deploy is critical and manual-reviewed.
-    #[arg(long, global = true)]
-    skip_verify: bool,
-
     /// Let the verify stage attempt an Opus-driven auto-fix if it
     /// catches a regression. Capped at 2 iters + 150 LoC/module. When
-    /// off (default), regressions just abort the pipeline and ask the
-    /// operator to fix manually.
+    /// off (default), regressions just abort the pipeline and the
+    /// operator fixes manually.
     #[arg(long, global = true)]
     auto_fix: bool,
 
+    // NOTE: --skip-build / --skip-mac / --skip-git / --skip-verify /
+    // --force-ci-drift were removed in v0.6.5. Those flags existed
+    // as "emergency overrides" but every prior emergency turned out
+    // to be either a bug we should have fixed inline OR a transient
+    // we should have retried. Cumulative cost over v0.5.x: a 90-min
+    // hardware-debug session caused by --skip-build hiding a stale
+    // binary, three weeks of broken smart-home masked by --skip-verify
+    // bypassing the visual audit, and four publication gaps caused
+    // by --force-ci-drift letting the pipeline declare success past
+    // failing CI. Every "emergency" flag was a security regression
+    // we shipped to ourselves. The pipeline is now fix-or-block.
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -158,12 +139,7 @@ fn main() -> ExitCode {
 
     let run_opts = pipeline::RunOptions {
         dry_run: cli.dry_run,
-        skip_build: cli.skip_build,
-        skip_mac: cli.skip_mac,
-        skip_git: cli.skip_git,
         social_only: cli.social_only,
-        force_ci_drift: cli.force_ci_drift,
-        skip_verify: cli.skip_verify,
         auto_fix: cli.auto_fix,
     };
 

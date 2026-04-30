@@ -17,7 +17,7 @@ use crate::pipeline::StageContext;
 pub const CANARY_SECS: u64 = 45;
 
 pub fn run(ctx: &StageContext) -> Result<()> {
-    if ctx.opts.dry_run || ctx.opts.skip_mac || ctx.opts.social_only {
+    if ctx.opts.dry_run || ctx.opts.social_only {
         return Ok(());
     }
     log::info!(

@@ -7,6 +7,7 @@ pub mod doc_audit;
 pub mod git_push;
 pub mod mac_mini;
 pub mod preflight;
+pub mod review_triage;
 pub mod snapshot;
 pub mod truenas;
 pub mod verify;
