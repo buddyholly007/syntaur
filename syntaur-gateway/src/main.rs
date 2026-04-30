@@ -1821,7 +1821,15 @@ async fn resolve_agent(state: &AppState, agent_id: &str, user_id: i64) -> Resolv
     }
 
     // 1. User-level customization wins.
-    if let Ok(Some(ua)) = state.users.get_user_agent(user_id, agent_id).await {
+    let ua_result = state.users.get_user_agent(user_id, agent_id).await;
+    // Treat Err the same as no row, but log it so we never silently ignore a
+    // mapper failure again. Pre-2026-04-30 a Blob-typed system_prompt
+    // produced an Err here that the old `if let Ok(Some(_))` pattern ate,
+    // which made the persona-edit UI appear broken for the main agent.
+    if let Err(ref e) = ua_result {
+        log::warn!("[resolve_agent] get_user_agent({}, {}) failed: {}", user_id, agent_id, e);
+    }
+    if let Ok(Some(ua)) = ua_result {
         let base = &ua.base_agent;
         let workspace = if let Some(ref ws) = ua.workspace {
             let expanded = ws.replace("~", &std::env::var("HOME").unwrap_or_default());

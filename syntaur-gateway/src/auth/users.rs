@@ -1066,16 +1066,49 @@ impl UserStore {
     }
 }
 
+/// Read a SQLite TEXT column tolerantly: if it was stored as BLOB (which
+/// happens when the value was inserted via `readfile()` or any other API
+/// that produces binary affinity), interpret the bytes as UTF-8. This is
+/// a defensive fix for the persona-doc class of bug Sean hit 2026-04-30
+/// — `UPDATE user_agents SET system_prompt = readfile(...)` produced a
+/// Blob row, the mapper rejected it with `Invalid column type Blob`,
+/// `get_user_agent` returned Err, and the caller's `if let Ok(Some(_))`
+/// pattern silently fell through to the default persona path. The user
+/// experience: the persona-edit feature appeared to do nothing for any
+/// user whose row had Blob-typed text. This helper round-trips both
+/// affinities and treats invalid UTF-8 bytes as a hard error so we don't
+/// silently lose data.
+fn col_text(r: &rusqlite::Row, idx: usize) -> rusqlite::Result<Option<String>> {
+    use rusqlite::types::ValueRef;
+    match r.get_ref(idx)? {
+        ValueRef::Null => Ok(None),
+        ValueRef::Text(b) | ValueRef::Blob(b) => std::str::from_utf8(b)
+            .map(|s| Some(s.to_owned()))
+            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
+                idx, rusqlite::types::Type::Text, Box::new(e),
+            )),
+        ValueRef::Integer(i) => Ok(Some(i.to_string())),
+        ValueRef::Real(f) => Ok(Some(f.to_string())),
+    }
+}
+
+/// Required-text variant of `col_text` — returns an error when the cell is NULL.
+fn col_text_required(r: &rusqlite::Row, idx: usize) -> rusqlite::Result<String> {
+    col_text(r, idx)?.ok_or(rusqlite::Error::InvalidColumnType(
+        idx, format!("col {} required", idx), rusqlite::types::Type::Text,
+    ))
+}
+
 fn map_user_agent(r: &rusqlite::Row) -> rusqlite::Result<UserAgent> {
     Ok(UserAgent {
         id: r.get(0)?,
         user_id: r.get(1)?,
-        agent_id: r.get(2)?,
-        display_name: r.get(3)?,
-        base_agent: r.get(4)?,
-        system_prompt: r.get(5)?,
-        workspace: r.get(6)?,
-        tool_profile: r.get(7)?,
+        agent_id: col_text_required(r, 2)?,
+        display_name: col_text_required(r, 3)?,
+        base_agent: col_text_required(r, 4)?,
+        system_prompt: col_text(r, 5)?,
+        workspace: col_text(r, 6)?,
+        tool_profile: col_text(r, 7)?.unwrap_or_else(|| "full".to_string()),
         enabled: r.get::<_, i64>(8)? != 0,
         created_at: r.get(9)?,
         updated_at: r.get(10)?,
@@ -1083,9 +1116,9 @@ fn map_user_agent(r: &rusqlite::Row) -> rusqlite::Result<UserAgent> {
         // round-trip through this mapper since the column list below is
         // always in the new order where the query selects all 15 columns.
         is_main_thread: r.get::<_, Option<i64>>(11).unwrap_or(None).unwrap_or(0) != 0,
-        description: r.get::<_, Option<String>>(12).unwrap_or(None),
-        avatar_color: r.get::<_, Option<String>>(13).unwrap_or(None),
-        imported_from: r.get::<_, Option<String>>(14).unwrap_or(None),
+        description: col_text(r, 12).ok().flatten(),
+        avatar_color: col_text(r, 13).ok().flatten(),
+        imported_from: col_text(r, 14).ok().flatten(),
     })
 }
 
