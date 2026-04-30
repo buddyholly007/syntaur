@@ -11669,20 +11669,44 @@ async fn handle_api_agent_icon_get(
 }
 
 /// POST /api/agents/{id}/icon — multipart upload, single field `icon`.
-/// Caps at 256 KB. Returns the new icon URL the client can hot-swap into
-/// the preview without an extra GET (the cache-bust suffix forces reload).
+/// Returns the new icon URL the client can hot-swap into the preview
+/// without an extra GET (the cache-bust suffix forces reload). Errors
+/// return a JSON `error` body so the JS can surface what went wrong
+/// instead of just spinning silently — Sean called this 2026-04-30
+/// after his desktop wallpaper upload failed with no UI feedback at
+/// all.
+///
+/// Limits:
+/// - 8 MB cap. Avatars get displayed as 32-256px circles, so a 50KB
+///   JPEG is more than enough — but desktop screenshots and wallpapers
+///   are routinely 2-5MB and the previous 256KB cap rejected nearly
+///   every realistic image. Server-side image::open + thumbnail will
+///   downscale on the way to disk; the upload limit is just to bound
+///   memory.
+/// - PNG / JPEG / WebP / GIF / BMP / TIFF accepted. HEIC stays
+///   rejected because the `image` crate decoder is gated behind a
+///   native dep we deliberately skip.
 async fn handle_api_agent_icon_put(
     headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Path(agent_id): axum::extract::Path<String>,
     mut multipart: axum::extract::Multipart,
-) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
     let token = crate::security::extract_session_token(&headers);
-    if token.is_empty() { return Err(axum::http::StatusCode::UNAUTHORIZED); }
-    let principal = resolve_principal(&state, &token).await?;
+    if token.is_empty() {
+        return Err((
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Sign in again, then retry the upload."})),
+        ));
+    }
+    let principal = resolve_principal(&state, &token).await
+        .map_err(|sc| (sc, Json(serde_json::json!({"error": "Authentication failed."}))))?;
     let uid = principal.user_id();
     let indexer = state.indexer.as_ref()
-        .ok_or(axum::http::StatusCode::SERVICE_UNAVAILABLE)?;
+        .ok_or((
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "Storage layer is not ready yet — try again in a moment."})),
+        ))?;
 
     let mut content_type = String::new();
     let mut bytes: Vec<u8> = Vec::new();
@@ -11690,26 +11714,53 @@ async fn handle_api_agent_icon_put(
         if field.name() != Some("icon") { continue; }
         content_type = field.content_type().unwrap_or("image/png").to_string();
         bytes = field.bytes().await
-            .map_err(|_| axum::http::StatusCode::BAD_REQUEST)?
+            .map_err(|_| (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "The upload was interrupted before all bytes arrived. Try again."})),
+            ))?
             .to_vec();
         break;
     }
     if bytes.is_empty() {
-        return Err(axum::http::StatusCode::BAD_REQUEST);
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "No image found in the upload — pick a file and try again."})),
+        ));
     }
-    if bytes.len() > 256 * 1024 {
-        return Err(axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+    const MAX_BYTES: usize = 8 * 1024 * 1024;
+    if bytes.len() > MAX_BYTES {
+        return Err((
+            axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({
+                "error": format!(
+                    "Image is {:.1} MB — limit is {} MB. Try a smaller image, or compress this one first.",
+                    bytes.len() as f64 / (1024.0 * 1024.0),
+                    MAX_BYTES / (1024 * 1024)
+                ),
+            })),
+        ));
     }
     if !matches!(content_type.as_str(),
-        "image/png" | "image/jpeg" | "image/webp" | "image/gif") {
-        return Err(axum::http::StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        "image/png" | "image/jpeg" | "image/webp" | "image/gif" | "image/bmp" | "image/tiff") {
+        return Err((
+            axum::http::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Json(serde_json::json!({
+                "error": format!(
+                    "{} isn't supported. Use PNG, JPEG, WebP, GIF, BMP, or TIFF.",
+                    if content_type.is_empty() { "Unknown format".to_string() } else { content_type.clone() }
+                ),
+            })),
+        ));
     }
 
     let agent = agent_id.clone();
     indexer
         .with_conn(move |conn| Ok(crate::agents::settings::put_icon(conn, uid, &agent, &content_type, &bytes)?))
         .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Saving the icon failed: {}", e)})),
+        ))?;
     Ok(Json(serde_json::json!({
         "blob_id": 1,
         "url": format!("/api/agents/{}/icon?v={}", agent_id, std::time::SystemTime::now()

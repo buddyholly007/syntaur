@@ -2232,6 +2232,23 @@ const RESOURCE_BUDGET_JS: &str = r#"
     const ind = card.querySelector('.cf-back-saving');
     if (ind) ind.hidden = !on;
   }
+  function showCardError(card, msg) {
+    if (!msg) return;
+    let el = card.querySelector('.cf-back-error');
+    if (!el) {
+      const back = card.querySelector('.cf-back');
+      if (!back) return;
+      el = document.createElement('div');
+      el.className = 'cf-back-error';
+      el.style.cssText =
+        'margin:8px 12px;padding:8px 12px;border-radius:6px;' +
+        'background:rgba(239,68,68,.12);color:#fecaca;font-size:12px;line-height:1.4;';
+      back.insertBefore(el, back.firstChild);
+    }
+    el.textContent = msg;
+    el.hidden = false;
+    setTimeout(() => { if (el) el.hidden = true; }, 8000);
+  }
   async function persistField(card, field, value) {
     const agent = card.dataset.agent;
     if (!agent) return;
@@ -2262,14 +2279,39 @@ const RESOURCE_BUDGET_JS: &str = r#"
       // the returned blob_id back via PUT settings.
       const file = ev.target.files && ev.target.files[0];
       if (!file) return;
+      // WebKitGTK quirk: FormData multipart POSTs drop Origin/Referer
+      // headers, which trips CSRF / auth in some paths. Always send the
+      // bearer token explicitly. Locked in as a class rule in
+      // feedback/webkitgtk_formdata_no_origin.md.
+      const tok = sessionStorage.getItem('syntaur_token')
+        || localStorage.getItem('syntaur_token') || '';
       const fd = new FormData();
       fd.append('icon', file);
       showSavingIndicator(card, true);
       fetch('/api/agents/' + encodeURIComponent(card.dataset.agent) + '/icon', {
-        method: 'POST', credentials: 'same-origin', body: fd,
-      }).then(r => r.ok ? r.json() : Promise.reject(r))
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: tok ? { 'Authorization': 'Bearer ' + tok } : {},
+        body: fd,
+      }).then(async r => {
+        if (r.ok) return r.json();
+        // Surface the server's error message instead of swallowing the
+        // failure. /api/agents/{id}/icon returns {error: "..."} JSON on
+        // every non-2xx, with size/format/auth-specific copy.
+        let msg = 'Upload failed (HTTP ' + r.status + ')';
+        try {
+          const body = await r.json();
+          if (body && body.error) msg = body.error;
+        } catch (_) { /* not JSON; keep generic */ }
+        throw new Error(msg);
+      })
         .then(j => persistField(card, 'icon_blob_id', j.blob_id))
-        .catch(() => {})
+        .catch(err => {
+          showCardError(card, (err && err.message) || 'Upload failed.');
+          // Reset the file input so picking the same file again re-fires
+          // the change event and gives the user another shot.
+          ev.target.value = '';
+        })
         .finally(() => showSavingIndicator(card, false));
       return;
     }
