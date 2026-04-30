@@ -451,11 +451,31 @@ impl Browser {
         // pixel-diff on every voice ship.
         {
             use chromiumoxide::cdp::browser_protocol::page::AddScriptToEvaluateOnNewDocumentParams;
+            // Two-layer defense:
+            //   1. Inject a <style> early for the bulk-suppression rules
+            //      (animations, transitions, --sh-backdrop). These stand
+            //      up against the page's own !important rules because the
+            //      properties they target don't have a competing fixed-state
+            //      declaration in the page CSS.
+            //   2. Walk the DOM after DOMContentLoaded and set
+            //      `el.style.visibility = 'hidden'` directly on every
+            //      [data-verify-mask] element. INLINE STYLES BEAT ANY
+            //      EXTERNAL RULE regardless of !important / specificity —
+            //      this is bulletproof against the page's CSS race that
+            //      previously left greeting/clock/sun-position visible
+            //      and contributed 94.8% pixel-diff on every dashboard
+            //      capture (cost: visibility into real regressions for
+            //      the dashboard module since the masking-attribute
+            //      annotations landed; 6 visual-diff regressions in the
+            //      v0.6.3 ship that turned out to be entirely time-of-day
+            //      noise).
+            //   Plus a MutationObserver to catch elements added later
+            //   (SPA navigation, lazy-mounted widgets).
             let mask_js = r#"
                 (function () {
                   try {
-                    const css = '[data-verify-mask]{visibility:hidden!important;animation:none!important;transition:none!important}:root{--sh-backdrop:none!important}*,*::before,*::after{animation-duration:0s!important;animation-delay:0s!important;animation-iteration-count:1!important;transition:none!important}';
-                    const apply = () => {
+                    const css = ':root{--sh-backdrop:none!important}*,*::before,*::after{animation-duration:0s!important;animation-delay:0s!important;animation-iteration-count:1!important;transition:none!important;animation-play-state:paused!important}[data-verify-mask]{visibility:hidden!important}';
+                    const injectStyle = () => {
                       if (!document.head) return false;
                       const s = document.createElement('style');
                       s.setAttribute('data-from', 'syntaur-verify-mask');
@@ -463,10 +483,32 @@ impl Browser {
                       document.head.appendChild(s);
                       return true;
                     };
-                    if (!apply()) {
-                      const obs = new MutationObserver(() => { if (apply()) obs.disconnect(); });
+                    if (!injectStyle()) {
+                      const obs = new MutationObserver(() => { if (injectStyle()) obs.disconnect(); });
                       obs.observe(document.documentElement, { childList: true });
                     }
+                    // Bulletproof inline-style mask. Walks DOM and sets
+                    // visibility:hidden directly on every annotated element.
+                    // Inline styles override any external rule.
+                    const hideAll = () => {
+                      try {
+                        document.querySelectorAll('[data-verify-mask]').forEach(el => {
+                          el.style.setProperty('visibility', 'hidden', 'important');
+                        });
+                      } catch (e) { /* swallow */ }
+                    };
+                    if (document.readyState === 'loading') {
+                      document.addEventListener('DOMContentLoaded', hideAll, { once: false });
+                    } else {
+                      hideAll();
+                    }
+                    // Catch lazy-mounted elements + post-DCL DOM updates.
+                    // Run for 1.6s so the interval is still firing when
+                    // the Rust capture path takes its 1.5s screenshot —
+                    // a late-mounted SPA portal or React-style mount
+                    // can't sneak through an off-by-100ms gap.
+                    const tick = setInterval(hideAll, 100);
+                    setTimeout(() => clearInterval(tick), 1600);
                   } catch (e) { /* swallow */ }
                 })();
             "#;
