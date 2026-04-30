@@ -35,6 +35,7 @@ mod tax;
 mod tax_pdf;
 mod ledger;
 mod trading;
+mod trading_summary;
 mod library;
 mod drafts;
 mod financial;
@@ -6691,6 +6692,14 @@ async fn main() {
     if "calendar_reminder::spawn_reminder_task" != "disabled" {
         crate::calendar_reminder::spawn_reminder_task(Arc::clone(&state));
         info!("[calendar-reminder] spawned background reminder task");
+    }
+
+    // Daily 8pm PT trading summary. Replaces per-event chatter from
+    // rust-bot-monitor (which is still off post-VM-migration). Sean's ask
+    // 2026-04-30: one digest/day with trades-made + day P&L + all-time P&L.
+    // Silently no-ops if TRADING_SUMMARY_TG_TOKEN env var is unset.
+    if let Some(tsvc) = state.trading.clone() {
+        crate::trading_summary::spawn(tsvc);
     }
 
     // Scheduler Tier 3 #20 — school ICS feeds resync every 6h per feed.
