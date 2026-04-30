@@ -178,6 +178,15 @@ const EXTRA_STYLE: &str = r#"
 "#;
 
 const PAGE_JS: &str = r#"
+// Wrapped in IIFE so top-level const declarations (token, esc,
+// apiGet, apiPost) don't collide with the same names declared at
+// top level of settings_chunks/page.js (rendered as a sibling
+// <script> in the same realm). Without this, Chromium throws
+// `Identifier 'token' has already been declared` and aborts both
+// scripts. Page.js's token + esc are referenced via global scope
+// only by code inside page.js itself; this script's references
+// stay inside this IIFE so the dep is local.
+(function () {
 const token = sessionStorage.getItem('syntaur_token') || localStorage.getItem('syntaur_token') || '';
 // Client-side token-gate removed 2026-04-24 (module-reset bug fix).
 
@@ -315,4 +324,5 @@ async function agentsDelete(id, name) {
 })();
 
 agentsLoad();
+})();
 "#;
