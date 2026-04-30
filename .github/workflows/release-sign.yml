@@ -311,7 +311,14 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
 
-          assets=( syntaur-* checksums.txt *.cosign.bundle )
+          # Dedupe the asset list. The naive `( syntaur-* checksums.txt
+          # *.cosign.bundle )` literal counts every cosign bundle twice
+          # because `syntaur-*` already matches `syntaur-…cosign.bundle`
+          # siblings. That inflated `expected` from 16 to 23 on v0.6.5,
+          # so the post-upload assertion (`actual < expected`) failed
+          # despite the release being correctly published with all 16
+          # files. `sort -u` collapses the overlap.
+          mapfile -t assets < <(printf '%s\n' syntaur-* checksums.txt *.cosign.bundle | sort -u)
           expected=${#assets[@]}
           if (( expected == 0 )); then
             echo "::error::no assets found in dist/ — refusing to publish empty release"

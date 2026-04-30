@@ -40,7 +40,12 @@ pub fn run(ctx: &StageContext) -> Result<()> {
     // VERSION just bumped and the operator used `syntaur-ship release`,
     // the workflow is in-flight when this stage starts. Without the
     // poll, every release deploy would log a spurious warning.
-    results.push(("GitHub Releases latest tag".into(), github_latest_tag_polled(expected, 5)));
+    // 15-min poll deadline matches release-sign.yml's worst-case
+    // wall-clock: 4 platforms × 4-min builds + cosign + asset upload.
+    // Was 5min when version_audit was warn-only; v0.6.5 promoted to
+    // fatal so the deadline must cover the actual workflow runtime
+    // or every release will spuriously abort with prod already live.
+    results.push(("GitHub Releases latest tag".into(), github_latest_tag_polled(expected, 15)));
     results.push(("install.sh raw (from GH main)".into(), install_sh_version()));
 
     let mut mismatches = Vec::new();
