@@ -109,8 +109,20 @@ pub fn agent_settings_overlay() -> Markup {
 /// data-section="<name>" hook so phased rollout doesn't disturb
 /// neighbouring markup).
 pub fn agent_settings_back(agent_id: &str) -> Markup {
+    // The settings drawer is injected into #syntaur-agent-overlay's body
+    // via /api/agents/{id}/settings_back, NOT into a chat-card-flip
+    // surface. But every JS handler in RESOURCE_BUDGET_JS uses
+    // `closest('.cf-back')` and `closest('.chat-card-flip')` to scope
+    // events. Without wrappers carrying those classes, every change /
+    // blur / click in the drawer returns early at the `if (!back) return`
+    // guard and nothing saves — the UI looks alive but every interaction
+    // silently no-ops. Sean hit this 2026-04-30 trying to upload an icon:
+    // the bytes never even left the browser. Wrap the inner with
+    // `chat-card-flip cf-back` (with data-agent on the outer for any
+    // `card.dataset.agent` reads) so all the existing JS scopes work.
     html! {
-        div class="cf-back-inner" data-agent=(agent_id) {
+        div class="chat-card-flip cf-back" data-agent=(agent_id) {
+            div class="cf-back-inner" data-agent=(agent_id) {
             header class="cf-back-head" {
                 button
                     type="button"
@@ -138,6 +150,7 @@ pub fn agent_settings_back(agent_id: &str) -> Markup {
             (section_memory(agent_id))
             (section_limits(agent_id))
             (section_maintenance(agent_id))
+            }
         }
     }
 }
