@@ -960,6 +960,35 @@ pub fn spawn_background_tasks(state: Arc<AppState>) {
             loop { i.tick().await; run_post_monitor(&state).await; }
         });
     }
+    // Nightly review — daily rollup of social activity into social_alerts.
+    // Replaces the legacy openclaw `cl-nightly-review` cron job (which
+    // ran an LLM turn against the agent following NIGHTLYREVIEW.md).
+    // Syntaur version is mechanical: aggregate today's drafts/replies/
+    // engagements + stats delta, surface as one info alert per user so
+    // it shows up in the social-module dashboard without LLM cost.
+    {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            log::info!("[social] nightly review started (24h)");
+            let mut i = tokio::time::interval(Duration::from_secs(24 * 3600));
+            i.tick().await;
+            loop { i.tick().await; run_nightly_review(&state).await; }
+        });
+    }
+    // Retention sweep — daily cleanup. Replaces the legacy openclaw
+    // `cl-session-reset` cron job (which reset the agent's chat
+    // session). Syntaur has no agent chat history per se, so the
+    // equivalent is keeping the social tables tidy: expire abandoned
+    // drafts, prune rejected replies, trim ancient engagement log.
+    {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            log::info!("[social] retention sweep started (24h)");
+            let mut i = tokio::time::interval(Duration::from_secs(24 * 3600));
+            i.tick().await;
+            loop { i.tick().await; run_retention_sweep(&state).await; }
+        });
+    }
 }
 
 /// Invoked once per minute by Syntaur's cron runner. Scans user prefs
@@ -1361,5 +1390,150 @@ pub async fn run_post_monitor(state: &AppState) {
                 }
             }
         }
+    }
+}
+
+/// Daily rollup of the last 24h of social activity per user. Replaces
+/// the legacy `cl-nightly-review` cron job that ran an LLM turn against
+/// the openclaw agent. Syntaur version is mechanical: count drafts +
+/// replies + engagement actions per platform, compute follower delta
+/// vs the previous stats snapshot, write one info alert per user so
+/// the rollup surfaces in the social dashboard.
+pub async fn run_nightly_review(state: &AppState) {
+    let users: Vec<i64> = {
+        let db = state.db_path.clone();
+        tokio::task::spawn_blocking(move || -> Vec<i64> {
+            let conn = match rusqlite::Connection::open(&db) { Ok(c) => c, Err(_) => return vec![] };
+            let mut stmt = match conn.prepare("SELECT id FROM users WHERE disabled = 0") { Ok(s) => s, Err(_) => return vec![] };
+            stmt.query_map([], |r| r.get::<_, i64>(0)).map(|i| i.filter_map(Result::ok).collect()).unwrap_or_default()
+        }).await.unwrap_or_default()
+    };
+    let now = chrono::Utc::now().timestamp();
+    let since = now - 24 * 3600;
+    for uid in users {
+        let db = state.db_path.clone();
+        let summary = tokio::task::spawn_blocking(move || -> Option<String> {
+            let conn = rusqlite::Connection::open(&db).ok()?;
+            let mut lines: Vec<String> = Vec::new();
+
+            // Drafts created today, by platform/status.
+            if let Ok(mut s) = conn.prepare(
+                "SELECT platform, status, COUNT(*) FROM social_drafts \
+                 WHERE user_id = ? AND created_at >= ? GROUP BY platform, status"
+            ) {
+                let rows = s.query_map(rusqlite::params![uid, since], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
+                }).map(|i| i.filter_map(Result::ok).collect::<Vec<_>>()).unwrap_or_default();
+                for (p, st, n) in rows {
+                    lines.push(format!("drafts.{p}.{st}={n}"));
+                }
+            }
+
+            // Replies posted today, by platform.
+            if let Ok(mut s) = conn.prepare(
+                "SELECT platform, COUNT(*) FROM social_replies \
+                 WHERE user_id = ? AND posted_at IS NOT NULL AND posted_at >= ? GROUP BY platform"
+            ) {
+                let rows = s.query_map(rusqlite::params![uid, since], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                }).map(|i| i.filter_map(Result::ok).collect::<Vec<_>>()).unwrap_or_default();
+                for (p, n) in rows {
+                    lines.push(format!("replies.{p}.posted={n}"));
+                }
+            }
+
+            // Engagement actions today, by platform/action.
+            if let Ok(mut s) = conn.prepare(
+                "SELECT platform, action, COUNT(*) FROM social_engagement_log \
+                 WHERE user_id = ? AND created_at >= ? GROUP BY platform, action"
+            ) {
+                let rows = s.query_map(rusqlite::params![uid, since], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
+                }).map(|i| i.filter_map(Result::ok).collect::<Vec<_>>()).unwrap_or_default();
+                for (p, a, n) in rows {
+                    lines.push(format!("engage.{p}.{a}={n}"));
+                }
+            }
+
+            // Follower delta: latest snapshot vs one ~24h older.
+            if let Ok(mut s) = conn.prepare(
+                "SELECT platform, MAX(as_of), followers FROM social_stats_snapshots \
+                 WHERE user_id = ? GROUP BY platform"
+            ) {
+                let latest = s.query_map(rusqlite::params![uid], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<i64>>(2)?))
+                }).map(|i| i.filter_map(Result::ok).collect::<Vec<_>>()).unwrap_or_default();
+                for (p, _as_of, fol_now) in latest {
+                    let prior: Option<i64> = conn.query_row(
+                        "SELECT followers FROM social_stats_snapshots \
+                         WHERE user_id = ? AND platform = ? AND as_of < ? \
+                         ORDER BY as_of DESC LIMIT 1",
+                        rusqlite::params![uid, p, since],
+                        |r| r.get::<_, Option<i64>>(0),
+                    ).ok().flatten();
+                    if let (Some(now_n), Some(prior_n)) = (fol_now, prior) {
+                        lines.push(format!("followers.{p}.delta={}", now_n - prior_n));
+                    }
+                }
+            }
+
+            if lines.is_empty() {
+                return Some("no activity in last 24h".into());
+            }
+            Some(lines.join(", "))
+        }).await.ok().flatten();
+
+        let Some(detail) = summary else { continue };
+        let db = state.db_path.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let conn = rusqlite::Connection::open(&db).ok()?;
+            conn.execute(
+                "INSERT INTO social_alerts (user_id, platform, alert_type, target_uri, detail, created_at) \
+                 VALUES (?, '_all', 'nightly_review', NULL, ?, ?)",
+                rusqlite::params![uid, detail, now],
+            ).ok()
+        }).await;
+        log::info!("[social] nightly review user={} written", uid);
+    }
+}
+
+/// Daily retention sweep — keep the social tables from growing
+/// unboundedly. Replaces the legacy `cl-session-reset` cron job which
+/// reset the openclaw agent's chat context. Syntaur tracks no per-agent
+/// chat session, so the equivalent maintenance is data hygiene:
+/// expire abandoned drafts, prune rejected replies, trim ancient
+/// engagement log + acknowledged alerts.
+pub async fn run_retention_sweep(state: &AppState) {
+    let now = chrono::Utc::now().timestamp();
+    let draft_stale  = now - 7  * 24 * 3600;
+    let reply_stale  = now - 30 * 24 * 3600;
+    let engage_stale = now - 90 * 24 * 3600;
+    let alert_stale  = now - 90 * 24 * 3600;
+    let db = state.db_path.clone();
+    let counts = tokio::task::spawn_blocking(move || -> Option<(usize, usize, usize, usize)> {
+        let conn = rusqlite::Connection::open(&db).ok()?;
+        let drafts_expired = conn.execute(
+            "UPDATE social_drafts SET status = 'expired', updated_at = ? \
+             WHERE status IN ('pending','draft') AND updated_at < ?",
+            rusqlite::params![now, draft_stale],
+        ).unwrap_or(0);
+        let replies_pruned = conn.execute(
+            "DELETE FROM social_replies WHERE status = 'rejected' AND updated_at < ?",
+            rusqlite::params![reply_stale],
+        ).unwrap_or(0);
+        let engage_pruned = conn.execute(
+            "DELETE FROM social_engagement_log WHERE created_at < ?",
+            rusqlite::params![engage_stale],
+        ).unwrap_or(0);
+        let alerts_pruned = conn.execute(
+            "DELETE FROM social_alerts WHERE acknowledged = 1 AND created_at < ?",
+            rusqlite::params![alert_stale],
+        ).unwrap_or(0);
+        Some((drafts_expired, replies_pruned, engage_pruned, alerts_pruned))
+    }).await.ok().flatten();
+    if let Some((d, r, e, a)) = counts {
+        log::info!(
+            "[social] retention sweep: drafts_expired={d} replies_pruned={r} engage_pruned={e} alerts_pruned={a}"
+        );
     }
 }
