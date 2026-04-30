@@ -146,13 +146,30 @@ pub fn run_full(cfg: &Config, opts: &RunOptions) -> Result<()> {
     // Threaded `snapshot_holder`: written by run_full_inner the moment
     // the ZFS snapshot is created, so the failure-path journal entry
     // can record the recovery point even if a later stage aborts.
+    // `truenas_done`: flipped true the moment the docker-restart
+    // succeeds on prod. If a later stage (viewer / version_audit /
+    // win11) fails, this lets the failure-path journal record outcome
+    // = "partial" + prod_live = true so the operator sees that prod IS
+    // live with the new version even though the line item says
+    // non-success. Without this, post-truenas failures got recorded
+    // as "aborted" — the same shape as a pre-truenas failure where
+    // prod is still on the old version. Two very different operator
+    // responses (rollback vs fix-and-redeploy-the-warning) flattened
+    // into one. Tracked as pipeline-version-audit-aborted-mismatch in
+    // .syntaur/reviews/2026-04-30-gemini.md.
     let mut snapshot_holder: Option<String> = None;
-    let result = run_full_inner(cfg, opts, &ctx, &mut snapshot_holder);
+    let mut truenas_done = false;
+    let result = run_full_inner(cfg, opts, &ctx, &mut snapshot_holder, &mut truenas_done);
     let duration_ms = start.elapsed().as_millis();
 
     // Write journal entry regardless of outcome (unless dry-run).
     if !opts.dry_run {
-        let outcome = if result.is_ok() { "success" } else { "aborted" };
+        let outcome = match (&result, truenas_done) {
+            (Ok(()), _) => "success",
+            (Err(_), true) => "partial",
+            (Err(_), false) => "aborted",
+        };
+        let prod_live = if outcome == "partial" { Some(true) } else { None };
         let (failed_stage, failure_reason) = match &result {
             Ok(()) => (None, None),
             Err(e) => {
@@ -177,6 +194,7 @@ pub fn run_full(cfg: &Config, opts: &RunOptions) -> Result<()> {
                 skip_flags: s.skip_flags,
                 failed_stage,
                 failure_reason,
+                prod_live,
                 duration_ms,
             },
             _ => {
@@ -197,6 +215,7 @@ pub fn run_full(cfg: &Config, opts: &RunOptions) -> Result<()> {
                     skip_flags: collect_skip_flags(opts),
                     failed_stage,
                     failure_reason,
+                    prod_live,
                     duration_ms,
                 }
             }
@@ -204,13 +223,19 @@ pub fn run_full(cfg: &Config, opts: &RunOptions) -> Result<()> {
         if let Err(e) = journal::append(&cfg.vault_dir, &entry) {
             log::warn!("[journal] append failed: {e}");
         }
-        let msg = match &result {
-            Ok(()) => format!(
+        let msg = match (&result, truenas_done) {
+            (Ok(()), _) => format!(
                 "✓ syntaur-ship: v{} deployed to prod in {:.1}s (session {})",
                 entry.version, duration_ms as f64 / 1000.0, cfg.coord_session
             ),
-            Err(e) => format!(
-                "✗ syntaur-ship: deploy ABORTED after {:.1}s — {}",
+            (Err(e), true) => format!(
+                "⚠ syntaur-ship: v{} PARTIAL after {:.1}s — prod IS LIVE with new version, but post-deploy stage failed: {}",
+                entry.version,
+                duration_ms as f64 / 1000.0,
+                format!("{e:#}").chars().take(200).collect::<String>()
+            ),
+            (Err(e), false) => format!(
+                "✗ syntaur-ship: deploy ABORTED after {:.1}s — prod still on previous version: {}",
                 duration_ms as f64 / 1000.0,
                 format!("{e:#}").chars().take(200).collect::<String>()
             ),
@@ -233,6 +258,7 @@ fn run_full_inner(
     opts: &RunOptions,
     ctx: &StageContext,
     snapshot_out: &mut Option<String>,
+    truenas_done_out: &mut bool,
 ) -> Result<()> {
     // Each .context("<stage>") makes the stage name the outermost
     // anyhow message, so on failure run_full can extract failed_stage
@@ -255,6 +281,10 @@ fn run_full_inner(
         stages::git_push::run(ctx).context("git_push")?;
     }
     stages::truenas::run(ctx).context("truenas")?;
+    // Prod is now serving the new binary. Any later-stage failure is a
+    // post-prod issue, not a deploy abort — record so run_full can use
+    // outcome="partial" + prod_live=true instead of outcome="aborted".
+    *truenas_done_out = true;
     if !opts.social_only {
         stages::viewer::run(ctx).context("viewer")?;
     }

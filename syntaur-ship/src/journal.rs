@@ -19,7 +19,12 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JournalEntry {
     pub timestamp: DateTime<Utc>,
-    /// "success" | "aborted" | "rolled-back"
+    /// "success" | "partial" | "aborted" | "rolled-back".
+    /// `partial` = a stage failed AFTER the TrueNAS docker-restart
+    /// already swung prod onto the new binary (viewer / version_audit /
+    /// win11 are post-truenas). The deploy didn't reach a clean finish,
+    /// but prod IS live with the new version. `aborted` is reserved for
+    /// pre-truenas failures where prod is still on the previous version.
     pub outcome: String,
     pub version: String,
     pub git_head: String,
@@ -33,6 +38,12 @@ pub struct JournalEntry {
     /// If outcome != success, human-readable reason.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_reason: Option<String>,
+    /// True only when outcome == "partial". Surfaces to the operator
+    /// that prod is actually serving the new version even though the
+    /// deploy line says non-success — so they don't roll back something
+    /// that was already mostly succeeded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prod_live: Option<bool>,
     /// How long the pipeline took wall-clock.
     pub duration_ms: u128,
 }
