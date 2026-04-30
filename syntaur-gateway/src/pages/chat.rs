@@ -1322,8 +1322,12 @@ function stopVoice(e) {
 
 
 // ── Voice Mode (continuous conversation) ─────────────────────────
-const VM_SILENCE_THRESHOLD = 1200;   // RMS energy (browser mic is louder than satellite)
-const VM_SILENCE_CHUNKS = 8;         // ~330ms at 4096 samples/chunk @ 16kHz
+// VAD tuned 2026-04-30 after Sean reported "have to speak louder or repeat"
+// (threshold too high) and "cuts off tail end mid-sentence without a pause"
+// (silence window too short). Old: threshold=1200, chunks=8 (~330ms). New
+// values pick up conversational speech and tolerate normal pauses.
+const VM_SILENCE_THRESHOLD = 600;    // RMS energy — half the old gate
+const VM_SILENCE_CHUNKS = 18;        // ~750ms — survives natural mid-utterance pauses
 const VM_MAX_SILENCE_S = 30;         // exit voice mode after 30s total silence
 // Hard watchdogs so a turn never wedges silently (post-cache-fix "dies after 2-3 turns" symptom)
 const VM_TURN_TIMEOUT_MS = 45000;     // SSE/turn must reach 'complete' or fall back to listening
@@ -1771,7 +1775,11 @@ async function handleVmTranscript(e) {
             const ttsResp = await fetch('/api/tts', {
               method: 'POST',
               headers: JSON_AUTH_H(),
-              body: JSON.stringify({ text: ev.response.substring(0, 500) })
+              // Server cap is 2000 chars (voice_api.rs:322); 500 was a stale
+              // legacy clamp that truncated audio while the chat bubble kept
+              // showing the full response — Sean called this "cuts off after
+              // a certain point even though the text below continues" 4-30.
+              body: JSON.stringify({ text: ev.response.substring(0, 1800) })
             });
             if (!ttsResp.ok) {
               vmShowError('tts-http', `TTS unavailable (HTTP ${ttsResp.status})`);
@@ -1863,7 +1871,7 @@ async function playTts(text) {
     const resp = await fetch('/api/tts', {
       method: 'POST',
       headers: JSON_AUTH_H(),
-      body: JSON.stringify({ text: text.substring(0, 500) })
+      body: JSON.stringify({ text: text.substring(0, 1800) })
     });
     const data = await resp.json();
     if (data.audio_url) {
