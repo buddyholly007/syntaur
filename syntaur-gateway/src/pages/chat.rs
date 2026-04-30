@@ -1754,11 +1754,13 @@ async function handleVmTranscript(e) {
         vmShowError('turn_timeout', 'Reply took too long — try again');
         vmEndTurn('turn_timeout');
       }, VM_TURN_TIMEOUT_MS);
+      let __vmTurnCompleted = false;
       evtSource.onmessage = async (event) => {
         // Ignore stale messages from a turn that was already cleaned up.
         if (vmCurrentTurnId !== turnId) return;
         const ev = JSON.parse(event.data);
         if (ev.event === 'complete') {
+          __vmTurnCompleted = true;
           // Add response to chat
           const aiEl = document.createElement('div');
           aiEl.className = 'flex gap-4';
@@ -1865,6 +1867,18 @@ async function handleVmTranscript(e) {
       };
       evtSource.onerror = () => {
         if (vmCurrentTurnId !== turnId) return;
+        // EventSource fires onerror on EVERY close, including the normal
+        // close after the server sends 'complete' and ends the response.
+        // If the complete event already arrived for this turn, this is a
+        // benign stream close — don't surface "Lost connection". Sean
+        // called this out 2026-04-30: "underneath the blue bubble … model
+        // stream interrupted … he still replies but there is some sort
+        // of a message popping up". The error was firing on every
+        // long-reply turn after TTS started playing.
+        if (__vmTurnCompleted) {
+          vmTelemetry('sse_close_after_complete', { state: vmState });
+          return;
+        }
         vmShowError('sse-error', 'Lost connection to agent stream');
         vmEndTurn('sse_error');
       };

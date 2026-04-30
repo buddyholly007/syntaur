@@ -1883,7 +1883,7 @@ async fn handle_api_message(
     // branch sets llm_agent_id = agent_id, so multi-user installs keep
     // landing on PROMPT_KYRON via the existing 'main' → 'main_default' map).
     let (mut system_prompt, used_persona_template) =
-        match try_default_persona(&state, &resolved.llm_agent_id, principal.user_id()).await {
+        match try_default_persona(&state, &resolved.llm_agent_id, principal.user_id(), &agent_id).await {
             Some(tmpl) => (tmpl, true),
             None => {
                 let mut parts = Vec::new();
@@ -2453,7 +2453,7 @@ async fn handle_message_start(
         // for legacy/custom system agents without a seeded row. `custom_prompt`
         // still prepends in both branches. See handle_api_message for details.
         let (mut system_prompt, used_persona_template) =
-            match try_default_persona(&state_clone, &persona_key_for_task, principal_user_id).await {
+            match try_default_persona(&state_clone, &persona_key_for_task, principal_user_id, &agent_for_task).await {
                 Some(tmpl) => (tmpl, true),
                 None => {
                     let mut parts = Vec::new();
@@ -12219,6 +12219,7 @@ async fn try_default_persona(
     state: &AppState,
     agent_id: &str,
     user_id: i64,
+    surface_agent_id: &str,
 ) -> Option<String> {
     // Persona identifier → seeded DB key. Seeded rows use module names
     // (module_scheduler, module_tax, …) not persona names (thaddeus,
@@ -12260,7 +12261,20 @@ async fn try_default_persona(
         .ok()
         .flatten()
         .map(|u| u.name);
-    let personality = state.users.personality_prompt(user_id, agent_id, 4000).await;
+    // Personality docs are keyed on the SURFACE agent_id (the one the
+    // settings UI sees), not the resolved llm_agent_id. When Sean's
+    // user_agents row maps surface 'main' → base_agent 'peter', the
+    // persona TEMPLATE comes from agent_id='peter' (Peter's prompt) but
+    // the personality DOC was inserted at agent_id='main' from the UI.
+    // Falling back to the surface key when the resolved key is empty
+    // keeps both paths working without forcing duplicate doc rows.
+    // Sean called this 2026-04-30: "Peter Parker / Spider-Man persona
+    // info from the satellite isn't loading — he thinks he's just an
+    // assistant".
+    let mut personality = state.users.personality_prompt(user_id, agent_id, 4000).await;
+    if personality.is_empty() && surface_agent_id != agent_id {
+        personality = state.users.personality_prompt(user_id, surface_agent_id, 4000).await;
+    }
     let personality_opt = if personality.is_empty() {
         None
     } else {
