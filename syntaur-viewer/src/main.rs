@@ -120,8 +120,13 @@ fn main() {
     //
     // LAN-local URLs skip the probe — the operator intentionally chose
     // local-only mode and Tailscale isn't the right guidance there.
+    // 8s timeout (was 3s). Cold Tailscale starts often need 5-7s for the
+    // first MagicDNS resolve + TLS handshake; a 3s gate routinely lost
+    // that race and dropped users on the onboarding page even when their
+    // tailnet was already healthy. Sean reported the resulting "blue
+    // backdrop on every desktop launch" 2026-04-30.
     let load_url = if is_local_gateway(&url)
-        || probe_reachable(&url, std::time::Duration::from_secs(3))
+        || probe_reachable(&url, std::time::Duration::from_secs(8))
     {
         url.clone()
     } else {
@@ -315,16 +320,29 @@ const ONBOARDING_TEMPLATE: &str = r##"<!DOCTYPE html>
     const msg = document.getElementById('probeMsg');
     const state = document.getElementById('probe');
 
-    async function probe() {
-      try {
-        await fetch(TARGET + "/health", { mode: "no-cors", cache: "no-store" });
+    // Image() probe over fetch: the onboarding HTML is loaded as a
+    // file:// URL, and WebKitGTK silently blocks file://→https fetch even
+    // with mode:"no-cors" (no CORS error event fires — the promise just
+    // hangs). Image() bypasses that — it fires onload OR onerror as soon
+    // as the TCP+TLS handshake completes, regardless of response code or
+    // content type. Either event = reachable; only timeout = not reachable.
+    let __probeRedirected = false;
+    function probe() {
+      if (__probeRedirected) return;
+      const img = new Image();
+      let settled = false;
+      const ok = () => {
+        if (settled || __probeRedirected) return;
+        settled = true; __probeRedirected = true;
         state.classList.add('ok');
         msg.innerHTML = "Connected. Loading your dashboard…";
         setTimeout(() => { window.location.href = TARGET; }, 400);
-        return true;
-      } catch (e) {
-        return false;
-      }
+      };
+      const fail = () => { if (!settled) settled = true; };
+      img.onload  = ok;
+      img.onerror = ok;     // 404/wrong-type still proves the host answered
+      setTimeout(fail, 3500);
+      img.src = TARGET + "/favicon.ico?_=" + Date.now();
     }
 
     probe();

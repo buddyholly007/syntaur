@@ -1775,11 +1775,12 @@ async function handleVmTranscript(e) {
             const ttsResp = await fetch('/api/tts', {
               method: 'POST',
               headers: JSON_AUTH_H(),
-              // Server cap is 2000 chars (voice_api.rs:322); 500 was a stale
-              // legacy clamp that truncated audio while the chat bubble kept
-              // showing the full response — Sean called this "cuts off after
-              // a certain point even though the text below continues" 4-30.
-              body: JSON.stringify({ text: ev.response.substring(0, 1800) })
+              // No client-side cap — Sean's directive 2026-04-30: "I'm
+              // uncertain why we have any kind of a limit, kills the whole
+              // experience". The TTS pipeline (Wyoming → Orpheus) has no
+              // server-side text cap (voice_api.rs::synthesize_speech only
+              // checks empty), so pass the full response through.
+              body: JSON.stringify({ text: ev.response })
             });
             if (!ttsResp.ok) {
               vmShowError('tts-http', `TTS unavailable (HTTP ${ttsResp.status})`);
@@ -1871,7 +1872,7 @@ async function playTts(text) {
     const resp = await fetch('/api/tts', {
       method: 'POST',
       headers: JSON_AUTH_H(),
-      body: JSON.stringify({ text: text.substring(0, 1800) })
+      body: JSON.stringify({ text: text })
     });
     const data = await resp.json();
     if (data.audio_url) {

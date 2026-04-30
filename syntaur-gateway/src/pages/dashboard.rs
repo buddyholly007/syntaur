@@ -103,16 +103,21 @@ const DASHBOARD_HEAD_BOOT: &str = r##"
         String(({sage:135,indigo:265,ochre:70,gray:260})[p.accent]));
     }
     // Pre-paint time-of-day bucket so the gradient bg lands on first
-    // frame instead of flashing midday dark then fading to morning cream.
+    // frame instead of flashing dark then fading to morning cream.
+    // Three distinct modes per Sean's design intent (2026-04-30):
+    //   night    — pre-sunrise, post-sunset, OR forced dark (dark navy)
+    //   morning  — sunrise → sunrise+3h         (warm cream + amber)
+    //   midday   — sunrise+3h → sunset          (bright sky-blue daylight)
     // theme.rs apply() re-runs this with the full NOAA calc post-paint.
     var rs = p.light_start_min || 420, dk = p.dark_start_min || 1140;
+    var overnight = minNow < rs || minNow >= dk;
     var tod;
-    if (isLight) {
+    if (overnight || p.theme_mode === 'dark') {
+      tod = 'night';
+    } else if (minNow < rs + 180) {
       tod = 'morning';
     } else {
-      var preDusk = minNow >= (dk - 120) && minNow < dk;
-      var overnight = minNow < rs || minNow >= dk;
-      tod = (preDusk || overnight) ? 'evening' : 'midday';
+      tod = 'midday';
     }
     // Body doesn't exist yet at head-script time; set on <html> as a
     // data attribute, and syntaur-ambient.theme-ready in theme.rs will
@@ -121,7 +126,7 @@ const DASHBOARD_HEAD_BOOT: &str = r##"
     document.documentElement.setAttribute('data-tod', tod);
     var setTod = function() {
       if (!document.body) return false;
-      document.body.classList.remove('tod-morning','tod-midday','tod-evening');
+      document.body.classList.remove('tod-morning','tod-midday','tod-evening','tod-night');
       document.body.classList.add('tod-' + tod);
       return true;
     };

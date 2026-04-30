@@ -84,8 +84,13 @@ html.theme-light {
 }
 
 /* ── Time-of-day palette buckets (ribbons + backdrop) ───────────────── */
-/* Driven by body.tod-morning | tod-midday | tod-evening, which
-   THEME_SCRIPT computes from compute() and applies on every tick. */
+/* Three distinct modes per Sean's design intent (2026-04-30):
+   - tod-morning: sunrise→+3h, warm cream/amber sunrise palette
+   - tod-midday : daylight, bright sky-blue + cream (NOT dark)
+   - tod-night  : post-sunset / forced-dark, dark navy + warm rust
+   THEME_SCRIPT::compute() decides which to apply.
+   `tod-evening` is kept as a deprecated alias of tod-night so older
+   cached JS doesn't break mid-deploy. */
 body.tod-morning {
   --rib-a:    #da8a34;  /* deep amber */
   --rib-b:    #f0b85a;  /* gold */
@@ -113,33 +118,39 @@ body.tod-morning {
   --accent-soft: rgba(190, 114, 36, 0.12);
   --accent-line: rgba(190, 114, 36, 0.38);
 }
+/* MIDDAY — bright daylight. Soft sky-blue gradient with warm cream
+   highlights, dark text on light bg. Fundamentally different from
+   morning (warm-cream) and night (dark-navy). */
 body.tod-midday {
-  --rib-a:    #e8a84a;
-  --rib-b:    #f3d078;
-  --rib-c:    #c87a2c;
-  --rib-d:    #6da89d;
-  --rib-e:    #b4d3c5;
-  --rib-core: #fff5de;
+  --rib-a:    #5a9bd4;  /* mid sky blue */
+  --rib-b:    #a3cce8;  /* pale azure */
+  --rib-c:    #d8a85c;  /* warm gold (sun) */
+  --rib-d:    #6da89d;  /* sage teal */
+  --rib-e:    #d8e8f2;  /* near-white sky */
+  --rib-core: #ffffff;  /* pure cloud highlight */
 
-  --bg-top:       #041a33;
-  --bg-bot:       #0b3a6a;
-  --bg-vignette:  rgba(60, 150, 220, 0.22);
-  --bg-vignette2: rgba(220, 170, 90, 0.10);
+  --bg-top:       #d8ecfa;  /* near-zenith pale blue */
+  --bg-bot:       #b5d3ec;  /* horizon haze */
+  --bg-vignette:  rgba(255, 240, 200, 0.30);  /* warm sun glow */
+  --bg-vignette2: rgba(120, 175, 220, 0.22);  /* sky-blue cool */
 
-  --card-bg:     rgba(10, 35, 65, 0.82);
-  --card-brd:    rgba(180, 210, 240, 0.22);
-  --card-glow:   inset 0 0 0 1px rgba(255, 230, 180, 0.12),
-                 0 0 0 1px rgba(180, 210, 240, 0.18),
-                 0 12px 36px -14px rgba(0, 80, 150, 0.55);
-  --card-pad-bg: rgba(8, 28, 54, 0.72);
+  --card-bg:     rgba(255, 255, 255, 0.78);
+  --card-brd:    rgba(120, 170, 215, 0.40);
+  --card-glow:   inset 0 0 0 1px rgba(255, 255, 255, 0.55),
+                 0 0 0 1px rgba(120, 170, 215, 0.30),
+                 0 10px 32px -14px rgba(40, 90, 140, 0.18);
+  --card-pad-bg: rgba(248, 252, 255, 0.78);
 
-  /* Concept accent — butter gold for buttons, focus rings. */
-  --accent:      #f0c06a;
-  --accent-ink:  #0a1a30;
-  --accent-soft: rgba(240, 192, 106, 0.15);
-  --accent-line: rgba(240, 192, 106, 0.40);
+  /* Deep azure accent — readable on light bg, sky theme. */
+  --accent:      #2563a8;
+  --accent-ink:  #f8fbff;
+  --accent-soft: rgba(37, 99, 168, 0.12);
+  --accent-line: rgba(37, 99, 168, 0.38);
 }
-body.tod-evening {
+/* NIGHT — dark navy + warm rust accents. The original "evening"
+   palette was the right look for after-sunset; renamed to "night"
+   to make the design intent obvious. */
+body.tod-night, body.tod-evening {
   --rib-a:    #e8a84a;
   --rib-b:    #f3d078;
   --rib-c:    #c06e28;  /* rust */
@@ -261,7 +272,7 @@ html.rb-on body.syntaur-ambient {
   transition: --rb-base 3s ease-in-out, --rb-peak 3s ease-in-out;
 }
 body.tod-morning .sd-rb .rb { --rb-base: 0.55; --rb-peak: 0.72; }
-body.tod-evening .sd-rb .rb { --rb-base: 0.42; --rb-peak: 0.58; }
+body.tod-night .sd-rb .rb, body.tod-evening .sd-rb .rb { --rb-base: 0.42; --rb-peak: 0.58; }
 
 /* Ignite — shifts the breathing band up for ~6s without stopping the
    keyframe. Because the keyframe reads --rb-base / --rb-peak live and
@@ -389,7 +400,10 @@ html.rb-on .sd-card-body {
    requirement. Lift --fg-mute + --fg-faint by 0.04 when rb-on so
    labels / timestamps / "NEXT" pills in CALENDAR / NOW PLAYING / TO
    DO stay legible over the ribbon-backdropped tiles. */
-html.rb-on body.tod-midday, html.rb-on body.tod-evening {
+/* Bright midday no longer needs the dark-bg AA bump — text-on-light
+   already meets WCAG AA without the contrast lift. Keep it for night
+   (and the legacy `tod-evening` alias) where bg is dark. */
+html.rb-on body.tod-night, html.rb-on body.tod-evening {
   --fg-mute:  oklch(calc(var(--fg-l) - 0.28) 0.010 var(--accent-h));
   --fg-faint: oklch(calc(var(--fg-l) - 0.42) 0.010 var(--accent-h));
 }
@@ -485,17 +499,24 @@ pub const THEME_SCRIPT: &str = r##"
     const baseHue = ACCENT_HUE[pref.accent] != null ? ACCENT_HUE[pref.accent] : ACCENT_HUE.sage;
 
     // Time-of-day bucket drives the dashboard ribbon + bg gradient
-    // palette. Morning when isLight (first light through afternoon);
-    // evening in the 2h before dusk + overnight; midday otherwise.
-    // When the user forces dark mode during daylight, we still route
-    // to midday so the navy palette reads correctly.
+    // palette. Three distinct daytime modes per the original design
+    // (Sean 2026-04-30: "morning, midday, night — all different colors,
+    // dark mode only after sunset"):
+    //   night    — post-sunset, pre-sunrise          (dark navy + warm rust accents)
+    //   morning  — sunrise → sunrise + 3h            (warm cream + amber)
+    //   midday   — sunrise + 3h → sunset             (bright sky-blue daylight)
+    // When the user forces dark mode during daylight, we route to
+    // 'night' so the dark palette renders correctly regardless of clock.
     let tod;
-    if (isLight) {
+    const overnight = minNow < rise || minNow >= set;
+    if (overnight) {
+      tod = 'night';
+    } else if (pref.theme_mode === 'dark') {
+      tod = 'night';
+    } else if (minNow < rise + 180) {
       tod = 'morning';
     } else {
-      const preDusk = minNow >= (set - 120) && minNow < set;
-      const overnight = minNow < rise || minNow >= set;
-      tod = (preDusk || overnight) ? 'evening' : 'midday';
+      tod = 'midday';
     }
     return { isLight, hue: baseHue + hueShift + __weatherHue, rise, set, tod };
   }
@@ -508,7 +529,7 @@ pub const THEME_SCRIPT: &str = r##"
     root.classList.toggle('ambient-on', !!pref.ambient_mode);
     document.body.classList.add('syntaur-ambient');
     // Swap time-of-day bucket class on body (drives ribbon + bg vars).
-    document.body.classList.remove('tod-morning','tod-midday','tod-evening');
+    document.body.classList.remove('tod-morning','tod-midday','tod-evening','tod-night');
     document.body.classList.add('tod-' + s.tod);
     // Enable transitions only after the first apply has committed, so
     // the initial paint doesn't animate in from gray-950.
