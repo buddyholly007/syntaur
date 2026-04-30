@@ -70,10 +70,38 @@ pub fn run(ctx: &StageContext) -> Result<()> {
         }
     }
 
-    log::info!(">> cd {ws} && cargo build --release -p syntaur-gateway -p mace");
+    // Resolve the cargo --features list from (in priority order):
+    //   1. SYNTAUR_BUILD_FEATURES env (CSV)
+    //   2. ~/.syntaur/ship/features.txt (one feature per line, # comments)
+    // Empty / missing → no --features flag (public default).
+    //
+    // This exists because the Peter persona work shipped 2026-04-30 is
+    // gated behind `#[cfg(feature = "personal-peter")]` on
+    // syntaur-gateway. A bare `cargo build -p syntaur-gateway` excludes
+    // PROMPT_PETER + the LOCAL_ONLY_DEFAULTS PETER row, AND triggers the
+    // `cfg(not(feature = "personal-peter"))` cleanup branch that
+    // ACTIVELY DELETES the main_peter_local row at startup. Sean's prod
+    // would lose the persona on first restart. Caught by peer review at
+    // ship time before the bad binary landed; this gate prevents the
+    // same regression on every future ship.
+    let build_features = resolve_build_features(&ctx.cfg);
+    let mut build_args: Vec<String> = vec![
+        "build".into(), "--release".into(),
+        "-p".into(), "syntaur-gateway".into(),
+        "-p".into(), "mace".into(),
+    ];
+    if !build_features.is_empty() {
+        build_args.push("--features".into());
+        build_args.push(build_features.clone());
+        log::info!(
+            ">> cd {ws} && cargo build --release -p syntaur-gateway -p mace --features {build_features}"
+        );
+    } else {
+        log::info!(">> cd {ws} && cargo build --release -p syntaur-gateway -p mace");
+    }
     if !ctx.opts.dry_run {
         let status = Command::new(&cargo)
-            .args(["build", "--release", "-p", "syntaur-gateway", "-p", "mace"])
+            .args(&build_args)
             .current_dir(&ctx.cfg.workspace)
             .status()
             .context("cargo build gateway+mace")?;
@@ -99,4 +127,24 @@ pub fn run(ctx: &StageContext) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Resolve cargo --features CSV from env override + local config file.
+/// Empty string means "build with default feature set" (public Syntaur).
+fn resolve_build_features(cfg: &crate::config::Config) -> String {
+    if let Ok(v) = std::env::var("SYNTAUR_BUILD_FEATURES") {
+        let v = v.trim().to_string();
+        if !v.is_empty() {
+            return v;
+        }
+    }
+    let features_file = cfg.state_dir.join("features.txt");
+    let Ok(text) = std::fs::read_to_string(&features_file) else {
+        return String::new();
+    };
+    text.lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect::<Vec<_>>()
+        .join(",")
 }
