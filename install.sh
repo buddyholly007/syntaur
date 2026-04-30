@@ -20,7 +20,7 @@ BRAND="Syntaur"
 # before tagging a release so this string and install.ps1 stay in sync with
 # the workspace version in Cargo.toml. install.sh ships standalone (users
 # curl|sh it), so it can't read the VERSION file at runtime.
-VERSION="0.6.2"
+VERSION="0.6.3"
 BINARY="syntaur"
 INSTALL_DIR="$HOME/.local/bin"
 MODE=""
