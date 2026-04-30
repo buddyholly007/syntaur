@@ -47,6 +47,17 @@ pub fn run(ctx: &StageContext) -> Result<()> {
     // or every release will spuriously abort with prod already live.
     results.push(("GitHub Releases latest tag".into(), github_latest_tag_polled(expected, 15)));
     results.push(("install.sh raw (from GH main)".into(), install_sh_version()));
+    // Verify the homepage's advertised install URL (releases/latest/
+    // download/install.sh) actually resolves AND its VERSION line
+    // matches what we just deployed. Catches the 2026-04-30 reviewer
+    // finding: site advertises an install URL that 302s into a 404
+    // because release-sign.yml never uploaded install.sh as a release
+    // asset. The release-smoke.yml workflow catches this from the
+    // GitHub side; this catch is what makes syntaur-ship REFUSE to
+    // declare a deploy clean while the URL is broken from the user's
+    // side. Both gates because the failure mode is bad enough to
+    // warrant defense in depth.
+    results.push(("releases/latest/download/install.sh".into(), released_install_sh_version_polled(expected, 15)));
 
     let mut mismatches = Vec::new();
     let mut gh_drift = false;
@@ -69,12 +80,12 @@ pub fn run(ctx: &StageContext) -> Result<()> {
         // review caught the public version-story split (site says
         // v0.6.0, GH "latest" said v0.5.9 in the reviewer's cache) — the
         // ship pipeline must refuse to declare a deploy clean while
-        // that gap is real, even after the 5-min poll. Operators who
+        // that gap is real, even after the 15-min poll. Operators who
         // bumped VERSION without running `syntaur-ship release` get a
         // pointer at the right command.
         anyhow::bail!(
             "version-audit ✗ GitHub Releases 'latest' did not catch up to v{expected} after \
-             5-min poll. Either the release-sign.yml workflow failed (check GH Actions), or \
+             15-min poll. Either the release-sign.yml workflow failed (check GH Actions), or \
              VERSION was bumped without running `syntaur-ship release v{expected}` to tag + \
              push. Other drift:\n  {}",
             mismatches.join("\n  ")
@@ -222,5 +233,67 @@ fn install_sh_version() -> Result<String> {
     let end = after
         .find('"')
         .ok_or_else(|| anyhow::anyhow!("install.sh VERSION close quote"))?;
+    Ok(after[..end].to_string())
+}
+
+/// Poll the homepage-advertised install URL up to `max_minutes` for
+/// the version line to match `expected`. The URL goes through a 302
+/// to releases/download/v<tag>/install.sh, which is published by
+/// release-sign.yml AFTER tag push — same wall-clock as the GH
+/// Releases tag (release-sign.yml is the same workflow). Sharing the
+/// 15-min deadline keeps the gates symmetric.
+fn released_install_sh_version_polled(expected: &str, max_minutes: u64) -> Result<String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(max_minutes * 60);
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        let got = released_install_sh_version();
+        match &got {
+            Ok(v) if v == expected => return got,
+            Ok(v) => {
+                if std::time::Instant::now() >= deadline {
+                    return Ok(v.clone());
+                }
+                log::info!(
+                    "  releases/latest install.sh           = {v} (waiting for v{expected}, attempt {attempt})"
+                );
+            }
+            Err(e) => {
+                if std::time::Instant::now() >= deadline {
+                    anyhow::bail!("releases/latest/download/install.sh kept failing through deadline: {e}");
+                }
+                log::info!("  releases/latest install.sh           probe failed (attempt {attempt}): {e}");
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(30));
+    }
+}
+
+fn released_install_sh_version() -> Result<String> {
+    // The exact URL the landing page tells users to wget. If this 404s
+    // — e.g. because release-sign.yml forgot to upload install.sh as
+    // an asset, like it did pre-2026-04-30 — every deploy refuses to
+    // declare clean. -L follows the 302 redirect into the
+    // tag-specific URL.
+    let out = Command::new("curl")
+        .args([
+            "-sfL",
+            "--max-time",
+            "15",
+            "https://github.com/buddyholly007/syntaur/releases/latest/download/install.sh",
+        ])
+        .output()?;
+    if !out.status.success() {
+        anyhow::bail!("fetch releases/latest/download/install.sh (likely 404 — release-sign.yml asset upload regression)");
+    }
+    let body = String::from_utf8_lossy(&out.stdout);
+    let needle = r#"VERSION=""#;
+    let Some(i) = body.find(needle) else {
+        anyhow::bail!("VERSION= not found in released install.sh");
+    };
+    let after = &body[i + needle.len()..];
+    let end = after
+        .find('"')
+        .ok_or_else(|| anyhow::anyhow!("released install.sh VERSION close quote"))?;
     Ok(after[..end].to_string())
 }

@@ -34,11 +34,14 @@ use maud::{html, PreEscaped};
 
 use super::shared::{shell, top_bar, ModuleStatus, Page};
 
-/// Embedded default backdrop. Served when the user hasn't dropped a
+/// Embedded per-slot defaults. Served when the user hasn't dropped a
 /// per-slot override at `~/.syntaur/smart-home/backdrops/{slot}.png`.
-/// All four time-of-day slots (morning/midday/evening/night) fall back
-/// to this single image until Sean replaces them.
-const BACKDROP_DEFAULT: &[u8] = include_bytes!("../../assets/smart-home/backdrop-default.png");
+/// Each slot ships with its own time-of-day photo so the UI feels
+/// alive out of the box (sunrise → midday → sunset → night).
+const BACKDROP_MORNING: &[u8] = include_bytes!("../../assets/smart-home/backdrop-morning.png");
+const BACKDROP_MIDDAY:  &[u8] = include_bytes!("../../assets/smart-home/backdrop-midday.png");
+const BACKDROP_EVENING: &[u8] = include_bytes!("../../assets/smart-home/backdrop-evening.png");
+const BACKDROP_NIGHT:   &[u8] = include_bytes!("../../assets/smart-home/backdrop-night.png");
 
 pub async fn render() -> Html<String> {
     let page = Page {
@@ -1655,14 +1658,19 @@ const SMART_HOME_JS: &str = r#"
 /// Resolution order:
 ///   1. `~/.syntaur/smart-home/backdrops/<slot>.png` if the user has
 ///      dropped a per-slot override on disk.
-///   2. The embedded `BACKDROP_DEFAULT` baked into the binary.
+///   2. The embedded per-slot default baked into the binary
+///      (morning/midday/evening/night each ship with their own photo).
 ///
 /// Slot must be one of `morning` / `midday` / `evening` / `night`.
 /// Anything else returns 404.
 pub async fn handle_backdrop(AxumPath(slot): AxumPath<String>) -> Response {
-    if !matches!(slot.as_str(), "morning" | "midday" | "evening" | "night") {
-        return (StatusCode::NOT_FOUND, "unknown backdrop slot").into_response();
-    }
+    let default: &[u8] = match slot.as_str() {
+        "morning" => BACKDROP_MORNING,
+        "midday"  => BACKDROP_MIDDAY,
+        "evening" => BACKDROP_EVENING,
+        "night"   => BACKDROP_NIGHT,
+        _ => return (StatusCode::NOT_FOUND, "unknown backdrop slot").into_response(),
+    };
 
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
     let user_path: PathBuf = PathBuf::from(home)
@@ -1673,7 +1681,7 @@ pub async fn handle_backdrop(AxumPath(slot): AxumPath<String>) -> Response {
 
     let bytes: Vec<u8> = match tokio::fs::read(&user_path).await {
         Ok(b) => b,
-        Err(_) => BACKDROP_DEFAULT.to_vec(),
+        Err(_) => default.to_vec(),
     };
 
     Response::builder()
