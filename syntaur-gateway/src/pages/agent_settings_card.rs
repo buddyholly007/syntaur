@@ -2342,7 +2342,23 @@ const RESOURCE_BUDGET_JS: &str = r#"
         } catch (_) { /* not JSON; keep generic */ }
         throw new Error(msg);
       })
-        .then(j => persistField(card, 'icon_blob_id', j.blob_id))
+        .then(async (j) => {
+          await persistField(card, 'icon_blob_id', j.blob_id);
+          // After upload + settings PUT both succeed, refresh the live
+          // preview. Without this, Sean sees no visual change and
+          // believes the upload silently failed even though the bytes
+          // are on disk and icon_blob_id is set. The cache-bust query
+          // forces a fresh fetch (the image element would otherwise
+          // keep the old src cached). Sean caught this 2026-04-30:
+          // "appears that it is saving the text … however it still is
+          // not saving the image".
+          const preview = card.querySelector('.cf-icon-preview');
+          if (preview) {
+            const url = '/api/agents/' + encodeURIComponent(card.dataset.agent)
+              + '/icon?v=' + Date.now();
+            preview.innerHTML = '<img alt="" src="' + url + '">';
+          }
+        })
         .catch(err => {
           showCardError(card, (err && err.message) || 'Upload failed.');
           // Reset the file input so picking the same file again re-fires
