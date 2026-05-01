@@ -1,0 +1,51 @@
+[Unit]
+Description=Syntaur BLE Shim — multi-subscriber BlueZ → ESPHome native API proxy
+Documentation=https://github.com/syntaur/syntaur-ble-shim
+After=bluetooth.service network.target
+Wants=bluetooth.service
+
+[Service]
+Type=simple
+User=syntaur-ble-shim
+Group=syntaur-ble-shim
+SupplementaryGroups=bluetooth
+
+# /etc/syntaur-ble-shim/config.toml — optional. CLI/env override anything in here.
+Environment=SYNTAUR_BLE_SHIM_CONFIG=/etc/syntaur-ble-shim/config.toml
+ExecStart=/usr/local/bin/syntaur-ble-shim -v
+
+# Need NET_RAW + NET_ADMIN for raw HCI when btleplug talks to BlueZ DBus.
+# DAC_OVERRIDE is intentionally NOT granted; BlueZ DBus + the bluetooth group
+# is sufficient for adapter ownership.
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+
+# Sandbox.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+
+# State dir — for future PSK / cached IDs.
+StateDirectory=syntaur-ble-shim
+StateDirectoryMode=0750
+ReadWritePaths=/var/lib/syntaur-ble-shim
+ReadOnlyPaths=/etc/syntaur-ble-shim
+
+# Auto-restart on transient BlueZ glitches.
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Install]
+WantedBy=multi-user.target

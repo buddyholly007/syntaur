@@ -1,0 +1,3 @@
+# Prebuilt binary copied in by `cargo build --release` then `cp` per the README.
+# Not source — regenerated each release.
+syntaur-ble-shim

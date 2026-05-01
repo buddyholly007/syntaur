@@ -1,0 +1,27 @@
+[package]
+name = "syntaur-ble-shim"
+description = "BlueZ-claiming BLE scanner that fans out adverts to multiple clients via the ESPHome native API protocol. Lets HA + Syntaur (and any future tenant on the same box) share one Bluetooth adapter as if it were an ESPHome bluetooth_proxy."
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "syntaur-ble-shim"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+btleplug = "0.11"
+snow = "0.10"
+socket2 = { version = "0.5", features = ["all"] }
+serde = { workspace = true }
+serde_json = "1"
+toml = "0.8"
+log = "0.4"
+env_logger = "0.11"
+futures = "0.3"
+hex = "0.4"
+rand = "0.8"
+hostname = "0.4"
+clap = { version = "4", features = ["derive", "env"] }
+uuid = "1"
+if-addrs = "0.13"

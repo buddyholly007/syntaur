@@ -1,0 +1,27 @@
+name: Syntaur BLE Shim
+version: "0.5.1"
+slug: syntaur_ble_shim
+description: Multi-subscriber BLE adapter proxy. Claims the host's Bluetooth adapter and exposes adverts via the ESPHome native API so HA + Syntaur (and any future tenant) can read the same radio at the same time.
+url: https://github.com/syntaur/syntaur-ble-shim
+arch:
+  - amd64
+init: false
+host_dbus: true
+host_network: true
+apparmor: false
+boot: auto
+startup: services
+options:
+  name: ""
+  suggested_area: ""
+  bind: "0.0.0.0:6053"
+  verbosity: 1
+schema:
+  name: str?
+  suggested_area: str?
+  bind: str?
+  verbosity: int(0,3)?
+ports:
+  6053/tcp: 6053
+ports_description:
+  6053/tcp: ESPHome native API (subscribers connect here)
