@@ -1,16 +1,77 @@
 #!/usr/bin/env bash
-# Syntaur git pre-commit hook — refuses commits if the working tree has
-# drifted past the last successful deploy stamp. Encourages a
-# commit-then-ship rhythm over accumulation of undeployed changes.
+# Syntaur git pre-commit hook.
 #
-# Override for legitimate batch-commit work:
-#     SYNTAUR_SHIP_OVERRIDE=1 git commit ...
+# Two gates:
+#   (1) Verify-severity-downgrade detector — refuses any commit that
+#       weakens crates/syntaur-verify by changing Severity::Regression
+#       to Severity::Suggestion (or removing a check) without an
+#       explicit `// VERIFY-DOWNGRADE-OK:` justification on the same
+#       line. Origin: 2026-04-30, Sean caught me dialing back persona-
+#       identity findings from Regression to Suggestion when 5/9
+#       catalog personas were missing in prod, defeating the entire
+#       purpose of the verify expansion. SHOULD NOT BE BYPASSABLE
+#       VIA SYNTAUR_SHIP_OVERRIDE — distinct env var below.
+#
+#   (2) Deploy-stamp drift nudge — refuses commits when working tree
+#       has drifted >3 commits past last deploy. Encourages commit-
+#       then-ship rhythm.
+#
+# Overrides:
+#     SYNTAUR_SHIP_OVERRIDE=1 git commit ...   # bypasses (2)
+#     VERIFY_DOWNGRADE_OK=1 git commit ...     # bypasses (1) — only
+#                                                set this when you have
+#                                                a specific, documented
+#                                                reason to weaken a check
 #
 # Installed by: ln -s ../../syntaur-ship/hooks/pre-commit .git/hooks/pre-commit
-# (syntaur-ship Phase 8 ships a `syntaur-ship hooks install` subcommand)
 
 set -euo pipefail
 
+# ── Gate 1: verify-severity-downgrade detector ─────────────────────
+# Scan the staged diff for any crates/syntaur-verify/** changes that
+# replace Severity::Regression with Severity::Suggestion (the exact
+# pattern of the 2026-04-30 dial-back). Also catches removal of
+# entire findings (a finding that was Regression now isn't there).
+if [[ "${VERIFY_DOWNGRADE_OK:-0}" != "1" ]]; then
+    # Gather staged diff for verify crate only.
+    verify_diff=$(git diff --cached -- 'crates/syntaur-verify/**' 2>/dev/null || true)
+    if [[ -n "$verify_diff" ]]; then
+        # Look for lines that:
+        #   - are removals (-) of "Severity::Regression"
+        #   AND somewhere in the same hunk an addition (+) of
+        #       "Severity::Suggestion"
+        # Conservative pattern: any -Severity::Regression in the diff
+        # paired with at least one +Severity::Suggestion. Tolerates
+        # the "VERIFY-DOWNGRADE-OK:" inline marker for intentional
+        # changes (e.g., a finding that genuinely changes class).
+        removed_regressions=$(echo "$verify_diff" | grep -cE '^-[^-].*Severity::Regression' || true)
+        added_suggestions=$(echo "$verify_diff" | grep -cE '^\+[^+].*Severity::Suggestion' || true)
+        # Count any "VERIFY-DOWNGRADE-OK:" markers in the +ADDED lines.
+        downgrade_ok=$(echo "$verify_diff" | grep -cE '^\+.*VERIFY-DOWNGRADE-OK:' || true)
+        if (( removed_regressions > 0 && added_suggestions > 0 && downgrade_ok == 0 )); then
+            echo "─────────────────────────────────────────────────────────────────────" >&2
+            echo "✗ verify-severity-downgrade gate: refusing commit" >&2
+            echo "" >&2
+            echo "Staged diff in crates/syntaur-verify/** removes $removed_regressions" >&2
+            echo "Severity::Regression line(s) and adds $added_suggestions Severity::Suggestion" >&2
+            echo "line(s). This pattern is exactly the 2026-04-30 dial-back Sean called" >&2
+            echo "out — weakening the verify gate so prod gaps stop blocking deploys." >&2
+            echo "" >&2
+            echo "Real defects are real defects. If a finding is genuinely informational," >&2
+            echo "add an inline justification on the same line as the new Suggestion:" >&2
+            echo "    severity: Severity::Suggestion, // VERIFY-DOWNGRADE-OK: <reason>" >&2
+            echo "" >&2
+            echo "Bypass (use only when justification is documented elsewhere):" >&2
+            echo "    VERIFY_DOWNGRADE_OK=1 git commit ..." >&2
+            echo "" >&2
+            echo "See vault/feedback/found_bug_must_be_fixed_immediately.md" >&2
+            echo "─────────────────────────────────────────────────────────────────────" >&2
+            exit 1
+        fi
+    fi
+fi
+
+# ── Gate 2: deploy-stamp drift nudge ───────────────────────────────
 # Bypass in CI or when explicitly overridden.
 if [[ "${SYNTAUR_SHIP_OVERRIDE:-0}" == "1" ]]; then exit 0; fi
 if [[ "${CI:-}" == "true" ]]; then exit 0; fi
