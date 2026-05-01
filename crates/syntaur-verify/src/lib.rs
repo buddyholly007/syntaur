@@ -26,6 +26,7 @@
 
 pub mod baseline;
 pub mod browser;
+pub mod cache_control;
 pub mod changeset;
 pub mod corpus;
 pub mod fix;

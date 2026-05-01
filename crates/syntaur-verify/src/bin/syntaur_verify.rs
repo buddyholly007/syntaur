@@ -1009,6 +1009,28 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
         findings.extend(tone_findings);
     }
 
+    // ── Layer A · Stage 1: Cache-Control gate ──────────────────────
+    // Once-per-run check on the curated mutable-asset list. Catches
+    // the navigate-away cache-stale class structurally — no Playwright
+    // needed, just header inspection. ~1s per ship.
+    let cache_findings = match syntaur_verify_core::cache_control::check_cache_control(
+        &target_url,
+        auth_token.as_deref(),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("[verify] cache-control gate failed to run: {e:#}");
+            Vec::new()
+        }
+    };
+    log::info!(
+        "[verify] cache-control gate: {} finding(s)",
+        cache_findings.len()
+    );
+    findings.extend(cache_findings);
+
     let run = VerifyRun {
         run_id: run_id.clone(),
         started_at: parse_run_id_ts(&run_id),
