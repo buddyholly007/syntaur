@@ -1661,10 +1661,19 @@ const SMART_HOME_JS: &str = r#"
 ///   2. The embedded per-slot default baked into the binary
 ///      (morning/midday/evening/night each ship with their own photo).
 ///
-/// Slot must be one of `morning` / `midday` / `evening` / `night`.
+/// Slot must be one of `morning` / `midday` / `evening` / `night`,
+/// optionally suffixed with `.png` (the page JS appends `.png` so the
+/// browser treats the URL as a real image asset; we tolerate either form).
 /// Anything else returns 404.
 pub async fn handle_backdrop(AxumPath(slot): AxumPath<String>) -> Response {
-    let default: &[u8] = match slot.as_str() {
+    // Tolerate the `.png` suffix the page JS appends — `smart_home.rs`
+    // line 781 builds `'/assets/smart-home/backdrop/' + slot + '.png'`,
+    // which makes the slot path-segment `morning.png` rather than
+    // `morning`. Without this strip the match below 404'd every request
+    // (caught 2026-04-30 by the new Stage 1 cache-control gate).
+    let slot_key = slot.strip_suffix(".png").unwrap_or(&slot);
+
+    let default: &[u8] = match slot_key {
         "morning" => BACKDROP_MORNING,
         "midday"  => BACKDROP_MIDDAY,
         "evening" => BACKDROP_EVENING,
@@ -1677,7 +1686,7 @@ pub async fn handle_backdrop(AxumPath(slot): AxumPath<String>) -> Response {
         .join(".syntaur")
         .join("smart-home")
         .join("backdrops")
-        .join(format!("{slot}.png"));
+        .join(format!("{slot_key}.png"));
 
     let bytes: Vec<u8> = match tokio::fs::read(&user_path).await {
         Ok(b) => b,
@@ -1687,10 +1696,14 @@ pub async fn handle_backdrop(AxumPath(slot): AxumPath<String>) -> Response {
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "image/png")
-        // 1 hour cache — short enough that a fresh override is picked
-        // up reasonably quickly without hammering the handler on every
-        // page paint.
-        .header(header::CACHE_CONTROL, "public, max-age=3600")
+        // no-store: Sean drops a new backdrop on disk and expects the
+        // next page paint to reflect it. The previous `max-age=3600`
+        // here would have shipped a stale backdrop for up to an hour
+        // after a drop — same regression class as the avatar
+        // nav-away cache-stale chain. Caught at deploy time by the
+        // Stage 1 cache-control gate (see crates/syntaur-verify/src/
+        // cache_control.rs::MUTABLE_ASSETS).
+        .header(header::CACHE_CONTROL, "no-store")
         .body(Body::from(bytes))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
