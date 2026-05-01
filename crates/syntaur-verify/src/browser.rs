@@ -588,24 +588,27 @@ impl Browser {
             .ok()
             .and_then(|v| v.into_value::<u16>().ok());
 
-        // ── Layout sanity probes ───────────────────────────────────
-        // Engine-portable JS assertions that catch classes of layout
-        // bug headless Chromium otherwise tolerates but real WebKit
-        // (the user's wry+webkit2gtk viewer) breaks on. Each probe
-        // returns a string — empty if OK, message if regressed. The
-        // probes here grew out of the 2026-04-25 bug where a missing
-        // min-height on `main#syntaur-app-content` plus a body
-        // `overflow: hidden` collapsed the swap container to 0px in
-        // WebKit but still rendered fine in headless Chromium, so
-        // verify reported green while users saw an empty `/coders`.
-        // Probes intentionally simulate the WebKit-strict constraint
-        // (recompute layout after locking body overflow) so the
-        // single-engine sweep catches the divergence class.
+        // ── Layout + asset + DOM-scope sanity probes ───────────────
+        // Engine-portable JS assertions that catch classes of bug
+        // headless Chromium otherwise tolerates but real WebKit
+        // (the user's wry+webkit2gtk viewer) breaks on, plus passive
+        // checks that catch the Verify Plan v2 bug classes:
+        //   - layout collapse (origin: 2026-04-25 /coders empty-glass)
+        //   - broken images (Stage 2: <img complete && naturalWidth===0>)
+        //   - JS handler scope violations (Stage 6b: elements missing
+        //     ancestors that handler closest() calls require)
+        //
+        // Each probe returns one or more strings into `warns`; the run
+        // loop turns every warning into a Regression Finding. Probes
+        // intentionally simulate the WebKit-strict constraint so the
+        // single-engine sweep catches divergence.
         let layout_warnings: Vec<String> = page
             .evaluate(
                 r#"
                 (() => {
                     const warns = [];
+
+                    // ── Probe 1: layout collapse (origin: 2026-04-25)
                     const main = document.querySelector('main#syntaur-app-content');
                     if (main) {
                         const r = main.getBoundingClientRect();
@@ -615,15 +618,8 @@ impl Browser {
                         if (r.width < 1) {
                             warns.push('main#syntaur-app-content has width ' + r.width + 'px (collapsed)');
                         }
-                        // Re-probe under WebKit-strict simulation: lock
-                        // body { overflow: hidden } and recompute.
-                        // Catches pages that today inherit body's
-                        // implicit min-height: 100vh from Tailwind but
-                        // would collapse if the body's overflow path
-                        // changed. Restored after measurement.
                         const prevOverflow = document.body.style.overflow;
                         document.body.style.overflow = 'hidden';
-                        // Force layout recompute.
                         void main.offsetHeight;
                         const r2 = main.getBoundingClientRect();
                         document.body.style.overflow = prevOverflow;
@@ -631,11 +627,78 @@ impl Browser {
                             warns.push('main#syntaur-app-content collapses to 0px under body{overflow:hidden} — fragile for WebKit pages with overflow:hidden bodies (e.g. /coders)');
                         }
                     } else if (!document.body.classList.contains('public-shell')) {
-                        // Only warn for authed pages — public shells (login, register) intentionally don't render the swap container.
                         if (document.querySelector('.syntaur-topbar')) {
                             warns.push('expected main#syntaur-app-content not found (authed page missing SPA shell wrapper)');
                         }
                     }
+
+                    // ── Probe 2 (Stage 2): broken images
+                    // Catches the avatar empty-blue-circle class — <img>
+                    // element renders but its src failed to load. Origin:
+                    // 2026-04-30 maurice avatar absent on /coders.
+                    // Skip data: URIs and inline SVG (naturalWidth can be 0
+                    // legitimately for some SVG sources without intrinsic
+                    // dimensions).
+                    try {
+                        const imgs = [...document.querySelectorAll('img')];
+                        for (const img of imgs) {
+                            if (!img.complete) continue;
+                            if (img.naturalWidth > 0) continue;
+                            const src = img.getAttribute('src') || img.currentSrc || '';
+                            if (!src) continue;
+                            if (src.startsWith('data:')) continue;
+                            const summary = (img.outerHTML || '').slice(0, 200);
+                            warns.push('broken image: ' + summary + ' (src=' + src + ', naturalWidth=0)');
+                        }
+                    } catch (e) {
+                        warns.push('broken-image probe threw: ' + (e && e.message ? e.message : String(e)));
+                    }
+
+                    // ── Probe 3 (Stage 6b): JS handler scope sanity
+                    // Catches the drawer-wrapper class — element rendered
+                    // without the ancestor that bound JS handlers
+                    // require via closest(). Origin: 2026-04-30 commit
+                    // 4511363 — agent_settings_back returned a bare
+                    // <div class="cf-back-inner"> with no .cf-back
+                    // ancestor; every handler scoped via closest('.cf-back')
+                    // hit the `if (!back) return` no-op on line one.
+                    //
+                    // Maintained list of (selector → required ancestors).
+                    // Add new pairs whenever a handler relies on closest():
+                    // grep maud sources for `closest('.X')` and pair the
+                    // X with the WRAPPER class the handler scopes to.
+                    // Be precise — selectors on the LEFT must be the
+                    // exact element that needs scoping, NOT a CSS hook
+                    // that gets attached to many unrelated panels (e.g.
+                    // [data-syntaur-cogged] is a CSS hook, not a scope
+                    // signal — handlers like the right-click context-menu
+                    // happen to use closest() on it but tolerate any
+                    // ancestor; only true scope-violations belong here).
+                    const REQUIRED_ANCESTORS = [
+                        ['.cf-back-inner', ['.cf-back']],
+                    ];
+                    try {
+                        for (const [sel, ancestors] of REQUIRED_ANCESTORS) {
+                            const elements = document.querySelectorAll(sel);
+                            elements.forEach((el, idx) => {
+                                for (const ancestor of ancestors) {
+                                    if (!el.closest(ancestor)) {
+                                        const tag = el.tagName.toLowerCase();
+                                        const cls = (el.className || '').toString().slice(0, 60);
+                                        warns.push(
+                                            'JS handler scope violation: ' + sel + '[' + idx + '] ' +
+                                            '(<' + tag + (cls ? ' class="' + cls + '"' : '') + '>) ' +
+                                            'is missing required ancestor `' + ancestor + '` — ' +
+                                            'handlers scoped via closest(\'' + ancestor + '\') will no-op silently'
+                                        );
+                                    }
+                                }
+                            });
+                        }
+                    } catch (e) {
+                        warns.push('handler-scope probe threw: ' + (e && e.message ? e.message : String(e)));
+                    }
+
                     return warns;
                 })()
                 "#,
