@@ -947,6 +947,45 @@ const STYLES: &str = r#"
   padding: 0 24px;
 }
 
+/* Widget-scoped variant: overlay covers only the host card so other
+   dashboard widgets remain interactive. Smaller orb + tighter spacing. */
+#cf-talk-overlay.cf-talk-scoped {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  background: rgba(15,23,42,0.92);
+  border-radius: inherit;
+  backdrop-filter: blur(8px);
+}
+#cf-talk-overlay.cf-talk-scoped #cf-talk-close {
+  top: 8px;
+  right: 8px;
+  padding: 4px 10px;
+  font-size: 12px;
+}
+#cf-talk-overlay.cf-talk-scoped #cf-talk-orb {
+  width: 80px;
+  height: 80px;
+  box-shadow: 0 0 36px rgba(99,102,241,0.5);
+}
+#cf-talk-overlay.cf-talk-scoped #cf-talk-orb.cf-orb-thinking {
+  box-shadow: 0 0 36px rgba(251,191,36,0.45);
+}
+#cf-talk-overlay.cf-talk-scoped #cf-talk-orb.cf-orb-replying {
+  box-shadow: 0 0 36px rgba(52,211,153,0.45);
+}
+#cf-talk-overlay.cf-talk-scoped #cf-talk-status {
+  margin-top: 14px;
+  font-size: 13px;
+}
+#cf-talk-overlay.cf-talk-scoped #cf-talk-transcript {
+  margin-top: 8px;
+  font-size: 12px;
+  max-width: 92%;
+  min-height: 18px;
+  padding: 0 8px;
+}
+
 .cf-back .cf-back-inner {
   height: 100%;
   display: flex;
@@ -1847,24 +1886,34 @@ const RESOURCE_BUDGET_JS: &str = r#"
   function _talkExit() {
     _talkActive = false;
     const overlay = document.getElementById('cf-talk-overlay');
-    if (overlay) overlay.style.display = 'none';
+    if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay);
   }
   function _talkClick(btn, agent, sendBtn) {
     if (_talkActive) { _talkExit(); return; }
     const note = _micSecurityNote();
     if (note) { alert(note); return; }
-    let overlay = document.getElementById('cf-talk-overlay');
-    if (!overlay) {
-      overlay = document.createElement('div');
-      overlay.id = 'cf-talk-overlay';
-      overlay.innerHTML =
-        '<button id="cf-talk-close" type="button">✕ Exit</button>' +
-        '<div id="cf-talk-orb"></div>' +
-        '<div id="cf-talk-status">Listening…</div>' +
-        '<div id="cf-talk-transcript"></div>';
+    // Scope to widget when invoked from a dashboard tile so other widgets
+    // remain accessible. Full-screen on standalone module pages.
+    const widgetRoot = sendBtn && sendBtn.closest && sendBtn.closest('.sd-card');
+    const stale = document.getElementById('cf-talk-overlay');
+    if (stale && stale.parentNode) stale.parentNode.removeChild(stale);
+    const overlay = document.createElement('div');
+    overlay.id = 'cf-talk-overlay';
+    if (widgetRoot) overlay.classList.add('cf-talk-scoped');
+    overlay.innerHTML =
+      '<button id="cf-talk-close" type="button">✕ Exit</button>' +
+      '<div id="cf-talk-orb"></div>' +
+      '<div id="cf-talk-status">Listening…</div>' +
+      '<div id="cf-talk-transcript"></div>';
+    if (widgetRoot) {
+      if (getComputedStyle(widgetRoot).position === 'static') {
+        widgetRoot.style.position = 'relative';
+      }
+      widgetRoot.appendChild(overlay);
+    } else {
       document.body.appendChild(overlay);
-      document.getElementById('cf-talk-close').addEventListener('click', _talkExit);
     }
+    document.getElementById('cf-talk-close').addEventListener('click', _talkExit);
     overlay.dataset.agent = agent;
     overlay.style.display = 'flex';
     _talkLoop(agent, sendBtn);

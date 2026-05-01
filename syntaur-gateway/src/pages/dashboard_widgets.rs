@@ -876,6 +876,40 @@ impl DashboardWidget for ChatWidget {
         typing.classList.remove('sd-chat-typing');
         typing.querySelector('.sd-chat-body').textContent = reply;
       }}
+      // Talk-mode (the cf-talk-mode overlay button) flips the per-agent
+      // TTS pref ON before triggering send. Honor that here so Peter
+      // actually speaks the reply. Silent when the pref is off, when
+      // the reply is an error placeholder, or when /api/tts isn't
+      // available.
+      const ttsPref = localStorage.getItem('syntaur:tts:' + currentAgent);
+      if (ttsPref === 'on' && reply && reply[0] !== '(') {{
+        try {{
+          const ttsR = await window.sdFetch('/api/tts', {{
+            method: 'POST', credentials: 'same-origin',
+            headers: {{ 'Content-Type': 'application/json' }},
+            body: JSON.stringify({{ text: reply }})
+          }});
+          if (ttsR.ok) {{
+            const td = await ttsR.json();
+            if (td && td.audio_url) {{
+              const audio = new Audio(td.audio_url);
+              const playOnce = (attempt) => {{
+                audio.play().catch(e => {{
+                  const name = (e && e.name) || '';
+                  const msg = (e && e.message) || '';
+                  if (attempt === 0 && (name === 'NotSupportedError' || /not supported/i.test(msg))) {{
+                    try {{ audio.load(); }} catch (_) {{}}
+                    setTimeout(() => playOnce(attempt + 1), 150);
+                    return;
+                  }}
+                  console.log('[dash-tts] play blocked:', e);
+                }});
+              }};
+              playOnce(0);
+            }}
+          }}
+        }} catch (e) {{ console.log('[dash-tts] error:', e); }}
+      }}
     }} catch (e) {{
       if (typing) typing.querySelector('.sd-chat-body').textContent = "(network error)";
     }} finally {{
