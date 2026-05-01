@@ -110,7 +110,7 @@ fi
 # More than 3 undeployed commits — nudge the operator.
 echo "───────────────────────────────────────────────────────────────────────────" >&2
 echo "⚠ syntaur-ship pre-commit: $ahead commits past last deployed ($deployed_head)" >&2
-echo "  Consider running `~/deploy.sh` (or syntaur-ship) to ship what you have" >&2
+echo "  Consider running \`~/deploy.sh\` (or syntaur-ship) to ship what you have" >&2
 echo "  before stacking more work. Prod drift accumulates risk." >&2
 echo "" >&2
 echo "  Override: SYNTAUR_SHIP_OVERRIDE=1 git commit ..." >&2

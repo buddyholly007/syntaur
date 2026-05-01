@@ -8403,6 +8403,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "syntaur-ble-shim"
+version = "0.6.7"
+dependencies = [
+ "btleplug",
+ "clap",
+ "env_logger",
+ "futures",
+ "hex",
+ "hostname",
+ "if-addrs",
+ "log",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "snow",
+ "socket2 0.5.10",
+ "tokio",
+ "toml 0.8.2",
+ "uuid",
+]
+
+[[package]]
 name = "syntaur-capability-shim"
 version = "0.1.0"
 dependencies = [
