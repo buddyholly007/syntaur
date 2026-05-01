@@ -14,7 +14,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 regex = "1"
 byteorder = "1"
 chrono = "0.4"
-sherpa-onnx = { version = "1.12", features = ["static"] }
+sherpa-onnx = { version = "1.13", features = ["static"] }
 
 [profile.release]
 opt-level = 2
