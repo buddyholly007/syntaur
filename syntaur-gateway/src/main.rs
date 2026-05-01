@@ -11789,13 +11789,49 @@ async fn handle_api_agent_icon_put(
     }
 
     let agent = agent_id.clone();
+    let agent_for_db = agent.clone();
+    let bytes_for_db = bytes.clone();
+    let ct_for_db = content_type.clone();
     indexer
-        .with_conn(move |conn| Ok(crate::agents::settings::put_icon(conn, uid, &agent, &content_type, &bytes)?))
+        .with_conn(move |conn| Ok(crate::agents::settings::put_icon(conn, uid, &agent_for_db, &ct_for_db, &bytes_for_db)?))
         .await
         .map_err(|e| (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("Saving the icon failed: {}", e)})),
         ))?;
+    // Mirror to ~/.syntaur/avatars/<agent>.<ext> so the chat avatar
+    // endpoint /agent-avatar/<id> picks up the new image. Two parallel
+    // storage systems exist for historical reasons:
+    //   * /api/agents/{id}/icon → DB blob (this handler)
+    //   * /agent-avatar/{id}    → ~/.syntaur/avatars/<id>.<ext> on disk
+    // Without this dual-write, drawer uploads would only update the
+    // settings drawer's own preview, while every chat-rendered avatar
+    // (welcome, thinking, message bubbles) kept showing the old icon.
+    // Sean caught this 2026-04-30: "I'm now able to upload an image and
+    // it appears to save however it doesn't change the actual image in
+    // chat for the AI". Long term these endpoints should consolidate.
+    let ext = match content_type.as_str() {
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif"  => "gif",
+        "image/bmp"  => "bmp",
+        "image/tiff" => "tiff",
+        _            => "png",
+    };
+    if let Ok(home) = std::env::var("HOME") {
+        let dir = format!("{}/.syntaur/avatars", home);
+        let _ = std::fs::create_dir_all(&dir);
+        // Clean any stale extension variant — e.g. user previously had
+        // main.jpg, now uploading main.png — so the avatar handler doesn't
+        // serve the wrong-format file from the earlier upload.
+        for stale in ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff"] {
+            if stale != ext {
+                let _ = std::fs::remove_file(format!("{}/{}.{}", dir, agent, stale));
+            }
+        }
+        let path = format!("{}/{}.{}", dir, agent, ext);
+        let _ = std::fs::write(&path, &bytes);
+    }
     Ok(Json(serde_json::json!({
         "blob_id": 1,
         "url": format!("/api/agents/{}/icon?v={}", agent_id, std::time::SystemTime::now()

@@ -2358,6 +2358,29 @@ const RESOURCE_BUDGET_JS: &str = r#"
               + '/icon?v=' + Date.now();
             preview.innerHTML = '<img alt="" src="' + url + '">';
           }
+          // Refresh every <img> on the page that points at the chat
+          // avatar endpoint for this agent. /agent-avatar/<id> is the
+          // chat-rendered avatar (welcome, thinking, message bubbles)
+          // and is served with cache-control max-age=300, so without
+          // bust the user keeps seeing the old icon for 5 minutes.
+          // Sean 2026-04-30: "I'm now able to upload an image and it
+          // appears to save however it doesn't change the actual image
+          // in chat for the AI."
+          const agentId = card.dataset.agent;
+          const v = Date.now();
+          document.querySelectorAll('img').forEach(img => {
+            const src = img.getAttribute('src') || '';
+            if (src.indexOf('/agent-avatar/' + agentId) !== -1) {
+              const base = src.split('?')[0];
+              img.setAttribute('src', base + '?v=' + v);
+            }
+          });
+          // Tell anyone else who renders an avatar that the icon
+          // changed. Long-lived chat surfaces (Mushi, dashboard widget,
+          // etc.) can listen and refresh their own DOM nodes.
+          window.dispatchEvent(new CustomEvent('syntaur:agent-icon-changed', {
+            detail: { agent: agentId, v: v },
+          }));
         })
         .catch(err => {
           showCardError(card, (err && err.message) || 'Upload failed.');
