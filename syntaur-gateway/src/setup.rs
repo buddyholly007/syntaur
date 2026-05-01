@@ -1241,7 +1241,18 @@ pub async fn handle_agent_avatar(
 ) -> Result<(axum::http::HeaderMap, Vec<u8>), StatusCode> {
     let agent_id = sanitize_agent_id(&agent_id).map_err(|_| StatusCode::BAD_REQUEST)?;
     let mut h = axum::http::HeaderMap::new();
-    h.insert("cache-control", "public, max-age=300".parse().unwrap());
+    // `no-store` instead of the previous `max-age=300` — Sean's
+    // wry/WebKitGTK viewer (persistent disk cache, unlike headless
+    // WebKit) was serving a stale or empty response from cache for up
+    // to 5 minutes after navigate-away+return, leaving every chat
+    // avatar as an empty blue circle. Sean 2026-05-01: "I left the
+    // chat and returned and the image is no longer on the chat
+    // images … just empty blue circles." Avatars are ~100KB; the
+    // bandwidth cost of refetching on each chat-page load is trivial
+    // and far less expensive than the trust cost of "just uploaded
+    // it, now it's gone." Long-term this should switch to
+    // ETag-based revalidation; for now correctness over efficiency.
+    h.insert("cache-control", "no-store".parse().unwrap());
 
     // Check for custom avatar on disk
     let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
