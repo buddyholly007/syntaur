@@ -1411,9 +1411,36 @@ const SPA_ROUTER_SCRIPT: &str = r##"
     navigate(url, false);
   });
 
+  // Pure hash-only changes (e.g. /scheduler#queue, /social#inbox) should
+  // NOT trigger an SPA fetch+swap — they're per-page state shifts handled
+  // by the page's own hashchange/hash-init logic. WebKitGTK fires popstate
+  // on `location.hash = ...` assignments, so without this gate every
+  // page that does hash routing would re-fetch itself, swap innerHTML,
+  // re-execute its embedded script, and hit `const X` redeclaration →
+  // script aborts mid-handler. (cf. /social left-nav 2026-05-01.)
+  let __spaLastNavUrl = location.href;
   window.addEventListener('popstate', () => {
-    navigate(location.href, true);
+    const next = location.href;
+    let prevU, nextU;
+    try { prevU = new URL(__spaLastNavUrl); nextU = new URL(next); } catch (_) {
+      __spaLastNavUrl = next;
+      navigate(next, true);
+      return;
+    }
+    const samePage =
+      prevU.origin === nextU.origin &&
+      prevU.pathname === nextU.pathname &&
+      prevU.search === nextU.search;
+    __spaLastNavUrl = next;
+    if (samePage) return; // hash-only — let the page's hashchange handler deal with it
+    navigate(next, true);
   });
+  // Keep the cursor in sync so the next popstate has the right baseline.
+  const _origNavigate = navigate;
+  navigate = async function(url, isPopState) {
+    __spaLastNavUrl = url;
+    return _origNavigate(url, isPopState);
+  };
 
   // Programmatic-navigation helper. Anywhere we'd otherwise write
   // `location.href = '/some/internal/path'`, use syntaurGo() instead
