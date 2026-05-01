@@ -1,30 +1,39 @@
 //! Stage 8 (Verify Plan v2 Layer A): Server-vs-DOM persona identity.
 //!
-//! For every persona slug in the catalog, GET /api/agents/{slug}/settings
-//! and assert the row exists + display_name matches. Catches:
-//!   - missing persona settings row (catalog lists slug but nothing
-//!     seeded in prod)
-//!   - display_name divergence (catalog stale relative to prod renames)
+//! TWO checks:
 //!
-//! What this stage does NOT catch (yet): the 2026-04-30 Peter BLOB
-//! silent fall-through (commit 23f7370). That bug shape was: catalog
-//! `system_prompt` BLOB column unreadable by rusqlite, get_user_agent
-//! falls through to default, chat returns from wrong persona. The
-//! `/api/agents/{slug}/settings` endpoint deliberately does NOT
-//! expose `system_prompt` (it's sensitive), so we can't detect the
-//! BLOB-vs-TEXT regression server-side. Detecting it requires a chat
-//! round-trip under each persona's own auth token: ask "what is your
-//! name?" and assert response contains the catalog display_name.
-//! That probe lands as Stage 8b once the verify-bot service-account
-//! infrastructure provides per-persona tokens (today: blocked).
+//! 8A — Per-persona settings rows. For every EXPECTED_PERSONAS slug,
+//!      GET /api/agents/{slug}/settings and assert the row exists +
+//!      display_name is present and non-empty. Catches:
+//!        - missing persona settings row (catalog lists slug but
+//!          nothing seeded in prod) → Regression
+//!        - display_name empty or wrong type → Regression
+//!        - display_name divergence from catalog → Suggestion (Sean
+//!          legitimately renames personas via the cog drawer; catalog
+//!          updated to current renames in EXPECTED_PERSONAS)
 //!
-//! Severity:
-//!   - Missing row + missing display_name + divergent display_name →
-//!     Suggestion (pre-existing state issues, surfaced informationally).
-//!   - Endpoint 5xx, body not JSON, body wrong shape → Regression
-//!     (those are server bugs, not state issues).
+//! 8B — Per-template resolved system prompt. For every EXPECTED_TEMPLATES
+//!      agent_key, GET /api/agents/resolve_prompt and assert the
+//!      catalog template loads + the prompt is a non-trivial string +
+//!      no unresolved {{placeholders}} survived substitution. Catches
+//!      the original 2026-04-30 Peter BLOB silent fall-through class
+//!      (commit 23f7370): catalog row stored as BLOB, rusqlite refuses
+//!      to read as TEXT, load_default returns Err, every chat with
+//!      that persona silently uses the default prompt. resolve_prompt
+//!      goes through the same load_default pathway, so a BLOB column
+//!      surfaces as 404 / empty prompt here.
 //!
-//! Auth: requires a verify auth token. The endpoint is 401 unauth.
+//! Severity model (per [[feedback/found_bug_must_be_fixed_immediately]]):
+//!   - Missing settings row → Regression. Catalog says it should exist;
+//!     prod doesn't have it; deploys should NOT ship past this gap.
+//!   - Empty display_name / wrong type → Regression.
+//!   - resolve_prompt 404 / 5xx / empty / unresolved placeholders →
+//!     Regression (the BLOB-class symptom).
+//!   - display_name divergence (Sean rename vs catalog default) →
+//!     Suggestion (informational; update EXPECTED_PERSONAS when
+//!     intentional).
+//!
+//! Auth: requires a verify auth token. Both endpoints are 401 unauth.
 
 use anyhow::Result;
 use chrono::Utc;
@@ -42,8 +51,9 @@ use crate::run::{Finding, FindingKind, Severity};
 /// case-insensitively because Sean's installs sometimes capitalise
 /// differently than the catalog default.
 const EXPECTED_PERSONAS: &[(&str, &str)] = &[
-    // Reflects 2026-04-30 Sean's prod state (from /api/agents/{slug}/export).
-    // Update when Sean renames a persona via the cog drawer.
+    // 8A: per-user settings rows. Reflects 2026-04-30 Sean's prod
+    // state (from /api/agents/{slug}/export). Update when Sean
+    // renames a persona via the cog drawer.
     ("main", "peter"),                // default user agent → display_name="Peter"
     ("cortex", "doctor bishop"),       // Sean renamed cortex → "Doctor Bishop"
     ("maurice", "moss"),               // Sean renamed maurice → "Moss"
@@ -53,6 +63,23 @@ const EXPECTED_PERSONAS: &[(&str, &str)] = &[
     ("positron", "positron"),
     ("nyota", "nyota"),
     ("kyron", "kyron"),
+];
+
+/// 8B: catalog template agent_keys + minimum prompt length. Used by
+/// resolve_prompt to verify the catalog template loads + substitutes
+/// cleanly. Sourced from `syntaur-gateway/src/agents/defaults.rs` —
+/// every entry there with `agent_key:` is a candidate. Min length is
+/// 1000 — well above the empty-fallback marker (~50 chars), well below
+/// any real persona's prompt (which today are 3.6k–10.8k chars).
+const EXPECTED_TEMPLATES: &[(&str, usize)] = &[
+    ("main_default", 1000),
+    ("module_tax", 1000),
+    ("module_research", 1000),
+    ("module_music", 1000),
+    ("module_scheduler", 1000),
+    ("module_coders", 1000),
+    ("module_social", 1000),
+    ("module_journal", 1000),
 ];
 
 /// One finding per check failure. Returns Vec so multiple personas
@@ -128,22 +155,26 @@ pub async fn check_persona_identity(
         };
 
         // Body literally `null` → no settings row for this slug.
-        // Could be: persona never seeded, or persona row deleted under
-        // the catalog. Surfaces as Suggestion (informational) — not
-        // every catalog entry needs to be seeded in every install.
-        // The BLOB silent fall-through Sean hit on 23f7370 looked
-        // similar from outside (chat returned wrong-persona content)
-        // but is NOT detectable here because the relevant column
-        // (system_prompt) isn't on this endpoint. See module docstring.
+        // EXPECTED_PERSONAS is the contract: if a slug is here, prod
+        // is supposed to have it. A null body means the catalog and
+        // prod are out of sync — that's a real defect, not informational.
+        // Resolution path: either (a) seed the row in prod, or (b)
+        // remove the slug from EXPECTED_PERSONAS if the persona is
+        // genuinely optional. Don't silently let deploys ship past
+        // this gap (per [[feedback/found_bug_must_be_fixed_immediately]]
+        // — a verify finding is a defect to act on, not a Suggestion
+        // to file).
         if body.is_null() {
-            findings.push(make_suggestion(
+            findings.push(make_finding(
                 slug,
-                "settings row not seeded",
+                "settings row missing in prod",
                 format!(
                     "GET {url} → 200 with body `null` — slug `{slug}` has no \
-                     settings row in this gateway. Catalog lists it, prod doesn't \
-                     have it. Either seed the row or remove the slug from \
-                     EXPECTED_PERSONAS in persona_identity.rs."
+                     settings row. EXPECTED_PERSONAS lists it as required; \
+                     either seed the row in prod (so chat with `{slug}` works) \
+                     or remove the slug from EXPECTED_PERSONAS in \
+                     persona_identity.rs (acknowledging it's intentionally not \
+                     deployed)."
                 ),
             ));
             continue;
@@ -180,10 +211,13 @@ pub async fn check_persona_identity(
                     ));
                 }
             }
-            Some(Value::String(_)) => findings.push(make_suggestion(
+            Some(Value::String(_)) => findings.push(make_finding(
                 slug,
                 "display_name empty",
-                format!("GET {url} → display_name is empty string"),
+                format!(
+                    "GET {url} → display_name is empty string. Persona is \
+                     unrenderable in any UI surface that shows persona name."
+                ),
             )),
             _ => findings.push(make_finding(
                 slug,
@@ -192,7 +226,137 @@ pub async fn check_persona_identity(
             )),
         }
     }
+
+    // ── 8B: catalog template resolution ───────────────────────────
+    // Walk EXPECTED_TEMPLATES, GET /api/agents/resolve_prompt for each.
+    // Catches the BLOB-class regression directly: load_default fails
+    // → 404 here → resolved prompt would silently fall back to default
+    // in chat. Also catches placeholder-substitution regressions
+    // (templates with unresolved {{vars}} get rendered to the LLM
+    // verbatim, surfaces as in-character "what's {{first_name}}" replies).
+    for (agent_key, min_len) in EXPECTED_TEMPLATES {
+        // Bearer header NOT query param — query strings are commonly
+        // logged by proxies/load balancers/journals; the token must
+        // not appear in URLs. Endpoint accepts either now (gateway
+        // updated 2026-04-30 to add Authorization header support).
+        let url = format!(
+            "{}/api/agents/resolve_prompt?agent_key={}",
+            target_url.trim_end_matches('/'),
+            agent_key,
+        );
+        let resp = match client.get(&url).bearer_auth(token).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                findings.push(make_template_finding(
+                    agent_key,
+                    "request failed",
+                    format!("GET /api/agents/resolve_prompt?agent_key={agent_key}: {e:#}"),
+                ));
+                continue;
+            }
+        };
+        let status = resp.status();
+        if status == 404 {
+            findings.push(make_template_finding(
+                agent_key,
+                "catalog template missing (BLOB-class symptom)",
+                format!(
+                    "GET /api/agents/resolve_prompt?agent_key={agent_key} → 404. \
+                     load_default returned None — either the row was never seeded \
+                     or it's stored as BLOB and rusqlite refuses to read it as TEXT \
+                     (the 2026-04-30 Peter regression class). Chat with this \
+                     persona will silently use the default fallback prompt."
+                ),
+            ));
+            continue;
+        }
+        if !status.is_success() {
+            findings.push(make_template_finding(
+                agent_key,
+                "non-success status",
+                format!(
+                    "GET /api/agents/resolve_prompt?agent_key={agent_key} → {status}"
+                ),
+            ));
+            continue;
+        }
+        let body: Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                findings.push(make_template_finding(
+                    agent_key,
+                    "body not JSON",
+                    format!(
+                        "GET /api/agents/resolve_prompt?agent_key={agent_key}: \
+                         response not parseable as JSON: {e:#}"
+                    ),
+                ));
+                continue;
+            }
+        };
+
+        // Extract length + placeholders_remaining + display_name + prompt.
+        let prompt_len = body.get("length").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let placeholders =
+            body.get("placeholders_remaining").and_then(|v| v.as_u64()).unwrap_or(u64::MAX);
+        let display = body
+            .get("display_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if prompt_len < *min_len {
+            findings.push(make_template_finding(
+                agent_key,
+                "prompt too short (BLOB-class symptom)",
+                format!(
+                    "resolve_prompt({agent_key}) returned a {prompt_len}-char prompt \
+                     (min {min_len}). Either the catalog template was wiped, or it \
+                     loaded as BLOB and substituted to empty. Default-fallback path \
+                     will execute on every chat with this persona."
+                ),
+            ));
+        }
+        if placeholders > 0 {
+            findings.push(make_template_finding(
+                agent_key,
+                "unresolved placeholders survived substitution",
+                format!(
+                    "resolve_prompt({agent_key}) → {placeholders} unresolved \
+                     {{{{placeholders}}}} in the rendered prompt. The LLM will see \
+                     literal `{{{{name}}}}`-style strings instead of substituted \
+                     values — surfaces as in-character 'hello {{{{first_name}}}}' \
+                     replies in chat."
+                ),
+            ));
+        }
+        if display.is_empty() {
+            findings.push(make_template_finding(
+                agent_key,
+                "display_name empty in resolve_prompt",
+                format!(
+                    "resolve_prompt({agent_key}) → display_name is empty. The \
+                     resolved persona has no name; chat header / topbar avatar \
+                     hint will render as blank."
+                ),
+            ));
+        }
+    }
+
     Ok(findings)
+}
+
+fn make_template_finding(agent_key: &str, title_suffix: &str, detail: String) -> Finding {
+    Finding {
+        module_slug: "persona-identity".into(),
+        kind: FindingKind::Other,
+        severity: Severity::Regression,
+        title: format!("Template `{agent_key}`: {title_suffix}"),
+        detail,
+        artifact: None,
+        captured_at: Utc::now(),
+        edits: None,
+        persona: Some(agent_key.into()),
+    }
 }
 
 fn make_finding(slug: &str, title_suffix: &str, detail: String) -> Finding {

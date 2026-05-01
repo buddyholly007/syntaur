@@ -12470,15 +12470,25 @@ async fn try_default_persona(
 // observability while the personas system is being wired up.
 async fn handle_api_agent_resolve_prompt(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let agent_key = params
         .get("agent_key")
         .cloned()
         .ok_or(axum::http::StatusCode::BAD_REQUEST)?;
-    let token = params
-        .get("token")
-        .cloned()
+    // Token resolution: prefer Authorization: Bearer (avoids the
+    // token-in-URL leak path — query strings are commonly logged by
+    // proxies/load balancers/journals); fall back to ?token= for
+    // back-compat with existing internal callers (the agent debug UI
+    // pages this endpoint via query). syntaur-verify Stage 8B uses
+    // the Bearer path.
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(str::to_string)
+        .or_else(|| params.get("token").cloned())
         .ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
 
     let principal = resolve_principal(&state, &token).await?;

@@ -878,6 +878,15 @@ const SMART_HOME_JS: &str = r#"
     return {
       lightsTotal: lights.length,
       lightsOn: onLights.length,
+      // Total device count regardless of kind — surfaces non-light
+      // devices (BLE proxies, sensors, locks, switches, thermostats)
+      // in the room card summary so rooms with no lights but other
+      // devices don't render as "empty." Caught 2026-04-30 when the
+      // verify Stage 5 functional smoke flow flagged room 9 as having
+      // a device in the API but no visible representation in the
+      // card (the office BLE shim wasn't a light, so the card said
+      // "No lights" and looked empty).
+      devicesTotal: list.length,
       avgLevelPct,
     };
   }
@@ -889,9 +898,17 @@ const SMART_HOME_JS: &str = r#"
     const agg = aggregateRoom(room.id);
 
     const allOn = agg.lightsOn === agg.lightsTotal && agg.lightsTotal > 0;
-    const onText = agg.lightsTotal === 0
-      ? 'No lights'
-      : agg.lightsOn + ' light' + (agg.lightsOn === 1 ? '' : 's') + (agg.lightsOn > 0 ? ' on' : ' off');
+    // Summary text precedence:
+    //   1. If room has lights → "X light(s) on/off" (most actionable)
+    //   2. Else if room has any other devices → "Y device(s)" (so non-light
+    //      rooms — sensor-only, lock-only, BLE-anchor-only — show as
+    //      occupied instead of "No lights" empty)
+    //   3. Else → "No devices" (truly empty, awaiting setup)
+    const onText = agg.lightsTotal > 0
+      ? agg.lightsOn + ' light' + (agg.lightsOn === 1 ? '' : 's') + (agg.lightsOn > 0 ? ' on' : ' off')
+      : agg.devicesTotal > 0
+      ? agg.devicesTotal + ' device' + (agg.devicesTotal === 1 ? '' : 's')
+      : 'No devices';
 
     card.innerHTML =
       '<div class="sh-room-head">' +

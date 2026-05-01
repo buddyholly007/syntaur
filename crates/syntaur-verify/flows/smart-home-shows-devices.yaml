@@ -1,0 +1,187 @@
+# Stage 5 (Verify Plan v2 Layer A): authenticated functional smoke
+# for the smart-home module.
+#
+# Catches the 2026-04-30 miss class directly: gateway returns 200,
+# page renders, JS executes without console errors — but the user
+# sees empty room cards because the underlying `devices` table only
+# has 3 BLE proxies and 0 controllable devices, OR because the
+# device→room mapping is null for most devices, OR because the JS
+# rendered the rooms but lost the device data.
+#
+# Three layers of assertion (each one independently catches a real
+# regression class):
+#
+#   1. API SHAPE — /api/smart-home/{rooms,devices} returns 200, body
+#      is { rooms: [], devices: [] }, room count > 0. Catches:
+#      endpoint regression, schema break, total seed loss.
+#
+#   2. DOM SHAPE — after the page loads, .sh-room-card count matches
+#      the rooms API count. Catches: page renders but rendering loop
+#      broken, fetch failed silently, JS crashed before draw.
+#
+#   3. DEVICE COVERAGE — count of rooms that have ≥1 device in the
+#      DOM matches count of rooms that have ≥1 device in the API.
+#      Catches the 2026-04-30 miss exactly: API returns devices but
+#      device→room mapping or rendering is wrong, so most rooms
+#      render visually empty even though devices "exist."
+#
+# Auth: requires a verify auth token (--auth-token / env
+# SYNTAUR_VERIFY_AUTH_TOKEN). When run anon, /smart-home redirects
+# to /landing and the assertions all fail — that's the correct
+# behavior because the flow is expressly testing the signed-in
+# state.
+name: "Smart Home: page shows the devices the API reports"
+module: smart-home
+steps:
+  # Stage 1: hit the page authenticated. The browser was launched
+  # with the auth token, so the first goto carries the bearer.
+  - goto: "/smart-home"
+    wait_ms: 2500
+
+  # Stage 2: probe the API directly via fetch (browser is already
+  # authed). Capture rooms + devices counts as page-scope variables
+  # for the DOM-cross-check stage to read.
+  - eval: |
+      (async () => {
+        const [rRooms, rDevs] = await Promise.all([
+          fetch('/api/smart-home/rooms', {credentials: 'same-origin'}),
+          fetch('/api/smart-home/devices', {credentials: 'same-origin'}),
+        ]);
+        if (rRooms.status !== 200) {
+          throw new Error('REGRESSION: /api/smart-home/rooms returned ' + rRooms.status + ' (expected 200)');
+        }
+        if (rDevs.status !== 200) {
+          throw new Error('REGRESSION: /api/smart-home/devices returned ' + rDevs.status + ' (expected 200)');
+        }
+        const roomsBody = await rRooms.json();
+        const devsBody = await rDevs.json();
+        const rooms = (roomsBody && roomsBody.rooms) || [];
+        const devices = (devsBody && devsBody.devices) || [];
+        if (!Array.isArray(rooms)) {
+          throw new Error('REGRESSION: /api/smart-home/rooms .rooms is not an array (got ' + typeof rooms + ')');
+        }
+        if (!Array.isArray(devices)) {
+          throw new Error('REGRESSION: /api/smart-home/devices .devices is not an array (got ' + typeof devices + ')');
+        }
+        if (rooms.length === 0) {
+          throw new Error('REGRESSION: /api/smart-home/rooms returned 0 rooms — Sean has rooms in prod, this is a seed/query regression');
+        }
+        // Stash on window for the next eval steps to read. Not great
+        // hygiene but the flow runner keeps the page alive between
+        // steps so it works.
+        window.__verifySh = { rooms, devices };
+        return { roomsApi: rooms.length, devicesApi: devices.length };
+      })()
+
+  # Stage 3: DOM assertion — the page rendered the room cards we
+  # expect from the API. If the API says 18 rooms exist but the page
+  # shows 0 (or 5), the rendering loop is broken. Tolerate a 1-off
+  # for the "no rooms" empty-state placeholder which renders as a
+  # `.sh-room-skeleton` instead of a real card.
+  - eval: |
+      (() => {
+        const sh = window.__verifySh || { rooms: [], devices: [] };
+        const cards = document.querySelectorAll('.sh-room-card');
+        const skeletons = document.querySelectorAll('.sh-room-skeleton');
+        // sh-room-card may include the skeleton wrapper too — count
+        // distinct real-room cards (those with a room_id data attr
+        // OR that aren't the placeholder).
+        const realCards = [...cards].filter(c => !c.classList.contains('sh-room-skeleton'));
+        if (realCards.length === 0 && sh.rooms.length > 0) {
+          throw new Error(
+            'REGRESSION: API reports ' + sh.rooms.length + ' rooms but page rendered 0 ' +
+            '.sh-room-card elements. Page fetched but rendering loop is broken — ' +
+            'this is the smart-home empty-screen class Sean reported 2026-04-30.'
+          );
+        }
+        if (realCards.length < sh.rooms.length) {
+          throw new Error(
+            'REGRESSION: API reports ' + sh.rooms.length + ' rooms, page rendered only ' +
+            realCards.length + '. Some rooms are missing from the DOM.'
+          );
+        }
+        return { roomsApi: sh.rooms.length, cardsDom: realCards.length };
+      })()
+
+  # Stage 4: Device coverage — the most-precise assertion against
+  # the 2026-04-30 miss class. Of the rooms the API says have ≥1
+  # device, every one of them must show that device count in the
+  # room card summary (`.sh-room-on` text). Card design is summary-
+  # only at the top level; per-device controls live in the click-
+  # expand drawer. So the structural assertion is "summary text
+  # reflects device presence."
+  #
+  # If a room has lights, summary shows "N lights on/off" — that
+  # implicitly proves devices were aggregated. If a room has only
+  # non-light devices, summary should show "N devices" (page change
+  # 2026-04-30 — previously said "No lights" and looked empty).
+  # If a room is genuinely empty (no devices), summary says
+  # "No devices."
+  - eval: |
+      (() => {
+        const sh = window.__verifySh || { rooms: [], devices: [] };
+        // Group device counts per room from the API.
+        const apiCountByRoom = new Map();
+        for (const d of sh.devices) {
+          if (d.room_id == null) continue;
+          const k = String(d.room_id);
+          apiCountByRoom.set(k, (apiCountByRoom.get(k) || 0) + 1);
+        }
+        if (apiCountByRoom.size === 0) {
+          // No devices have room_id — surface as REGRESSION because
+          // Sean has 18 rooms in prod and only 3 devices, none in
+          // most rooms. This IS the underlying issue (driver→devices
+          // projection gap, Stage 9 territory). The flow refuses to
+          // pass with 0 device-room mappings — that gate forces the
+          // upstream issue to be addressed instead of silently
+          // ignored.
+          throw new Error(
+            'REGRESSION: 0 rooms have any device with room_id assigned. ' +
+            sh.rooms.length + ' rooms exist, ' + sh.devices.length + ' devices exist, ' +
+            'but no device→room mapping. Driver crates (rust-aidot, rust-kasa, ' +
+            'syntaur-zwave, matter commissioner) are not projecting into the ' +
+            'devices table with room_id, OR the existing devices have null ' +
+            'room_id. Smart-home page renders all rooms as empty — exactly ' +
+            'what Sean reported 2026-04-30 ("I couldn\'t access smart home"). ' +
+            'See vault/projects/syntaur_verify_expansion_plan_v2_2026-04-30.md Stage 9.'
+          );
+        }
+        const cards = [...document.querySelectorAll('.sh-room-card')];
+        const empty = [];
+        const missing = [];
+        for (const [roomId, count] of apiCountByRoom) {
+          const card =
+            document.querySelector('.sh-room-card[data-room-id="' + roomId + '"]') ||
+            cards.find(c => (c.dataset && c.dataset.roomId === roomId));
+          if (!card) {
+            missing.push('room ' + roomId + ' (no card with data-room-id matching)');
+            continue;
+          }
+          // Summary text in .sh-room-on. Acceptable shapes:
+          //   "N lights on" / "N lights off" / "N device(s)"
+          // Unacceptable:
+          //   "No devices" / "No lights" — treats the room as empty
+          //   when API reports devices in it.
+          const summary = (card.querySelector('.sh-room-on') || {}).textContent || '';
+          if (/^no devices/i.test(summary) || /^no lights/i.test(summary)) {
+            empty.push('room ' + roomId + ' (' + count + ' device(s) per API, but card summary says "' + summary + '")');
+          }
+        }
+        if (missing.length > 0) {
+          throw new Error(
+            'REGRESSION: ' + missing.length + ' room(s) with devices have no card in DOM: ' +
+            missing.slice(0, 3).join('; ') +
+            (missing.length > 3 ? ' (+' + (missing.length - 3) + ' more)' : '')
+          );
+        }
+        if (empty.length > 0) {
+          throw new Error(
+            'REGRESSION: ' + empty.length + '/' + apiCountByRoom.size + ' rooms with devices ' +
+            'show as empty in the card summary: ' + empty.slice(0, 3).join('; ') +
+            (empty.length > 3 ? ' (+' + (empty.length - 3) + ' more)' : '')
+          );
+        }
+        return { roomsWithDevices: apiCountByRoom.size, allCovered: true };
+      })()
+
+  - screenshot: "smart-home-functional"
