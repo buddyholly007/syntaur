@@ -1,0 +1,22 @@
+[package]
+name = "syntaur-dictate"
+version = "0.1.0"
+edition = "2021"
+description = "Streaming dictation client. Captures mic audio via cpal, streams to NVIDIA Parakeet-unified-en-0.6b (ONNX, via parakeet-rs), types transcripts into the focused window via ydotool's UNIX socket. Toggled live/muted by SIGUSR1 from the G6→F24 listener service."
+
+[[bin]]
+name = "syntaur-dictate"
+path = "src/main.rs"
+
+[dependencies]
+parakeet-rs = "0.3"
+# Direct dep on the same ort version parakeet-rs 0.3 uses, so we can
+# reference its types in the SessionBuilder configure callback.
+ort = "=2.0.0-rc.12"
+cpal = "0.15"
+signal-hook = "0.3"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+log = "0.4"
+env_logger = "0.11"
+crossbeam-channel = "0.5"
