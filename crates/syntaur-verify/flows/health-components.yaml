@@ -1,0 +1,58 @@
+# Regression flow for the 2026-04-30 "satellite_client spamming logs"
+# class of bug — a background task that's failing every few seconds but
+# the page-render verify pass has no way to see it.
+#
+# Top-level /health.status was always "ok" even when the satellite
+# voice client was hitting "No route to host (os error 113)" every 8
+# seconds. v0.6.7 added /health.components which surfaces per-component
+# state (ok | degraded | error | n/a). This flow asserts none of those
+# components is in "error" — so a regressed satellite, MQTT, or any
+# future component reaches the operator BEFORE the deploy lands instead
+# of after Sean notices the spam.
+#
+# Components currently tracked:
+#   - satellite (voice satellite client). state derived from
+#     consecutive_failures: 0 = ok, 1-5 = degraded, 6+ = error,
+#     -1 = n/a (no satellite_host configured).
+#
+# Future components: mqtt broker, ledger, trading, indexer, scheduler.
+# Add each to AppState as an Arc<AtomicI32> health gauge with the same
+# state-machine pattern; this flow auto-covers them since it walks
+# every component in the response.
+name: "Health: no component is in error state"
+module: dashboard
+steps:
+  # Need a page loaded so fetch() uses the gateway origin. /landing is
+  # anon-safe and doesn't trigger any auth flows.
+  - goto: "/landing"
+    wait_ms: 300
+
+  # GET /health, walk components, fail loud on any "error".
+  - eval: |
+      (async () => {
+        const r = await fetch('/health', { headers: { 'Accept': 'application/json' } });
+        if (!r.ok) {
+          throw new Error('REGRESSION: /health returned ' + r.status + ' — gateway not healthy');
+        }
+        const body = await r.json();
+        const components = body.components || {};
+        const errors = [];
+        const degraded = [];
+        for (const [name, c] of Object.entries(components)) {
+          if (!c || typeof c !== 'object') continue;
+          if (c.state === 'error') {
+            errors.push(name + '(failures=' + (c.consecutive_failures || '?') + ')');
+          } else if (c.state === 'degraded') {
+            degraded.push(name + '(failures=' + (c.consecutive_failures || '?') + ')');
+          }
+        }
+        if (errors.length > 0) {
+          throw new Error('REGRESSION: /health.components in error state: ' + errors.join(', ') +
+            ' — background task is failing repeatedly. Check docker logs syntaur for the underlying cause.');
+        }
+        // Degraded is informational only — surfaces as a verify suggestion,
+        // not a regression. Brief flaps during a restart are normal.
+        if (degraded.length > 0) {
+          console.warn('[verify] degraded components (informational): ' + degraded.join(', '));
+        }
+      })()

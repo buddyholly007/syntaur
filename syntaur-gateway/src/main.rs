@@ -199,6 +199,13 @@ pub struct AppState {
     /// unreadable across restarts, which is the worst case but doesn't
     /// crash the service). See `library::encryption`.
     pub master_key: Arc<aes_gcm::Key<aes_gcm::Aes256Gcm>>,
+    /// Live health of the satellite voice client. -1 = not configured
+    /// (no satellite_host in config). 0 = connected and healthy. N>0
+    /// = N consecutive connect/handshake failures since last success.
+    /// Surfaced via /health.components.satellite so verify-stage can
+    /// catch a regressed satellite link before it becomes a silent
+    /// outage. Updated by satellite_client on every reconnect attempt.
+    pub satellite_failures: Arc<std::sync::atomic::AtomicI32>,
 }
 
 /// Run the `bootstrap-admin` CLI subcommand. Parses `--name <name>` from
@@ -1029,6 +1036,19 @@ async fn handle_health(State(state): State<Arc<AppState>>) -> Json<serde_json::V
     let restart_pending = state.restart_pending.load(std::sync::atomic::Ordering::SeqCst);
     let restart_pending_since = state.restart_pending_since.load(std::sync::atomic::Ordering::SeqCst);
 
+    // Per-component health snapshot. Surfaces background-task state
+    // that the top-level "status" otherwise hides — syntaur-verify
+    // asserts none of these flips to "error" on every deploy so a
+    // regressed satellite/MQTT/etc. blocks the ship instead of
+    // shipping silently and spamming the log.
+    let sat_failures = state.satellite_failures.load(std::sync::atomic::Ordering::SeqCst);
+    let satellite_state = match sat_failures {
+        i if i < 0 => "n/a",       // satellite_host not configured
+        0 => "ok",                 // connected
+        1..=5 => "degraded",       // briefly retrying
+        _ => "error",              // sustained outage
+    };
+
     Json(serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
@@ -1042,6 +1062,12 @@ async fn handle_health(State(state): State<Arc<AppState>>) -> Json<serde_json::V
             })
         }).collect::<Vec<serde_json::Value>>(),
         "providers": providers,
+        "components": {
+            "satellite": {
+                "state": satellite_state,
+                "consecutive_failures": sat_failures.max(0),
+            },
+        },
     }))
 }
 
@@ -6718,6 +6744,10 @@ async fn main() {
         restart_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         restart_pending_since: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         master_key: Arc::new(master_key),
+        // -1 = not configured. Flipped to 0 when satellite_client spawns
+        // (see voice satellite block below) and updated by the client on
+        // every reconnect attempt.
+        satellite_failures: Arc::new(std::sync::atomic::AtomicI32::new(-1)),
     });
 
     // Calendar reminder background task: checks for upcoming events every 60s.
@@ -8117,7 +8147,12 @@ async fn main() {
                     "Satellite voice client: {} (STT: {}, TTS: {})",
                     sat_config.host, sat_config.stt_host, sat_config.tts_host
                 );
-                tokio::spawn(voice::satellite_client::run_satellite_client(sat_config));
+                // Flip the health gauge from "not configured" (-1) to
+                // "connecting" (1) so /health.components.satellite
+                // renders as degraded until the first connect succeeds.
+                state.satellite_failures.store(1, std::sync::atomic::Ordering::SeqCst);
+                let failures = Arc::clone(&state.satellite_failures);
+                tokio::spawn(voice::satellite_client::run_satellite_client(sat_config, failures));
             }
         }
     }

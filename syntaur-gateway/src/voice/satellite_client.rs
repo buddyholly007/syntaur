@@ -153,15 +153,62 @@ pub struct SatelliteConfig {
 /// Run the satellite client loop. Connects, handles voice pipeline,
 /// reconnects on disconnect. This function never returns under normal
 /// operation — it runs as a background task.
-pub async fn run_satellite_client(config: SatelliteConfig) {
+pub async fn run_satellite_client(
+    config: SatelliteConfig,
+    health: std::sync::Arc<std::sync::atomic::AtomicI32>,
+) {
+    use std::sync::atomic::Ordering;
+    // Track consecutive failures so an unreachable satellite (powered
+    // off, removed, network gone) doesn't spam the log every 5s. The
+    // pre-2026-04-30 behavior generated ~10K identical "no route to
+    // host" warnings per day, drowning out real errors. Now: log the
+    // first failure at WARN, hold subsequent identical failures at
+    // DEBUG until the situation changes, exponentially back off the
+    // reconnect from 5s up to 60s. Also publish the consecutive
+    // failure count to the shared `health` atomic so /health and
+    // syntaur-verify can detect a regressed satellite link.
+    let mut consecutive_failures: u32 = 0;
+    let mut last_error: Option<String> = None;
     loop {
-        info!("[satellite] connecting to {}", config.host);
-        match connect_and_run(&config).await {
-            Ok(()) => info!("[satellite] disconnected cleanly"),
-            Err(e) => warn!("[satellite] connection error: {}", e),
+        if consecutive_failures == 0 {
+            info!("[satellite] connecting to {}", config.host);
         }
-        info!("[satellite] reconnecting in 5s...");
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        match connect_and_run(&config).await {
+            Ok(()) => {
+                info!("[satellite] disconnected cleanly");
+                consecutive_failures = 0;
+                last_error = None;
+                health.store(0, Ordering::SeqCst);
+            }
+            Err(e) => {
+                let same_as_last = last_error.as_deref() == Some(e.as_str());
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                health.store(consecutive_failures.min(i32::MAX as u32) as i32, Ordering::SeqCst);
+                if !same_as_last {
+                    // First time we see this specific error — surface at WARN.
+                    warn!("[satellite] connection error: {} (will back off)", e);
+                    last_error = Some(e);
+                } else if consecutive_failures % 60 == 0 {
+                    // Same error for ~60 retries — surface a heartbeat WARN
+                    // (~once per hour at the 60s steady-state cadence) so a
+                    // long-running outage stays visible without flooding.
+                    warn!("[satellite] still unreachable after {} retries: still {}",
+                          consecutive_failures, last_error.as_deref().unwrap_or(""));
+                } else {
+                    // Steady-state spam during outage — debug only.
+                    log::debug!("[satellite] retry {}: {}", consecutive_failures, last_error.as_deref().unwrap_or(""));
+                }
+            }
+        }
+        // Exponential backoff: 5s, 10s, 20s, 40s, then cap at 60s.
+        let delay_secs = match consecutive_failures {
+            0 => 5,
+            1 => 5,
+            2 => 10,
+            3 => 20,
+            _ => 60,
+        };
+        tokio::time::sleep(Duration::from_secs(delay_secs)).await;
     }
 }
 
