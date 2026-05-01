@@ -34,6 +34,7 @@ pub mod flow;
 pub mod module_map;
 pub mod opus;
 pub mod persona;
+pub mod persona_identity;
 pub mod persona_tone;
 pub mod run;
 pub mod visual_diff;

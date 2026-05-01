@@ -1031,6 +1031,31 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
     );
     findings.extend(cache_findings);
 
+    // ── Layer A · Stage 8: Persona identity probe ─────────────────
+    // For every persona in the catalog, GET /api/agents/{slug}/settings
+    // and assert the row exists + system_prompt is a non-trivial
+    // string. Catches the BLOB silent fall-through class (commit
+    // 23f7370 was the last one Sean hit; the symptom shape is
+    // chat-returns-200-from-the-wrong-persona, which page-render
+    // verify cannot see).
+    let persona_findings = match syntaur_verify_core::persona_identity::check_persona_identity(
+        &target_url,
+        auth_token.as_deref(),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("[verify] persona-identity stage failed to run: {e:#}");
+            Vec::new()
+        }
+    };
+    log::info!(
+        "[verify] persona-identity: {} finding(s)",
+        persona_findings.len()
+    );
+    findings.extend(persona_findings);
+
     let run = VerifyRun {
         run_id: run_id.clone(),
         started_at: parse_run_id_ts(&run_id),
