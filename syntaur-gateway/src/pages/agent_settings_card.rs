@@ -685,11 +685,17 @@ const STYLES: &str = r#"
   height: 100%;
   display: contents;
 }
-/* Side-panel cogs require a relative parent for the absolute cog. The
-   JS auto-mounter sets `position: relative` on each registered panel
-   only if its computed position is `static` — preserves any panel that
-   already has fixed/absolute/relative positioning. */
-[data-syntaur-cogged] { position: relative; }
+/* Side-panel cogs require a positioned parent for the absolute cog.
+   We deliberately do NOT set `position: relative` from CSS here, because
+   the cogged-panel set includes panels that legitimately want `position:
+   fixed` (e.g. /scheduler's `.sch-thad-drawer`, /tax's positron drawer).
+   A blanket `[data-syntaur-cogged] { position: relative }` rule has the
+   same specificity (0,1,0) as `.sch-thad-drawer { position: fixed }` and
+   wins by source order — the drawer renders inline at the bottom of the
+   page instead of as a side overlay (cf. 2026-05-01 regression). The JS
+   auto-mounter (search `data-syntaur-cogged` below) handles this case
+   correctly: it only sets `style.position = 'relative'` inline when the
+   computed position is `static`. */
 
 /* ─── Slide-over agent settings drawer (singleton, lives in shell) ───
    Cog click anywhere on the page opens this. Holds the back-of-card
@@ -2181,6 +2187,14 @@ const RESOURCE_BUDGET_JS: &str = r#"
     panel.dataset.syntaurCogHost = '1';
     panel.setAttribute('data-syntaur-cogged', '');
     panel.dataset.agent = agent;
+    // The absolute-positioned cog needs a positioned ancestor.
+    // Only force `position: relative` on panels that are currently
+    // `static` — leaves drawers/modals with fixed/absolute/relative
+    // alone (otherwise we destroy the layout of `.sch-thad-drawer`,
+    // positron drawer etc.).
+    if (getComputedStyle(panel).position === 'static') {
+      panel.style.position = 'relative';
+    }
     const cog = _makeCog(agent);
     const header = _findHeader(panel, headerSel);
     if (header) {
@@ -2345,6 +2359,14 @@ const RESOURCE_BUDGET_JS: &str = r#"
           if (body && body.error) msg = body.error;
         } catch (_) {}
         showCardError(card, msg);
+      } else if (field === 'display_name') {
+        // Modules that hardcode the persona name (sch-thad-head-name,
+        // maurice-name, etc.) need a re-fetch trigger after rename so
+        // the user sees the new name without a full reload. Sister
+        // event to syntaur:agent-icon-changed.
+        window.dispatchEvent(new CustomEvent('syntaur:agent-name-changed', {
+          detail: { agent: agent, display_name: value }
+        }));
       }
     } catch (e) {
       showCardError(card, 'Could not save — ' + ((e && e.message) || 'network error'));

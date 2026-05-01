@@ -420,7 +420,7 @@ function renderConvMessage(m) {
     if (S_RENDERED.has(key)) return;
     S_RENDERED.add(key);
     if (role === 'assistant') {
-        msgs.innerHTML += `<div class="ai-msg assistant"><strong>Maurice:</strong> ${esc(content)}</div>`;
+        msgs.innerHTML += `<div class="ai-msg assistant"><strong>${esc(S.mauriceName || "Maurice")}:</strong> ${esc(content)}</div>`;
     } else if (role === 'user') {
         msgs.innerHTML += `<div class="ai-msg user">${esc(content)}</div>`;
     } else if (role === 'tool') {
@@ -591,7 +591,7 @@ function renderHandoffBanner() {
     // chat UI just needs an opener — no need to re-render the transcript.
     const msgs = document.getElementById('ai-messages');
     if (msgs) {
-        msgs.innerHTML = `<div class="ai-msg assistant"><strong>Maurice:</strong> ${esc(bannerBody)}</div>`;
+        msgs.innerHTML = `<div class="ai-msg assistant"><strong>${esc(S.mauriceName || "Maurice")}:</strong> ${esc(bannerBody)}</div>`;
         msgs.scrollTop = msgs.scrollHeight;
     }
     // Pre-populate the chat input with a diagnosis prompt so one Enter
@@ -1053,11 +1053,15 @@ function renderContext() {
     const body = document.getElementById('context-body');
     if (!tabs || !body) return;
 
-    // Maurice identity header
+    // Maurice identity header. The avatar renders the user-uploaded
+    // /agent-avatar/maurice image when present; falls back to the
+    // letter "M" via onerror so renames before any icon upload still
+    // look intentional.
+    const dispName = (window.S && window.S.mauriceName) || 'MAURICE';
     tabs.innerHTML = `<div class="maurice-header">
-        <div class="maurice-avatar">M</div>
+        <div class="maurice-avatar">M<img src="/agent-avatar/maurice" alt="" onerror="this.remove()" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:4px"></div>
         <div style="flex:1;min-width:0">
-            <div class="maurice-name">MAURICE</div>
+            <div class="maurice-name">${esc(String(dispName).toUpperCase())}</div>
             <div class="maurice-role">Pair Programmer // Rust-First</div>
         </div>
         <div style="width:7px;height:7px;border-radius:50%;background:var(--phos);box-shadow:0 0 6px var(--phos-glow);flex-shrink:0" title="online"></div>
@@ -1066,14 +1070,30 @@ function renderContext() {
     {
         body.innerHTML = `
             <div class="ai-messages" id="ai-messages">
-                <div class="ai-msg assistant"><strong>Maurice:</strong> Hello. I am here. I can see your terminal output, and I would very much like to help. Errors, commands, Rust things, SSH things — ask away. I will not judge a segfault.</div>
+                <div class="ai-msg assistant"><strong>${esc(dispName)}:</strong> Hello. I am here. I can see your terminal output, and I would very much like to help. Errors, commands, Rust things, SSH things — ask away. I will not judge a segfault.</div>
             </div>
             <div class="ai-input-row">
-                <input id="ai-input" placeholder="Ask Maurice..." onkeydown="if(event.key==='Enter')sendAiMsg()">
+                <input id="ai-input" placeholder="Ask ${esc(dispName)}..." onkeydown="if(event.key==='Enter')sendAiMsg()">
                 <button class="btn-primary" style="padding:0.5rem 0.85rem" onclick="sendAiMsg()">SEND</button>
             </div>`;
     }
 }
+
+// Live persona name binding. Hardcoded "MAURICE"/"Maurice" labels are
+// re-rendered after rename via the cog drawer.
+async function refreshMauriceName() {
+    try {
+        const r = await apiFetch('/api/agents/maurice/settings');
+        const name = (r && r.display_name) || 'Maurice';
+        if (!window.S) window.S = S;
+        S.mauriceName = name;
+        renderContext();
+    } catch (_) {}
+}
+setTimeout(() => { refreshMauriceName(); }, 150);
+window.addEventListener('syntaur:agent-name-changed', (e) => {
+    if (e && e.detail && e.detail.agent === 'maurice') refreshMauriceName();
+});
 
 // Init right panel on load
 setTimeout(() => { renderContext(); }, 100);
@@ -1179,7 +1199,7 @@ async function sendAiMsg() {
             });
             if (thinkEl) thinkEl.innerHTML = `<em style="color:var(--ink-dim)">Sent to Maurice in the terminal — watch his reply there.</em>`;
         } catch(e) {
-            if (thinkEl) thinkEl.innerHTML = `<strong>Maurice:</strong> <span style="color:var(--rust-hot)">Couldn't reach Maurice — ${esc(e.message||e)}</span>`;
+            if (thinkEl) thinkEl.innerHTML = `<strong>${esc(S.mauriceName || "Maurice")}:</strong> <span style="color:var(--rust-hot)">Couldn't reach Maurice — ${esc(e.message||e)}</span>`;
         }
         msgs.scrollTop = msgs.scrollHeight;
         return;
@@ -1192,10 +1212,10 @@ async function sendAiMsg() {
         });
         const resp = document.getElementById(thinkId);
         const answer = r.response || r.text || JSON.stringify(r);
-        if (resp) resp.innerHTML = `<strong>Maurice:</strong> ${esc(answer)}`;
+        if (resp) resp.innerHTML = `<strong>${esc(S.mauriceName || "Maurice")}:</strong> ${esc(answer)}`;
     } catch(e) {
         const resp = document.getElementById(thinkId);
-        if (resp) resp.innerHTML = `<strong>Maurice:</strong> <span style="color:var(--rust-hot)">Error — ${esc(e.message||e)}</span>`;
+        if (resp) resp.innerHTML = `<strong>${esc(S.mauriceName || "Maurice")}:</strong> <span style="color:var(--rust-hot)">Error — ${esc(e.message||e)}</span>`;
     }
     msgs.scrollTop = msgs.scrollHeight;
 }

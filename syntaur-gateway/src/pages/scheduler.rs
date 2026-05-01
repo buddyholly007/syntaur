@@ -3503,6 +3503,32 @@ const PAGE_JS: &str = r##"
   const THAD_CID_KEY = 'syntaur_sch_thad_cid';
   let thadSending = false;
 
+  // Live display-name binding. The page renders "Thaddeus" hardcoded in
+  // four places; whenever the user renames the persona via the cog
+  // drawer, those need to update without a full reload. Sister to the
+  // /agent-avatar/<id> img cache-bust pattern.
+  async function schThadRefreshName() {
+    try {
+      const r = await fetch('/api/agents/thaddeus/settings', {
+        headers: { 'Authorization': 'Bearer ' + TOKEN },
+        credentials: 'same-origin',
+      });
+      if (!r.ok) return;
+      const d = await r.json();
+      const name = (d && d.display_name) || 'Thaddeus';
+      const head = document.querySelector('.sch-thad-head-name');
+      if (head) head.textContent = name;
+      const bub = document.getElementById('sch-thad-bubble');
+      if (bub) bub.title = 'Ask ' + name;
+      const ta = document.getElementById('sch-thad-input');
+      if (ta) ta.placeholder = 'Ask ' + name + '…';
+    } catch (_) {}
+  }
+  schThadRefreshName();
+  window.addEventListener('syntaur:agent-name-changed', (e) => {
+    if (e && e.detail && e.detail.agent === 'thaddeus') schThadRefreshName();
+  });
+
   window.schThadToggle = function() {
     const drawer = document.getElementById('sch-thad-drawer');
     const bubble = document.getElementById('sch-thad-bubble');
