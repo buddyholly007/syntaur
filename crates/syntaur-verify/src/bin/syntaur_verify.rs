@@ -921,6 +921,36 @@ async fn run(cli: Cli) -> Result<VerifyRun> {
                 .await?
                 .with_auth_token(auth_token.clone());
             for ff in &flow_files {
+                // Skip flows that explicitly require auth when no token
+                // was configured. Running them anon trips false-regressions
+                // on canary boxes that don't share Sean's seed data
+                // (Mac Mini DB has 0 rooms; prod has 18). Without this
+                // gate, every ship without --auth-token fails the
+                // smart-home flow assertion "API returned 0 rooms — Sean
+                // has rooms in prod, this is a seed/query regression".
+                if ff.requires_auth && auth_token.is_none() {
+                    log::info!(
+                        "[verify] flow {} on {} skipped — requires_auth=true and no --auth-token / SYNTAUR_VERIFY_AUTH_TOKEN set",
+                        ff.name,
+                        flow_viewport.slug()
+                    );
+                    findings.push(Finding {
+                        module_slug: ff.module.clone(),
+                        kind: FindingKind::Other,
+                        severity: Severity::Suggestion,
+                        title: format!("Flow `{}` skipped (no auth token)", ff.name),
+                        detail: "Flow declares `requires_auth: true` but no \
+                            --auth-token / SYNTAUR_VERIFY_AUTH_TOKEN was set. \
+                            Anonymous run would fail assertions written against \
+                            the authenticated state."
+                            .to_string(),
+                        artifact: None,
+                        captured_at: Utc::now(),
+                        edits: None,
+                        persona: None,
+                    });
+                    continue;
+                }
                 match run_flow(&fbrowser, ff, &target_url, &run_dir).await {
                     Ok(outcome) => {
                         log::info!(

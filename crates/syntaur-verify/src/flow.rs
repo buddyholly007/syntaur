@@ -57,6 +57,12 @@ pub struct FlowFile {
     /// Source path — carried for error messages + per-flow screenshot
     /// filenames (filename stem is used as the flow slug).
     pub source_path: PathBuf,
+    /// True when the flow's assertions are only meaningful against an
+    /// authenticated session (e.g. checks Sean's actual room/device
+    /// data). Caller is expected to skip the flow when no auth token
+    /// is configured rather than run it anon and trip false-regressions
+    /// against the canary's empty install. Defaults to false.
+    pub requires_auth: bool,
 }
 
 impl FlowFile {
@@ -89,6 +95,10 @@ impl FlowFile {
 
         let name = require_string(mapping, "name", path)?;
         let module = require_string(mapping, "module", path)?;
+        let requires_auth = mapping
+            .get(&YamlValue::String("requires_auth".into()))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let steps_val = mapping
             .get(&YamlValue::String("steps".into()))
             .ok_or_else(|| anyhow!("{}: missing `steps:` array", path.display()))?;
@@ -110,6 +120,7 @@ impl FlowFile {
             module,
             steps,
             source_path: path.to_path_buf(),
+            requires_auth,
         })
     }
 

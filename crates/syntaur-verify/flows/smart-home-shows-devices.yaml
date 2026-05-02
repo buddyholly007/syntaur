@@ -32,6 +32,11 @@
 # state.
 name: "Smart Home: page shows the devices the API reports"
 module: smart-home
+# Flow runner skips this when no --auth-token / SYNTAUR_VERIFY_AUTH_TOKEN
+# is set, because the assertions ("API returns ≥1 room") only hold
+# against Sean's authenticated state. Anon canary boxes (Mac Mini)
+# have empty smart-home tables and would always fail. See FlowFile.requires_auth.
+requires_auth: true
 steps:
   # Stage 1: hit the page authenticated. The browser was launched
   # with the auth token, so the first goto carries the bearer.
