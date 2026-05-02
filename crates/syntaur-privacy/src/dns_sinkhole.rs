@@ -17,13 +17,16 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use hickory_proto::op::{Header, MessageType, OpCode, ResponseCode};
-use hickory_proto::rr::{Record, RecordType};
+use hickory_proto::op::{Header, HeaderCounts, Metadata, ResponseCode};
+use hickory_proto::rr::{Name, Record, RecordType};
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-use hickory_resolver::TokioAsyncResolver;
-use hickory_server::authority::MessageResponseBuilder;
+use hickory_resolver::lookup::Lookup;
+use hickory_resolver::net::NetError;
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::TokioResolver;
+use hickory_server::Server;
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
-use hickory_server::ServerFuture;
+use hickory_server::zone_handler::MessageResponseBuilder;
 use tokio::net::{TcpListener, UdpSocket};
 
 use crate::error::{Error, Result};
@@ -98,7 +101,7 @@ impl Default for SinkholeConfig {
 /// The hickory-server request handler that glues registry + upstream.
 pub struct PrivacyDnsHandler {
     registry: Arc<CloudDomainRegistry>,
-    upstream: Arc<TokioAsyncResolver>,
+    upstream: Arc<TokioResolver>,
     bus: EventBus,
     device_lookup: Arc<dyn DeviceLookup>,
 }
@@ -106,7 +109,7 @@ pub struct PrivacyDnsHandler {
 impl PrivacyDnsHandler {
     pub fn new(
         registry: Arc<CloudDomainRegistry>,
-        upstream: Arc<TokioAsyncResolver>,
+        upstream: Arc<TokioResolver>,
         bus: EventBus,
         device_lookup: Arc<dyn DeviceLookup>,
     ) -> Self {
@@ -119,22 +122,35 @@ impl PrivacyDnsHandler {
     }
 }
 
+// hickory 0.26 made the RequestHandler trait generic over a `Time` type
+// in addition to `ResponseHandler`. The Time generic is unused in this
+// handler's body but required by the trait signature.
 #[async_trait::async_trait]
 impl RequestHandler for PrivacyDnsHandler {
-    async fn handle_request<R: ResponseHandler>(
+    async fn handle_request<R: ResponseHandler, T: hickory_server::net::runtime::Time>(
         &self,
         request: &Request,
         response_handle: R,
     ) -> ResponseInfo {
-        let mut header = Header::response_from_request(request.header());
-        header.set_authoritative(false);
-        header.set_recursion_available(true);
+        // RequestInfo gives us the metadata + the single LowerQuery in one
+        // typed access. If the request has 0 or 2+ queries we fall back to
+        // ServFail rather than panic — same shape as ResponseInfo::serve_failed.
+        let info = match request.request_info() {
+            Ok(i) => i,
+            Err(_) => {
+                let mut metadata = Metadata::response_from_request(&request.metadata);
+                metadata.response_code = ResponseCode::ServFail;
+                return send_empty(response_handle, request, metadata).await;
+            }
+        };
 
-        // hickory exposes the request's question as a single LowerQuery.
-        let query = request.query();
-        let qname = query.name().to_string();
+        let mut metadata = Metadata::response_from_request(info.metadata);
+        metadata.authoritative = false;
+        metadata.recursion_available = true;
+
+        let qname = info.query.name().to_string();
         let qname_lc = qname.to_ascii_lowercase();
-        let qtype = query.query_type();
+        let qtype = info.query.query_type();
 
         match decide(&self.registry, &qname_lc) {
             Decision::Block { vendor_id } => {
@@ -149,15 +165,15 @@ impl RequestHandler for PrivacyDnsHandler {
                     query_name: qname_lc.trim_end_matches('.').to_string(),
                     vendor_id,
                 });
-                header.set_response_code(ResponseCode::NXDomain);
-                send_empty(response_handle, request, header).await
+                metadata.response_code = ResponseCode::NXDomain;
+                send_empty(response_handle, request, metadata).await
             }
             Decision::Forward => match forward(&self.upstream, &qname, qtype).await {
-                Ok(records) => send_records(response_handle, request, header, records).await,
+                Ok(records) => send_records(response_handle, request, metadata, records).await,
                 Err(e) => {
                     log::debug!("upstream resolve failed for {qname_lc}: {e}");
-                    header.set_response_code(ResponseCode::ServFail);
-                    send_empty(response_handle, request, header).await
+                    metadata.response_code = ResponseCode::ServFail;
+                    send_empty(response_handle, request, metadata).await
                 }
             },
         }
@@ -165,40 +181,37 @@ impl RequestHandler for PrivacyDnsHandler {
 }
 
 async fn forward(
-    upstream: &TokioAsyncResolver,
+    upstream: &TokioResolver,
     qname: &str,
     qtype: RecordType,
-) -> std::result::Result<Vec<Record>, hickory_resolver::error::ResolveError> {
-    use hickory_resolver::Name;
+) -> std::result::Result<Vec<Record>, NetError> {
     let name = Name::from_ascii(qname)?;
-    let lookup = upstream.lookup(name, qtype).await?;
-    Ok(lookup.records().to_vec())
+    let lookup: Lookup = upstream.lookup(name, qtype).await?;
+    Ok(lookup.answers().to_vec())
 }
 
 async fn send_empty<R: ResponseHandler>(
     mut response_handle: R,
     request: &Request,
-    header: Header,
+    metadata: Metadata,
 ) -> ResponseInfo {
     let builder = MessageResponseBuilder::from_message_request(request);
-    let resp = builder.build_no_records(header);
+    let resp = builder.build_no_records(metadata);
     response_handle
         .send_response(resp)
         .await
-        .unwrap_or_else(|_| header.into())
+        .unwrap_or_else(|_| ResponseInfo::from(Header { metadata, counts: HeaderCounts::default() }))
 }
 
 async fn send_records<R: ResponseHandler>(
     mut response_handle: R,
     request: &Request,
-    mut header: Header,
+    metadata: Metadata,
     records: Vec<Record>,
 ) -> ResponseInfo {
-    header.set_message_type(MessageType::Response);
-    header.set_op_code(OpCode::Query);
     let builder = MessageResponseBuilder::from_message_request(request);
     let resp = builder.build(
-        header,
+        metadata,
         records.iter(),
         std::iter::empty(),
         std::iter::empty(),
@@ -207,20 +220,20 @@ async fn send_records<R: ResponseHandler>(
     response_handle
         .send_response(resp)
         .await
-        .unwrap_or_else(|_| header.into())
+        .unwrap_or_else(|_| ResponseInfo::from(Header { metadata, counts: HeaderCounts::default() }))
 }
 
 /// Bind UDP+TCP listeners on `cfg.bind` and serve until the future
-/// is dropped. Cancel by dropping the returned `ServerFuture`.
+/// is dropped. Cancel by dropping the returned `Server`.
 pub async fn serve(
     cfg: SinkholeConfig,
     registry: Arc<CloudDomainRegistry>,
     bus: EventBus,
     device_lookup: Arc<dyn DeviceLookup>,
-) -> Result<ServerFuture<PrivacyDnsHandler>> {
+) -> Result<Server<PrivacyDnsHandler>> {
     let upstream = build_resolver(&cfg)?;
     let handler = PrivacyDnsHandler::new(registry, Arc::new(upstream), bus, device_lookup);
-    let mut server = ServerFuture::new(handler);
+    let mut server = Server::new(handler);
 
     let udp = UdpSocket::bind(cfg.bind)
         .await
@@ -230,23 +243,40 @@ pub async fn serve(
     let tcp = TcpListener::bind(cfg.bind)
         .await
         .map_err(|e| Error::DnsServer(format!("tcp bind {}: {e}", cfg.bind)))?;
-    server.register_listener(tcp, Duration::from_secs(5));
+    // hickory 0.26 added a response_buffer_size param. 65535 = max UDP
+    // payload — generous for a forwarder, no real downside on TCP.
+    server.register_listener(tcp, Duration::from_secs(5), 65535);
 
     log::info!("syntaur-privacy DNS sinkhole listening on {}", cfg.bind);
     Ok(server)
 }
 
-fn build_resolver(cfg: &SinkholeConfig) -> Result<TokioAsyncResolver> {
+fn build_resolver(cfg: &SinkholeConfig) -> Result<TokioResolver> {
     let resolver = match &cfg.upstream {
-        Some(rc) => TokioAsyncResolver::tokio(rc.clone(), cfg.upstream_opts.clone()),
+        Some(rc) => {
+            let mut builder = TokioResolver::builder_with_config(rc.clone(), TokioRuntimeProvider::default());
+            *builder.options_mut() = cfg.upstream_opts.clone();
+            builder
+                .build()
+                .map_err(|e| Error::DnsServer(format!("resolver build (explicit): {e}")))?
+        }
         None => {
             // Honor the host's /etc/resolv.conf rather than blindly using
-            // Google DNS (which is what ResolverConfig::default() is).
-            match hickory_resolver::system_conf::read_system_conf() {
-                Ok((rc, opts)) => TokioAsyncResolver::tokio(rc, opts),
+            // Google DNS. `builder()` reads system_conf internally.
+            match TokioResolver::builder(TokioRuntimeProvider::default()) {
+                Ok(b) => b
+                    .build()
+                    .map_err(|e| Error::DnsServer(format!("resolver build (system): {e}")))?,
                 Err(e) => {
-                    log::warn!("read_system_conf failed ({e}); falling back to Google DNS");
-                    TokioAsyncResolver::tokio(ResolverConfig::default(), cfg.upstream_opts.clone())
+                    log::warn!("read_system_conf failed ({e}); falling back to default config");
+                    let mut builder = TokioResolver::builder_with_config(
+                        ResolverConfig::default(),
+                        TokioRuntimeProvider::default(),
+                    );
+                    *builder.options_mut() = cfg.upstream_opts.clone();
+                    builder
+                        .build()
+                        .map_err(|e| Error::DnsServer(format!("resolver build (fallback): {e}")))?
                 }
             }
         }

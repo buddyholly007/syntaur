@@ -15,9 +15,9 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 log = { workspace = true }
 async-trait = { workspace = true }
-hickory-server = { version = "0.24", default-features = false, features = ["resolver"] }
-hickory-resolver = { version = "0.24", default-features = false, features = ["tokio-runtime", "system-config"] }
-hickory-proto = { version = "0.24", default-features = false }
+hickory-server = { version = "0.26.1", default-features = false, features = ["resolver"] }
+hickory-resolver = { version = "0.26.1", default-features = false, features = ["tokio", "system-config"] }
+hickory-proto = { version = "0.26.1", default-features = false }
 globset = "0.4"
 tokio-util = { version = "0.7", features = ["rt"] }
 
